@@ -548,7 +548,7 @@ Category Breakdown:
         self.status_var.set(f"Cleared {n} completed plan(s)")
 
     def _init_new_project(self):
-        """Initialize memory for a new project directory."""
+        """Initialize memory for a new project directory with auto-detection."""
         path = filedialog.askdirectory(title="Select project to initialize")
         if not path:
             return
@@ -560,23 +560,459 @@ Category Breakdown:
             self._load_project(str(project))
             return
 
-        memory_dir.mkdir(parents=True, exist_ok=True)
-        (memory_dir / "sessions").mkdir(exist_ok=True)
-        (memory_dir / "topics").mkdir(exist_ok=True)
+        # Scan project and show confirmation dialog
+        scan = _scan_project_deep(project)
+        self._show_init_confirm_dialog(project, scan)
 
-        # Create .gitignore
-        gitignore = memory_dir / ".gitignore"
-        if not gitignore.exists():
-            gitignore.write_text(
-                "# cc-memory: exclude database from git\n"
-                "memory.db\nmemory.db-wal\nmemory.db-shm\nsessions/\n",
-                encoding="utf-8"
-            )
+    def _show_init_confirm_dialog(self, project, scan):
+        """Show dialog with detected info and suggested memories for user confirmation."""
+        dlg = tk.Toplevel(self.root)
+        dlg.title(f"Initialize: {project.name}")
+        dlg.geometry("750x650")
+        dlg.transient(self.root)
+        dlg.grab_set()
 
-        self._load_project(str(project))
-        messagebox.showinfo("Success",
-                            f"Memory initialized for {project.name}!\n\n"
-                            f"Directory: {memory_dir}")
+        # Header
+        ttk.Label(dlg, text=f"Project: {project.name}",
+                  font=("", 12, "bold")).pack(pady=(10, 2))
+        ttk.Label(dlg, text=f"Path: {project}",
+                  font=("", 9)).pack(pady=(0, 5))
+
+        # Detection summary
+        summary = scan["summary"]
+        sf = ttk.LabelFrame(dlg, text="Detected Structure", padding=8)
+        sf.pack(fill=tk.X, padx=15, pady=5)
+        ttk.Label(sf, text=summary, wraplength=680, justify=tk.LEFT).pack(anchor=tk.W)
+
+        # Suggested memories with checkboxes
+        mf = ttk.LabelFrame(dlg, text="Suggested Initial Memories (uncheck to skip)", padding=8)
+        mf.pack(fill=tk.BOTH, expand=True, padx=15, pady=5)
+
+        canvas = tk.Canvas(mf)
+        scrollbar = ttk.Scrollbar(mf, orient=tk.VERTICAL, command=canvas.yview)
+        scroll_frame = ttk.Frame(canvas)
+        scroll_frame.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.create_window((0, 0), window=scroll_frame, anchor=tk.NW)
+        canvas.configure(yscrollcommand=scrollbar.set)
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        mem_vars = []  # (BooleanVar, category, content, importance)
+        for mem in scan["suggested_memories"]:
+            var = tk.BooleanVar(value=True)
+            row = ttk.Frame(scroll_frame)
+            row.pack(fill=tk.X, pady=1)
+            ttk.Checkbutton(row, variable=var).pack(side=tk.LEFT)
+            cat_label = f"[{mem['category']}|{'*'*mem['importance']}]"
+            ttk.Label(row, text=cat_label, width=14, font=("Consolas", 9)).pack(side=tk.LEFT)
+            ttk.Label(row, text=mem["content"], wraplength=550, justify=tk.LEFT).pack(
+                side=tk.LEFT, padx=5)
+            mem_vars.append((var, mem["category"], mem["content"], mem["importance"]))
+
+        # CLAUDE.md option
+        cf = ttk.Frame(dlg, padding=8)
+        cf.pack(fill=tk.X, padx=15, pady=5)
+        self._create_claude_md_var = tk.BooleanVar(value=not (project / "CLAUDE.md").exists())
+        cb_text = "Create CLAUDE.md (project instructions for Claude Code)"
+        if (project / "CLAUDE.md").exists():
+            cb_text = "CLAUDE.md already exists — skip"
+        ttk.Checkbutton(cf, text=cb_text,
+                        variable=self._create_claude_md_var).pack(anchor=tk.W)
+        if (project / "CLAUDE.md").exists():
+            self._create_claude_md_var.set(False)
+
+        # Buttons
+        bf = ttk.Frame(dlg, padding=8)
+        bf.pack(fill=tk.X, padx=15)
+
+        def do_init():
+            # Create memory directory
+            memory_dir = project / "memory"
+            memory_dir.mkdir(parents=True, exist_ok=True)
+            (memory_dir / "sessions").mkdir(exist_ok=True)
+            (memory_dir / "topics").mkdir(exist_ok=True)
+
+            # .gitignore
+            gitignore = memory_dir / ".gitignore"
+            if not gitignore.exists():
+                gitignore.write_text(
+                    "# cc-memory: exclude database from git\n"
+                    "memory.db\nmemory.db-wal\nmemory.db-shm\nsessions/\n",
+                    encoding="utf-8"
+                )
+
+            # Initialize DB and save confirmed memories
+            db = MemoryDB(memory_dir / "memory.db")
+            pid = db.upsert_project(str(project))
+
+            saved = 0
+            for var, cat, content, imp in mem_vars:
+                if var.get():
+                    db.insert_memory(pid, None, cat, content, imp, ["auto-detected", "init"])
+                    saved += 1
+
+            # Save keywords
+            if scan.get("keywords"):
+                db.upsert_keywords(pid, scan["keywords"])
+
+            # Create CLAUDE.md
+            if self._create_claude_md_var.get():
+                claude_md = _generate_claude_md(project, scan)
+                (project / "CLAUDE.md").write_text(claude_md, encoding="utf-8")
+
+            dlg.destroy()
+            self._load_project(str(project))
+
+            parts = [f"Saved {saved} memories"]
+            if self._create_claude_md_var.get():
+                parts.append("created CLAUDE.md")
+            messagebox.showinfo("Success",
+                                f"Memory initialized for {project.name}!\n\n"
+                                + ", ".join(parts))
+
+        ttk.Button(bf, text="Initialize", command=do_init).pack(side=tk.RIGHT, padx=5)
+        ttk.Button(bf, text="Cancel", command=dlg.destroy).pack(side=tk.RIGHT)
+
+
+# ---------------------------------------------------------------------------
+# Project Scanning & CLAUDE.md Generation
+# ---------------------------------------------------------------------------
+
+def _scan_project_deep(project: Path) -> dict:
+    """Deep scan a project directory to detect structure, language, frameworks, and suggest memories."""
+    result = {
+        "summary": "",
+        "suggested_memories": [],
+        "keywords": {},
+        "language": None,
+        "framework": None,
+        "project_type": "unknown",
+        "has_claude_md": (project / "CLAUDE.md").exists(),
+        "has_git": (project / ".git").exists(),
+    }
+
+    add_mem = lambda cat, content, imp=3: result["suggested_memories"].append(
+        {"category": cat, "content": content, "importance": imp})
+
+    # ── Language & framework detection ──
+    lang_markers = {
+        "pyproject.toml": ("Python", None), "setup.py": ("Python", None),
+        "setup.cfg": ("Python", None), "requirements.txt": ("Python", None),
+        "Pipfile": ("Python", "pipenv"),
+        "package.json": ("JavaScript/TypeScript", "Node.js"),
+        "tsconfig.json": ("TypeScript", "Node.js"),
+        "Cargo.toml": ("Rust", "Cargo"), "go.mod": ("Go", None),
+        "pom.xml": ("Java", "Maven"), "build.gradle": ("Java", "Gradle"),
+        "Gemfile": ("Ruby", "Bundler"), "composer.json": ("PHP", "Composer"),
+        "CMakeLists.txt": ("C/C++", "CMake"), "Makefile": ("C/C++", "Make"),
+        "*.sln": ("C#", ".NET"), "mix.exs": ("Elixir", "Mix"),
+    }
+
+    for marker, (lang, fw) in lang_markers.items():
+        if "*" in marker:
+            if list(project.glob(marker)):
+                result["language"] = lang
+                result["framework"] = fw
+                break
+        elif (project / marker).exists():
+            result["language"] = lang
+            result["framework"] = fw
+            break
+
+    # ── Project type detection ──
+    has_notebooks = bool(list(project.rglob("*.ipynb"))[:1])
+    has_src = (project / "src").exists()
+    has_lib = (project / "lib").exists() or (project / "pkg").exists()
+    has_tests = (project / "tests").exists() or (project / "test").exists()
+    has_docs = (project / "docs").exists() or (project / "doc").exists()
+
+    if has_notebooks:
+        result["project_type"] = "notebook/research"
+    elif has_src and has_lib:
+        result["project_type"] = "application+library"
+    elif has_src:
+        result["project_type"] = "application"
+    elif has_lib:
+        result["project_type"] = "library"
+    elif result["language"]:
+        result["project_type"] = f"{result['language']} project"
+
+    # ── Count files by extension ──
+    ext_counts = {}
+    total_files = 0
+    try:
+        for f in project.rglob("*"):
+            if f.is_file() and ".git" not in f.parts and "node_modules" not in f.parts \
+                    and "__pycache__" not in f.parts and ".venv" not in f.parts:
+                total_files += 1
+                ext = f.suffix.lower()
+                if ext:
+                    ext_counts[ext] = ext_counts.get(ext, 0) + 1
+                if total_files > 50000:
+                    break
+    except (PermissionError, OSError):
+        pass
+
+    top_exts = sorted(ext_counts.items(), key=lambda x: -x[1])[:8]
+
+    # ── Detect specific structures ──
+    has_docker = (project / "Dockerfile").exists() or (project / "docker-compose.yml").exists()
+    has_ci = any((project / p).exists() for p in [
+        ".github/workflows", ".gitlab-ci.yml", ".circleci", "Jenkinsfile"])
+    has_readme = (project / "README.md").exists() or (project / "readme.md").exists()
+    has_env = (project / ".env").exists() or (project / ".env.example").exists()
+    has_venv = (project / ".venv").exists() or (project / "venv").exists()
+
+    # ── Detect key config files ──
+    config_files = []
+    for name in ["config.py", "config.js", "config.ts", "settings.py", "constants.py",
+                 ".eslintrc.json", "webpack.config.js", "vite.config.ts", "next.config.js",
+                 "jest.config.js", "pytest.ini", "tox.ini", ".flake8", "mypy.ini",
+                 "tsconfig.json", "tailwind.config.js"]:
+        matches = list(project.rglob(name))[:3]
+        config_files.extend(str(m.relative_to(project)) for m in matches)
+
+    # ── Detect entry points ──
+    entry_points = []
+    for name in ["main.py", "app.py", "index.py", "index.js", "index.ts",
+                 "main.go", "main.rs", "Main.java", "manage.py", "server.py"]:
+        matches = list(project.rglob(name))[:2]
+        entry_points.extend(str(m.relative_to(project)) for m in matches)
+
+    # ── Detect important directories ──
+    important_dirs = []
+    for d in ["src", "lib", "pkg", "app", "api", "core", "models", "utils",
+              "components", "pages", "routes", "services", "hooks",
+              "tests", "test", "docs", "scripts", "data", "config"]:
+        if (project / d).exists() and (project / d).is_dir():
+            important_dirs.append(d)
+
+    # ── Read README for project description ──
+    readme_desc = None
+    for rname in ["README.md", "readme.md", "README.rst", "README.txt"]:
+        rpath = project / rname
+        if rpath.exists():
+            try:
+                text = rpath.read_text(encoding="utf-8", errors="ignore")[:2000]
+                # Extract first meaningful paragraph
+                lines = text.split("\n")
+                desc_lines = []
+                started = False
+                for line in lines:
+                    stripped = line.strip()
+                    if not started:
+                        # Skip title lines (# heading, === underline, blank)
+                        if stripped and not stripped.startswith("#") and not all(
+                                c in "=-~" for c in stripped):
+                            started = True
+                            desc_lines.append(stripped)
+                    elif stripped:
+                        desc_lines.append(stripped)
+                    elif desc_lines:
+                        break
+                if desc_lines:
+                    readme_desc = " ".join(desc_lines)[:200]
+            except Exception:
+                pass
+            break
+
+    # ── Read package.json / pyproject.toml for metadata ──
+    pkg_name = None
+    pkg_desc = None
+    if (project / "package.json").exists():
+        try:
+            pkg = json.loads((project / "package.json").read_text(encoding="utf-8"))
+            pkg_name = pkg.get("name")
+            pkg_desc = pkg.get("description")
+            deps = list(pkg.get("dependencies", {}).keys())[:15]
+            dev_deps = list(pkg.get("devDependencies", {}).keys())[:10]
+            if deps:
+                add_mem("config", f"Dependencies: {', '.join(deps)}", 2)
+            if dev_deps:
+                add_mem("config", f"Dev dependencies: {', '.join(dev_deps)}", 1)
+        except Exception:
+            pass
+    elif (project / "pyproject.toml").exists():
+        try:
+            text = (project / "pyproject.toml").read_text(encoding="utf-8")
+            for line in text.split("\n"):
+                if line.strip().startswith("name") and "=" in line:
+                    pkg_name = line.split("=", 1)[1].strip().strip('"').strip("'")
+                elif line.strip().startswith("description") and "=" in line:
+                    pkg_desc = line.split("=", 1)[1].strip().strip('"').strip("'")
+        except Exception:
+            pass
+    elif (project / "requirements.txt").exists():
+        try:
+            text = (project / "requirements.txt").read_text(encoding="utf-8")
+            deps = [l.split("==")[0].split(">=")[0].split("[")[0].strip()
+                    for l in text.strip().split("\n")
+                    if l.strip() and not l.startswith("#") and not l.startswith("-")][:15]
+            if deps:
+                add_mem("config", f"Python dependencies: {', '.join(deps)}", 2)
+        except Exception:
+            pass
+
+    # ── Build suggested memories ──
+
+    # Project identity
+    proj_desc = pkg_desc or readme_desc
+    if proj_desc:
+        add_mem("arch", f"Project description: {proj_desc}", 4)
+    add_mem("arch",
+            f"Project type: {result['project_type']}, language: {result['language'] or 'mixed'}"
+            + (f", framework: {result['framework']}" if result['framework'] else ""),
+            3)
+
+    # File structure
+    if important_dirs:
+        add_mem("arch", f"Key directories: {', '.join(important_dirs)}", 3)
+    add_mem("config", f"Total files: {total_files}", 2)
+    if top_exts:
+        ext_str = ", ".join(f"{ext}({n})" for ext, n in top_exts[:5])
+        add_mem("config", f"File types: {ext_str}", 2)
+
+    # Entry points
+    if entry_points:
+        add_mem("arch", f"Entry points: {', '.join(entry_points)}", 3)
+    if config_files:
+        add_mem("config", f"Config files: {', '.join(config_files[:5])}", 2)
+
+    # Infrastructure
+    if has_docker:
+        add_mem("config", "Docker: Dockerfile/docker-compose present", 2)
+    if has_ci:
+        add_mem("config", "CI/CD: pipeline configuration detected", 2)
+    if has_tests:
+        add_mem("config", "Tests: test directory present", 2)
+    if has_venv:
+        add_mem("config", "Virtual environment: .venv or venv present", 1)
+    if result["has_git"]:
+        add_mem("config", "Version control: Git repository", 1)
+    if result["has_claude_md"]:
+        add_mem("config", "CLAUDE.md exists — Claude Code project instructions configured", 3)
+
+    # Skills
+    skills_dir = project / ".claude" / "skills"
+    if skills_dir.exists():
+        skill_files = [f.name for f in skills_dir.iterdir() if f.is_file()]
+        if skill_files:
+            add_mem("config", f"Claude skills: {', '.join(skill_files)}", 2)
+
+    # Notebooks
+    if has_notebooks:
+        notebooks = list(project.rglob("*.ipynb"))[:10]
+        nb_names = [str(nb.relative_to(project)) for nb in notebooks]
+        add_mem("arch", f"Notebooks: {', '.join(nb_names)}", 3)
+
+    # ── Build keywords ──
+    for d in important_dirs:
+        result["keywords"][d] = 1
+    if pkg_name:
+        result["keywords"][pkg_name] = 2
+    for ep in entry_points:
+        name = Path(ep).stem
+        if len(name) > 2:
+            result["keywords"][name] = 1
+    for cf in config_files:
+        name = Path(cf).stem
+        if len(name) > 2:
+            result["keywords"][name] = 1
+
+    # ── Build summary string ──
+    parts = [f"Type: {result['project_type']}"]
+    if result["language"]:
+        parts.append(f"Language: {result['language']}")
+    if result["framework"]:
+        parts.append(f"Framework: {result['framework']}")
+    parts.append(f"Files: {total_files}")
+    if important_dirs:
+        parts.append(f"Dirs: {', '.join(important_dirs[:6])}")
+    if has_docker:
+        parts.append("Docker")
+    if has_ci:
+        parts.append("CI/CD")
+    if has_tests:
+        parts.append("Tests")
+    if result["has_claude_md"]:
+        parts.append("CLAUDE.md")
+    if result["has_git"]:
+        parts.append("Git")
+    result["summary"] = " | ".join(parts)
+
+    return result
+
+
+def _generate_claude_md(project: Path, scan: dict) -> str:
+    """Generate a CLAUDE.md template based on detected project structure."""
+    name = project.name
+    lang = scan.get("language") or "unknown"
+    ptype = scan.get("project_type", "project")
+    framework = scan.get("framework")
+
+    sections = []
+
+    # Header
+    sections.append(f"# CLAUDE.md — Project Instructions for Claude Code\n")
+    sections.append(f"## Project: {name}\n")
+
+    desc_mem = next((m for m in scan["suggested_memories"]
+                     if m["category"] == "arch" and "description:" in m["content"].lower()), None)
+    if desc_mem:
+        desc = desc_mem["content"].replace("Project description: ", "")
+        sections.append(f"{desc}\n")
+
+    sections.append(f"- **Type**: {ptype}")
+    sections.append(f"- **Language**: {lang}")
+    if framework:
+        sections.append(f"- **Framework**: {framework}")
+    sections.append("")
+
+    # Key directories
+    dir_mem = next((m for m in scan["suggested_memories"]
+                    if "Key directories" in m["content"]), None)
+    if dir_mem:
+        dirs = dir_mem["content"].replace("Key directories: ", "")
+        sections.append(f"## Project Structure\n")
+        sections.append(f"Key directories: `{dirs}`\n")
+
+    # Entry points
+    ep_mem = next((m for m in scan["suggested_memories"]
+                   if "Entry points" in m["content"]), None)
+    if ep_mem:
+        eps = ep_mem["content"].replace("Entry points: ", "")
+        sections.append(f"Entry points: `{eps}`\n")
+
+    # Development guidelines (language-specific)
+    sections.append("## Development Guidelines\n")
+
+    if lang == "Python":
+        sections.append("- Use type hints where appropriate")
+        sections.append("- Follow PEP 8 style conventions")
+        sections.append("- Use `encoding='utf-8'` when reading/writing files")
+    elif lang in ("JavaScript/TypeScript", "TypeScript"):
+        sections.append("- Follow existing code style and linting rules")
+        sections.append("- Use TypeScript types where available")
+    elif lang == "Rust":
+        sections.append("- Run `cargo check` before committing")
+        sections.append("- Follow Rust API guidelines")
+    elif lang == "Go":
+        sections.append("- Run `go vet` and `go fmt` before committing")
+    else:
+        sections.append("- Follow existing code conventions")
+
+    sections.append("- Read files before modifying them")
+    sections.append("- Do not delete or overwrite data files without asking")
+    sections.append("")
+
+    # Data integrity
+    sections.append("## Data & Safety Rules\n")
+    sections.append("- Never delete cached data or model files without asking")
+    sections.append("- Never overwrite existing files without reading them first")
+    sections.append("- Never fabricate data, results, or citations")
+    sections.append("")
+
+    return "\n".join(sections)
 
 
 # ---------------------------------------------------------------------------
