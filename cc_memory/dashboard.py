@@ -916,30 +916,14 @@ Memories:
             self.db.update_plan_status(pid, "executing")
         self._load_plans()
 
-        # Launch Claude Code in a new terminal
+        # Launch Claude Code in a new console window
         try:
+            kwargs = {"cwd": proj_dir}
             if sys.platform == "win32":
-                # Windows: open new CMD window with claude
-                cmd = f'cd /d "{proj_dir}" && claude "{prompt}"'
-                subprocess.Popen(["cmd", "/c", "start", "cmd", "/k", cmd])
+                kwargs["creationflags"] = subprocess.CREATE_NEW_CONSOLE
             else:
-                # Unix: try common terminal emulators
-                for term_cmd in [
-                    ["gnome-terminal", "--", "bash", "-c"],
-                    ["xterm", "-e"],
-                    ["open", "-a", "Terminal"],  # macOS
-                ]:
-                    try:
-                        full_cmd = term_cmd + [f'cd "{proj_dir}" && claude "{prompt}"']
-                        subprocess.Popen(full_cmd)
-                        break
-                    except FileNotFoundError:
-                        continue
-                else:
-                    # Fallback: run in background
-                    subprocess.Popen(
-                        ["claude", "-p", prompt],
-                        cwd=proj_dir, start_new_session=True)
+                kwargs["start_new_session"] = True
+            subprocess.Popen(["claude", prompt], **kwargs)
 
             self.status_var.set(f"Launched Claude Code for {len(ids)} plan(s)")
         except Exception as e:
