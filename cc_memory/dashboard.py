@@ -71,6 +71,7 @@ class DashboardApp:
         self.project_combo.pack(side=tk.LEFT, padx=5)
         self.project_combo.bind("<<ComboboxSelected>>", self._on_project_selected)
         ttk.Button(top, text="Browse...", command=self._browse_project).pack(side=tk.LEFT)
+        ttk.Button(top, text="Init New Project", command=self._init_new_project).pack(side=tk.LEFT, padx=5)
         ttk.Button(top, text="Refresh", command=self._refresh).pack(side=tk.LEFT, padx=5)
 
         # Notebook tabs
@@ -545,6 +546,37 @@ Category Breakdown:
         n = self.db.clear_done_plans(self.project_id)
         self._load_plans()
         self.status_var.set(f"Cleared {n} completed plan(s)")
+
+    def _init_new_project(self):
+        """Initialize memory for a new project directory."""
+        path = filedialog.askdirectory(title="Select project to initialize")
+        if not path:
+            return
+        project = Path(path)
+        memory_dir = project / "memory"
+        if (memory_dir / "memory.db").exists():
+            messagebox.showinfo("Already Initialized",
+                                f"{project.name} already has memory.\nLoading it now.")
+            self._load_project(str(project))
+            return
+
+        memory_dir.mkdir(parents=True, exist_ok=True)
+        (memory_dir / "sessions").mkdir(exist_ok=True)
+        (memory_dir / "topics").mkdir(exist_ok=True)
+
+        # Create .gitignore
+        gitignore = memory_dir / ".gitignore"
+        if not gitignore.exists():
+            gitignore.write_text(
+                "# cc-memory: exclude database from git\n"
+                "memory.db\nmemory.db-wal\nmemory.db-shm\nsessions/\n",
+                encoding="utf-8"
+            )
+
+        self._load_project(str(project))
+        messagebox.showinfo("Success",
+                            f"Memory initialized for {project.name}!\n\n"
+                            f"Directory: {memory_dir}")
 
 
 # ---------------------------------------------------------------------------
