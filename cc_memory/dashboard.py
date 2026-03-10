@@ -140,29 +140,58 @@ class DashboardApp:
         frame = ttk.Frame(self.notebook)
         self.notebook.add(frame, text="Plans")
 
-        # Toolbar
-        tb = ttk.Frame(frame, padding=5)
-        tb.pack(fill=tk.X)
-        ttk.Button(tb, text="Add Plan", command=self._add_plan_dialog).pack(side=tk.LEFT)
-        ttk.Button(tb, text="Approve Selected", command=self._approve_plans).pack(side=tk.LEFT, padx=5)
-        ttk.Button(tb, text="Approve All", command=self._approve_all_plans).pack(side=tk.LEFT)
-        ttk.Button(tb, text="Clear Done", command=self._clear_done_plans).pack(side=tk.LEFT, padx=5)
-        ttk.Button(tb, text="Refresh", command=self._load_plans).pack(side=tk.RIGHT)
+        # Toolbar row 1: lifecycle actions
+        tb1 = ttk.Frame(frame, padding=(5, 5, 5, 0))
+        tb1.pack(fill=tk.X)
+        ttk.Button(tb1, text="Add Plan", command=self._add_plan_dialog).pack(side=tk.LEFT)
+        ttk.Separator(tb1, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=6)
+        ttk.Button(tb1, text="Approve", command=self._approve_plans).pack(side=tk.LEFT)
+        ttk.Button(tb1, text="Approve All", command=self._approve_all_plans).pack(side=tk.LEFT, padx=3)
+        ttk.Separator(tb1, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=6)
+        ttk.Button(tb1, text="Execute", command=self._execute_plans).pack(side=tk.LEFT)
+        ttk.Button(tb1, text="Mark Done", command=self._mark_plan_done).pack(side=tk.LEFT, padx=3)
+        ttk.Button(tb1, text="Mark Failed", command=self._mark_plan_failed).pack(side=tk.LEFT)
+        ttk.Separator(tb1, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=6)
+        ttk.Button(tb1, text="Edit", command=self._edit_plan_dialog).pack(side=tk.LEFT)
+        ttk.Button(tb1, text="Delete", command=self._delete_plans).pack(side=tk.LEFT, padx=3)
+        ttk.Button(tb1, text="Clear Done", command=self._clear_done_plans).pack(side=tk.LEFT, padx=3)
+        ttk.Button(tb1, text="Refresh", command=self._load_plans).pack(side=tk.RIGHT)
 
         # Treeview
-        cols = ("id", "order", "status", "content", "feasibility")
-        self.plan_tree = ttk.Treeview(frame, columns=cols, show="headings", height=15)
+        cols = ("id", "order", "status", "content", "result")
+        self.plan_tree = ttk.Treeview(frame, columns=cols, show="headings", height=15,
+                                       selectmode="extended")
         self.plan_tree.heading("id", text="ID")
         self.plan_tree.heading("order", text="Order")
         self.plan_tree.heading("status", text="Status")
         self.plan_tree.heading("content", text="Content")
-        self.plan_tree.heading("feasibility", text="Evaluation")
+        self.plan_tree.heading("result", text="Eval / Result")
         self.plan_tree.column("id", width=40)
         self.plan_tree.column("order", width=50)
         self.plan_tree.column("status", width=80)
-        self.plan_tree.column("content", width=450)
-        self.plan_tree.column("feasibility", width=250)
-        self.plan_tree.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        self.plan_tree.column("content", width=420)
+        self.plan_tree.column("result", width=280)
+
+        scroll = ttk.Scrollbar(frame, orient=tk.VERTICAL, command=self.plan_tree.yview)
+        self.plan_tree.configure(yscrollcommand=scroll.set)
+        self.plan_tree.pack(fill=tk.BOTH, expand=True, side=tk.LEFT, padx=(5, 0), pady=5)
+        scroll.pack(fill=tk.Y, side=tk.RIGHT, padx=(0, 5), pady=5)
+
+        # Double-click to edit
+        self.plan_tree.bind("<Double-1>", lambda e: self._edit_plan_dialog())
+
+        # Right-click context menu
+        self.plan_menu = tk.Menu(self.plan_tree, tearoff=0)
+        self.plan_menu.add_command(label="Edit...", command=self._edit_plan_dialog)
+        self.plan_menu.add_separator()
+        self.plan_menu.add_command(label="Approve", command=self._approve_plans)
+        self.plan_menu.add_command(label="Execute", command=self._execute_plans)
+        self.plan_menu.add_command(label="Mark Done", command=self._mark_plan_done)
+        self.plan_menu.add_command(label="Mark Failed", command=self._mark_plan_failed)
+        self.plan_menu.add_command(label="Skip", command=self._skip_plans)
+        self.plan_menu.add_separator()
+        self.plan_menu.add_command(label="Delete", command=self._delete_plans)
+        self.plan_tree.bind("<Button-3>", self._plan_context_menu)
 
     def _build_sessions_tab(self):
         frame = ttk.Frame(self.notebook)
@@ -337,11 +366,18 @@ class DashboardApp:
         plans = self.db.get_plans(self.project_id)
         for p in plans:
             content = p["content"]
-            if len(content) > 70:
-                content = content[:67] + "..."
-            feas = (p.get("feasibility") or "")[:40]
+            if len(content) > 80:
+                content = content[:77] + "..."
+            # Show result if done/failed, otherwise show feasibility
+            info = ""
+            if p.get("result"):
+                info = p["result"]
+            elif p.get("feasibility"):
+                info = p["feasibility"]
+            if len(info) > 50:
+                info = info[:47] + "..."
             self.plan_tree.insert("", tk.END, values=(
-                p["id"], p["exec_order"], p["status"], content, feas
+                p["id"], p["exec_order"], p["status"], content, info
             ))
 
     def _load_sessions(self):
@@ -546,6 +582,179 @@ Category Breakdown:
         n = self.db.clear_done_plans(self.project_id)
         self._load_plans()
         self.status_var.set(f"Cleared {n} completed plan(s)")
+
+    def _get_selected_plan_ids(self):
+        """Get list of selected plan IDs from treeview."""
+        return [int(self.plan_tree.item(item, "values")[0])
+                for item in self.plan_tree.selection()]
+
+    def _execute_plans(self):
+        """Mark selected plans as executing."""
+        if not self.db:
+            return
+        ids = self._get_selected_plan_ids()
+        if not ids:
+            messagebox.showinfo("No Selection", "Select plan(s) to execute.")
+            return
+        for pid in ids:
+            self.db.update_plan_status(pid, "executing")
+        self._load_plans()
+        self.status_var.set(f"Executing {len(ids)} plan(s)")
+
+    def _mark_plan_done(self):
+        """Mark selected plans as done, optionally with a result note."""
+        if not self.db:
+            return
+        ids = self._get_selected_plan_ids()
+        if not ids:
+            messagebox.showinfo("No Selection", "Select plan(s) to mark done.")
+            return
+
+        # Ask for optional result note
+        dlg = tk.Toplevel(self.root)
+        dlg.title("Mark Done")
+        dlg.geometry("450x150")
+        dlg.transient(self.root)
+        dlg.grab_set()
+
+        ttk.Label(dlg, text=f"Result note for {len(ids)} plan(s) (optional):").pack(
+            padx=10, pady=(10, 5), anchor=tk.W)
+        result_var = tk.StringVar()
+        ttk.Entry(dlg, textvariable=result_var, width=55).pack(padx=10, fill=tk.X)
+
+        def do_done():
+            note = result_var.get().strip()
+            for pid in ids:
+                self.db.update_plan_status(pid, "done", note or None, field="result")
+            dlg.destroy()
+            self._load_plans()
+            self.status_var.set(f"Marked {len(ids)} plan(s) done")
+
+        bf = ttk.Frame(dlg)
+        bf.pack(pady=10)
+        ttk.Button(bf, text="Done", command=do_done).pack(side=tk.LEFT, padx=5)
+        ttk.Button(bf, text="Cancel", command=dlg.destroy).pack(side=tk.LEFT)
+
+    def _mark_plan_failed(self):
+        """Mark selected plans as failed."""
+        if not self.db:
+            return
+        ids = self._get_selected_plan_ids()
+        if not ids:
+            return
+
+        dlg = tk.Toplevel(self.root)
+        dlg.title("Mark Failed")
+        dlg.geometry("450x150")
+        dlg.transient(self.root)
+        dlg.grab_set()
+
+        ttk.Label(dlg, text=f"Failure reason for {len(ids)} plan(s) (optional):").pack(
+            padx=10, pady=(10, 5), anchor=tk.W)
+        reason_var = tk.StringVar()
+        ttk.Entry(dlg, textvariable=reason_var, width=55).pack(padx=10, fill=tk.X)
+
+        def do_fail():
+            reason = reason_var.get().strip()
+            for pid in ids:
+                self.db.update_plan_status(pid, "failed", reason or None, field="result")
+            dlg.destroy()
+            self._load_plans()
+            self.status_var.set(f"Marked {len(ids)} plan(s) failed")
+
+        bf = ttk.Frame(dlg)
+        bf.pack(pady=10)
+        ttk.Button(bf, text="Mark Failed", command=do_fail).pack(side=tk.LEFT, padx=5)
+        ttk.Button(bf, text="Cancel", command=dlg.destroy).pack(side=tk.LEFT)
+
+    def _skip_plans(self):
+        """Skip selected plans."""
+        if not self.db:
+            return
+        ids = self._get_selected_plan_ids()
+        for pid in ids:
+            self.db.update_plan_status(pid, "skipped")
+        self._load_plans()
+        self.status_var.set(f"Skipped {len(ids)} plan(s)")
+
+    def _edit_plan_dialog(self):
+        """Edit the content of a selected plan."""
+        if not self.db:
+            return
+        ids = self._get_selected_plan_ids()
+        if len(ids) != 1:
+            messagebox.showinfo("Select One", "Select exactly one plan to edit.")
+            return
+        plan_id = ids[0]
+
+        # Get current plan data
+        plans = self.db.get_plans(self.project_id)
+        plan = next((p for p in plans if p["id"] == plan_id), None)
+        if not plan:
+            return
+
+        dlg = tk.Toplevel(self.root)
+        dlg.title(f"Edit Plan #{plan_id}")
+        dlg.geometry("600x350")
+        dlg.transient(self.root)
+        dlg.grab_set()
+
+        ttk.Label(dlg, text=f"Status: {plan['status']}  |  Order: {plan['exec_order']}",
+                  font=("", 9)).pack(padx=10, pady=(10, 5), anchor=tk.W)
+
+        ttk.Label(dlg, text="Content:").pack(padx=10, anchor=tk.W)
+        content_text = tk.Text(dlg, height=6, width=70, font=("Consolas", 10))
+        content_text.pack(padx=10, pady=5, fill=tk.X)
+        content_text.insert("1.0", plan["content"])
+
+        ttk.Label(dlg, text="Evaluation notes:").pack(padx=10, anchor=tk.W)
+        feas_var = tk.StringVar(value=plan.get("feasibility") or "")
+        ttk.Entry(dlg, textvariable=feas_var, width=70).pack(padx=10, fill=tk.X)
+
+        ttk.Label(dlg, text="Result:").pack(padx=10, pady=(5, 0), anchor=tk.W)
+        result_var = tk.StringVar(value=plan.get("result") or "")
+        ttk.Entry(dlg, textvariable=result_var, width=70).pack(padx=10, fill=tk.X)
+
+        def save():
+            new_content = content_text.get("1.0", tk.END).strip()
+            if new_content and new_content != plan["content"]:
+                self.db.update_plan_content(plan_id, new_content)
+            new_feas = feas_var.get().strip()
+            if new_feas != (plan.get("feasibility") or ""):
+                self.db.update_plan_status(plan_id, plan["status"], new_feas, field="feasibility")
+            new_result = result_var.get().strip()
+            if new_result != (plan.get("result") or ""):
+                self.db.update_plan_status(plan_id, plan["status"], new_result, field="result")
+            dlg.destroy()
+            self._load_plans()
+
+        bf = ttk.Frame(dlg)
+        bf.pack(pady=10)
+        ttk.Button(bf, text="Save", command=save).pack(side=tk.LEFT, padx=5)
+        ttk.Button(bf, text="Cancel", command=dlg.destroy).pack(side=tk.LEFT)
+
+    def _delete_plans(self):
+        """Delete selected plans."""
+        if not self.db:
+            return
+        ids = self._get_selected_plan_ids()
+        if not ids:
+            return
+        if not messagebox.askyesno("Delete Plans",
+                                    f"Delete {len(ids)} plan(s)? This cannot be undone."):
+            return
+        for pid in ids:
+            self.db.delete_plan(pid)
+        self._load_plans()
+        self.status_var.set(f"Deleted {len(ids)} plan(s)")
+
+    def _plan_context_menu(self, event):
+        """Show right-click context menu on plan tree."""
+        item = self.plan_tree.identify_row(event.y)
+        if item:
+            if item not in self.plan_tree.selection():
+                self.plan_tree.selection_set(item)
+            self.plan_menu.post(event.x_root, event.y_root)
 
     def _init_new_project(self):
         """Initialize memory for a new project directory with auto-detection."""

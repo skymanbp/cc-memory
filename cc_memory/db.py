@@ -438,6 +438,20 @@ class MemoryDB:
             )
             return cur.rowcount
 
+    def delete_plan(self, plan_id: int) -> None:
+        """Delete a single plan by ID."""
+        with self._connect() as conn:
+            conn.execute("DELETE FROM plans WHERE id = ?", (plan_id,))
+
+    def update_plan_content(self, plan_id: int, content: str) -> None:
+        """Update the content text of a plan."""
+        now = self._now()
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE plans SET content = ?, updated_at = ? WHERE id = ?",
+                (content, now, plan_id)
+            )
+
     def reorder_plans(self, project_id: int, plan_ids: List[int]) -> None:
         """Reorder plans by providing the new sequence of plan IDs."""
         now = self._now()
