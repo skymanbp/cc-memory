@@ -156,12 +156,24 @@ def extract_todos(messages: List[Dict]) -> List[Dict]:
     for name, inp in _iter_tool_uses(messages):
         if name != "TodoWrite":
             continue
-        for item in inp.get("todos", []):
-            todos.append({
-                "status":   item.get("status", "pending"),
-                "priority": item.get("priority", "medium"),
-                "content":  item.get("content", "").strip(),
-            })
+        raw_todos = inp.get("todos", [])
+        # Guard: if todos is a string instead of list, wrap it
+        if isinstance(raw_todos, str):
+            raw_todos = [raw_todos] if raw_todos.strip() else []
+        if not isinstance(raw_todos, list):
+            continue
+        for item in raw_todos:
+            if isinstance(item, str):
+                if len(item.strip()) > 3:  # skip single chars / noise
+                    todos.append({"status": "pending", "priority": "medium", "content": item.strip()})
+            elif isinstance(item, dict):
+                content = item.get("content", "").strip()
+                if len(content) > 3:
+                    todos.append({
+                        "status":   item.get("status", "pending"),
+                        "priority": item.get("priority", "medium"),
+                        "content":  content,
+                    })
     return todos
 
 
@@ -209,7 +221,7 @@ def _score_sentence(sentence: str) -> Tuple[int, str]:
             if re.search(pat, sentence, re.IGNORECASE):
                 return min(importance, 5), category
 
-    return importance, "note"
+    return min(importance, 5), "note"
 
 
 def extract_key_sentences(
@@ -227,10 +239,20 @@ def extract_key_sentences(
     sentences = re.split(r"(?<=[.!?。！？])\s+|\n{2,}|\n(?=[A-Z•\-])", text)
 
     results: List[Tuple[str, int, str]] = []
+    seen_content: set = set()
     for raw in sentences:
         s = raw.strip()
-        if len(s) < 12 or len(s) > 600:
+        if len(s) < 20 or len(s) > 600:
             continue
+        # Skip noise: lines that are mostly punctuation, symbols, or markdown artifacts
+        alpha_ratio = sum(1 for c in s if c.isalnum()) / max(len(s), 1)
+        if alpha_ratio < 0.3:
+            continue
+        # Deduplicate by normalized content
+        norm = s.lower().strip()
+        if norm in seen_content:
+            continue
+        seen_content.add(norm)
         importance, category = _score_sentence(s)
         # Boost if ≥2 project-specific keywords hit
         hits = sum(1 for kw in kw_set if kw in s.lower())

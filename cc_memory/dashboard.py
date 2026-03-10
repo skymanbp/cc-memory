@@ -29,6 +29,13 @@ if getattr(sys, 'frozen', False):
 else:
     sys.path.insert(0, str(_PLUGIN_DIR))
 from db import MemoryDB
+from extractor import (
+    build_extraction,
+    group_sentences,
+    CATEGORY_ORDER,
+    CATEGORY_LABELS,
+    load_transcript,
+)
 
 try:
     import tkinter as tk
@@ -72,6 +79,8 @@ class DashboardApp:
         self.project_combo.bind("<<ComboboxSelected>>", self._on_project_selected)
         ttk.Button(top, text="Browse...", command=self._browse_project).pack(side=tk.LEFT)
         ttk.Button(top, text="Init New Project", command=self._init_new_project).pack(side=tk.LEFT, padx=5)
+        ttk.Button(top, text="Save Session", command=self._save_current_session).pack(side=tk.LEFT, padx=5)
+        ttk.Button(top, text="Tidy Memories", command=self._tidy_memories).pack(side=tk.LEFT, padx=5)
         ttk.Button(top, text="Refresh", command=self._refresh).pack(side=tk.LEFT, padx=5)
 
         # Notebook tabs
@@ -492,6 +501,209 @@ Category Breakdown:
         except sqlite3.Error as e:
             self.sql_output.insert("1.0", f"SQL Error: {e}\n\nTables: projects, sessions, memories, topics, keywords, plans")
 
+    # ── Tidy Memories (LLM-powered cleanup) ─────────────────────────────────
+
+    def _tidy_memories(self):
+        """Use Haiku API to review all memories and suggest cleanup."""
+        if not self.db or not self.project_path:
+            messagebox.showwarning("No Project", "Load a project first.")
+            return
+
+        api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+        if not api_key:
+            messagebox.showerror(
+                "No API Key",
+                "ANTHROPIC_API_KEY environment variable not set.\n\n"
+                "Set it and restart the dashboard.")
+            return
+
+        # Load all active memories
+        with self.db._connect() as conn:
+            rows = conn.execute(
+                "SELECT id, category, importance, content, created_at "
+                "FROM memories WHERE project_id = ? AND is_active = 1 "
+                "ORDER BY importance DESC, id",
+                (self.project_id,)
+            ).fetchall()
+
+        if not rows:
+            messagebox.showinfo("Empty", "No memories to tidy.")
+            return
+
+        # Build memory list for LLM
+        mem_lines = []
+        for r in rows:
+            mem_lines.append(
+                f"ID:{r['id']} | {r['category']} | imp={r['importance']} | {r['content']}"
+            )
+        mem_text = "\n".join(mem_lines)
+
+        self.status_var.set("Analyzing memories with LLM...")
+        self.root.update()
+
+        # Call Haiku API
+        import urllib.request, urllib.error
+
+        prompt = f"""\
+Review these {len(rows)} memories from a project database. For each memory, decide:
+- KEEP: valuable, unique, self-contained information
+- DELETE: garbage, noise, debug output, fragments, duplicates, or meta-discussion about the memory system itself
+- MERGE: two or more memories that say the same thing (keep the better one, delete others)
+
+Output a JSON object with:
+- "delete": list of memory IDs to delete, with brief reason
+- "merge": list of {{"keep_id": int, "delete_ids": [int], "reason": str}}
+- "summary": one sentence summary of what was cleaned
+
+Be aggressive about removing noise. Only KEEP memories that would be genuinely useful in a future conversation.
+
+Memories:
+{mem_text}"""
+
+        body = json.dumps({
+            "model": "claude-haiku-4-5-20251001",
+            "max_tokens": 3000,
+            "messages": [{"role": "user", "content": prompt}],
+            "system": "You are a memory database curator. Output ONLY valid JSON, no markdown.",
+        }).encode("utf-8")
+
+        req = urllib.request.Request(
+            "https://api.anthropic.com/v1/messages",
+            data=body,
+            headers={
+                "Content-Type": "application/json",
+                "x-api-key": api_key,
+                "anthropic-version": "2023-06-01",
+            },
+            method="POST",
+        )
+
+        try:
+            with urllib.request.urlopen(req, timeout=25) as resp:
+                result = json.loads(resp.read().decode("utf-8"))
+
+            text_content = ""
+            for block in result.get("content", []):
+                if block.get("type") == "text":
+                    text_content += block.get("text", "")
+
+            text_content = text_content.strip()
+            if text_content.startswith("```"):
+                lines = text_content.split("\n")
+                text_content = "\n".join(l for l in lines if not l.strip().startswith("```"))
+
+            analysis = json.loads(text_content)
+
+        except Exception as e:
+            self.status_var.set("Ready")
+            messagebox.showerror("API Error", f"LLM analysis failed:\n\n{e}")
+            return
+
+        # Collect all IDs to delete
+        delete_ids = set()
+        reasons = {}
+
+        for item in analysis.get("delete", []):
+            if isinstance(item, dict):
+                did = item.get("id", item.get("ID"))
+                reason = item.get("reason", "")
+                if did:
+                    delete_ids.add(int(did))
+                    reasons[int(did)] = reason
+            elif isinstance(item, int):
+                delete_ids.add(item)
+
+        for merge in analysis.get("merge", []):
+            if isinstance(merge, dict):
+                for did in merge.get("delete_ids", []):
+                    delete_ids.add(int(did))
+                    reasons[int(did)] = f"Merged into #{merge.get('keep_id')}"
+
+        if not delete_ids:
+            self.status_var.set("Ready")
+            messagebox.showinfo("All Clean", "LLM found no garbage to remove.")
+            return
+
+        # Show confirmation dialog
+        self._show_tidy_confirm(rows, delete_ids, reasons, analysis.get("summary", ""))
+
+    def _show_tidy_confirm(self, all_rows, delete_ids, reasons, summary):
+        """Show dialog with LLM suggestions for user to confirm."""
+        dlg = tk.Toplevel(self.root)
+        dlg.title("Tidy Memories — Review")
+        dlg.geometry("850x600")
+        dlg.transient(self.root)
+        dlg.grab_set()
+
+        # Summary
+        ttk.Label(dlg, text=f"LLM suggests removing {len(delete_ids)} of {len(all_rows)} memories",
+                  font=("", 12, "bold")).pack(pady=(10, 2))
+        if summary:
+            ttk.Label(dlg, text=summary, wraplength=780, font=("", 9)).pack(pady=(0, 8))
+
+        # Scrollable list with checkboxes
+        frame = ttk.LabelFrame(dlg, text="Memories to delete (uncheck to keep)", padding=8)
+        frame.pack(fill=tk.BOTH, expand=True, padx=15, pady=5)
+
+        canvas = tk.Canvas(frame)
+        scrollbar = ttk.Scrollbar(frame, orient=tk.VERTICAL, command=canvas.yview)
+        scroll_frame = ttk.Frame(canvas)
+        scroll_frame.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.create_window((0, 0), window=scroll_frame, anchor=tk.NW)
+        canvas.configure(yscrollcommand=scrollbar.set)
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        check_vars = []  # (BooleanVar, memory_id)
+        id_to_row = {r["id"]: r for r in all_rows}
+
+        for mid in sorted(delete_ids):
+            row = id_to_row.get(mid)
+            if not row:
+                continue
+
+            var = tk.BooleanVar(value=True)
+            rf = ttk.Frame(scroll_frame)
+            rf.pack(fill=tk.X, pady=1)
+
+            ttk.Checkbutton(rf, variable=var).pack(side=tk.LEFT)
+
+            content = row["content"][:90].replace("\n", " ")
+            reason = reasons.get(mid, "")
+            label_text = f"#{mid} [{row['category']}|{'*'*row['importance']}] {content}"
+            ttk.Label(rf, text=label_text, wraplength=500, font=("Consolas", 9)).pack(side=tk.LEFT, padx=3)
+
+            if reason:
+                ttk.Label(rf, text=f"({reason})", foreground="gray",
+                          font=("", 8)).pack(side=tk.LEFT, padx=3)
+
+            check_vars.append((var, mid))
+
+        # Buttons
+        bf = ttk.Frame(dlg, padding=8)
+        bf.pack(fill=tk.X, padx=15)
+
+        def do_delete():
+            ids_to_delete = [mid for var, mid in check_vars if var.get()]
+            if not ids_to_delete:
+                dlg.destroy()
+                return
+
+            with self.db._connect() as conn:
+                conn.executemany(
+                    "DELETE FROM memories WHERE id = ?",
+                    [(mid,) for mid in ids_to_delete],
+                )
+
+            dlg.destroy()
+            self._refresh()
+            self.status_var.set(f"Deleted {len(ids_to_delete)} memories")
+            messagebox.showinfo("Done", f"Removed {len(ids_to_delete)} memories.")
+
+        ttk.Button(bf, text=f"Delete Selected ({len(delete_ids)})", command=do_delete).pack(side=tk.RIGHT, padx=5)
+        ttk.Button(bf, text="Cancel", command=dlg.destroy).pack(side=tk.RIGHT)
+        self.status_var.set("Ready")
+
     # ── Dialogs ──────────────────────────────────────────────────────────────
 
     def _add_memory_dialog(self):
@@ -756,6 +968,167 @@ Category Breakdown:
                 self.plan_tree.selection_set(item)
             self.plan_menu.post(event.x_root, event.y_root)
 
+    def _save_current_session(self):
+        """Manually save memories from the most recent Claude Code transcript."""
+        if not self.db or not self.project_path:
+            messagebox.showwarning("No Project", "Load a project first.")
+            return
+
+        # Find the transcript directory for this project
+        transcript_dir = _find_transcript_dir(self.project_path)
+        if not transcript_dir:
+            messagebox.showerror(
+                "No Transcripts",
+                f"Could not find Claude Code transcript directory for:\n{self.project_path}\n\n"
+                f"Looked in: {Path.home() / '.claude' / 'projects'}")
+            return
+
+        # Find the most recent JSONL file
+        jsonl_files = sorted(
+            transcript_dir.glob("*.jsonl"),
+            key=lambda f: f.stat().st_mtime,
+            reverse=True,
+        )
+        if not jsonl_files:
+            messagebox.showinfo("No Transcripts", "No JSONL transcript files found.")
+            return
+
+        latest = jsonl_files[0]
+        mtime = datetime.fromtimestamp(latest.stat().st_mtime)
+
+        # Confirm with user
+        if not messagebox.askyesno(
+            "Save Session",
+            f"Extract memories from the most recent transcript?\n\n"
+            f"File: {latest.name}\n"
+            f"Modified: {mtime.strftime('%Y-%m-%d %H:%M:%S')}\n"
+            f"Size: {latest.stat().st_size / 1024:.0f} KB"):
+            return
+
+        try:
+            # Load and extract
+            messages = load_transcript(str(latest))
+            if not messages:
+                messagebox.showinfo("Empty", "Transcript is empty or could not be parsed.")
+                return
+
+            project_kw = self.db.get_top_keywords(self.project_id, 40)
+            ext = build_extraction(messages, project_kw)
+
+            # Save to DB
+            now = datetime.now()
+            timestamp = now.strftime("%Y-%m-%d %H:%M:%S")
+            file_ts = now.strftime("%Y%m%d_%H%M%S")
+
+            # Session record
+            session_id = self.db.insert_session(
+                project_id=self.project_id,
+                claude_session_id=latest.stem,
+                trigger_type="manual_dashboard",
+                msg_count=ext["msg_count"],
+                archive_path=f"sessions/{now.strftime('%Y/%m')}/session_{file_ts}.md",
+                brief_summary=f"Manual save from dashboard at {timestamp}",
+            )
+
+            # Load existing memories for dedup
+            existing_content = set()
+            with self.db._connect() as conn:
+                rows = conn.execute(
+                    "SELECT content FROM memories WHERE project_id = ? AND is_active = 1",
+                    (self.project_id,)
+                ).fetchall()
+                for r in rows:
+                    existing_content.add(r["content"].strip().lower())
+
+            def _is_dup(text):
+                return text.strip().lower() in existing_content
+
+            # Memories by category
+            cat_base_imp = {
+                "decision": 3, "result": 3, "arch": 3,
+                "config": 2, "bug": 4, "task": 2, "note": 1,
+            }
+            grouped = group_sentences(ext["sentences"])
+            mem_count = 0
+            skipped = 0
+            for cat, items in grouped.items():
+                base = cat_base_imp.get(cat, 2)
+                for text, imp in items[:10]:
+                    if _is_dup(text):
+                        skipped += 1
+                        continue
+                    self.db.insert_memory(
+                        self.project_id, session_id, cat, text,
+                        importance=min(max(imp, base), 5),
+                    )
+                    mem_count += 1
+
+            # Metrics (dedup)
+            for metric in ext["metrics"][:10]:
+                if _is_dup(metric):
+                    skipped += 1
+                    continue
+                self.db.insert_memory(
+                    self.project_id, session_id, "result", metric,
+                    importance=3, tags=["metric", "manual"],
+                )
+                mem_count += 1
+
+            # Todos (dedup, limit to 20)
+            for t in ext["todos"][:20]:
+                content = f"[{t['status']}] {t['content']}"
+                if _is_dup(content):
+                    skipped += 1
+                    continue
+                imp = 3 if t["priority"] == "high" else 2
+                self.db.insert_memory(
+                    self.project_id, session_id, "task", content,
+                    importance=imp, tags=["todo", t["status"]],
+                )
+                mem_count += 1
+
+            # Keywords
+            if ext["keywords"]:
+                self.db.upsert_keywords(self.project_id, ext["keywords"])
+
+            # Write session archive
+            memory_dir = self.project_path / "memory"
+            archive_dir = memory_dir / "sessions" / now.strftime("%Y/%m")
+            archive_dir.mkdir(parents=True, exist_ok=True)
+
+            archive_lines = [
+                f"# Manual Session Save — {self.project_path.name}",
+                f"**Timestamp**: {timestamp}  |  **Messages**: {ext['msg_count']}",
+                "",
+            ]
+            if ext["metrics"]:
+                archive_lines += ["## Metrics", ""]
+                for m in ext["metrics"][:15]:
+                    archive_lines.append(f"- `{m}`")
+                archive_lines.append("")
+            for cat in CATEGORY_ORDER:
+                if cat not in grouped:
+                    continue
+                archive_lines += [f"## {CATEGORY_LABELS[cat]}", ""]
+                for text, imp in grouped[cat][:10]:
+                    archive_lines.append(f"- {text}")
+                archive_lines.append("")
+
+            archive_path = archive_dir / f"session_{file_ts}.md"
+            archive_path.write_text("\n".join(archive_lines), encoding="utf-8")
+
+            self._refresh()
+            messagebox.showinfo(
+                "Saved",
+                f"Extracted from {ext['msg_count']} messages:\n\n"
+                f"  New memories: {mem_count}\n"
+                f"  Duplicates skipped: {skipped}\n"
+                f"  Keywords: {len(ext['keywords'])}\n\n"
+                f"Archive: {archive_path.name}")
+
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to extract memories:\n\n{e}")
+
     def _init_new_project(self):
         """Initialize memory for a new project directory with auto-detection."""
         path = filedialog.askdirectory(title="Select project to initialize")
@@ -889,6 +1262,55 @@ Category Breakdown:
 
         ttk.Button(bf, text="Initialize", command=do_init).pack(side=tk.RIGHT, padx=5)
         ttk.Button(bf, text="Cancel", command=dlg.destroy).pack(side=tk.RIGHT)
+
+
+# ---------------------------------------------------------------------------
+# Transcript Finder
+# ---------------------------------------------------------------------------
+
+def _find_transcript_dir(project_path: Path) -> "Path | None":
+    """
+    Find the Claude Code transcript directory for a project.
+
+    Claude stores transcripts at ~/.claude/projects/<hash>/ where <hash> is
+    the project path with ':' → '-' and path separators → '-'.
+    """
+    claude_projects = Path.home() / ".claude" / "projects"
+    if not claude_projects.exists():
+        return None
+
+    # Convert project path to the expected hash format
+    # e.g. D:\Projects\foo → D--Projects-foo
+    path_str = str(project_path.resolve())
+    # Normalize: replace : and separators with -
+    hash_candidate = path_str.replace(":", "-").replace("\\", "-").replace("/", "-")
+
+    # Try exact match first
+    candidate = claude_projects / hash_candidate
+    if candidate.exists():
+        return candidate
+
+    # Case-insensitive match (Windows paths may differ in casing)
+    hash_lower = hash_candidate.lower()
+    for d in claude_projects.iterdir():
+        if d.is_dir() and d.name.lower() == hash_lower:
+            return d
+
+    # Fuzzy match: check if any dir name contains the project name
+    proj_name = project_path.name.lower()
+    best = None
+    best_mtime = 0
+    for d in claude_projects.iterdir():
+        if d.is_dir() and proj_name in d.name.lower():
+            # Pick the one with most recent transcript
+            jsonls = list(d.glob("*.jsonl"))
+            if jsonls:
+                latest_mtime = max(f.stat().st_mtime for f in jsonls)
+                if latest_mtime > best_mtime:
+                    best = d
+                    best_mtime = latest_mtime
+
+    return best
 
 
 # ---------------------------------------------------------------------------

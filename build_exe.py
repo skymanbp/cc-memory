@@ -68,11 +68,12 @@ def build_dashboard():
     print("  Building cc-memory-dashboard.exe")
     print("=" * 50)
 
-    # Dashboard needs db.py and config.json
+    # Dashboard needs db.py, config.json, plan.py, extractor.py
     data_args = [
         "--add-data", f"{SRC / 'db.py'};cc_memory_files",
         "--add-data", f"{SRC / 'config.json'};cc_memory_files",
         "--add-data", f"{SRC / 'plan.py'};cc_memory_files",
+        "--add-data", f"{SRC / 'extractor.py'};cc_memory_files",
     ]
 
     cmd = [
