@@ -764,9 +764,17 @@ Category Breakdown:
         project = Path(path)
         memory_dir = project / "memory"
         if (memory_dir / "memory.db").exists():
-            messagebox.showinfo("Already Initialized",
-                                f"{project.name} already has memory.\nLoading it now.")
             self._load_project(str(project))
+            if not (project / "CLAUDE.md").exists():
+                if messagebox.askyesno("Generate CLAUDE.md?",
+                                       f"{project.name} already has memory but no CLAUDE.md.\n\n"
+                                       f"Scan project and generate CLAUDE.md?"):
+                    scan = _scan_project_deep(project)
+                    claude_md = _generate_claude_md(project, scan)
+                    (project / "CLAUDE.md").write_text(claude_md, encoding="utf-8")
+                    messagebox.showinfo("Done", "CLAUDE.md created!")
+            else:
+                self.status_var.set(f"Loaded: {project.name} (already initialized)")
             return
 
         # Scan project and show confirmation dialog
