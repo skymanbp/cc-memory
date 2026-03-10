@@ -1,0 +1,32 @@
+{
+  "version": "1.0.0",
+  "description": "cc-memory — Claude Code persistent memory plugin",
+
+  "extraction": {
+    "max_sentences_per_category": 10,
+    "max_metrics": 10,
+    "max_todos": 15,
+    "max_file_changes": 15,
+    "keyword_min_frequency": 2,
+    "keyword_max_count": 40
+  },
+
+  "injection": {
+    "max_recent_sessions": 3,
+    "max_memories_per_category": 4,
+    "min_importance_for_display": 2,
+    "critical_importance_threshold": 5,
+    "max_handoff_chars": 650
+  },
+
+  "archive": {
+    "session_retention_days": 180,
+    "max_archive_files": 100
+  },
+
+  "notes": {
+    "importance_scale": "1=noise, 2=low, 3=normal, 4=important, 5=critical(never forget)",
+    "categories": "decision, result, config, bug, task, arch, note",
+    "storage": "<project>/memory/memory.db (SQLite, project-local)"
+  }
+}
