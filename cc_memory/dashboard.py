@@ -60,6 +60,7 @@ class DashboardApp:
         self.project_id = None
         self.project_path = None
         self._manual_api_key = ""  # Set via Settings dialog
+        self._projects_file = _PLUGIN_DIR / "projects.json"
 
         self._build_ui()
 
@@ -79,11 +80,11 @@ class DashboardApp:
         self.project_combo = ttk.Combobox(top, textvariable=self.project_var, width=60)
         self.project_combo.pack(side=tk.LEFT, padx=5)
         self.project_combo.bind("<<ComboboxSelected>>", self._on_project_selected)
-        ttk.Button(top, text="Browse...", command=self._browse_project).pack(side=tk.LEFT)
-        ttk.Button(top, text="Init New Project", command=self._init_new_project).pack(side=tk.LEFT, padx=5)
-        ttk.Button(top, text="Save Session", command=self._save_current_session).pack(side=tk.LEFT, padx=5)
-        ttk.Button(top, text="Tidy Memories", command=self._tidy_memories).pack(side=tk.LEFT, padx=5)
-        ttk.Button(top, text="Refresh", command=self._refresh).pack(side=tk.LEFT, padx=5)
+        ttk.Button(top, text="Manage...", command=self._manage_projects).pack(side=tk.LEFT)
+        ttk.Button(top, text="Init New", command=self._init_new_project).pack(side=tk.LEFT, padx=3)
+        ttk.Button(top, text="Save Session", command=self._save_current_session).pack(side=tk.LEFT, padx=3)
+        ttk.Button(top, text="Tidy Memories", command=self._tidy_memories).pack(side=tk.LEFT, padx=3)
+        ttk.Button(top, text="Refresh", command=self._refresh).pack(side=tk.LEFT, padx=3)
         ttk.Button(top, text="Settings", command=self._show_settings).pack(side=tk.RIGHT, padx=5)
 
         # Notebook tabs
@@ -332,24 +333,62 @@ class DashboardApp:
 
     # ── Project Management ───────────────────────────────────────────────────
 
+    # ── Project Registry (persistent JSON) ──────────────────────────────────
+
+    def _load_project_registry(self) -> list:
+        """Load saved project paths from projects.json."""
+        if self._projects_file.exists():
+            try:
+                data = json.loads(self._projects_file.read_text(encoding="utf-8"))
+                return [p for p in data.get("projects", []) if Path(p).exists()]
+            except Exception:
+                pass
+        return []
+
+    def _save_project_registry(self, projects: list):
+        """Save project paths to projects.json."""
+        self._projects_file.write_text(
+            json.dumps({"projects": projects}, indent=2, ensure_ascii=False),
+            encoding="utf-8")
+
+    def _add_to_registry(self, project_path: str):
+        """Add a project to the persistent registry (dedup)."""
+        projects = self._load_project_registry()
+        resolved = str(Path(project_path).resolve())
+        # Dedup (case-insensitive on Windows)
+        existing_lower = {p.lower() for p in projects}
+        if resolved.lower() not in existing_lower:
+            projects.append(resolved)
+            self._save_project_registry(projects)
+        return projects
+
     def _auto_discover_projects(self):
-        """Scan common project directories for memory.db files."""
+        """Load saved projects + scan common directories for new ones."""
+        # Start with saved registry
+        projects = self._load_project_registry()
+        known_lower = {p.lower() for p in projects}
+
+        # Scan common locations for undiscovered projects
         search_dirs = []
-        # Check D:/Projects/ and common locations
         for d in ["D:/Projects", "C:/Projects", str(Path.home() / "Projects"),
                    str(Path.home() / "repos"), str(Path.home() / "dev")]:
             if Path(d).exists():
                 search_dirs.append(Path(d))
 
-        projects = []
         for sd in search_dirs:
             try:
                 for child in sd.iterdir():
                     db_path = child / "memory" / "memory.db"
                     if db_path.exists():
-                        projects.append(str(child))
+                        resolved = str(child.resolve())
+                        if resolved.lower() not in known_lower:
+                            projects.append(resolved)
+                            known_lower.add(resolved.lower())
             except PermissionError:
                 pass
+
+        # Persist any newly discovered projects
+        self._save_project_registry(projects)
 
         self.project_combo["values"] = projects
         if projects:
@@ -359,7 +398,138 @@ class DashboardApp:
     def _browse_project(self):
         path = filedialog.askdirectory(title="Select project directory")
         if path:
+            self._add_to_registry(path)
             self._load_project(path)
+
+    def _manage_projects(self):
+        """Dialog to add, remove, and reorder project directories."""
+        dlg = tk.Toplevel(self.root)
+        dlg.title("Manage Projects")
+        dlg.geometry("700x450")
+        dlg.transient(self.root)
+        dlg.grab_set()
+
+        ttk.Label(dlg, text="Project Directories", font=("", 11, "bold")).pack(
+            padx=15, pady=(10, 5), anchor=tk.W)
+        ttk.Label(dlg, text="Projects with memory.db are managed here. "
+                  "Add new directories or remove stale ones.",
+                  wraplength=660, font=("", 9)).pack(padx=15, anchor=tk.W)
+
+        # Listbox with scrollbar
+        list_frame = ttk.Frame(dlg)
+        list_frame.pack(fill=tk.BOTH, expand=True, padx=15, pady=10)
+
+        scrollbar = ttk.Scrollbar(list_frame, orient=tk.VERTICAL)
+        listbox = tk.Listbox(list_frame, yscrollcommand=scrollbar.set,
+                             selectmode=tk.EXTENDED, font=("Consolas", 10))
+        scrollbar.config(command=listbox.yview)
+        listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        # Populate
+        projects = self._load_project_registry()
+        for p in projects:
+            has_db = (Path(p) / "memory" / "memory.db").exists()
+            prefix = "" if has_db else "[no DB] "
+            listbox.insert(tk.END, f"{prefix}{p}")
+
+        # Status label
+        status_label = ttk.Label(dlg, text=f"{len(projects)} project(s)", font=("", 9))
+        status_label.pack(padx=15, anchor=tk.W)
+
+        # Buttons
+        btn_frame = ttk.Frame(dlg)
+        btn_frame.pack(fill=tk.X, padx=15, pady=(0, 10))
+
+        def add_dir():
+            path = filedialog.askdirectory(title="Add project directory")
+            if not path:
+                return
+            resolved = str(Path(path).resolve())
+            # Check for duplicate
+            current = list(listbox.get(0, tk.END))
+            current_paths = [c.replace("[no DB] ", "") for c in current]
+            if resolved.lower() in {p.lower() for p in current_paths}:
+                messagebox.showinfo("Duplicate", "This project is already in the list.")
+                return
+            has_db = (Path(resolved) / "memory" / "memory.db").exists()
+            prefix = "" if has_db else "[no DB] "
+            listbox.insert(tk.END, f"{prefix}{resolved}")
+            status_label.config(text=f"{listbox.size()} project(s)")
+
+        def remove_selected():
+            sel = listbox.curselection()
+            if not sel:
+                return
+            if not messagebox.askyesno("Remove", f"Remove {len(sel)} project(s) from list?\n"
+                                       "(This does NOT delete any files.)"):
+                return
+            for i in reversed(sel):
+                listbox.delete(i)
+            status_label.config(text=f"{listbox.size()} project(s)")
+
+        def move_up():
+            sel = listbox.curselection()
+            if not sel or sel[0] == 0:
+                return
+            for i in sel:
+                text = listbox.get(i)
+                listbox.delete(i)
+                listbox.insert(i - 1, text)
+                listbox.selection_set(i - 1)
+
+        def move_down():
+            sel = listbox.curselection()
+            if not sel or sel[-1] >= listbox.size() - 1:
+                return
+            for i in reversed(sel):
+                text = listbox.get(i)
+                listbox.delete(i)
+                listbox.insert(i + 1, text)
+                listbox.selection_set(i + 1)
+
+        def scan_dir():
+            """Scan a parent directory for projects with memory.db."""
+            path = filedialog.askdirectory(title="Select parent directory to scan")
+            if not path:
+                return
+            current = list(listbox.get(0, tk.END))
+            current_paths = {c.replace("[no DB] ", "").lower() for c in current}
+            found = 0
+            try:
+                for child in Path(path).iterdir():
+                    if child.is_dir() and (child / "memory" / "memory.db").exists():
+                        resolved = str(child.resolve())
+                        if resolved.lower() not in current_paths:
+                            listbox.insert(tk.END, resolved)
+                            current_paths.add(resolved.lower())
+                            found += 1
+            except PermissionError:
+                pass
+            status_label.config(text=f"{listbox.size()} project(s) ({found} new)")
+
+        def save_and_close():
+            items = list(listbox.get(0, tk.END))
+            # Strip [no DB] prefix
+            paths = [item.replace("[no DB] ", "") for item in items]
+            self._save_project_registry(paths)
+            # Update combo
+            self.project_combo["values"] = paths
+            if paths and not self.project_path:
+                self.project_combo.set(paths[0])
+                self._load_project(paths[0])
+            dlg.destroy()
+            self.status_var.set(f"Saved {len(paths)} project(s)")
+
+        ttk.Button(btn_frame, text="Add Directory", command=add_dir).pack(side=tk.LEFT, padx=2)
+        ttk.Button(btn_frame, text="Scan Folder", command=scan_dir).pack(side=tk.LEFT, padx=2)
+        ttk.Button(btn_frame, text="Remove", command=remove_selected).pack(side=tk.LEFT, padx=2)
+        ttk.Separator(btn_frame, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=6)
+        ttk.Button(btn_frame, text="Up", command=move_up, width=4).pack(side=tk.LEFT, padx=2)
+        ttk.Button(btn_frame, text="Down", command=move_down, width=5).pack(side=tk.LEFT, padx=2)
+        ttk.Separator(btn_frame, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=6)
+        ttk.Button(btn_frame, text="Save & Close", command=save_and_close).pack(side=tk.RIGHT, padx=2)
+        ttk.Button(btn_frame, text="Cancel", command=dlg.destroy).pack(side=tk.RIGHT, padx=2)
 
     def _on_project_selected(self, event):
         self._load_project(self.project_var.get())
@@ -376,12 +546,9 @@ class DashboardApp:
         self.project_id = self.db.upsert_project(str(self.project_path))
         self.project_var.set(str(self.project_path))
 
-        # Update combo values
-        vals = list(self.project_combo["values"])
-        sp = str(self.project_path)
-        if sp not in vals:
-            vals.append(sp)
-            self.project_combo["values"] = vals
+        # Persist to registry + update combo
+        projects = self._add_to_registry(str(self.project_path))
+        self.project_combo["values"] = projects
 
         self._refresh()
         self.status_var.set(f"Loaded: {self.project_path.name}")
