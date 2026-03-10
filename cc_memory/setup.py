@@ -38,7 +38,7 @@ def make_hooks_config(python_cmd: str) -> dict:
         ],
         "SessionStart": [
             {
-                "matcher": "compact",
+                "matcher": "",
                 "hooks": [
                     {
                         "type": "command",

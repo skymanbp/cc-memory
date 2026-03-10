@@ -11,3 +11,4 @@ build/
 .env
 .venv/
 *.log
+*.spec

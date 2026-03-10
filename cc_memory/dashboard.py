@@ -22,7 +22,12 @@ from datetime import datetime
 from pathlib import Path
 
 _PLUGIN_DIR = Path(__file__).parent
-sys.path.insert(0, str(_PLUGIN_DIR))
+# Support both: running as script (db.py in same dir) and PyInstaller exe (in cc_memory_files/)
+if getattr(sys, 'frozen', False):
+    _BUNDLE_DIR = Path(sys._MEIPASS) / "cc_memory_files"
+    sys.path.insert(0, str(_BUNDLE_DIR))
+else:
+    sys.path.insert(0, str(_PLUGIN_DIR))
 from db import MemoryDB
 
 try:
