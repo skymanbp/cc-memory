@@ -17,7 +17,8 @@ Usage:
   python dashboard.py
   python dashboard.py --project D:/Projects/my-project
 """
-import argparse, json, sqlite3, sys, os
+import argparse, json, sqlite3, subprocess, sys, os
+import urllib.request, urllib.error
 from datetime import datetime
 from pathlib import Path
 
@@ -58,6 +59,7 @@ class DashboardApp:
         self.db = None
         self.project_id = None
         self.project_path = None
+        self._manual_api_key = ""  # Set via Settings dialog
 
         self._build_ui()
 
@@ -82,6 +84,7 @@ class DashboardApp:
         ttk.Button(top, text="Save Session", command=self._save_current_session).pack(side=tk.LEFT, padx=5)
         ttk.Button(top, text="Tidy Memories", command=self._tidy_memories).pack(side=tk.LEFT, padx=5)
         ttk.Button(top, text="Refresh", command=self._refresh).pack(side=tk.LEFT, padx=5)
+        ttk.Button(top, text="Settings", command=self._show_settings).pack(side=tk.RIGHT, padx=5)
 
         # Notebook tabs
         self.notebook = ttk.Notebook(self.root)
@@ -99,6 +102,74 @@ class DashboardApp:
         ttk.Label(self.root, textvariable=self.status_var, relief=tk.SUNKEN,
                   anchor=tk.W, padding=3).pack(fill=tk.X)
 
+    # ── API Key Management ─────────────────────────────────────────────────
+
+    def _get_api_key(self) -> str:
+        """Get API key from: manual setting > env var > Claude OAuth credentials."""
+        # 1. Manual setting (from Settings dialog)
+        if self._manual_api_key:
+            return self._manual_api_key
+        # 2. Environment variable
+        env_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+        if env_key:
+            return env_key
+        # 3. Claude Code OAuth credentials (accessToken starts with sk-ant-oat01-)
+        creds_path = Path.home() / ".claude" / ".credentials.json"
+        if creds_path.exists():
+            try:
+                creds = json.loads(creds_path.read_text(encoding="utf-8"))
+                oauth = creds.get("claudeAiOauth", {})
+                token = oauth.get("accessToken", "")
+                if token and token.startswith("sk-ant-"):
+                    return token
+            except Exception:
+                pass
+        return ""
+
+    def _show_settings(self):
+        """Show settings dialog for API key configuration."""
+        dlg = tk.Toplevel(self.root)
+        dlg.title("Settings")
+        dlg.geometry("600x200")
+        dlg.transient(self.root)
+        dlg.grab_set()
+
+        ttk.Label(dlg, text="Anthropic API Key", font=("", 11, "bold")).pack(
+            padx=15, pady=(15, 5), anchor=tk.W)
+        ttk.Label(dlg, text="Used for Tidy Memories and LLM-powered Save Session.\n"
+                  "Leave blank to auto-detect from ANTHROPIC_API_KEY env var or Claude OAuth.",
+                  wraplength=560, font=("", 9)).pack(padx=15, anchor=tk.W)
+
+        key_var = tk.StringVar(value=self._manual_api_key)
+        key_entry = ttk.Entry(dlg, textvariable=key_var, width=70, show="*")
+        key_entry.pack(padx=15, pady=10, fill=tk.X)
+
+        # Show current source
+        current = self._get_api_key()
+        if current:
+            if self._manual_api_key:
+                src = "manual"
+            elif os.environ.get("ANTHROPIC_API_KEY", "").strip():
+                src = "env var"
+            else:
+                src = "Claude OAuth"
+            ttk.Label(dlg, text=f"Current: ...{current[-8:]} (from {src})",
+                      font=("", 9)).pack(padx=15, anchor=tk.W)
+        else:
+            ttk.Label(dlg, text="No API key found", font=("", 9),
+                      foreground="red").pack(padx=15, anchor=tk.W)
+
+        def save():
+            self._manual_api_key = key_var.get().strip()
+            dlg.destroy()
+            src = "manual" if self._manual_api_key else ("auto" if self._get_api_key() else "none")
+            self.status_var.set(f"API key: {src}")
+
+        bf = ttk.Frame(dlg)
+        bf.pack(pady=10)
+        ttk.Button(bf, text="Save", command=save).pack(side=tk.LEFT, padx=5)
+        ttk.Button(bf, text="Cancel", command=dlg.destroy).pack(side=tk.LEFT)
+
     def _build_memories_tab(self):
         frame = ttk.Frame(self.notebook)
         self.notebook.add(frame, text="Memories")
@@ -114,14 +185,17 @@ class DashboardApp:
 
         ttk.Label(filt, text="Category:").pack(side=tk.LEFT, padx=(10,0))
         self.mem_cat_var = tk.StringVar(value="all")
-        ttk.Combobox(filt, textvariable=self.mem_cat_var, width=12,
+        cat_combo = ttk.Combobox(filt, textvariable=self.mem_cat_var, width=12,
                      values=["all","decision","result","config","bug","task","arch","note"],
-                     state="readonly").pack(side=tk.LEFT, padx=5)
+                     state="readonly")
+        cat_combo.pack(side=tk.LEFT, padx=5)
+        cat_combo.bind("<<ComboboxSelected>>", lambda e: self._load_memories())
 
         ttk.Label(filt, text="Min Imp:").pack(side=tk.LEFT, padx=(10,0))
         self.mem_imp_var = tk.StringVar(value="1")
-        ttk.Spinbox(filt, textvariable=self.mem_imp_var, from_=1, to=5,
-                    width=3).pack(side=tk.LEFT, padx=5)
+        imp_spin = ttk.Spinbox(filt, textvariable=self.mem_imp_var, from_=1, to=5,
+                    width=3, command=self._load_memories)
+        imp_spin.pack(side=tk.LEFT, padx=5)
 
         ttk.Button(filt, text="Search", command=self._load_memories).pack(side=tk.LEFT, padx=5)
         ttk.Button(filt, text="Add Memory", command=self._add_memory_dialog).pack(side=tk.RIGHT)
@@ -509,12 +583,12 @@ Category Breakdown:
             messagebox.showwarning("No Project", "Load a project first.")
             return
 
-        api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+        api_key = self._get_api_key()
         if not api_key:
             messagebox.showerror(
                 "No API Key",
-                "ANTHROPIC_API_KEY environment variable not set.\n\n"
-                "Set it and restart the dashboard.")
+                "No API key found.\n\n"
+                "Set ANTHROPIC_API_KEY env var, or click Settings to enter one manually.")
             return
 
         # Load all active memories
@@ -542,8 +616,6 @@ Category Breakdown:
         self.root.update()
 
         # Call Haiku API
-        import urllib.request, urllib.error
-
         prompt = f"""\
 Review these {len(rows)} memories from a project database. For each memory, decide:
 - KEEP: valuable, unique, self-contained information
@@ -801,17 +873,78 @@ Memories:
                 for item in self.plan_tree.selection()]
 
     def _execute_plans(self):
-        """Mark selected plans as executing."""
+        """Launch Claude Code CLI with selected plan content."""
         if not self.db:
             return
         ids = self._get_selected_plan_ids()
         if not ids:
             messagebox.showinfo("No Selection", "Select plan(s) to execute.")
             return
+
+        # Gather plan contents
+        plans_text = []
+        for pid in ids:
+            with self.db._connect() as conn:
+                row = conn.execute(
+                    "SELECT content FROM plans WHERE id = ?", (pid,)
+                ).fetchone()
+                if row:
+                    plans_text.append(row["content"])
+
+        if not plans_text:
+            return
+
+        # Build the prompt for Claude Code
+        if len(plans_text) == 1:
+            prompt = plans_text[0]
+        else:
+            prompt = "Execute these tasks in order:\n" + "\n".join(
+                f"{i+1}. {t}" for i, t in enumerate(plans_text))
+
+        # Add project context
+        proj_dir = str(self.project_path) if self.project_path else ""
+
+        if not messagebox.askyesno(
+            "Execute in Claude Code",
+            f"Launch Claude Code with this plan?\n\n"
+            f"{prompt[:300]}{'...' if len(prompt) > 300 else ''}\n\n"
+            f"Project: {proj_dir}"):
+            return
+
+        # Mark as executing
         for pid in ids:
             self.db.update_plan_status(pid, "executing")
         self._load_plans()
-        self.status_var.set(f"Executing {len(ids)} plan(s)")
+
+        # Launch Claude Code in a new terminal
+        try:
+            if sys.platform == "win32":
+                # Windows: open new CMD window with claude
+                cmd = f'cd /d "{proj_dir}" && claude "{prompt}"'
+                subprocess.Popen(["cmd", "/c", "start", "cmd", "/k", cmd])
+            else:
+                # Unix: try common terminal emulators
+                for term_cmd in [
+                    ["gnome-terminal", "--", "bash", "-c"],
+                    ["xterm", "-e"],
+                    ["open", "-a", "Terminal"],  # macOS
+                ]:
+                    try:
+                        full_cmd = term_cmd + [f'cd "{proj_dir}" && claude "{prompt}"']
+                        subprocess.Popen(full_cmd)
+                        break
+                    except FileNotFoundError:
+                        continue
+                else:
+                    # Fallback: run in background
+                    subprocess.Popen(
+                        ["claude", "-p", prompt],
+                        cwd=proj_dir, start_new_session=True)
+
+            self.status_var.set(f"Launched Claude Code for {len(ids)} plan(s)")
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to launch Claude Code:\n\n{e}\n\n"
+                                 "Make sure 'claude' is on your PATH.")
 
     def _mark_plan_done(self):
         """Mark selected plans as done, optionally with a result note."""
@@ -968,6 +1101,120 @@ Memories:
                 self.plan_tree.selection_set(item)
             self.plan_menu.post(event.x_root, event.y_root)
 
+    _HAIKU_MODEL = "claude-haiku-4-5-20251001"
+    _API_URL = "https://api.anthropic.com/v1/messages"
+
+    _EXTRACTION_PROMPT = """\
+You are a memory extraction system. Given a Claude Code conversation transcript, extract the most important information worth remembering across sessions.
+
+Output a JSON array of objects: {"category": str, "content": str, "importance": int}
+- category: decision|result|config|bug|task|arch|note
+- content: one concise, self-contained sentence with specific values
+- importance: 1-5 (5=critical, 4=important, 3=useful)
+
+Rules: Only conclusions, not process. Self-contained. Specific values. 5-15 items max.
+Output ONLY valid JSON array."""
+
+    def _build_transcript_summary(self, messages, max_chars=12000):
+        """Condensed transcript for LLM prompt."""
+        parts = []
+        total = 0
+        for msg in messages:
+            message = msg.get("message", {})
+            if not isinstance(message, dict):
+                continue
+            role = message.get("role", "")
+            content = message.get("content", "")
+            if isinstance(content, str):
+                text = content
+            elif isinstance(content, list):
+                text_parts = []
+                for block in content:
+                    if isinstance(block, dict):
+                        if block.get("type") == "text":
+                            text_parts.append(block.get("text", ""))
+                        elif block.get("type") == "tool_use":
+                            name = block.get("name", "")
+                            inp = block.get("input", {})
+                            if name in ("Edit", "Write", "MultiEdit"):
+                                text_parts.append(f"[Tool: {name} {inp.get('file_path', '')}]")
+                            elif name == "Bash":
+                                text_parts.append(f"[Bash: {inp.get('command', '')[:100]}]")
+                            else:
+                                text_parts.append(f"[Tool: {name}]")
+                text = "\n".join(text_parts)
+            else:
+                continue
+            if not text.strip():
+                continue
+            if len(text) > 800:
+                text = text[:400] + "\n...\n" + text[-400:]
+            line = f"[{role}] {text}\n"
+            if total + len(line) > max_chars:
+                parts.append(f"\n[...truncated, {len(messages) - len(parts)} more messages...]")
+                break
+            parts.append(line)
+            total += len(line)
+        return "\n".join(parts)
+
+    def _extract_via_llm(self, messages, api_key):
+        """Call Haiku API for structured extraction. Returns list of dicts or None."""
+        transcript_text = self._build_transcript_summary(messages)
+        if len(transcript_text) < 100:
+            return None
+
+        body = json.dumps({
+            "model": self._HAIKU_MODEL,
+            "max_tokens": 2000,
+            "messages": [{"role": "user", "content": f"Extract memories:\n\n{transcript_text}"}],
+            "system": self._EXTRACTION_PROMPT,
+        }).encode("utf-8")
+
+        req = urllib.request.Request(
+            self._API_URL, data=body,
+            headers={
+                "Content-Type": "application/json",
+                "x-api-key": api_key,
+                "anthropic-version": "2023-06-01",
+            },
+            method="POST",
+        )
+
+        try:
+            with urllib.request.urlopen(req, timeout=25) as resp:
+                result = json.loads(resp.read().decode("utf-8"))
+
+            text_content = ""
+            for block in result.get("content", []):
+                if block.get("type") == "text":
+                    text_content += block.get("text", "")
+
+            text_content = text_content.strip()
+            if text_content.startswith("```"):
+                lines = text_content.split("\n")
+                text_content = "\n".join(l for l in lines if not l.strip().startswith("```"))
+
+            memories = json.loads(text_content)
+            if not isinstance(memories, list):
+                return None
+
+            valid = []
+            for m in memories:
+                if not isinstance(m, dict):
+                    continue
+                cat = m.get("category", "note")
+                content = m.get("content", "").strip()
+                imp = m.get("importance", 3)
+                if not content or len(content) < 10:
+                    continue
+                if cat not in ("decision", "result", "config", "bug", "task", "arch", "note"):
+                    cat = "note"
+                valid.append({"category": cat, "content": content,
+                              "importance": max(1, min(int(imp), 5))})
+            return valid if valid else None
+        except Exception:
+            return None
+
     def _save_current_session(self):
         """Manually save memories from the most recent Claude Code transcript."""
         if not self.db or not self.project_path:
@@ -1006,29 +1253,18 @@ Memories:
             return
 
         try:
-            # Load and extract
+            # Load transcript
             messages = load_transcript(str(latest))
             if not messages:
                 messagebox.showinfo("Empty", "Transcript is empty or could not be parsed.")
                 return
 
-            project_kw = self.db.get_top_keywords(self.project_id, 40)
-            ext = build_extraction(messages, project_kw)
+            self.status_var.set("Extracting memories...")
+            self.root.update()
 
-            # Save to DB
             now = datetime.now()
             timestamp = now.strftime("%Y-%m-%d %H:%M:%S")
             file_ts = now.strftime("%Y%m%d_%H%M%S")
-
-            # Session record
-            session_id = self.db.insert_session(
-                project_id=self.project_id,
-                claude_session_id=latest.stem,
-                trigger_type="manual_dashboard",
-                msg_count=ext["msg_count"],
-                archive_path=f"sessions/{now.strftime('%Y/%m')}/session_{file_ts}.md",
-                brief_summary=f"Manual save from dashboard at {timestamp}",
-            )
 
             # Load existing memories for dedup
             existing_content = set()
@@ -1043,88 +1279,92 @@ Memories:
             def _is_dup(text):
                 return text.strip().lower() in existing_content
 
-            # Memories by category
-            cat_base_imp = {
-                "decision": 3, "result": 3, "arch": 3,
-                "config": 2, "bug": 4, "task": 2, "note": 1,
-            }
-            grouped = group_sentences(ext["sentences"])
-            mem_count = 0
-            skipped = 0
-            for cat, items in grouped.items():
-                base = cat_base_imp.get(cat, 2)
-                for text, imp in items[:10]:
-                    if _is_dup(text):
+            # Try LLM extraction first, fallback to regex
+            memories = None
+            method = "regex"
+            api_key = self._get_api_key()
+            if api_key:
+                memories = self._extract_via_llm(messages, api_key)
+                if memories:
+                    method = "llm"
+
+            if memories:
+                # LLM path: structured memories ready to save
+                session_id = self.db.insert_session(
+                    project_id=self.project_id,
+                    claude_session_id=latest.stem,
+                    trigger_type=f"manual_dashboard_{method}",
+                    msg_count=len(messages),
+                    archive_path=f"sessions/{now.strftime('%Y/%m')}/session_{file_ts}.md",
+                    brief_summary=f"Manual save ({method}) at {timestamp}",
+                )
+
+                mem_count = 0
+                skipped = 0
+                for m in memories:
+                    if _is_dup(m["content"]):
                         skipped += 1
                         continue
                     self.db.insert_memory(
-                        self.project_id, session_id, cat, text,
-                        importance=min(max(imp, base), 5),
+                        self.project_id, session_id, m["category"], m["content"],
+                        importance=m["importance"], tags=[method, "manual"],
+                    )
+                    existing_content.add(m["content"].strip().lower())
+                    mem_count += 1
+
+            else:
+                # Regex fallback path
+                project_kw = self.db.get_top_keywords(self.project_id, 40)
+                ext = build_extraction(messages, project_kw)
+
+                session_id = self.db.insert_session(
+                    project_id=self.project_id,
+                    claude_session_id=latest.stem,
+                    trigger_type="manual_dashboard_regex",
+                    msg_count=ext["msg_count"],
+                    archive_path=f"sessions/{now.strftime('%Y/%m')}/session_{file_ts}.md",
+                    brief_summary=f"Manual save (regex) at {timestamp}",
+                )
+
+                cat_base_imp = {
+                    "decision": 3, "result": 3, "arch": 3,
+                    "config": 2, "bug": 4, "task": 2, "note": 1,
+                }
+                grouped = group_sentences(ext["sentences"])
+                mem_count = 0
+                skipped = 0
+                for cat, items in grouped.items():
+                    base = cat_base_imp.get(cat, 2)
+                    for text, imp in items[:10]:
+                        if _is_dup(text):
+                            skipped += 1
+                            continue
+                        self.db.insert_memory(
+                            self.project_id, session_id, cat, text,
+                            importance=min(max(imp, base), 5),
+                        )
+                        mem_count += 1
+
+                for metric in ext["metrics"][:10]:
+                    if _is_dup(metric):
+                        skipped += 1
+                        continue
+                    self.db.insert_memory(
+                        self.project_id, session_id, "result", metric,
+                        importance=3, tags=["metric", "manual"],
                     )
                     mem_count += 1
 
-            # Metrics (dedup)
-            for metric in ext["metrics"][:10]:
-                if _is_dup(metric):
-                    skipped += 1
-                    continue
-                self.db.insert_memory(
-                    self.project_id, session_id, "result", metric,
-                    importance=3, tags=["metric", "manual"],
-                )
-                mem_count += 1
-
-            # Todos (dedup, limit to 20)
-            for t in ext["todos"][:20]:
-                content = f"[{t['status']}] {t['content']}"
-                if _is_dup(content):
-                    skipped += 1
-                    continue
-                imp = 3 if t["priority"] == "high" else 2
-                self.db.insert_memory(
-                    self.project_id, session_id, "task", content,
-                    importance=imp, tags=["todo", t["status"]],
-                )
-                mem_count += 1
-
-            # Keywords
-            if ext["keywords"]:
-                self.db.upsert_keywords(self.project_id, ext["keywords"])
-
-            # Write session archive
-            memory_dir = self.project_path / "memory"
-            archive_dir = memory_dir / "sessions" / now.strftime("%Y/%m")
-            archive_dir.mkdir(parents=True, exist_ok=True)
-
-            archive_lines = [
-                f"# Manual Session Save — {self.project_path.name}",
-                f"**Timestamp**: {timestamp}  |  **Messages**: {ext['msg_count']}",
-                "",
-            ]
-            if ext["metrics"]:
-                archive_lines += ["## Metrics", ""]
-                for m in ext["metrics"][:15]:
-                    archive_lines.append(f"- `{m}`")
-                archive_lines.append("")
-            for cat in CATEGORY_ORDER:
-                if cat not in grouped:
-                    continue
-                archive_lines += [f"## {CATEGORY_LABELS[cat]}", ""]
-                for text, imp in grouped[cat][:10]:
-                    archive_lines.append(f"- {text}")
-                archive_lines.append("")
-
-            archive_path = archive_dir / f"session_{file_ts}.md"
-            archive_path.write_text("\n".join(archive_lines), encoding="utf-8")
+                if ext.get("keywords"):
+                    self.db.upsert_keywords(self.project_id, ext["keywords"])
 
             self._refresh()
             messagebox.showinfo(
                 "Saved",
-                f"Extracted from {ext['msg_count']} messages:\n\n"
+                f"Extraction method: {method.upper()}\n\n"
                 f"  New memories: {mem_count}\n"
-                f"  Duplicates skipped: {skipped}\n"
-                f"  Keywords: {len(ext['keywords'])}\n\n"
-                f"Archive: {archive_path.name}")
+                f"  Duplicates skipped: {skipped}\n\n"
+                f"Session: {latest.stem[:8]}...")
 
         except Exception as e:
             messagebox.showerror("Error", f"Failed to extract memories:\n\n{e}")
