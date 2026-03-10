@@ -8,6 +8,7 @@ Schema design (3NF normalized):
   memories   — extracted facts, categorized + weighted
   topics     — long-term knowledge blobs per topic name
   keywords   — auto-detected project vocabulary with frequency
+  plans      — task queue with ordering + feasibility + status
 
 SQL features used:
   - Foreign keys (PRAGMA foreign_keys = ON)
@@ -92,6 +93,21 @@ CREATE TABLE IF NOT EXISTS keywords (
     UNIQUE (project_id, keyword)
 );
 
+-- ── plans ───────────────────────────────────────────────────────────────────
+-- Task queue: user fills plans, Claude evaluates feasibility, user triggers exec.
+-- Status flow: draft → evaluating → ready → executing → done | failed | skipped
+CREATE TABLE IF NOT EXISTS plans (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id  INTEGER NOT NULL REFERENCES projects(id),
+    content     TEXT    NOT NULL,          -- what to do (natural language)
+    exec_order  INTEGER NOT NULL DEFAULT 0,-- execution sequence (1, 2, 3...)
+    status      TEXT    NOT NULL DEFAULT 'draft',
+    feasibility TEXT,                      -- Claude's evaluation notes
+    result      TEXT,                      -- execution output / notes
+    created_at  TEXT    NOT NULL,
+    updated_at  TEXT    NOT NULL
+);
+
 -- ── indexes ─────────────────────────────────────────────────────────────────
 CREATE INDEX IF NOT EXISTS idx_memories_project_active
     ON memories (project_id, is_active);
@@ -104,6 +120,12 @@ CREATE INDEX IF NOT EXISTS idx_sessions_project
 
 CREATE INDEX IF NOT EXISTS idx_keywords_freq
     ON keywords (project_id, frequency DESC);
+
+CREATE INDEX IF NOT EXISTS idx_plans_project_order
+    ON plans (project_id, exec_order);
+
+CREATE INDEX IF NOT EXISTS idx_plans_status
+    ON plans (project_id, status);
 """
 
 
@@ -336,6 +358,97 @@ class MemoryDB:
             ).fetchall()
             return [r["keyword"] for r in rows]
 
+    # ── plans ────────────────────────────────────────────────────────────────
+
+    def add_plan(self, project_id: int, content: str, exec_order: int = 0) -> int:
+        now = self._now()
+        with self._connect() as conn:
+            if exec_order <= 0:
+                # Auto-assign next order number
+                row = conn.execute(
+                    "SELECT COALESCE(MAX(exec_order), 0) + 1 AS next_order "
+                    "FROM plans WHERE project_id = ? "
+                    "AND status NOT IN ('done', 'failed', 'skipped')",
+                    (project_id,)
+                ).fetchone()
+                exec_order = row["next_order"]
+            cur = conn.execute(
+                """INSERT INTO plans
+                   (project_id, content, exec_order, status, created_at, updated_at)
+                   VALUES (?, ?, ?, 'draft', ?, ?)""",
+                (project_id, content, exec_order, now, now)
+            )
+            return cur.lastrowid
+
+    def get_plans(self, project_id: int,
+                  statuses: List[str] = None) -> List[Dict]:
+        with self._connect() as conn:
+            if statuses:
+                ph = ",".join("?" * len(statuses))
+                rows = conn.execute(
+                    f"SELECT * FROM plans WHERE project_id = ? "
+                    f"AND status IN ({ph}) ORDER BY exec_order",
+                    [project_id] + statuses
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM plans WHERE project_id = ? "
+                    "ORDER BY exec_order",
+                    (project_id,)
+                ).fetchall()
+            return [dict(r) for r in rows]
+
+    def get_active_plans(self, project_id: int) -> List[Dict]:
+        return self.get_plans(project_id,
+                              statuses=["draft", "evaluating", "ready", "executing"])
+
+    def update_plan_status(self, plan_id: int, status: str,
+                           notes: Optional[str] = None,
+                           field: str = "feasibility") -> None:
+        now = self._now()
+        with self._connect() as conn:
+            if notes is not None:
+                conn.execute(
+                    f"UPDATE plans SET status = ?, {field} = ?, updated_at = ? "
+                    f"WHERE id = ?",
+                    (status, notes, now, plan_id)
+                )
+            else:
+                conn.execute(
+                    "UPDATE plans SET status = ?, updated_at = ? WHERE id = ?",
+                    (status, now, plan_id)
+                )
+
+    def get_next_plan(self, project_id: int) -> Optional[Dict]:
+        """Get the next plan to execute (lowest exec_order with status='ready')."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM plans WHERE project_id = ? AND status = 'ready' "
+                "ORDER BY exec_order LIMIT 1",
+                (project_id,)
+            ).fetchone()
+            return dict(row) if row else None
+
+    def clear_done_plans(self, project_id: int) -> int:
+        with self._connect() as conn:
+            cur = conn.execute(
+                "DELETE FROM plans WHERE project_id = ? "
+                "AND status IN ('done', 'failed', 'skipped')",
+                (project_id,)
+            )
+            return cur.rowcount
+
+    def reorder_plans(self, project_id: int, plan_ids: List[int]) -> None:
+        """Reorder plans by providing the new sequence of plan IDs."""
+        now = self._now()
+        with self._connect() as conn:
+            for order, pid in enumerate(plan_ids, 1):
+                conn.execute(
+                    "UPDATE plans SET exec_order = ?, updated_at = ? "
+                    "WHERE id = ? AND project_id = ?",
+                    (order, now, pid, project_id)
+                )
+
     # ── analytics / stats ────────────────────────────────────────────────────
 
     def get_stats(self, project_id: int) -> Dict:
@@ -362,9 +475,15 @@ class MemoryDB:
                 "ORDER BY compacted_at DESC LIMIT 1",
                 (project_id,)
             ).fetchone()
+            n_plans = conn.execute(
+                "SELECT COUNT(*) FROM plans WHERE project_id = ? "
+                "AND status NOT IN ('done', 'failed', 'skipped')",
+                (project_id,)
+            ).fetchone()[0]
             return {
                 "n_sessions":   n_sessions,
                 "n_memories":   n_memories,
+                "n_active_plans": n_plans,
                 "by_category":  [dict(r) for r in by_cat],
                 "last_session": last_session[0] if last_session else None,
             }

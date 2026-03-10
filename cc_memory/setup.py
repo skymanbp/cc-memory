@@ -115,8 +115,68 @@ def merge_hooks(python_cmd: str):
     print(f"[OK] Settings saved to {SETTINGS_PATH}")
 
 
+def detect_project_type(project: Path) -> dict:
+    """Auto-detect project structure and characteristics."""
+    info = {"type": "unknown", "language": None, "framework": None,
+            "has_claude_md": False, "has_skills": False, "files": []}
+
+    # Detect CLAUDE.md
+    if (project / "CLAUDE.md").exists():
+        info["has_claude_md"] = True
+        info["files"].append("CLAUDE.md")
+
+    # Detect .claude/skills/
+    skills_dir = project / ".claude" / "skills"
+    if skills_dir.exists():
+        info["has_skills"] = True
+        info["files"].extend([f".claude/skills/{f.name}" for f in skills_dir.iterdir()
+                              if f.is_file()])
+
+    # Detect language/framework
+    markers = {
+        "pyproject.toml": ("python", None),
+        "setup.py": ("python", None),
+        "requirements.txt": ("python", None),
+        "package.json": ("javascript", "node"),
+        "tsconfig.json": ("typescript", "node"),
+        "Cargo.toml": ("rust", "cargo"),
+        "go.mod": ("go", None),
+        "pom.xml": ("java", "maven"),
+        "build.gradle": ("java", "gradle"),
+    }
+    for marker, (lang, fw) in markers.items():
+        if (project / marker).exists():
+            info["language"] = lang
+            if fw:
+                info["framework"] = fw
+            info["files"].append(marker)
+            break
+
+    # Detect project type
+    if (project / ".ipynb_checkpoints").exists() or list(project.rglob("*.ipynb")):
+        info["type"] = "notebook/research"
+    elif (project / "src").exists():
+        info["type"] = "application"
+    elif (project / "lib").exists() or (project / "pkg").exists():
+        info["type"] = "library"
+    elif info["language"]:
+        info["type"] = f"{info['language']} project"
+
+    # Count files
+    try:
+        py_count = len(list(project.rglob("*.py")))
+        all_count = sum(1 for _ in project.rglob("*") if _.is_file())
+        info["py_files"] = py_count
+        info["total_files"] = min(all_count, 99999)  # cap for huge repos
+    except (PermissionError, OSError):
+        info["py_files"] = 0
+        info["total_files"] = 0
+
+    return info
+
+
 def init_project(project_path: str):
-    """Initialize memory directory for a project."""
+    """Initialize memory directory for a project with auto-detection."""
     project = Path(project_path).resolve()
     if not project.exists():
         print(f"ERROR: Project path does not exist: {project}")
@@ -127,16 +187,55 @@ def init_project(project_path: str):
     (memory_dir / "sessions").mkdir(exist_ok=True)
     (memory_dir / "topics").mkdir(exist_ok=True)
 
-    # Initialize empty DB
+    # Initialize DB
     sys.path.insert(0, str(PLUGIN_DIR))
     from db import MemoryDB
     db = MemoryDB(memory_dir / "memory.db")
-    db.upsert_project(str(project))
+    pid = db.upsert_project(str(project))
     print(f"[OK] Initialized memory for {project.name}")
     print(f"     Directory: {memory_dir}")
     print(f"     Database:  {memory_dir / 'memory.db'}")
 
-    # Create .gitignore for memory directory
+    # Auto-detect project structure
+    print("\n[..] Scanning project structure...")
+    info = detect_project_type(project)
+    print(f"[OK] Project type: {info['type']}")
+    if info["language"]:
+        print(f"     Language:    {info['language']}")
+    if info["framework"]:
+        print(f"     Framework:   {info['framework']}")
+    if info["has_claude_md"]:
+        print(f"     CLAUDE.md:   found")
+    if info["has_skills"]:
+        print(f"     Skills:      {len([f for f in info['files'] if 'skills' in f])} found")
+    print(f"     Files:       {info['total_files']} total, {info['py_files']} .py")
+
+    # Seed initial memories from detected info
+    if info["type"] != "unknown":
+        db.insert_memory(pid, None, "arch",
+                         f"Project type: {info['type']}, language: {info['language'] or 'mixed'}",
+                         importance=3, tags=["auto-detected", "init"])
+    if info["has_claude_md"]:
+        db.insert_memory(pid, None, "config",
+                         "CLAUDE.md exists — Claude Code project instructions are configured",
+                         importance=3, tags=["auto-detected", "init"])
+    if info["has_skills"]:
+        skill_names = [f.split("/")[-1] for f in info["files"] if "skills" in f]
+        db.insert_memory(pid, None, "config",
+                         f"Skills configured: {', '.join(skill_names)}",
+                         importance=2, tags=["auto-detected", "init"])
+
+    # Seed project-specific keywords from file names
+    keywords = {}
+    for f in info["files"]:
+        name = Path(f).stem
+        if len(name) > 2:
+            keywords[name] = 1
+    if keywords:
+        db.upsert_keywords(pid, keywords)
+        print(f"[OK] Seeded {len(keywords)} keywords from project files")
+
+    # Create .gitignore
     gitignore = memory_dir / ".gitignore"
     if not gitignore.exists():
         gitignore.write_text(
