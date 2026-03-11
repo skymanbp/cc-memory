@@ -76,6 +76,32 @@ def build_context(memory_dir, db, project_id, project_name):
         if body.strip():
             lines += ["### Last Session State", "", body, ""]
 
+    # 4. Last save status (from PreCompact)
+    last_save = memory_dir / ".last_save.json"
+    if last_save.exists():
+        try:
+            save_info = json.loads(last_save.read_text(encoding="utf-8"))
+            ts = save_info.get("timestamp", "?")
+            if save_info.get("success"):
+                method = save_info.get("method", "?")
+                n = save_info.get("n_saved", 0)
+                lines.append(f"[Last auto-save: {ts} | {n} memories via {method}]")
+            else:
+                lines.append(f"[Last auto-save FAILED at {ts}]")
+        except Exception:
+            pass
+
+    # 5. API key status
+    try:
+        from auth import get_api_key
+        _key, source = get_api_key()
+        if source == "oauth_expired":
+            lines.append("[WARNING: Claude OAuth token expired — LLM extraction disabled until refreshed]")
+        elif not _key:
+            lines.append("[WARNING: No API key — LLM memory extraction disabled]")
+    except Exception:
+        pass
+
     stats = db.get_stats(project_id)
     lines.append(f"[{stats['n_sessions']} sessions, {stats['n_memories']} memories]")
     lines += [
@@ -198,18 +224,8 @@ def _build_transcript_summary(messages: list, max_chars: int = 12000) -> str:
 
 def _extract_via_llm(messages: list) -> "list[dict] | None":
     """Call Haiku API for structured extraction."""
-    # Try: env var > Claude OAuth token
-    api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
-    if not api_key:
-        creds_path = Path.home() / ".claude" / ".credentials.json"
-        if creds_path.exists():
-            try:
-                creds = json.loads(creds_path.read_text(encoding="utf-8"))
-                token = creds.get("claudeAiOauth", {}).get("accessToken", "")
-                if token and token.startswith("sk-ant-"):
-                    api_key = token
-            except Exception:
-                pass
+    from auth import get_api_key
+    api_key, source = get_api_key()
     if not api_key:
         return None
 

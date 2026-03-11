@@ -132,20 +132,11 @@ def _extract_via_llm(messages: list) -> "list[dict] | None":
     Call Haiku API to extract structured memories.
     Returns list of {category, content, importance} or None on failure.
     """
-    # Try: env var > Claude OAuth token
-    api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+    from auth import get_api_key
+    api_key, source = get_api_key()
     if not api_key:
-        creds_path = Path.home() / ".claude" / ".credentials.json"
-        if creds_path.exists():
-            try:
-                creds = json.loads(creds_path.read_text(encoding="utf-8"))
-                token = creds.get("claudeAiOauth", {}).get("accessToken", "")
-                if token and token.startswith("sk-ant-"):
-                    api_key = token
-            except Exception:
-                pass
-    if not api_key:
-        print("[cc-memory] no API key (env or OAuth), skipping LLM extraction", file=sys.stderr)
+        reason = "OAuth token expired" if source == "oauth_expired" else "no API key found"
+        print(f"[cc-memory] {reason}, skipping LLM extraction", file=sys.stderr)
         return None
 
     transcript_text = _build_transcript_summary(messages)
@@ -530,6 +521,21 @@ def main():
         index_text = _fmt_memory_index(db, project_id, memory_dir)
         (memory_dir / "MEMORY.md").write_text(index_text, encoding="utf-8")
 
+        # ── Write save status for SessionStart to report ──────────────────
+        status = {
+            "timestamp": timestamp,
+            "method": method,
+            "n_saved": n_saved,
+            "msg_count": ext["msg_count"],
+            "success": True,
+        }
+        try:
+            (memory_dir / ".last_save.json").write_text(
+                json.dumps(status, ensure_ascii=False), encoding="utf-8"
+            )
+        except Exception:
+            pass
+
         # ── Done ─────────────────────────────────────────────────────────────
         print(
             f"[cc-memory] saved: {archive_path.name} "
@@ -543,6 +549,16 @@ def main():
         # NEVER let an exception block compaction
         print(f"[cc-memory] pre_compact ERROR:\n{traceback.format_exc()}",
               file=sys.stderr)
+        # Write failure status
+        try:
+            memory_dir = Path(cwd) / "memory"
+            (memory_dir / ".last_save.json").write_text(
+                json.dumps({"timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                             "success": False, "error": traceback.format_exc()[-200:]}),
+                encoding="utf-8",
+            )
+        except Exception:
+            pass
 
     sys.exit(0)
 

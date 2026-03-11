@@ -107,24 +107,11 @@ class DashboardApp:
 
     def _get_api_key(self) -> str:
         """Get API key from: manual setting > env var > Claude OAuth token."""
-        # 1. Manual setting (from Settings dialog)
         if self._manual_api_key:
             return self._manual_api_key
-        # 2. Environment variable
-        env_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
-        if env_key:
-            return env_key
-        # 3. Claude Code OAuth token (auto-refreshed by Claude Code)
-        creds_path = Path.home() / ".claude" / ".credentials.json"
-        if creds_path.exists():
-            try:
-                creds = json.loads(creds_path.read_text(encoding="utf-8"))
-                token = creds.get("claudeAiOauth", {}).get("accessToken", "")
-                if token and token.startswith("sk-ant-"):
-                    return token
-            except Exception:
-                pass
-        return ""
+        from auth import get_api_key
+        key, _source = get_api_key()
+        return key
 
     def _show_settings(self):
         """Show settings dialog for API key configuration."""
@@ -145,19 +132,25 @@ class DashboardApp:
         key_entry.pack(padx=15, pady=10, fill=tk.X)
 
         # Show current source
-        current = self._get_api_key()
-        if current:
-            if self._manual_api_key:
-                src = "manual"
-            elif os.environ.get("ANTHROPIC_API_KEY", "").strip():
-                src = "env var"
-            else:
-                src = "Claude OAuth"
-            ttk.Label(dlg, text=f"Current: ...{current[-8:]} (from {src})",
-                      font=("", 9)).pack(padx=15, anchor=tk.W)
+        from auth import get_api_key as _gak
+        if self._manual_api_key:
+            src_label = f"Current: ...{self._manual_api_key[-8:]} (manual)"
+            src_color = ""
         else:
-            ttk.Label(dlg, text="No API key found", font=("", 9),
-                      foreground="red").pack(padx=15, anchor=tk.W)
+            _k, _src = _gak()
+            if _k:
+                src_label = f"Current: ...{_k[-8:]} (from {_src})"
+                src_color = ""
+            elif _src == "oauth_expired":
+                src_label = "Claude OAuth token expired — restart Claude Code to refresh"
+                src_color = "orange"
+            else:
+                src_label = "No API key found"
+                src_color = "red"
+        lbl_kw = {"text": src_label, "font": ("", 9)}
+        if src_color:
+            lbl_kw["foreground"] = src_color
+        ttk.Label(dlg, **lbl_kw).pack(padx=15, anchor=tk.W)
 
         def save():
             self._manual_api_key = key_var.get().strip()
