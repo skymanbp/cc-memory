@@ -28,9 +28,9 @@ def _get_bundle_dir() -> Path:
 
 BUNDLE_DIR = _get_bundle_dir()
 PLUGIN_FILES = [
-    "db.py", "extractor.py", "pre_compact.py", "session_start.py",
-    "mem.py", "plan.py", "dashboard.py", "installer.py",
-    "setup.py", "config.json"
+    "auth.py", "db.py", "extractor.py", "pre_compact.py", "session_start.py",
+    "stop.py", "mem.py", "plan.py", "dashboard.py", "installer.py",
+    "setup.py", "config.json", "skill_template.md"
 ]
 TARGET_DIR = Path.home() / ".claude" / "hooks" / "cc-memory"
 SETTINGS_PATH = Path.home() / ".claude" / "settings.json"
@@ -188,6 +188,7 @@ class StandaloneInstaller:
 
             pre_compact_cmd = f'{python_cmd} "{TARGET_DIR / "pre_compact.py"}"'
             session_start_cmd = f'{python_cmd} "{TARGET_DIR / "session_start.py"}"'
+            stop_cmd = f'{python_cmd} "{TARGET_DIR / "stop.py"}"'
 
             hooks_config = {
                 "PreCompact": [{
@@ -197,6 +198,10 @@ class StandaloneInstaller:
                 "SessionStart": [{
                     "matcher": "",
                     "hooks": [{"type": "command", "command": session_start_cmd, "timeout": 10}]
+                }],
+                "Stop": [{
+                    "matcher": "",
+                    "hooks": [{"type": "command", "command": stop_cmd, "timeout": 5}]
                 }]
             }
 
@@ -278,6 +283,16 @@ class StandaloneInstaller:
                     encoding="utf-8"
                 )
 
+            # Deploy /save-memories skill
+            skill_dir = project / ".claude" / "skills" / "save-memories"
+            skill_dst = skill_dir / "skill.md"
+            skill_src = TARGET_DIR / "skill_template.md"
+            if not skill_dst.exists() and skill_src.exists():
+                skill_dir.mkdir(parents=True, exist_ok=True)
+                import shutil
+                shutil.copy2(str(skill_src), str(skill_dst))
+                self._log(f"[OK] Deployed /save-memories skill")
+
             self._log(f"[OK] Memory initialized for {project.name}")
             self._log(f"     {memory_dir}")
             self.project_info.set(f"Initialized: {memory_dir}")
@@ -322,6 +337,7 @@ def cli_install():
     python_cmd = "python3" if shutil.which("python3") else "python"
     pre_compact_cmd = f'{python_cmd} "{TARGET_DIR / "pre_compact.py"}"'
     session_start_cmd = f'{python_cmd} "{TARGET_DIR / "session_start.py"}"'
+    stop_cmd = f'{python_cmd} "{TARGET_DIR / "stop.py"}"'
 
     if SETTINGS_PATH.exists():
         settings = json.loads(SETTINGS_PATH.read_text(encoding="utf-8"))
@@ -335,6 +351,9 @@ def cli_install():
     }]
     settings["hooks"]["SessionStart"] = [{
         "matcher": "", "hooks": [{"type": "command", "command": session_start_cmd, "timeout": 10}]
+    }]
+    settings["hooks"]["Stop"] = [{
+        "matcher": "", "hooks": [{"type": "command", "command": stop_cmd, "timeout": 5}]
     }]
 
     SETTINGS_PATH.write_text(json.dumps(settings, indent=2, ensure_ascii=False), encoding="utf-8")

@@ -22,6 +22,7 @@ SETTINGS_PATH = Path.home() / ".claude" / "settings.json"
 def make_hooks_config(python_cmd: str) -> dict:
     pre_compact_cmd = f'{python_cmd} "{PLUGIN_DIR / "pre_compact.py"}"'
     session_start_cmd = f'{python_cmd} "{PLUGIN_DIR / "session_start.py"}"'
+    stop_cmd = f'{python_cmd} "{PLUGIN_DIR / "stop.py"}"'
 
     return {
         "PreCompact": [
@@ -47,13 +48,26 @@ def make_hooks_config(python_cmd: str) -> dict:
                     }
                 ]
             }
+        ],
+        "Stop": [
+            {
+                "matcher": "",
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": stop_cmd,
+                        "timeout": 5,
+                    }
+                ]
+            }
         ]
     }
 
 
 def check_files():
     """Verify all required plugin files exist."""
-    required = ["db.py", "extractor.py", "pre_compact.py", "session_start.py", "mem.py"]
+    required = ["auth.py", "db.py", "extractor.py", "pre_compact.py", "session_start.py",
+                 "stop.py", "mem.py", "skill_template.md"]
     missing = [f for f in required if not (PLUGIN_DIR / f).exists()]
     if missing:
         print(f"ERROR: Missing files: {', '.join(missing)}")
@@ -248,6 +262,15 @@ def init_project(project_path: str):
             encoding="utf-8"
         )
         print(f"[OK] Created {gitignore}")
+
+    # Deploy /save-memories skill
+    skill_dir = project / ".claude" / "skills" / "save-memories"
+    skill_dst = skill_dir / "skill.md"
+    skill_src = PLUGIN_DIR / "skill_template.md"
+    if not skill_dst.exists() and skill_src.exists():
+        skill_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(str(skill_src), str(skill_dst))
+        print(f"[OK] Deployed /save-memories skill to {skill_dir}")
 
 
 def print_usage():
