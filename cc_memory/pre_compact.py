@@ -489,14 +489,13 @@ def main():
         def _is_dup(text):
             return text.strip().lower() in existing_content
 
-        # 3. Extract memories: try LLM first, fallback to regex
-        llm_memories = _extract_via_llm(messages)
-        if llm_memories is not None:
-            extracted = llm_memories
-            method = "llm"
-        else:
-            extracted = _extract_via_regex(ext)
-            method = "regex"
+        # 3. Extract memories via LLM (regex disabled — produces too much garbage)
+        extracted = _extract_via_llm(messages)
+        method = "llm" if extracted else "none"
+        if not extracted:
+            extracted = []
+            print("[cc-memory] no API key or LLM failed; skipping memory extraction (archive/handoff still saved)",
+                  file=sys.stderr)
 
         # 4. Save extracted memories (with dedup)
         n_saved = 0
