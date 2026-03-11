@@ -132,9 +132,20 @@ def _extract_via_llm(messages: list) -> "list[dict] | None":
     Call Haiku API to extract structured memories.
     Returns list of {category, content, importance} or None on failure.
     """
-    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    # Try: env var > Claude OAuth token
+    api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
     if not api_key:
-        print("[cc-memory] no ANTHROPIC_API_KEY, skipping LLM extraction", file=sys.stderr)
+        creds_path = Path.home() / ".claude" / ".credentials.json"
+        if creds_path.exists():
+            try:
+                creds = json.loads(creds_path.read_text(encoding="utf-8"))
+                token = creds.get("claudeAiOauth", {}).get("accessToken", "")
+                if token and token.startswith("sk-ant-"):
+                    api_key = token
+            except Exception:
+                pass
+    if not api_key:
+        print("[cc-memory] no API key (env or OAuth), skipping LLM extraction", file=sys.stderr)
         return None
 
     transcript_text = _build_transcript_summary(messages)

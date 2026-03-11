@@ -198,7 +198,18 @@ def _build_transcript_summary(messages: list, max_chars: int = 12000) -> str:
 
 def _extract_via_llm(messages: list) -> "list[dict] | None":
     """Call Haiku API for structured extraction."""
-    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    # Try: env var > Claude OAuth token
+    api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+    if not api_key:
+        creds_path = Path.home() / ".claude" / ".credentials.json"
+        if creds_path.exists():
+            try:
+                creds = json.loads(creds_path.read_text(encoding="utf-8"))
+                token = creds.get("claudeAiOauth", {}).get("accessToken", "")
+                if token and token.startswith("sk-ant-"):
+                    api_key = token
+            except Exception:
+                pass
     if not api_key:
         return None
 
@@ -325,12 +336,12 @@ def retroactive_save(cwd: str, db, project_id: int, current_session_id: str = ""
             if not messages or len(messages) < 5:
                 continue
 
-            # Try LLM, fallback to regex
+            # Try LLM only (regex disabled — produces too much garbage)
             memories = _extract_via_llm(messages)
             method = "llm"
             if memories is None:
-                memories = _extract_via_regex(messages)
-                method = "regex"
+                memories = []
+                method = "none"
 
             if not memories:
                 continue
