@@ -106,7 +106,11 @@ class DashboardApp:
     # ── API Key Management ─────────────────────────────────────────────────
 
     def _get_api_key(self) -> str:
-        """Get API key from: manual setting > env var > Claude OAuth credentials."""
+        """Get Anthropic API key from: manual setting > env var.
+
+        Note: Claude OAuth tokens (sk-ant-oat01-*) do NOT work with the
+        Messages API — only proper API keys (sk-ant-api03-*) are accepted.
+        """
         # 1. Manual setting (from Settings dialog)
         if self._manual_api_key:
             return self._manual_api_key
@@ -114,17 +118,6 @@ class DashboardApp:
         env_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
         if env_key:
             return env_key
-        # 3. Claude Code OAuth credentials (accessToken starts with sk-ant-oat01-)
-        creds_path = Path.home() / ".claude" / ".credentials.json"
-        if creds_path.exists():
-            try:
-                creds = json.loads(creds_path.read_text(encoding="utf-8"))
-                oauth = creds.get("claudeAiOauth", {})
-                token = oauth.get("accessToken", "")
-                if token and token.startswith("sk-ant-"):
-                    return token
-            except Exception:
-                pass
         return ""
 
     def _show_settings(self):
@@ -137,8 +130,8 @@ class DashboardApp:
 
         ttk.Label(dlg, text="Anthropic API Key", font=("", 11, "bold")).pack(
             padx=15, pady=(15, 5), anchor=tk.W)
-        ttk.Label(dlg, text="Used for Tidy Memories and LLM-powered Save Session.\n"
-                  "Leave blank to auto-detect from ANTHROPIC_API_KEY env var or Claude OAuth.",
+        ttk.Label(dlg, text="Required for Tidy Memories and LLM-powered Save Session.\n"
+                  "Get your key from console.anthropic.com. Claude OAuth tokens do NOT work.",
                   wraplength=560, font=("", 9)).pack(padx=15, anchor=tk.W)
 
         key_var = tk.StringVar(value=self._manual_api_key)
@@ -150,10 +143,8 @@ class DashboardApp:
         if current:
             if self._manual_api_key:
                 src = "manual"
-            elif os.environ.get("ANTHROPIC_API_KEY", "").strip():
-                src = "env var"
             else:
-                src = "Claude OAuth"
+                src = "env var"
             ttk.Label(dlg, text=f"Current: ...{current[-8:]} (from {src})",
                       font=("", 9)).pack(padx=15, anchor=tk.W)
         else:
