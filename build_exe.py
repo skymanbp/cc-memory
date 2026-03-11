@@ -24,9 +24,9 @@ def build_installer():
 
     # Plugin files to bundle as data
     plugin_files = [
-        "db.py", "extractor.py", "pre_compact.py", "session_start.py",
-        "mem.py", "plan.py", "dashboard.py", "installer.py",
-        "setup.py", "config.json"
+        "auth.py", "db.py", "extractor.py", "pre_compact.py", "session_start.py",
+        "stop.py", "mem.py", "plan.py", "dashboard.py", "installer.py",
+        "setup.py", "config.json", "skill_template.md"
     ]
 
     # Verify all files exist
@@ -68,8 +68,9 @@ def build_dashboard():
     print("  Building cc-memory-dashboard.exe")
     print("=" * 50)
 
-    # Dashboard needs db.py, config.json, plan.py, extractor.py
+    # Dashboard needs db.py, auth.py, config.json, plan.py, extractor.py
     data_args = [
+        "--add-data", f"{SRC / 'auth.py'};cc_memory_files",
         "--add-data", f"{SRC / 'db.py'};cc_memory_files",
         "--add-data", f"{SRC / 'config.json'};cc_memory_files",
         "--add-data", f"{SRC / 'plan.py'};cc_memory_files",

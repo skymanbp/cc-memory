@@ -12,3 +12,5 @@ build/
 .venv/
 *.log
 *.spec
+*.exe
+projects.json
