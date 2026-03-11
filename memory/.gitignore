@@ -1,0 +1,6 @@
+# cc-memory: exclude database and session archives from git
+memory.db
+memory.db-wal
+memory.db-shm
+sessions/
+.last_save.json
