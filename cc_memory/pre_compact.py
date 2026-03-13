@@ -153,7 +153,7 @@ def _extract_via_llm(messages: list) -> "list[dict] | None":
             }
         ],
         "system": _EXTRACTION_PROMPT,
-    }).encode("utf-8")
+    }, ensure_ascii=False).encode("utf-8")
 
     req = urllib.request.Request(
         _API_URL,

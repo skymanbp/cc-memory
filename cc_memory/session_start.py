@@ -238,7 +238,7 @@ def _extract_via_llm(messages: list) -> "list[dict] | None":
         "max_tokens": 2000,
         "messages": [{"role": "user", "content": f"Extract memories:\n\n{transcript_text}"}],
         "system": _EXTRACTION_PROMPT,
-    }).encode("utf-8")
+    }, ensure_ascii=False).encode("utf-8")
 
     req = urllib.request.Request(
         _API_URL, data=body,
