@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-cc-memory/pre_compact.py  —  PreCompact hook
+cc-memory/pre_compact.py  --  PreCompact hook
 =============================================
 Triggered by Claude Code BEFORE context compaction.
 Reads the full conversation transcript, extracts structured memory,
@@ -8,17 +8,21 @@ and saves it to the project's memory/ directory + SQLite database.
 
 Extraction strategy (two-tier):
   1. PRIMARY: Call Haiku API for LLM-judged memory extraction (high quality)
-  2. FALLBACK: Regex heuristics if API call fails (no key, timeout, network)
+     - Now includes topic assignment in extraction
+  2. FALLBACK: Skip extraction if API unavailable (regex disabled)
+
+Auto-consolidation:
+  - Every CONSOLIDATION_INTERVAL sessions, run topic consolidation
+  - Keeps topic summaries fresh and memory count manageable
 
 Stdin (JSON):
-  session_id      str   — Claude's internal session UUID
-  transcript_path str   — path to the JSONL conversation file
-  cwd             str   — current working directory (= project root)
-  trigger         str   — "auto" | "manual"
+  session_id      str
+  transcript_path str
+  cwd             str
+  trigger         str   -- "auto" | "manual"
 
 Output:
-  stderr only (informational); stdout must stay empty for PreCompact hooks.
-  Hook NEVER blocks compaction (always exits 0).
+  stderr only; stdout must stay empty for PreCompact hooks.
 """
 
 import json
@@ -30,7 +34,6 @@ import urllib.error
 from datetime import datetime
 from pathlib import Path
 
-# ── resolve plugin directory so we can import siblings ──────────────────────
 _PLUGIN_DIR = Path(__file__).parent
 sys.path.insert(0, str(_PLUGIN_DIR))
 
@@ -43,13 +46,16 @@ from extractor import (
     load_transcript,
 )
 
+# How often to auto-trigger consolidation (every N sessions)
+CONSOLIDATION_INTERVAL = 5
+
 
 # ---------------------------------------------------------------------------
 # LLM-based extraction via Haiku API (primary)
 # ---------------------------------------------------------------------------
 _HAIKU_MODEL = "claude-haiku-4-5-20251001"
 _API_URL = "https://api.anthropic.com/v1/messages"
-_API_TIMEOUT = 25  # seconds (hook timeout is 30)
+_API_TIMEOUT = 25
 
 _EXTRACTION_PROMPT = """\
 You are a memory extraction system. Given a Claude Code conversation transcript, extract the most important information worth remembering across sessions.
@@ -58,6 +64,7 @@ For each memory, output a JSON array of objects with these fields:
 - "category": one of "decision", "result", "config", "bug", "task", "arch", "note"
 - "content": one concise, self-contained sentence with specific values (numbers, file names, parameters)
 - "importance": 1-5 (5=critical/never-forget, 4=important, 3=useful, 2=minor, 1=trivial)
+- "topic": a short lowercase keyword for grouping (e.g. "cnn", "gnn", "pipeline", "fusion", "config", "data")
 
 Rules:
 - Only save CONCLUSIONS, not discussion process or debugging steps
@@ -71,7 +78,6 @@ Output ONLY a valid JSON array, no markdown, no explanation."""
 
 
 def _build_transcript_summary(messages: list, max_chars: int = 12000) -> str:
-    """Build a condensed transcript for the LLM prompt."""
     parts = []
     total = 0
     for msg in messages:
@@ -81,7 +87,6 @@ def _build_transcript_summary(messages: list, max_chars: int = 12000) -> str:
         role = message.get("role", "")
         content = message.get("content", "")
 
-        # Extract text from content
         if isinstance(content, str):
             text = content
         elif isinstance(content, list):
@@ -103,7 +108,6 @@ def _build_transcript_summary(messages: list, max_chars: int = 12000) -> str:
                         else:
                             text_parts.append(f"[Tool: {name}]")
                     elif block.get("type") == "tool_result":
-                        # Skip tool results (too verbose)
                         pass
             text = "\n".join(text_parts)
         else:
@@ -111,14 +115,11 @@ def _build_transcript_summary(messages: list, max_chars: int = 12000) -> str:
 
         if not text.strip():
             continue
-
-        # Truncate very long messages
         if len(text) > 800:
             text = text[:400] + "\n...[truncated]...\n" + text[-400:]
 
         line = f"[{role}] {text}\n"
         if total + len(line) > max_chars:
-            # Add truncation notice and stop
             parts.append(f"\n[...truncated, {len(messages) - len(parts)} more messages...]")
             break
         parts.append(line)
@@ -128,10 +129,6 @@ def _build_transcript_summary(messages: list, max_chars: int = 12000) -> str:
 
 
 def _extract_via_llm(messages: list) -> "list[dict] | None":
-    """
-    Call Haiku API to extract structured memories.
-    Returns list of {category, content, importance} or None on failure.
-    """
     from auth import get_api_key
     api_key, source = get_api_key()
     if not api_key:
@@ -156,8 +153,7 @@ def _extract_via_llm(messages: list) -> "list[dict] | None":
     }, ensure_ascii=False).encode("utf-8")
 
     req = urllib.request.Request(
-        _API_URL,
-        data=body,
+        _API_URL, data=body,
         headers={
             "Content-Type": "application/json",
             "x-api-key": api_key,
@@ -170,15 +166,12 @@ def _extract_via_llm(messages: list) -> "list[dict] | None":
         with urllib.request.urlopen(req, timeout=_API_TIMEOUT) as resp:
             result = json.loads(resp.read().decode("utf-8"))
 
-        # Parse response
         text_content = ""
         for block in result.get("content", []):
             if block.get("type") == "text":
                 text_content += block.get("text", "")
 
-        # Extract JSON array from response
         text_content = text_content.strip()
-        # Handle possible markdown wrapping
         if text_content.startswith("```"):
             lines = text_content.split("\n")
             text_content = "\n".join(
@@ -189,7 +182,6 @@ def _extract_via_llm(messages: list) -> "list[dict] | None":
         if not isinstance(memories, list):
             return None
 
-        # Validate and clean
         valid = []
         for m in memories:
             if not isinstance(m, dict):
@@ -197,12 +189,17 @@ def _extract_via_llm(messages: list) -> "list[dict] | None":
             cat = m.get("category", "note")
             content = m.get("content", "").strip()
             imp = m.get("importance", 3)
+            topic = m.get("topic", "")
             if not content or len(content) < 10:
                 continue
             if cat not in ("decision", "result", "config", "bug", "task", "arch", "note"):
                 cat = "note"
             imp = max(1, min(int(imp), 5))
-            valid.append({"category": cat, "content": content, "importance": imp})
+            valid.append({
+                "category": cat, "content": content,
+                "importance": imp,
+                "topic": topic if isinstance(topic, str) else "",
+            })
 
         print(f"[cc-memory] LLM extracted {len(valid)} memories", file=sys.stderr)
         return valid if valid else None
@@ -214,46 +211,11 @@ def _extract_via_llm(messages: list) -> "list[dict] | None":
 
 
 # ---------------------------------------------------------------------------
-# Regex fallback extraction
-# ---------------------------------------------------------------------------
-def _extract_via_regex(ext: dict) -> "list[dict]":
-    """Fallback: use regex heuristics from extractor.py."""
-    cat_base_imp = {
-        "decision": 3, "result": 3, "arch": 3,
-        "config": 2, "bug": 4, "task": 2, "note": 1,
-    }
-    results = []
-
-    grouped = group_sentences(ext["sentences"])
-    for cat, items in grouped.items():
-        base = cat_base_imp.get(cat, 2)
-        for text, imp in items[:10]:
-            results.append({
-                "category": cat,
-                "content": text,
-                "importance": min(max(imp, base), 5),
-            })
-
-    # Metrics
-    for metric in ext["metrics"][:10]:
-        results.append({"category": "result", "content": metric, "importance": 3})
-
-    # Todos
-    for t in ext["todos"][:20]:
-        content = f"[{t['status']}] {t['content']}"
-        imp = 3 if t["priority"] == "high" else 2
-        results.append({"category": "task", "content": content, "importance": imp})
-
-    return results
-
-
-# ---------------------------------------------------------------------------
 # Markdown formatters
 # ---------------------------------------------------------------------------
 def _fmt_archive(ext: dict, timestamp: str, trigger: str, project_name: str) -> str:
-    """Full session archive — kept for historical reference."""
     lines = [
-        f"# Session Archive — {project_name}",
+        f"# Session Archive -- {project_name}",
         f"**Timestamp**: {timestamp}  |  **Trigger**: {trigger}  "
         f"|  **Messages**: {ext['msg_count']}",
         "",
@@ -305,9 +267,8 @@ def _fmt_archive(ext: dict, timestamp: str, trigger: str, project_name: str) -> 
 
 
 def _fmt_handoff(ext: dict, timestamp: str, project_name: str) -> str:
-    """SESSION_HANDOFF.md — overwritten each time, for SessionStart injection."""
     lines = [
-        f"# Session Handoff — {project_name}",
+        f"# Session Handoff -- {project_name}",
         f"*{timestamp}*",
         "",
     ]
@@ -347,45 +308,44 @@ def _fmt_handoff(ext: dict, timestamp: str, project_name: str) -> str:
 
 
 def _fmt_memory_index(db: MemoryDB, project_id: int, memory_dir: Path) -> str:
-    """MEMORY.md — auto-generated index."""
     stats = db.get_stats(project_id)
     topics = db.get_topics(project_id)
     top_kw = db.get_top_keywords(project_id, 25)
-    critical = db.get_critical_memories(project_id, min_importance=5)
 
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
     lines = [
         "# Memory Index  *(auto-generated by cc-memory)*",
         f"*Updated: {now_str}*  "
         f"|  Sessions: {stats['n_sessions']}  "
-        f"|  Memories: {stats['n_memories']}",
+        f"|  Memories: {stats['n_memories']}  "
+        f"|  Topics: {stats.get('n_topics', 0)}",
         "",
     ]
 
-    if critical:
-        lines += ["## Critical (Never Forget)", ""]
-        for m in critical[:8]:
-            lines.append(f"- **[{m['category']}]** {m['content']}")
+    if topics:
+        lines += ["## Topic Summaries (L1)", ""]
+        for t in topics:
+            preview = t["content"][:120] + "..." if len(t["content"]) > 120 else t["content"]
+            lines.append(f"- **{t['name']}** (v{t['version']}): {preview}")
+        lines.append("")
+
+    # Topic memory counts
+    topic_counts = db.get_topic_memory_counts(project_id)
+    if topic_counts:
+        lines += ["## Memory Distribution", ""]
+        for topic, count in sorted(topic_counts.items(), key=lambda x: -x[1]):
+            lines.append(f"- `{topic}`: {count}")
         lines.append("")
 
     if stats["by_category"]:
-        lines += ["## Memory by Category", ""]
+        lines += ["## By Category", ""]
         for row in stats["by_category"]:
             avg = f"{row['avg_imp']:.1f}"
             lines.append(f"- `{row['category']}`: {row['n']} entries  (avg importance {avg})")
         lines.append("")
 
-    if topics:
-        lines += ["## Topic Files", ""]
-        for t in topics:
-            lines.append(
-                f"- `memory/topics/{t['name']}.md`  "
-                f"(v{t['version']}, updated {t['updated_at'][:10]})"
-            )
-        lines.append("")
-
     if top_kw:
-        lines += ["## Project Vocabulary (top keywords)", ""]
+        lines += ["## Project Vocabulary", ""]
         lines.append(", ".join(f"`{kw}`" for kw in top_kw))
         lines.append("")
 
@@ -395,9 +355,9 @@ def _fmt_memory_index(db: MemoryDB, project_id: int, memory_dir: Path) -> str:
             sessions_dir.rglob("*.md"),
             key=lambda p: p.stat().st_mtime,
             reverse=True,
-        )[:10]
+        )[:5]
         if archive_files:
-            lines += ["## Recent Session Archives", ""]
+            lines += ["## Recent Archives", ""]
             for af in archive_files:
                 rel = af.relative_to(memory_dir)
                 lines.append(f"- `memory/{rel}`")
@@ -405,9 +365,27 @@ def _fmt_memory_index(db: MemoryDB, project_id: int, memory_dir: Path) -> str:
 
     lines += [
         "---",
-        "*To query memories: `python ~/.claude/hooks/cc-memory/mem.py --help`*",
+        "*Query: `python ~/.claude/hooks/cc-memory/mem.py --help`*",
+        "*Consolidate: `python ~/.claude/hooks/cc-memory/mem.py --project <path> consolidate`*",
     ]
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Auto-consolidation trigger
+# ---------------------------------------------------------------------------
+def _maybe_consolidate(cwd: str, db: MemoryDB, project_id: int):
+    """Run consolidation if enough sessions have passed since last consolidation."""
+    n_sessions = db.get_session_count(project_id)
+    if n_sessions % CONSOLIDATION_INTERVAL != 0:
+        return
+
+    print(f"[cc-memory] auto-consolidation triggered (session #{n_sessions})", file=sys.stderr)
+    try:
+        from consolidate import run_consolidation
+        results = run_consolidation(cwd, use_llm=True, verbose=True)
+    except Exception as e:
+        print(f"[cc-memory] auto-consolidation error: {e}", file=sys.stderr)
 
 
 # ---------------------------------------------------------------------------
@@ -469,7 +447,6 @@ def main():
         (memory_dir / "SESSION_HANDOFF.md").write_text(handoff_text, encoding="utf-8")
 
         # ── Persist to SQLite ────────────────────────────────────────────────
-        # 1. Session record
         session_id = db.insert_session(
             project_id=project_id,
             claude_session_id=claude_sid,
@@ -479,7 +456,7 @@ def main():
             brief_summary=archive_text[:1000],
         )
 
-        # 2. Load existing memories for deduplication
+        # Load existing memories for deduplication
         existing_content = set()
         with db._connect() as conn:
             for row in conn.execute(
@@ -491,15 +468,15 @@ def main():
         def _is_dup(text):
             return text.strip().lower() in existing_content
 
-        # 3. Extract memories via LLM (regex disabled — produces too much garbage)
+        # Extract memories via LLM (now includes topic assignment)
         extracted = _extract_via_llm(messages)
         method = "llm" if extracted else "none"
         if not extracted:
             extracted = []
-            print("[cc-memory] no API key or LLM failed; skipping memory extraction (archive/handoff still saved)",
+            print("[cc-memory] no API key or LLM failed; skipping memory extraction",
                   file=sys.stderr)
 
-        # 4. Save extracted memories (with dedup)
+        # Save extracted memories with topic
         n_saved = 0
         for m in extracted:
             content = m["content"]
@@ -509,11 +486,12 @@ def main():
                 project_id, session_id, m["category"], content,
                 importance=min(max(m["importance"], 1), 5),
                 tags=[method, "auto"],
+                topic=m.get("topic", ""),
             )
             existing_content.add(content.strip().lower())
             n_saved += 1
 
-        # 5. Update keyword vocabulary
+        # Update keyword vocabulary
         if ext["keywords"]:
             db.upsert_keywords(project_id, ext["keywords"])
 
@@ -521,7 +499,7 @@ def main():
         index_text = _fmt_memory_index(db, project_id, memory_dir)
         (memory_dir / "MEMORY.md").write_text(index_text, encoding="utf-8")
 
-        # ── Write save status for SessionStart to report ──────────────────
+        # ── Write save status ────────────────────────────────────────────────
         status = {
             "timestamp": timestamp,
             "method": method,
@@ -536,6 +514,9 @@ def main():
         except Exception:
             pass
 
+        # ── Auto-consolidation check ─────────────────────────────────────────
+        _maybe_consolidate(cwd, db, project_id)
+
         # ── Done ─────────────────────────────────────────────────────────────
         print(
             f"[cc-memory] saved: {archive_path.name} "
@@ -546,10 +527,8 @@ def main():
         )
 
     except Exception:
-        # NEVER let an exception block compaction
         print(f"[cc-memory] pre_compact ERROR:\n{traceback.format_exc()}",
               file=sys.stderr)
-        # Write failure status
         try:
             memory_dir = Path(cwd) / "memory"
             (memory_dir / ".last_save.json").write_text(

@@ -9,6 +9,9 @@ Usage:
   python mem.py --project D:/Projects/my-project sql "SELECT * FROM memories LIMIT 5"
   python mem.py --project D:/Projects/my-project add decision "Chose D1 GNN" --importance 4
   python mem.py --project D:/Projects/my-project keywords
+  python mem.py --project D:/Projects/my-project topics
+  python mem.py --project D:/Projects/my-project consolidate
+  python mem.py --project D:/Projects/my-project cleanup
   python mem.py --project D:/Projects/my-project schema
 """
 import argparse, json, sqlite3, sys, textwrap
@@ -36,7 +39,7 @@ def _require_db(db_path):
 
 
 def _trunc(text, w=80):
-    return text[:w-1] + "…" if len(text) > w else text
+    return text[:w-1] + "\u2026" if len(text) > w else text
 
 
 def _table(headers, rows):
@@ -71,14 +74,27 @@ def cmd_stats(args):
         print(f"  First : {s['first'][:16]}\n  Last  : {s['last'][:16]}")
 
     m = conn.execute("SELECT COUNT(*) n FROM memories WHERE is_active=1").fetchone()
-    print(f"\nMemories: {m['n']} active\n\nBy category:")
+    a = conn.execute("SELECT COUNT(*) n FROM memories WHERE is_active=0").fetchone()
+    print(f"\nMemories: {m['n']} active, {a['n']} archived")
 
+    print("\nBy category:")
     by_cat = conn.execute(
         """SELECT category, COUNT(*) cnt, AVG(importance) avg_imp, MAX(importance) max_imp
            FROM memories WHERE is_active=1 GROUP BY category ORDER BY cnt DESC"""
     ).fetchall()
     _table(["Category","Count","Avg Imp","Max Imp"],
            [(r["category"], r["cnt"], f"{r['avg_imp']:.1f}", r["max_imp"]) for r in by_cat])
+
+    # Topic stats
+    topics = conn.execute("SELECT COUNT(*) n FROM topics").fetchone()
+    if topics["n"]:
+        print(f"\nTopics: {topics['n']}")
+        by_topic = conn.execute(
+            """SELECT COALESCE(topic, '(none)') AS t, COUNT(*) cnt
+               FROM memories WHERE is_active=1
+               GROUP BY t ORDER BY cnt DESC LIMIT 15"""
+        ).fetchall()
+        _table(["Topic", "Count"], [(r["t"], r["cnt"]) for r in by_topic])
 
     kw = conn.execute(
         "SELECT keyword, frequency FROM keywords ORDER BY frequency DESC LIMIT 10"
@@ -107,7 +123,7 @@ def cmd_list(args):
     params.append(args.limit)
 
     rows = conn.execute(
-        f"""SELECT m.id, m.category, m.importance, m.content, s.compacted_at
+        f"""SELECT m.id, m.category, m.importance, m.content, m.topic, s.compacted_at
             FROM memories m JOIN sessions s ON m.session_id=s.id
             WHERE m.is_active=1 AND m.session_id IN ({ph}) {cat_sql}
             ORDER BY m.importance DESC, m.created_at DESC LIMIT ?""", params
@@ -117,7 +133,8 @@ def cmd_list(args):
     for r in rows:
         d = r["compacted_at"][:10] if r["compacted_at"] else "?"
         stars = "*" * r["importance"] + "." * (5 - r["importance"])
-        print(f"  [{r['id']:4d}] {stars}  {r['category']:<10}  {d}  {_trunc(r['content'], 85)}")
+        topic = f"[{r['topic']}]" if r["topic"] else ""
+        print(f"  [{r['id']:4d}] {stars}  {r['category']:<10}  {topic:<12}  {d}  {_trunc(r['content'], 75)}")
     conn.close()
 
 
@@ -126,10 +143,10 @@ def cmd_search(args):
     conn = _require_db(db_path)
     pat = f"%{args.query}%"
     rows = conn.execute(
-        """SELECT m.id, m.category, m.importance, m.content, s.compacted_at
+        """SELECT m.id, m.category, m.importance, m.content, m.topic, s.compacted_at
            FROM memories m LEFT JOIN sessions s ON m.session_id=s.id
-           WHERE m.is_active=1 AND (m.content LIKE ? OR m.tags LIKE ?)
-           ORDER BY m.importance DESC, m.created_at DESC LIMIT 30""", (pat, pat)
+           WHERE m.is_active=1 AND (m.content LIKE ? OR m.tags LIKE ? OR m.topic LIKE ?)
+           ORDER BY m.importance DESC, m.created_at DESC LIMIT 30""", (pat, pat, pat)
     ).fetchall()
     print(f"\nSearch '{args.query}' in {name}:\n")
     if not rows:
@@ -143,7 +160,8 @@ def cmd_search(args):
             snip = ("..." if s > 0 else "") + c[s:e] + ("..." if e < len(c) else "")
         else:
             snip = _trunc(c, 90)
-        print(f"  [{r['id']:4d}] {'*'*r['importance']:<5}  {r['category']:<10}  {d}  {snip}")
+        topic = f"[{r['topic']}]" if r["topic"] else ""
+        print(f"  [{r['id']:4d}] {'*'*r['importance']:<5}  {r['category']:<10}  {topic:<12}  {d}  {snip}")
     conn.close()
 
 
@@ -176,7 +194,7 @@ def cmd_sql(args):
         print(f"\n({len(rows)} rows)")
     except sqlite3.Error as e:
         print(f"SQL Error: {e}")
-        print("\nTables: projects, sessions, memories, topics, keywords")
+        print("\nTables: projects, sessions, memories, topics, keywords, _migrations")
     conn.close()
 
 
@@ -187,7 +205,9 @@ def cmd_add(args):
     db = MemoryDB(db_path)
     pid = db.upsert_project(args.project)
     tags = args.tags.split(",") if args.tags else ["manual"]
-    mid = db.insert_memory(pid, None, args.category, args.content, args.importance, tags)
+    topic = args.topic if hasattr(args, 'topic') and args.topic else ""
+    mid = db.insert_memory(pid, None, args.category, args.content,
+                           args.importance, tags, topic=topic)
     print(f"Added #{mid}: {'*'*args.importance} [{args.category}] {args.content}")
 
 
@@ -200,6 +220,65 @@ def cmd_keywords(args):
     print(f"\nVocabulary for {name}:\n")
     _table(["Keyword","Freq","Last Seen"], [(r["keyword"], r["frequency"], r["last_seen"][:10]) for r in rows])
     conn.close()
+
+
+def cmd_topics(args):
+    """Show all topic summaries."""
+    _, db_path, name = _resolve_db(args.project)
+    db = MemoryDB(db_path)
+    pid = db.upsert_project(args.project)
+    topics = db.get_topics(pid)
+    counts = db.get_topic_memory_counts(pid)
+
+    print(f"\n{'='*50}\n  Topics for {name}\n{'='*50}\n")
+    if not topics:
+        print("  No topics yet. Run 'consolidate' to create them.")
+        return
+
+    for t in topics:
+        n = counts.get(t["name"], 0)
+        print(f"  [{t['name']}] (v{t['version']}, {n} memories, updated {t['updated_at'][:10]})")
+        # Word-wrap the summary
+        for line in textwrap.wrap(t["content"], width=78):
+            print(f"    {line}")
+        print()
+
+
+def cmd_consolidate(args):
+    """Run full consolidation pipeline."""
+    from consolidate import run_consolidation
+    print(f"\n{'='*50}\n  Consolidating memory for {args.project}\n{'='*50}\n")
+
+    use_llm = not args.no_llm
+    results = run_consolidation(args.project, use_llm=use_llm, verbose=True)
+
+    print(f"\n{'='*50}")
+    print("  Consolidation results:")
+    for k, v in results.items():
+        print(f"    {k}: {v}")
+    print(f"{'='*50}")
+
+
+def cmd_cleanup(args):
+    """Run garbage cleanup + dedup only (no LLM needed)."""
+    from consolidate import cleanup_garbage, merge_near_duplicates, assign_topics_auto
+    memory_dir = Path(args.project).resolve() / "memory"
+    db = MemoryDB(memory_dir / "memory.db")
+    pid = db.upsert_project(args.project)
+
+    print(f"\n{'='*50}\n  Cleanup for {Path(args.project).name}\n{'='*50}\n")
+
+    n_garbage = cleanup_garbage(db, pid)
+    print(f"  Garbage deleted: {n_garbage}")
+
+    n_dedup = merge_near_duplicates(db, pid)
+    print(f"  Duplicates archived: {n_dedup}")
+
+    n_topics = assign_topics_auto(db, pid)
+    print(f"  Topics assigned: {n_topics}")
+
+    stats = db.get_stats(pid)
+    print(f"\n  Final: {stats['n_memories']} active memories")
 
 
 def cmd_schema(args):
@@ -223,14 +302,16 @@ def make_parser():
               python mem.py --project D:/Projects/my-project stats
               python mem.py --project D:/Projects/my-project list decisions --limit 10
               python mem.py --project D:/Projects/my-project search "F1=0.741"
-              python mem.py --project D:/Projects/my-project sql "SELECT category, COUNT(*) FROM memories GROUP BY category"
-              python mem.py --project D:/Projects/my-project add decision "Chose D1 GNN" --importance 4
-              python mem.py --project D:/Projects/my-project schema
+              python mem.py --project D:/Projects/my-project topics
+              python mem.py --project D:/Projects/my-project consolidate
+              python mem.py --project D:/Projects/my-project cleanup
+              python mem.py --project D:/Projects/my-project sql "SELECT topic, COUNT(*) FROM memories GROUP BY topic"
+              python mem.py --project D:/Projects/my-project add decision "Chose D1 GNN" --importance 4 --topic gnn
         """))
     p.add_argument("--project", required=True, help="Project root path")
     sub = p.add_subparsers(dest="command", required=True)
 
-    sub.add_parser("stats", help="Database statistics")
+    sub.add_parser("stats", help="Database statistics + topic distribution")
 
     pl = sub.add_parser("list", help="List memories")
     pl.add_argument("category", nargs="?", default="all",
@@ -251,15 +332,26 @@ def make_parser():
     pa.add_argument("content")
     pa.add_argument("--importance", type=int, default=3, choices=range(1,6), metavar="1-5")
     pa.add_argument("--tags", default="manual")
+    pa.add_argument("--topic", default="", help="Topic tag (e.g. cnn, gnn, pipeline)")
 
     sub.add_parser("keywords", help="Project keyword vocabulary")
-    sub.add_parser("schema", help="Show DB schema (educational)")
+    sub.add_parser("topics", help="Show all topic summaries")
+
+    pc = sub.add_parser("consolidate", help="Run full consolidation (cleanup + dedup + topic summarization)")
+    pc.add_argument("--no-llm", action="store_true", help="Skip LLM summarization")
+
+    sub.add_parser("cleanup", help="Quick cleanup: garbage + dedup + topic assignment (no LLM)")
+    sub.add_parser("schema", help="Show DB schema")
     return p
 
 
 if __name__ == "__main__":
     args = make_parser().parse_args()
-    dispatch = {"stats": cmd_stats, "list": cmd_list, "search": cmd_search,
-                "sessions": cmd_sessions, "sql": cmd_sql, "add": cmd_add,
-                "keywords": cmd_keywords, "schema": cmd_schema}
+    dispatch = {
+        "stats": cmd_stats, "list": cmd_list, "search": cmd_search,
+        "sessions": cmd_sessions, "sql": cmd_sql, "add": cmd_add,
+        "keywords": cmd_keywords, "topics": cmd_topics,
+        "consolidate": cmd_consolidate, "cleanup": cmd_cleanup,
+        "schema": cmd_schema,
+    }
     dispatch[args.command](args)

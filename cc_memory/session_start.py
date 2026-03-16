@@ -5,10 +5,14 @@ cc-memory/session_start.py -- SessionStart hook
 Triggered on EVERY new session (startup, resume, post-compaction).
 
 Two jobs:
-  1. INJECT: Read saved memory → print to stdout → Claude sees it immediately
-  2. RETROACTIVE SAVE: Check if the previous session's transcript was saved.
-     If not, extract memories from it (via Haiku API or regex fallback).
-     This catches conversations that ended without compaction.
+  1. INJECT: Read topic summaries + recent memories -> print to stdout
+  2. RETROACTIVE SAVE: Check if previous session was saved; extract if not.
+
+Context injection strategy (Topic Consolidation):
+  Level 0: Topic summaries    (always injected, compact)
+  Level 1: Unmerged critical   (imp>=5 not yet in any topic summary)
+  Level 2: Recent decisions    (last 3 sessions, imp>=3)
+  Level 3: Session handoff     (from last session)
 
 Stdout: context injection (seen by Claude)
 Stderr: logging only
@@ -38,45 +42,90 @@ def build_context(memory_dir, db, project_id, project_name):
         "",
     ]
 
-    # 1. Critical memories (importance=5, all-time)
+    # ── 1. Topic summaries (L0: always injected, most important) ─────────
+    topics = db.get_topics(project_id)
+    if topics:
+        lines.append("### Knowledge Base (by topic)")
+        lines.append("")
+        for t in topics:
+            # Compact: truncate to ~250 chars to keep total injection reasonable
+            summary = t["content"]
+            if len(summary) > 250:
+                # Cut at last sentence boundary within limit
+                cut = summary[:250].rfind(".")
+                if cut > 100:
+                    summary = summary[:cut+1]
+                else:
+                    summary = summary[:247] + "..."
+            lines.append(f"**[{t['name']}]** {summary}")
+            lines.append("")
+
+    # ── 2. Unmerged critical memories (not yet captured in topics) ────────
+    topic_names = {t["name"] for t in topics} if topics else set()
     critical = db.get_critical_memories(project_id, min_importance=5)
-    if critical:
-        lines += ["### Critical (Always Remember)", ""]
-        for m in critical[:5]:
+    # Filter out memories that belong to a consolidated topic
+    unmerged = [
+        m for m in critical
+        if not m.get("topic") or m.get("topic") not in topic_names
+    ]
+    if unmerged:
+        lines.append("### Critical (unmerged)")
+        lines.append("")
+        for m in unmerged[:8]:
             lines.append(f"- [{m['category']}] {m['content']}")
         lines.append("")
 
-    # 2. Recent memories grouped by category (last 3 sessions)
-    recent = db.get_recent_memories(project_id, sessions_back=3, min_importance=2, limit=25)
+    # ── 3. Recent high-value memories (last 3 sessions, imp>=3) ──────────
+    recent = db.get_recent_memories(
+        project_id, sessions_back=3, min_importance=3, limit=15
+    )
     if recent:
-        by_cat = {}
-        for m in recent:
-            by_cat.setdefault(m["category"], []).append(m)
-        order = ["decision", "bug", "result", "task", "config", "arch"]
-        labels = {"decision": "Recent Decisions", "bug": "Bugs Fixed",
-                  "result": "Recent Results", "task": "Active Tasks",
-                  "config": "Config Changes", "arch": "Architecture Notes"}
-        for cat in order:
-            if cat not in by_cat:
-                continue
-            lines += [f"### {labels.get(cat, cat.title())}", ""]
-            for m in by_cat[cat][:4]:
-                prefix = "! " if m["importance"] >= 4 else "- "
-                lines.append(f"{prefix}{m['content']}")
-            lines.append("")
+        # Filter out those already shown in critical or topics
+        shown_ids = {m["id"] for m in unmerged} if unmerged else set()
+        fresh = [m for m in recent if m["id"] not in shown_ids]
 
-    # 3. Last session handoff snippet
+        if fresh:
+            # Group by category, show compactly
+            by_cat = {}
+            for m in fresh:
+                by_cat.setdefault(m["category"], []).append(m)
+
+            labels = {
+                "decision": "Recent Decisions",
+                "bug": "Bugs Fixed",
+                "result": "Results",
+                "task": "Active Tasks",
+                "config": "Config Changes",
+                "arch": "Architecture",
+            }
+            priority_order = ["decision", "bug", "result", "task", "config", "arch"]
+            has_section = False
+            for cat in priority_order:
+                if cat not in by_cat:
+                    continue
+                if not has_section:
+                    lines.append("### Recent")
+                    lines.append("")
+                    has_section = True
+                items = by_cat[cat][:3]
+                for m in items:
+                    prefix = "! " if m["importance"] >= 4 else "- "
+                    lines.append(f"{prefix}[{cat}] {m['content']}")
+            if has_section:
+                lines.append("")
+
+    # ── 4. Last session handoff ──────────────────────────────────────────
     handoff = memory_dir / "SESSION_HANDOFF.md"
     if handoff.exists():
         text = handoff.read_text(encoding="utf-8").strip()
         body_lines = text.splitlines()
         body = "\n".join(body_lines[2:]) if len(body_lines) > 2 else text
-        if len(body) > 650:
-            body = body[:647] + "..."
+        if len(body) > 500:
+            body = body[:497] + "..."
         if body.strip():
             lines += ["### Last Session State", "", body, ""]
 
-    # 4. Last save status (from PreCompact)
+    # ── 5. Footer ────────────────────────────────────────────────────────
     last_save = memory_dir / ".last_save.json"
     if last_save.exists():
         try:
@@ -91,19 +140,21 @@ def build_context(memory_dir, db, project_id, project_name):
         except Exception:
             pass
 
-    # 5. API key status
     try:
         from auth import get_api_key
         _key, source = get_api_key()
         if source == "oauth_expired":
-            lines.append("[WARNING: Claude OAuth token expired — LLM extraction disabled until refreshed]")
+            lines.append("[WARNING: Claude OAuth token expired -- LLM extraction disabled until refreshed]")
         elif not _key:
-            lines.append("[WARNING: No API key — LLM memory extraction disabled]")
+            lines.append("[WARNING: No API key -- LLM memory extraction disabled]")
     except Exception:
         pass
 
     stats = db.get_stats(project_id)
-    lines.append(f"[{stats['n_sessions']} sessions, {stats['n_memories']} memories]")
+    lines.append(
+        f"[{stats['n_sessions']} sessions, {stats['n_memories']} memories, "
+        f"{stats.get('n_topics', 0)} topics]"
+    )
     lines += [
         "",
         "REMINDER: Before ending this conversation, call /save-memories to preserve important information.",
@@ -123,17 +174,17 @@ _API_TIMEOUT = 20
 _EXTRACTION_PROMPT = """\
 You are a memory extraction system. Given a Claude Code conversation transcript, extract the most important information worth remembering across sessions.
 
-Output a JSON array of objects: {"category": str, "content": str, "importance": int}
+Output a JSON array of objects: {"category": str, "content": str, "importance": int, "topic": str}
 - category: decision|result|config|bug|task|arch|note
 - content: one concise, self-contained sentence with specific values
 - importance: 1-5 (5=critical, 4=important, 3=useful)
+- topic: a short keyword for the topic (e.g. "cnn", "gnn", "pipeline", "config")
 
 Rules: Only conclusions, not process. Self-contained. Specific values. 5-15 items max.
 Output ONLY valid JSON array."""
 
 
 def _find_transcript_dir(project_path: str) -> "Path | None":
-    """Find Claude Code transcript directory for a project."""
     claude_projects = Path.home() / ".claude" / "projects"
     if not claude_projects.exists():
         return None
@@ -141,18 +192,15 @@ def _find_transcript_dir(project_path: str) -> "Path | None":
     path_str = str(Path(project_path).resolve())
     hash_candidate = path_str.replace(":", "-").replace("\\", "-").replace("/", "-")
 
-    # Exact match
     candidate = claude_projects / hash_candidate
     if candidate.exists():
         return candidate
 
-    # Case-insensitive match
     hash_lower = hash_candidate.lower()
     for d in claude_projects.iterdir():
         if d.is_dir() and d.name.lower() == hash_lower:
             return d
 
-    # Fuzzy match by project name
     proj_name = Path(project_path).name.lower()
     best, best_mtime = None, 0
     for d in claude_projects.iterdir():
@@ -166,7 +214,6 @@ def _find_transcript_dir(project_path: str) -> "Path | None":
 
 
 def _get_saved_session_ids(db, project_id: int) -> set:
-    """Get set of claude_session_ids already saved."""
     with db._connect() as conn:
         rows = conn.execute(
             "SELECT claude_session_id FROM sessions WHERE project_id = ?",
@@ -176,7 +223,6 @@ def _get_saved_session_ids(db, project_id: int) -> set:
 
 
 def _build_transcript_summary(messages: list, max_chars: int = 12000) -> str:
-    """Condensed transcript for LLM prompt."""
     parts = []
     total = 0
     for msg in messages:
@@ -223,7 +269,6 @@ def _build_transcript_summary(messages: list, max_chars: int = 12000) -> str:
 
 
 def _extract_via_llm(messages: list) -> "list[dict] | None":
-    """Call Haiku API for structured extraction."""
     from auth import get_api_key
     api_key, source = get_api_key()
     if not api_key:
@@ -275,84 +320,52 @@ def _extract_via_llm(messages: list) -> "list[dict] | None":
             cat = m.get("category", "note")
             content = m.get("content", "").strip()
             imp = m.get("importance", 3)
+            topic = m.get("topic", "")
             if not content or len(content) < 10:
                 continue
             if cat not in ("decision", "result", "config", "bug", "task", "arch", "note"):
                 cat = "note"
-            valid.append({"category": cat, "content": content, "importance": max(1, min(int(imp), 5))})
+            valid.append({
+                "category": cat, "content": content,
+                "importance": max(1, min(int(imp), 5)),
+                "topic": topic if isinstance(topic, str) else "",
+            })
 
         return valid if valid else None
     except Exception:
         return None
 
 
-def _extract_via_regex(messages: list) -> "list[dict]":
-    """Fallback regex extraction."""
-    from extractor import group_sentences
-    ext = build_extraction(messages, [])
-    cat_base_imp = {
-        "decision": 3, "result": 3, "arch": 3,
-        "config": 2, "bug": 4, "task": 2, "note": 1,
-    }
-    results = []
-    grouped = group_sentences(ext["sentences"])
-    for cat, items in grouped.items():
-        base = cat_base_imp.get(cat, 2)
-        for text, imp in items[:8]:
-            results.append({
-                "category": cat,
-                "content": text,
-                "importance": min(max(imp, base), 5),
-            })
-    for metric in ext["metrics"][:8]:
-        results.append({"category": "result", "content": metric, "importance": 3})
-    return results
-
-
 def retroactive_save(cwd: str, db, project_id: int, current_session_id: str = ""):
-    """
-    Check for unsaved previous transcripts and extract memories from them.
-    This catches conversations that ended without compaction.
-    """
     transcript_dir = _find_transcript_dir(cwd)
     if not transcript_dir:
         return
 
-    # Get already-saved session IDs
     saved_ids = _get_saved_session_ids(db, project_id)
 
-    # Find JSONL transcripts, sorted by modification time (newest first)
     jsonl_files = sorted(
         transcript_dir.glob("*.jsonl"),
         key=lambda f: f.stat().st_mtime,
         reverse=True,
     )
 
-    # Only check the most recent 3 transcripts (performance)
     n_retroactive = 0
     for jsonl in jsonl_files[:3]:
-        session_uuid = jsonl.stem  # filename without .jsonl
+        session_uuid = jsonl.stem
 
-        # Skip if this is the current session (being started now)
         if session_uuid == current_session_id:
             continue
-
-        # Skip if already saved
         if session_uuid in saved_ids:
             continue
-
-        # Skip tiny files (< 1KB, probably empty/aborted)
         if jsonl.stat().st_size < 1024:
             continue
 
-        # This transcript hasn't been saved — extract and save
         print(f"[cc-memory] retroactive save for {session_uuid[:8]}...", file=sys.stderr)
         try:
             messages = load_transcript(str(jsonl))
             if not messages or len(messages) < 5:
                 continue
 
-            # Try LLM only (regex disabled — produces too much garbage)
             memories = _extract_via_llm(messages)
             method = "llm"
             if memories is None:
@@ -362,7 +375,6 @@ def retroactive_save(cwd: str, db, project_id: int, current_session_id: str = ""
             if not memories:
                 continue
 
-            # Load existing for dedup
             existing = set()
             with db._connect() as conn:
                 for row in conn.execute(
@@ -371,9 +383,7 @@ def retroactive_save(cwd: str, db, project_id: int, current_session_id: str = ""
                 ):
                     existing.add(row["content"].strip().lower())
 
-            # Create session record
             now = datetime.now()
-            memory_dir = Path(cwd) / "memory"
             sid = db.insert_session(
                 project_id=project_id,
                 claude_session_id=session_uuid,
@@ -383,7 +393,6 @@ def retroactive_save(cwd: str, db, project_id: int, current_session_id: str = ""
                 brief_summary=f"Retroactive save at {now.strftime('%Y-%m-%d %H:%M')}",
             )
 
-            # Save memories (dedup)
             n_saved = 0
             for m in memories:
                 if m["content"].strip().lower() in existing:
@@ -392,6 +401,7 @@ def retroactive_save(cwd: str, db, project_id: int, current_session_id: str = ""
                     project_id, sid, m["category"], m["content"],
                     importance=m["importance"],
                     tags=[method, "retroactive"],
+                    topic=m.get("topic", ""),
                 )
                 existing.add(m["content"].strip().lower())
                 n_saved += 1
@@ -406,7 +416,6 @@ def retroactive_save(cwd: str, db, project_id: int, current_session_id: str = ""
             print(f"[cc-memory] retroactive save error: {e}", file=sys.stderr)
 
     if n_retroactive:
-        # Regenerate MEMORY.md index
         from pre_compact import _fmt_memory_index
         memory_dir = Path(cwd) / "memory"
         index_text = _fmt_memory_index(db, project_id, memory_dir)
@@ -442,7 +451,7 @@ def main():
         print(build_context(memory_dir, db, project_id, Path(cwd).name))
         print(f"[cc-memory] injected context for {Path(cwd).name}", file=sys.stderr)
 
-        # Job 2: Retroactive save from previous unsaved sessions (best effort)
+        # Job 2: Retroactive save (best effort)
         try:
             retroactive_save(cwd, db, project_id, session_id)
         except Exception as e:
