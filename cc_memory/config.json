@@ -1,5 +1,5 @@
 {
-  "version": "1.0.0",
+  "version": "2.0.0",
   "description": "cc-memory — Claude Code persistent memory plugin",
 
   "extraction": {
@@ -12,16 +12,51 @@
   },
 
   "injection": {
+    "total_budget_tokens": 4000,
+    "layers": {
+      "topics": 0.35,
+      "critical": 0.15,
+      "timeline": 0.25,
+      "handoff": 0.15,
+      "footer": 0.10
+    },
     "max_recent_sessions": 3,
-    "max_memories_per_category": 4,
-    "min_importance_for_display": 2,
+    "min_importance_for_display": 3,
     "critical_importance_threshold": 5,
-    "max_handoff_chars": 650
+    "show_token_economics": true,
+    "show_previously": false
+  },
+
+  "observation": {
+    "max_input_chars": 2000,
+    "max_output_chars": 1000,
+    "skip_tools": ["TodoWrite", "AskUserQuestion", "Skill", "ListMcpResourcesTool"],
+    "cleanup_after_save": true,
+    "retention_sessions": 2
   },
 
   "archive": {
     "session_retention_days": 180,
     "max_archive_files": 100
+  },
+
+  "modes": {
+    "default": "code"
+  },
+
+  "web_viewer": {
+    "port": 9377
+  },
+
+  "mcp": {
+    "auto_register": false
+  },
+
+  "excluded_projects": [],
+
+  "logging": {
+    "level": "INFO",
+    "max_log_days": 7
   },
 
   "notes": {

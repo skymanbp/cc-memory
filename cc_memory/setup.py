@@ -20,54 +20,34 @@ SETTINGS_PATH = Path.home() / ".claude" / "settings.json"
 
 # The hooks config to merge into settings.json
 def make_hooks_config(python_cmd: str) -> dict:
-    pre_compact_cmd = f'{python_cmd} "{PLUGIN_DIR / "pre_compact.py"}"'
-    session_start_cmd = f'{python_cmd} "{PLUGIN_DIR / "session_start.py"}"'
-    stop_cmd = f'{python_cmd} "{PLUGIN_DIR / "stop.py"}"'
+    import platform
+    win_mult = 1.5 if platform.system() == "Windows" else 1.0
+
+    def _hook(script, base_timeout):
+        return {
+            "matcher": "",
+            "hooks": [{
+                "type": "command",
+                "command": f'{python_cmd} "{PLUGIN_DIR / script}"',
+                "timeout": int(base_timeout * win_mult),
+            }]
+        }
 
     return {
-        "PreCompact": [
-            {
-                "matcher": "",
-                "hooks": [
-                    {
-                        "type": "command",
-                        "command": pre_compact_cmd,
-                        "timeout": 30,
-                    }
-                ]
-            }
-        ],
-        "SessionStart": [
-            {
-                "matcher": "",
-                "hooks": [
-                    {
-                        "type": "command",
-                        "command": session_start_cmd,
-                        "timeout": 10,
-                    }
-                ]
-            }
-        ],
-        "Stop": [
-            {
-                "matcher": "",
-                "hooks": [
-                    {
-                        "type": "command",
-                        "command": stop_cmd,
-                        "timeout": 5,
-                    }
-                ]
-            }
-        ]
+        "PreCompact":       [_hook("pre_compact.py", 30)],
+        "SessionStart":     [_hook("session_start.py", 10)],
+        "Stop":             [_hook("stop.py", 15)],  # observer LLM call needs time
+        "PostToolUse":      [_hook("post_tool_use.py", 5)],
+        "UserPromptSubmit": [_hook("user_prompt.py", 5)],
     }
 
 
 def check_files():
     """Verify all required plugin files exist."""
     required = ["auth.py", "db.py", "extractor.py", "pre_compact.py", "session_start.py",
-                 "stop.py", "mem.py", "skill_template.md"]
+                 "stop.py", "mem.py", "skill_template.md",
+                 "post_tool_use.py", "user_prompt.py", "privacy.py", "logger.py", "modes.py",
+                 "mcp_server.py", "web_viewer.py"]
     missing = [f for f in required if not (PLUGIN_DIR / f).exists()]
     if missing:
         print(f"ERROR: Missing files: {', '.join(missing)}")
@@ -275,28 +255,30 @@ def init_project(project_path: str):
 
 def print_usage():
     print("""
-cc-memory setup complete!
+cc-memory v2.0 setup complete!
 
 How it works:
-  1. PreCompact hook fires before context compaction
-     -> Reads full conversation transcript
-     -> Extracts decisions, results, configs, bugs, tasks
-     -> Saves to <project>/memory/memory.db (SQLite)
-     -> Writes SESSION_HANDOFF.md + session archive
+  1. PostToolUse  — captures every tool call as observation (real-time)
+  2. PreCompact   — extracts memories via LLM before compaction
+  3. SessionStart — injects context with progressive disclosure
+  4. Stop         — reminds to /save-memories after 8+ turns
+  5. UserPromptSubmit — tracks conversation turns
 
-  2. SessionStart hook fires after compaction
-     -> Reads saved memory from SQLite
-     -> Injects context summary into Claude's new window
-     -> Claude continues with full awareness of prior work
+  All hooks log to ~/.claude/hooks/cc-memory/logs/ (never stderr).
 
-CLI tool for querying memory:
+CLI:
   python {plugin}/mem.py --project <path> stats
-  python {plugin}/mem.py --project <path> list decisions
   python {plugin}/mem.py --project <path> search "keyword"
-  python {plugin}/mem.py --project <path> sql "SELECT * FROM memories"
-  python {plugin}/mem.py --project <path> schema
+  python {plugin}/mem.py --project <path> observations
+  python {plugin}/mem.py --project <path> topics
 
-To initialize memory for a new project:
+Web dashboard:
+  python {plugin}/web_viewer.py --project <path>
+
+MCP server (register in ~/.claude/mcp.json):
+  python {plugin}/mcp_server.py
+
+Init new project:
   python {plugin}/setup.py --init <project-path>
 """.format(plugin=PLUGIN_DIR))
 

@@ -139,20 +139,16 @@ def cmd_list(args):
 
 
 def cmd_search(args):
-    _, db_path, name = _resolve_db(args.project)
-    conn = _require_db(db_path)
-    pat = f"%{args.query}%"
-    rows = conn.execute(
-        """SELECT m.id, m.category, m.importance, m.content, m.topic, s.compacted_at
-           FROM memories m LEFT JOIN sessions s ON m.session_id=s.id
-           WHERE m.is_active=1 AND (m.content LIKE ? OR m.tags LIKE ? OR m.topic LIKE ?)
-           ORDER BY m.importance DESC, m.created_at DESC LIMIT 30""", (pat, pat, pat)
-    ).fetchall()
-    print(f"\nSearch '{args.query}' in {name}:\n")
+    memory_dir, db_path, name = _resolve_db(args.project)
+    db = MemoryDB(db_path)
+    pid = db.upsert_project(args.project)
+    rows = db.search_fts(pid, args.query, limit=30)
+    fts_tag = "(FTS5)" if db._fts5_available else "(LIKE)"
+    print(f"\nSearch '{args.query}' in {name} {fts_tag}:\n")
     if not rows:
         print("  (no matches)"); return
     for r in rows:
-        d = r["compacted_at"][:10] if r["compacted_at"] else "?"
+        d = (r.get("created_at") or "?")[:10]
         c = r["content"]
         idx = c.lower().find(args.query.lower())
         if idx >= 0:
@@ -160,9 +156,8 @@ def cmd_search(args):
             snip = ("..." if s > 0 else "") + c[s:e] + ("..." if e < len(c) else "")
         else:
             snip = _trunc(c, 90)
-        topic = f"[{r['topic']}]" if r["topic"] else ""
+        topic = f"[{r.get('topic', '')}]" if r.get("topic") else ""
         print(f"  [{r['id']:4d}] {'*'*r['importance']:<5}  {r['category']:<10}  {topic:<12}  {d}  {snip}")
-    conn.close()
 
 
 def cmd_sessions(args):
@@ -292,21 +287,88 @@ def cmd_schema(args):
     conn.close()
 
 
+def cmd_observations(args):
+    """List recent observations."""
+    memory_dir, db_path, name = _resolve_db(args.project)
+    db = MemoryDB(db_path)
+    pid = db.upsert_project(args.project)
+    obs = db.get_recent_observations(pid, limit=args.limit)
+    print(f"\nObservations for {name} ({len(obs)} shown):\n")
+    if not obs:
+        print("  (none)"); return
+    for o in obs:
+        ts = (o["timestamp"] or "")[:19]
+        inp = _trunc(o.get("tool_input", ""), 80)
+        print(f"  {ts}  [{o['tool_name']:<8}]  {inp}")
+
+
+def cmd_mode(args):
+    """Show or set project mode."""
+    memory_dir, db_path, name = _resolve_db(args.project)
+    db = MemoryDB(db_path)
+    pid = db.upsert_project(args.project)
+    if args.mode_name:
+        from modes import VALID_MODES
+        if args.mode_name not in VALID_MODES:
+            print(f"Invalid mode. Choose from: {', '.join(sorted(VALID_MODES))}")
+            return
+        db.set_project_mode(pid, args.mode_name)
+        print(f"Mode set to: {args.mode_name}")
+    else:
+        print(f"Current mode: {db.get_project_mode(pid)}")
+        from modes import list_modes
+        print("\nAvailable modes:")
+        for m in list_modes():
+            print(f"  {m['name']:<12} {m['description']}")
+
+
+def cmd_summary(args):
+    """Show latest session summary."""
+    memory_dir, db_path, name = _resolve_db(args.project)
+    db = MemoryDB(db_path)
+    pid = db.upsert_project(args.project)
+    s = db.get_latest_summary(pid)
+    if not s:
+        print("No session summary available."); return
+    print(f"\n{'='*50}\n  Session Summary for {name}\n{'='*50}\n")
+    for field in ["request", "investigated", "learned", "completed", "next_steps", "notes"]:
+        val = s.get(field, "")
+        if val:
+            print(f"  {field.title()}: {val}")
+    for field in ["files_read", "files_modified"]:
+        val = s.get(field, "[]")
+        try:
+            items = json.loads(val) if isinstance(val, str) else val
+            if items:
+                print(f"  {field}: {', '.join(items[:10])}")
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+
+def cmd_serve(args):
+    """Launch web viewer."""
+    from web_viewer import main as web_main
+    import sys as _sys
+    _sys.argv = ["web_viewer.py", "--project", args.project, "--port", str(args.port)]
+    web_main()
+
+
 # ── Parser ───────────────────────────────────────────────────────────────────
 
 def make_parser():
-    p = argparse.ArgumentParser(prog="mem.py", description="cc-memory CLI",
+    p = argparse.ArgumentParser(prog="mem.py", description="cc-memory CLI v2.0",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=textwrap.dedent("""
             Examples:
-              python mem.py --project D:/Projects/my-project stats
-              python mem.py --project D:/Projects/my-project list decisions --limit 10
-              python mem.py --project D:/Projects/my-project search "F1=0.741"
-              python mem.py --project D:/Projects/my-project topics
-              python mem.py --project D:/Projects/my-project consolidate
-              python mem.py --project D:/Projects/my-project cleanup
-              python mem.py --project D:/Projects/my-project sql "SELECT topic, COUNT(*) FROM memories GROUP BY topic"
-              python mem.py --project D:/Projects/my-project add decision "Chose D1 GNN" --importance 4 --topic gnn
+              python mem.py --project . stats
+              python mem.py --project . search "keyword"
+              python mem.py --project . list decisions --limit 10
+              python mem.py --project . observations --limit 20
+              python mem.py --project . topics
+              python mem.py --project . mode research
+              python mem.py --project . summary
+              python mem.py --project . serve --port 9377
+              python mem.py --project . consolidate
         """))
     p.add_argument("--project", required=True, help="Project root path")
     sub = p.add_subparsers(dest="command", required=True)
@@ -319,7 +381,7 @@ def make_parser():
     pl.add_argument("--limit", type=int, default=20)
     pl.add_argument("--sessions", type=int, default=5, help="Sessions to look back")
 
-    ps = sub.add_parser("search", help="Search memories")
+    ps = sub.add_parser("search", help="Search memories (FTS5 + LIKE fallback)")
     ps.add_argument("query")
 
     sub.add_parser("sessions", help="List sessions")
@@ -342,6 +404,19 @@ def make_parser():
 
     sub.add_parser("cleanup", help="Quick cleanup: garbage + dedup + topic assignment (no LLM)")
     sub.add_parser("schema", help="Show DB schema")
+
+    # v2.0 commands
+    po = sub.add_parser("observations", help="List recent tool observations")
+    po.add_argument("--limit", type=int, default=30)
+
+    pm = sub.add_parser("mode", help="Show or set project mode (code/research/writing)")
+    pm.add_argument("mode_name", nargs="?", default=None)
+
+    sub.add_parser("summary", help="Show latest structured session summary")
+
+    pv = sub.add_parser("serve", help="Launch web dashboard")
+    pv.add_argument("--port", type=int, default=9377)
+
     return p
 
 
@@ -353,5 +428,7 @@ if __name__ == "__main__":
         "keywords": cmd_keywords, "topics": cmd_topics,
         "consolidate": cmd_consolidate, "cleanup": cmd_cleanup,
         "schema": cmd_schema,
+        "observations": cmd_observations, "mode": cmd_mode,
+        "summary": cmd_summary, "serve": cmd_serve,
     }
     dispatch[args.command](args)

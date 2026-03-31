@@ -45,6 +45,10 @@ from extractor import (
     CATEGORY_LABELS,
     load_transcript,
 )
+from logger import get_logger
+from privacy import clean_for_storage
+
+_log = get_logger("pre_compact")
 
 # How often to auto-trigger consolidation (every N sessions)
 CONSOLIDATION_INTERVAL = 5
@@ -128,25 +132,36 @@ def _build_transcript_summary(messages: list, max_chars: int = 12000) -> str:
     return "\n".join(parts)
 
 
-def _extract_via_llm(messages: list) -> "list[dict] | None":
+def _extract_via_llm(messages: list, observations: list = None) -> "list[dict] | None":
     from auth import get_api_key
     api_key, source = get_api_key()
     if not api_key:
         reason = "OAuth token expired" if source == "oauth_expired" else "no API key found"
-        print(f"[cc-memory] {reason}, skipping LLM extraction", file=sys.stderr)
+        _log.info(f"{reason}, skipping LLM extraction")
         return None
 
     transcript_text = _build_transcript_summary(messages)
     if len(transcript_text) < 100:
         return None
 
+    # Append observation context if available
+    obs_context = ""
+    if observations:
+        obs_lines = []
+        for o in observations[-50:]:  # Last 50 observations
+            obs_lines.append(f"[{o['tool_name']}] {o['tool_input']}")
+        if obs_lines:
+            obs_context = "\n\nTool observations (for context):\n" + "\n".join(obs_lines)
+
+    user_content = f"Extract memories from this conversation:\n\n{transcript_text}{obs_context}"
+
     body = json.dumps({
         "model": _HAIKU_MODEL,
-        "max_tokens": 2000,
+        "max_tokens": 2500,
         "messages": [
             {
                 "role": "user",
-                "content": f"Extract memories from this conversation:\n\n{transcript_text}",
+                "content": user_content,
             }
         ],
         "system": _EXTRACTION_PROMPT,
@@ -201,12 +216,12 @@ def _extract_via_llm(messages: list) -> "list[dict] | None":
                 "topic": topic if isinstance(topic, str) else "",
             })
 
-        print(f"[cc-memory] LLM extracted {len(valid)} memories", file=sys.stderr)
+        _log.info(f"LLM extracted {len(valid)} memories")
         return valid if valid else None
 
     except (urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError,
             TimeoutError, OSError, KeyError, ValueError) as e:
-        print(f"[cc-memory] LLM extraction failed: {e}", file=sys.stderr)
+        _log.error(f"LLM extraction failed: {e}")
         return None
 
 
@@ -380,12 +395,12 @@ def _maybe_consolidate(cwd: str, db: MemoryDB, project_id: int):
     if n_sessions % CONSOLIDATION_INTERVAL != 0:
         return
 
-    print(f"[cc-memory] auto-consolidation triggered (session #{n_sessions})", file=sys.stderr)
+    _log.info(f"auto-consolidation triggered (session #{n_sessions})")
     try:
         from consolidate import run_consolidation
         results = run_consolidation(cwd, use_llm=True, verbose=True)
     except Exception as e:
-        print(f"[cc-memory] auto-consolidation error: {e}", file=sys.stderr)
+        _log.error(f"auto-consolidation error: {e}")
 
 
 # ---------------------------------------------------------------------------
@@ -395,7 +410,7 @@ def main():
     try:
         data = json.load(sys.stdin)
     except Exception as exc:
-        print(f"[cc-memory] pre_compact: stdin parse error: {exc}", file=sys.stderr)
+        _log.error(f"stdin parse error: {exc}")
         sys.exit(0)
 
     cwd = data.get("cwd", "")
@@ -404,7 +419,7 @@ def main():
     claude_sid = data.get("session_id", "")
 
     if not cwd or not transcript_path:
-        print("[cc-memory] pre_compact: missing cwd or transcript_path", file=sys.stderr)
+        _log.warn("missing cwd or transcript_path")
         sys.exit(0)
 
     try:
@@ -421,7 +436,7 @@ def main():
         # ── Load transcript ──────────────────────────────────────────────────
         messages = load_transcript(transcript_path)
         if not messages:
-            print("[cc-memory] pre_compact: empty transcript, skipping", file=sys.stderr)
+            _log.info("empty transcript, skipping")
             sys.exit(0)
 
         # ── Extract structured info (always needed for archive/handoff) ─────
@@ -456,31 +471,34 @@ def main():
             brief_summary=archive_text[:1000],
         )
 
-        # Load existing memories for deduplication
-        existing_content = set()
-        with db._connect() as conn:
-            for row in conn.execute(
-                "SELECT content FROM memories WHERE project_id = ? AND is_active = 1",
-                (project_id,),
-            ):
-                existing_content.add(row["content"].strip().lower())
+        # ── Gather observations for enriched extraction ──────────────────
+        last_session = db.get_recent_session_ids(project_id, 1)
+        last_ts = ""
+        if last_session:
+            with db._connect() as conn:
+                row = conn.execute(
+                    "SELECT compacted_at FROM sessions WHERE id = ?",
+                    (last_session[0],)
+                ).fetchone()
+                if row:
+                    last_ts = row["compacted_at"]
+        observations = db.get_observations_since(project_id, last_ts) if last_ts else []
 
-        def _is_dup(text):
-            return text.strip().lower() in existing_content
-
-        # Extract memories via LLM (now includes topic assignment)
-        extracted = _extract_via_llm(messages)
+        # ── Extract memories via LLM (with observation context) ─────────
+        extracted = _extract_via_llm(messages, observations)
         method = "llm" if extracted else "none"
         if not extracted:
             extracted = []
-            print("[cc-memory] no API key or LLM failed; skipping memory extraction",
-                  file=sys.stderr)
+            _log.info("no API key or LLM failed; skipping memory extraction")
 
-        # Save extracted memories with topic
+        # Save extracted memories with hash-based dedup
         n_saved = 0
         for m in extracted:
-            content = m["content"]
-            if _is_dup(content):
+            content = clean_for_storage(m["content"])
+            if not content or len(content) < 10:
+                continue
+            content_hash = MemoryDB.compute_content_hash(content)
+            if db.is_duplicate_hash(project_id, content_hash):
                 continue
             db.insert_memory(
                 project_id, session_id, m["category"], content,
@@ -488,12 +506,56 @@ def main():
                 tags=[method, "auto"],
                 topic=m.get("topic", ""),
             )
-            existing_content.add(content.strip().lower())
             n_saved += 1
 
         # Update keyword vocabulary
         if ext["keywords"]:
             db.upsert_keywords(project_id, ext["keywords"])
+
+        # ── Structured session summary (derived, no extra LLM call) ─────
+        obs_files_read = list(set(
+            o["tool_input"] for o in observations
+            if o["tool_name"] == "Read" and o["tool_input"]
+        ))
+        obs_files_modified = list(set(
+            o["tool_input"] for o in observations
+            if o["tool_name"] in ("Edit", "Write", "MultiEdit") and o["tool_input"]
+        ))
+        # Derive request from first user message
+        first_user_msg = ""
+        for msg in messages[:5]:
+            message = msg.get("message", {})
+            if isinstance(message, dict) and message.get("role") == "user":
+                content_field = message.get("content", "")
+                if isinstance(content_field, str):
+                    first_user_msg = content_field[:300]
+                elif isinstance(content_field, list):
+                    for block in content_field:
+                        if isinstance(block, dict) and block.get("type") == "text":
+                            first_user_msg = block.get("text", "")[:300]
+                            break
+                if first_user_msg:
+                    break
+        # Derive next_steps from task memories
+        task_mems = [m["content"] for m in extracted if m.get("category") == "task"]
+
+        try:
+            db.insert_session_summary(session_id, project_id, {
+                "request": first_user_msg,
+                "investigated": ", ".join(obs_files_read[:10]),
+                "learned": "",
+                "completed": ", ".join(obs_files_modified[:10]),
+                "next_steps": "; ".join(task_mems[:5]),
+                "notes": "",
+                "files_read": obs_files_read[:20],
+                "files_modified": obs_files_modified[:20],
+            })
+        except Exception as e:
+            _log.error(f"session summary save error: {e}")
+
+        # ── Cleanup processed observations ──────────────────────────────
+        if observations:
+            db.cleanup_observations(project_id, timestamp)
 
         # ── Regenerate MEMORY.md index ───────────────────────────────────────
         index_text = _fmt_memory_index(db, project_id, memory_dir)
@@ -504,6 +566,7 @@ def main():
             "timestamp": timestamp,
             "method": method,
             "n_saved": n_saved,
+            "n_observations": len(observations),
             "msg_count": ext["msg_count"],
             "success": True,
         }
@@ -518,17 +581,16 @@ def main():
         _maybe_consolidate(cwd, db, project_id)
 
         # ── Done ─────────────────────────────────────────────────────────────
-        print(
-            f"[cc-memory] saved: {archive_path.name} "
+        _log.info(
+            f"saved: {archive_path.name} "
             f"({ext['msg_count']} msgs, "
             f"{n_saved} new memories via {method}, "
-            f"{len(ext['keywords'])} keywords)",
-            file=sys.stderr,
+            f"{len(observations)} observations, "
+            f"{len(ext['keywords'])} keywords)"
         )
 
     except Exception:
-        print(f"[cc-memory] pre_compact ERROR:\n{traceback.format_exc()}",
-              file=sys.stderr)
+        _log.error_tb("pre_compact ERROR")
         try:
             memory_dir = Path(cwd) / "memory"
             (memory_dir / ".last_save.json").write_text(

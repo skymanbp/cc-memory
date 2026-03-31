@@ -22,11 +22,14 @@ def build_installer():
     print("  Building cc-memory-installer.exe")
     print("=" * 50)
 
-    # Plugin files to bundle as data
+    # Plugin files to bundle as data (v2.0: includes all new modules)
     plugin_files = [
         "auth.py", "db.py", "extractor.py", "pre_compact.py", "session_start.py",
         "stop.py", "mem.py", "plan.py", "dashboard.py", "installer.py",
-        "setup.py", "config.json", "skill_template.md"
+        "setup.py", "config.json", "skill_template.md",
+        # v2.0 new modules
+        "post_tool_use.py", "user_prompt.py", "privacy.py", "logger.py", "modes.py",
+        "mcp_server.py", "web_viewer.py", "consolidate.py",
     ]
 
     # Verify all files exist
@@ -68,14 +71,14 @@ def build_dashboard():
     print("  Building cc-memory-dashboard.exe")
     print("=" * 50)
 
-    # Dashboard needs db.py, auth.py, config.json, plan.py, extractor.py
-    data_args = [
-        "--add-data", f"{SRC / 'auth.py'};cc_memory_files",
-        "--add-data", f"{SRC / 'db.py'};cc_memory_files",
-        "--add-data", f"{SRC / 'config.json'};cc_memory_files",
-        "--add-data", f"{SRC / 'plan.py'};cc_memory_files",
-        "--add-data", f"{SRC / 'extractor.py'};cc_memory_files",
+    # Dashboard needs core modules + v2.0 deps
+    dashboard_deps = [
+        "auth.py", "db.py", "config.json", "plan.py", "extractor.py",
+        "logger.py", "privacy.py", "modes.py", "consolidate.py",
     ]
+    data_args = []
+    for f in dashboard_deps:
+        data_args.extend(["--add-data", f"{SRC / f};cc_memory_files"])
 
     cmd = [
         sys.executable, "-m", "PyInstaller",

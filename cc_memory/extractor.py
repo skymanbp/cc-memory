@@ -107,9 +107,11 @@ def load_transcript(transcript_path: str) -> List[Dict]:
 # Low-level content extractors
 # ---------------------------------------------------------------------------
 def _text_from_content(content: Any) -> str:
-    """Recursively pull plain text out of a message content field."""
+    """Recursively pull plain text out of a message content field.
+    Strips <private> and <cc-memory-context> tags before returning."""
+    from privacy import clean_for_storage
     if isinstance(content, str):
-        return content
+        return clean_for_storage(content)
     if isinstance(content, list):
         parts = []
         for block in content:
@@ -121,7 +123,8 @@ def _text_from_content(content: Any) -> str:
             elif btype == "tool_result":
                 inner = block.get("content", "")
                 parts.append(_text_from_content(inner))
-        return "\n".join(p for p in parts if p)
+        text = "\n".join(p for p in parts if p)
+        return clean_for_storage(text)
     return ""
 
 

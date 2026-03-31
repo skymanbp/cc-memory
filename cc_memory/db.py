@@ -17,6 +17,7 @@ Memory hierarchy (Topic Consolidation):
   Level 3: Archived memories (is_active=0 -- queryable but not injected)
 """
 
+import hashlib
 import sqlite3
 import json
 from pathlib import Path
@@ -126,6 +127,56 @@ _MIGRATIONS = [
     ("v1_topic_column", "ALTER TABLE memories ADD COLUMN topic TEXT"),
     # v1: add topic index
     ("v1_topic_index", "CREATE INDEX IF NOT EXISTS idx_memories_topic ON memories (project_id, topic, is_active)"),
+
+    # ── v2.0 migrations ──────────────────────────────────────────────────
+
+    # Content hash for fast deduplication
+    ("v2_content_hash",
+     "ALTER TABLE memories ADD COLUMN content_hash TEXT"),
+    ("v2_content_hash_idx",
+     "CREATE INDEX IF NOT EXISTS idx_memories_hash ON memories (project_id, content_hash)"),
+
+    # Observations table (PostToolUse raw events)
+    ("v2_observations", """
+        CREATE TABLE IF NOT EXISTS observations (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            project_id  INTEGER NOT NULL REFERENCES projects(id),
+            session_id  TEXT,
+            tool_name   TEXT    NOT NULL,
+            tool_input  TEXT,
+            tool_output TEXT,
+            timestamp   TEXT    NOT NULL,
+            is_private  INTEGER NOT NULL DEFAULT 0
+        )"""),
+    ("v2_observations_idx",
+     "CREATE INDEX IF NOT EXISTS idx_obs_project_ts ON observations (project_id, timestamp DESC)"),
+
+    # Structured session summaries (6 fields)
+    ("v2_session_summaries", """
+        CREATE TABLE IF NOT EXISTS session_summaries (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id      INTEGER NOT NULL REFERENCES sessions(id),
+            project_id      INTEGER NOT NULL REFERENCES projects(id),
+            request         TEXT,
+            investigated    TEXT,
+            learned         TEXT,
+            completed       TEXT,
+            next_steps      TEXT,
+            notes           TEXT,
+            files_read      TEXT    DEFAULT '[]',
+            files_modified  TEXT    DEFAULT '[]',
+            created_at      TEXT    NOT NULL
+        )"""),
+
+    # Project mode (code/research/writing)
+    ("v2_project_mode",
+     "ALTER TABLE projects ADD COLUMN mode TEXT NOT NULL DEFAULT 'code'"),
+
+    # FTS5 (special handler)
+    ("v2_fts5", "__FTS5_SETUP__"),
+
+    # Backfill content_hash for existing memories
+    ("v2_backfill_hash", "__BACKFILL_HASH__"),
 ]
 
 
@@ -142,12 +193,19 @@ class MemoryDB:
 
     # ── internal helpers ────────────────────────────────────────────────────
 
+    # FTS5 availability flag (set during bootstrap)
+    _fts5_available = False
+
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(str(self.db_path), timeout=10)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys = ON")
         conn.execute("PRAGMA journal_mode = WAL")
         conn.execute("PRAGMA synchronous = NORMAL")
+        conn.execute("PRAGMA busy_timeout = 5000")
+        conn.execute("PRAGMA temp_store = memory")
+        conn.execute("PRAGMA mmap_size = 268435456")
+        conn.execute("PRAGMA cache_size = 10000")
         return conn
 
     def _bootstrap(self):
@@ -178,13 +236,84 @@ class MemoryDB:
                 if name in applied:
                     continue
                 try:
-                    conn.execute(sql)
+                    if sql == "__FTS5_SETUP__":
+                        self._setup_fts5(conn)
+                    elif sql == "__BACKFILL_HASH__":
+                        self._backfill_content_hash(conn)
+                    else:
+                        conn.execute(sql)
                 except sqlite3.OperationalError:
                     pass  # e.g. column already exists
                 conn.execute(
                     "INSERT OR IGNORE INTO _migrations (name, applied_at) VALUES (?, ?)",
                     (name, self._now())
                 )
+
+    def _setup_fts5(self, conn):
+        """Create FTS5 virtual table with sync triggers. Probes availability first."""
+        try:
+            # Probe FTS5 availability
+            conn.execute("CREATE VIRTUAL TABLE IF NOT EXISTS _fts5_probe USING fts5(test_col)")
+            conn.execute("DROP TABLE IF EXISTS _fts5_probe")
+        except sqlite3.OperationalError:
+            self.__class__._fts5_available = False
+            return
+
+        try:
+            conn.execute("""
+                CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts
+                USING fts5(content, tags, topic, content=memories, content_rowid=id)
+            """)
+            conn.execute("""
+                CREATE TRIGGER IF NOT EXISTS memories_fts_ai AFTER INSERT ON memories BEGIN
+                    INSERT INTO memories_fts(rowid, content, tags, topic)
+                    VALUES (new.id, new.content, new.tags, COALESCE(new.topic, ''));
+                END
+            """)
+            conn.execute("""
+                CREATE TRIGGER IF NOT EXISTS memories_fts_ad AFTER DELETE ON memories BEGIN
+                    INSERT INTO memories_fts(memories_fts, rowid, content, tags, topic)
+                    VALUES ('delete', old.id, old.content, old.tags, COALESCE(old.topic, ''));
+                END
+            """)
+            conn.execute("""
+                CREATE TRIGGER IF NOT EXISTS memories_fts_au AFTER UPDATE ON memories BEGIN
+                    INSERT INTO memories_fts(memories_fts, rowid, content, tags, topic)
+                    VALUES ('delete', old.id, old.content, old.tags, COALESCE(old.topic, ''));
+                    INSERT INTO memories_fts(rowid, content, tags, topic)
+                    VALUES (new.id, new.content, new.tags, COALESCE(new.topic, ''));
+                END
+            """)
+            # Populate from existing data
+            conn.execute("""
+                INSERT OR IGNORE INTO memories_fts(rowid, content, tags, topic)
+                SELECT id, content, tags, COALESCE(topic, '') FROM memories
+            """)
+            self.__class__._fts5_available = True
+        except sqlite3.OperationalError:
+            self.__class__._fts5_available = False
+
+    def _backfill_content_hash(self, conn):
+        """Backfill content_hash for existing memories."""
+        rows = conn.execute(
+            "SELECT id, content FROM memories WHERE content_hash IS NULL"
+        ).fetchall()
+        for row in rows:
+            h = self.compute_content_hash(row["content"])
+            conn.execute(
+                "UPDATE memories SET content_hash = ? WHERE id = ?",
+                (h, row["id"])
+            )
+
+    def _rebuild_fts5(self):
+        """Rebuild FTS5 index if corrupted."""
+        if not self._fts5_available:
+            return
+        try:
+            with self._connect() as conn:
+                conn.execute("INSERT INTO memories_fts(memories_fts) VALUES('rebuild')")
+        except sqlite3.OperationalError:
+            self.__class__._fts5_available = False
 
     @staticmethod
     def _now() -> str:
@@ -263,14 +392,16 @@ class MemoryDB:
         topic: str = None,
     ) -> int:
         now = self._now()
+        content_hash = self.compute_content_hash(content)
         with self._connect() as conn:
             cur = conn.execute(
                 """INSERT INTO memories
                    (project_id, session_id, category, content, importance,
-                    tags, topic, created_at, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    tags, topic, content_hash, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (project_id, session_id, category, content, importance,
-                 json.dumps(tags or [], ensure_ascii=False), topic, now, now)
+                 json.dumps(tags or [], ensure_ascii=False), topic,
+                 content_hash, now, now)
             )
             return cur.lastrowid
 
@@ -416,6 +547,173 @@ class MemoryDB:
             conn.execute(
                 "UPDATE memories SET importance = ?, updated_at = ? WHERE id = ?",
                 (max(1, min(5, importance)), self._now(), memory_id)
+            )
+
+    # ── content hash + dedup ────────────────────────────────────────────────
+
+    @staticmethod
+    def compute_content_hash(content: str) -> str:
+        """SHA-256[:16] of normalized content for fast dedup."""
+        normalized = content.strip().lower().encode("utf-8")
+        return hashlib.sha256(normalized).hexdigest()[:16]
+
+    def is_duplicate_hash(self, project_id: int, content_hash: str) -> bool:
+        """Check if a memory with this hash already exists (active only)."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM memories WHERE project_id = ? AND content_hash = ? AND is_active = 1 LIMIT 1",
+                (project_id, content_hash)
+            ).fetchone()
+            return row is not None
+
+    # ── observations (PostToolUse) ──────────────────────────────────────────
+
+    def insert_observation(
+        self, project_id: int, session_id: str, tool_name: str,
+        tool_input: str = "", tool_output: str = "", is_private: int = 0,
+    ) -> int:
+        with self._connect() as conn:
+            cur = conn.execute(
+                """INSERT INTO observations
+                   (project_id, session_id, tool_name, tool_input,
+                    tool_output, timestamp, is_private)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (project_id, session_id, tool_name,
+                 tool_input, tool_output, self._now(), is_private)
+            )
+            return cur.lastrowid
+
+    def get_recent_observations(
+        self, project_id: int, limit: int = 50
+    ) -> List[Dict]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """SELECT * FROM observations
+                   WHERE project_id = ? AND is_private = 0
+                   ORDER BY timestamp DESC LIMIT ?""",
+                (project_id, limit)
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def get_observations_since(
+        self, project_id: int, since_ts: str
+    ) -> List[Dict]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """SELECT * FROM observations
+                   WHERE project_id = ? AND timestamp > ? AND is_private = 0
+                   ORDER BY timestamp ASC""",
+                (project_id, since_ts)
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def cleanup_observations(
+        self, project_id: int, before_ts: str
+    ) -> int:
+        """Delete observations older than given timestamp."""
+        with self._connect() as conn:
+            cur = conn.execute(
+                "DELETE FROM observations WHERE project_id = ? AND timestamp < ?",
+                (project_id, before_ts)
+            )
+            return cur.rowcount
+
+    def get_observation_count(self, project_id: int) -> int:
+        with self._connect() as conn:
+            return conn.execute(
+                "SELECT COUNT(*) FROM observations WHERE project_id = ?",
+                (project_id,)
+            ).fetchone()[0]
+
+    # ── session summaries ───────────────────────────────────────────────────
+
+    def insert_session_summary(
+        self, session_id: int, project_id: int, summary: Dict
+    ) -> int:
+        with self._connect() as conn:
+            cur = conn.execute(
+                """INSERT INTO session_summaries
+                   (session_id, project_id, request, investigated, learned,
+                    completed, next_steps, notes, files_read, files_modified,
+                    created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (session_id, project_id,
+                 summary.get("request", ""),
+                 summary.get("investigated", ""),
+                 summary.get("learned", ""),
+                 summary.get("completed", ""),
+                 summary.get("next_steps", ""),
+                 summary.get("notes", ""),
+                 json.dumps(summary.get("files_read", []), ensure_ascii=False),
+                 json.dumps(summary.get("files_modified", []), ensure_ascii=False),
+                 self._now())
+            )
+            return cur.lastrowid
+
+    def get_session_summary(self, session_id: int) -> Optional[Dict]:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM session_summaries WHERE session_id = ? ORDER BY id DESC LIMIT 1",
+                (session_id,)
+            ).fetchone()
+            return dict(row) if row else None
+
+    def get_latest_summary(self, project_id: int) -> Optional[Dict]:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM session_summaries WHERE project_id = ? ORDER BY created_at DESC LIMIT 1",
+                (project_id,)
+            ).fetchone()
+            return dict(row) if row else None
+
+    # ── FTS5 search ─────────────────────────────────────────────────────────
+
+    def search_fts(
+        self, project_id: int, query: str, limit: int = 30
+    ) -> List[Dict]:
+        """Full-text search with FTS5, falling back to LIKE."""
+        with self._connect() as conn:
+            if self._fts5_available:
+                try:
+                    rows = conn.execute(
+                        """SELECT m.* FROM memories m
+                           JOIN memories_fts f ON m.id = f.rowid
+                           WHERE memories_fts MATCH ?
+                             AND m.project_id = ? AND m.is_active = 1
+                           ORDER BY rank
+                           LIMIT ?""",
+                        (query, project_id, limit)
+                    ).fetchall()
+                    return [dict(r) for r in rows]
+                except sqlite3.OperationalError:
+                    # FTS5 corrupted, try rebuild
+                    self._rebuild_fts5()
+            # Fallback: LIKE search
+            pat = "%" + query + "%"
+            rows = conn.execute(
+                """SELECT * FROM memories
+                   WHERE project_id = ? AND is_active = 1
+                     AND (content LIKE ? OR tags LIKE ? OR COALESCE(topic, '') LIKE ?)
+                   ORDER BY importance DESC, created_at DESC
+                   LIMIT ?""",
+                (project_id, pat, pat, pat, limit)
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    # ── project mode ────────────────────────────────────────────────────────
+
+    def get_project_mode(self, project_id: int) -> str:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT mode FROM projects WHERE id = ?", (project_id,)
+            ).fetchone()
+            return row["mode"] if row and row["mode"] else "code"
+
+    def set_project_mode(self, project_id: int, mode: str):
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE projects SET mode = ? WHERE id = ?",
+                (mode, project_id)
             )
 
     # ── topics ───────────────────────────────────────────────────────────────

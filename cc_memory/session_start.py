@@ -30,102 +30,143 @@ _PLUGIN_DIR = Path(__file__).parent
 sys.path.insert(0, str(_PLUGIN_DIR))
 from db import MemoryDB
 from extractor import build_extraction, load_transcript
+from logger import get_logger
+
+_log = get_logger("session_start")
 
 
 # ---------------------------------------------------------------------------
-# Context injection (fast, always runs)
+# Progressive Disclosure Context Injection
 # ---------------------------------------------------------------------------
-def build_context(memory_dir, db, project_id, project_name):
-    lines = [
-        "=== CC-MEMORY: Context Restored ===",
-        f"Project: {project_name}  |  {datetime.now().strftime('%Y-%m-%d %H:%M')}",
-        "",
-    ]
+# Token budget: ~4000 tokens = ~16000 chars (4 chars/token estimate)
+_DEFAULT_BUDGET = 16000
+_CHARS_PER_TOKEN = 4
 
-    # ── 1. Topic summaries (L0: always injected, most important) ─────────
+# Layer budget fractions (unused budget flows to next layer)
+_LAYER_BUDGETS = {
+    "topics":   0.35,
+    "critical": 0.15,
+    "timeline": 0.25,
+    "handoff":  0.15,
+    "footer":   0.10,
+}
+
+
+def _build_topics_layer(db, project_id, budget):
+    """Layer 1: Topic summaries (always injected, most important)."""
     topics = db.get_topics(project_id)
-    if topics:
-        lines.append("### Knowledge Base (by topic)")
-        lines.append("")
-        for t in topics:
-            # Compact: truncate to ~250 chars to keep total injection reasonable
-            summary = t["content"]
-            if len(summary) > 250:
-                # Cut at last sentence boundary within limit
-                cut = summary[:250].rfind(".")
-                if cut > 100:
-                    summary = summary[:cut+1]
-                else:
-                    summary = summary[:247] + "..."
-            lines.append(f"**[{t['name']}]** {summary}")
-            lines.append("")
+    if not topics:
+        return "", set()
+    lines = ["### Knowledge Base (by topic)", ""]
+    used = 0
+    topic_names = set()
+    for t in topics:
+        summary = t["content"]
+        max_len = min(250, (budget - used) // max(len(topics), 1))
+        if len(summary) > max_len:
+            cut = summary[:max_len].rfind(".")
+            summary = summary[:cut+1] if cut > 50 else summary[:max_len-3] + "..."
+        entry = f"**[{t['name']}]** {summary}\n"
+        if used + len(entry) > budget:
+            break
+        lines.append(entry)
+        used += len(entry)
+        topic_names.add(t["name"])
+    return "\n".join(lines), topic_names
 
-    # ── 2. Unmerged critical memories (not yet captured in topics) ────────
-    topic_names = {t["name"] for t in topics} if topics else set()
+
+def _build_critical_layer(db, project_id, budget, topic_names):
+    """Layer 2: Unmerged critical memories (imp>=5, not in topics)."""
     critical = db.get_critical_memories(project_id, min_importance=5)
-    # Filter out memories that belong to a consolidated topic
     unmerged = [
         m for m in critical
         if not m.get("topic") or m.get("topic") not in topic_names
     ]
-    if unmerged:
-        lines.append("### Critical (unmerged)")
-        lines.append("")
-        for m in unmerged[:8]:
-            lines.append(f"- [{m['category']}] {m['content']}")
-        lines.append("")
+    if not unmerged:
+        return "", set()
+    lines = ["### Critical (unmerged)", ""]
+    used = 0
+    shown_ids = set()
+    for m in unmerged[:8]:
+        entry = f"- [{m['category']}] {m['content']}"
+        if used + len(entry) > budget:
+            break
+        lines.append(entry)
+        used += len(entry)
+        shown_ids.add(m["id"])
+    lines.append("")
+    return "\n".join(lines), shown_ids
 
-    # ── 3. Recent high-value memories (last 3 sessions, imp>=3) ──────────
+
+def _build_timeline_layer(db, project_id, budget, shown_ids, mode_name="code"):
+    """Layer 3: Unified chronological timeline (recent=full, older=compact)."""
+    from modes import get_injection_priority
+    priority = get_injection_priority(mode_name)
+
     recent = db.get_recent_memories(
-        project_id, sessions_back=3, min_importance=3, limit=15
+        project_id, sessions_back=3, min_importance=3, limit=20
     )
-    if recent:
-        # Filter out those already shown in critical or topics
-        shown_ids = {m["id"] for m in unmerged} if unmerged else set()
-        fresh = [m for m in recent if m["id"] not in shown_ids]
+    fresh = [m for m in recent if m["id"] not in shown_ids]
+    if not fresh:
+        return ""
 
-        if fresh:
-            # Group by category, show compactly
-            by_cat = {}
-            for m in fresh:
-                by_cat.setdefault(m["category"], []).append(m)
+    # Sort by priority order, then importance
+    cat_rank = {cat: i for i, cat in enumerate(priority)}
+    fresh.sort(key=lambda m: (cat_rank.get(m["category"], 99), -m["importance"]))
 
-            labels = {
-                "decision": "Recent Decisions",
-                "bug": "Bugs Fixed",
-                "result": "Results",
-                "task": "Active Tasks",
-                "config": "Config Changes",
-                "arch": "Architecture",
-            }
-            priority_order = ["decision", "bug", "result", "task", "config", "arch"]
-            has_section = False
-            for cat in priority_order:
-                if cat not in by_cat:
-                    continue
-                if not has_section:
-                    lines.append("### Recent")
-                    lines.append("")
-                    has_section = True
-                items = by_cat[cat][:3]
-                for m in items:
-                    prefix = "! " if m["importance"] >= 4 else "- "
-                    lines.append(f"{prefix}[{cat}] {m['content']}")
-            if has_section:
-                lines.append("")
+    lines = ["### Recent", ""]
+    used = 0
+    # First 5: full content. Rest: compact one-liners
+    for i, m in enumerate(fresh):
+        if i < 5:
+            prefix = "! " if m["importance"] >= 4 else "- "
+            entry = f"{prefix}[{m['category']}] {m['content']}"
+        else:
+            content_short = m["content"][:60] + "..." if len(m["content"]) > 60 else m["content"]
+            entry = f"#{m['id']} {m['category']}: {content_short}"
+        if used + len(entry) > budget:
+            break
+        lines.append(entry)
+        used += len(entry)
+    lines.append("")
+    return "\n".join(lines)
 
-    # ── 4. Last session handoff ──────────────────────────────────────────
+
+def _build_handoff_layer(db, project_id, memory_dir, budget):
+    """Layer 4: Structured session summary or handoff."""
+    # Try structured summary first
+    summary = db.get_latest_summary(project_id)
+    if summary:
+        lines = ["### Last Session"]
+        if summary.get("request"):
+            lines.append(f"**Request**: {summary['request'][:200]}")
+        if summary.get("completed"):
+            lines.append(f"**Completed**: {summary['completed'][:200]}")
+        if summary.get("next_steps"):
+            lines.append(f"**Next**: {summary['next_steps'][:200]}")
+        if summary.get("learned"):
+            lines.append(f"**Learned**: {summary['learned'][:200]}")
+        lines.append("")
+        text = "\n".join(lines)
+        return text[:budget]
+
+    # Fallback: SESSION_HANDOFF.md
     handoff = memory_dir / "SESSION_HANDOFF.md"
     if handoff.exists():
         text = handoff.read_text(encoding="utf-8").strip()
         body_lines = text.splitlines()
         body = "\n".join(body_lines[2:]) if len(body_lines) > 2 else text
-        if len(body) > 500:
-            body = body[:497] + "..."
         if body.strip():
-            lines += ["### Last Session State", "", body, ""]
+            section = "### Last Session State\n\n" + body
+            return section[:budget]
+    return ""
 
-    # ── 5. Footer ────────────────────────────────────────────────────────
+
+def _build_footer(db, project_id, memory_dir):
+    """Layer 5: Stats, warnings, token economics."""
+    lines = []
+
+    # Last save status
     last_save = memory_dir / ".last_save.json"
     if last_save.exists():
         try:
@@ -134,26 +175,30 @@ def build_context(memory_dir, db, project_id, project_name):
             if save_info.get("success"):
                 method = save_info.get("method", "?")
                 n = save_info.get("n_saved", 0)
-                lines.append(f"[Last auto-save: {ts} | {n} memories via {method}]")
+                n_obs = save_info.get("n_observations", 0)
+                lines.append(f"[Last save: {ts} | {n} memories, {n_obs} observations via {method}]")
             else:
-                lines.append(f"[Last auto-save FAILED at {ts}]")
+                lines.append(f"[Last save FAILED at {ts}]")
         except Exception:
             pass
 
+    # API key warnings
     try:
         from auth import get_api_key
         _key, source = get_api_key()
         if source == "oauth_expired":
-            lines.append("[WARNING: Claude OAuth token expired -- LLM extraction disabled until refreshed]")
+            lines.append("[WARNING: OAuth expired -- LLM extraction disabled]")
         elif not _key:
-            lines.append("[WARNING: No API key -- LLM memory extraction disabled]")
+            lines.append("[WARNING: No API key -- LLM extraction disabled]")
     except Exception:
         pass
 
+    # Stats
     stats = db.get_stats(project_id)
+    n_obs = db.get_observation_count(project_id)
     lines.append(
         f"[{stats['n_sessions']} sessions, {stats['n_memories']} memories, "
-        f"{stats.get('n_topics', 0)} topics]"
+        f"{stats.get('n_topics', 0)} topics, {n_obs} observations]"
     )
     lines += [
         "",
@@ -162,6 +207,60 @@ def build_context(memory_dir, db, project_id, project_name):
         "",
     ]
     return "\n".join(lines)
+
+
+def build_context(memory_dir, db, project_id, project_name):
+    """Progressive disclosure context injection with token budget."""
+    total_budget = _DEFAULT_BUDGET
+    mode_name = db.get_project_mode(project_id)
+
+    # Header (fixed cost)
+    header = (
+        f"=== CC-MEMORY: Context Restored ===\n"
+        f"Project: {project_name}  |  {datetime.now().strftime('%Y-%m-%d %H:%M')}\n"
+    )
+    remaining = total_budget - len(header)
+    parts = [header]
+
+    # Layer 1: Topics
+    budget = int(total_budget * _LAYER_BUDGETS["topics"])
+    topics_text, topic_names = _build_topics_layer(db, project_id, budget)
+    if topics_text:
+        parts.append(topics_text)
+        remaining -= len(topics_text)
+
+    # Layer 2: Critical unmerged
+    budget = int(total_budget * _LAYER_BUDGETS["critical"])
+    critical_text, shown_ids = _build_critical_layer(db, project_id, budget, topic_names)
+    if critical_text:
+        parts.append(critical_text)
+        remaining -= len(critical_text)
+
+    # Layer 3: Timeline
+    budget = int(total_budget * _LAYER_BUDGETS["timeline"])
+    timeline_text = _build_timeline_layer(db, project_id, budget, shown_ids, mode_name)
+    if timeline_text:
+        parts.append(timeline_text)
+        remaining -= len(timeline_text)
+
+    # Layer 4: Handoff/summary
+    budget = min(int(total_budget * _LAYER_BUDGETS["handoff"]), max(remaining - 500, 0))
+    handoff_text = _build_handoff_layer(db, project_id, memory_dir, budget)
+    if handoff_text:
+        parts.append(handoff_text)
+        remaining -= len(handoff_text)
+
+    # Layer 5: Footer (always included)
+    footer = _build_footer(db, project_id, memory_dir)
+    parts.append(footer)
+
+    result = "\n".join(parts)
+
+    # Token economics log
+    total_tokens = len(result) // _CHARS_PER_TOKEN
+    _log.info(f"injected ~{total_tokens} tokens of context ({len(result)} chars)")
+
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -360,7 +459,7 @@ def retroactive_save(cwd: str, db, project_id: int, current_session_id: str = ""
         if jsonl.stat().st_size < 1024:
             continue
 
-        print(f"[cc-memory] retroactive save for {session_uuid[:8]}...", file=sys.stderr)
+        _log.info(f"retroactive save for {session_uuid[:8]}...")
         try:
             messages = load_transcript(str(jsonl))
             if not messages or len(messages) < 5:
@@ -407,13 +506,10 @@ def retroactive_save(cwd: str, db, project_id: int, current_session_id: str = ""
                 n_saved += 1
 
             n_retroactive += 1
-            print(
-                f"[cc-memory] retroactive: {n_saved} memories from {session_uuid[:8]} via {method}",
-                file=sys.stderr,
-            )
+            _log.info(f"retroactive: {n_saved} memories from {session_uuid[:8]} via {method}")
 
         except Exception as e:
-            print(f"[cc-memory] retroactive save error: {e}", file=sys.stderr)
+            _log.error(f"retroactive save error: {e}")
 
     if n_retroactive:
         from pre_compact import _fmt_memory_index
@@ -429,7 +525,7 @@ def main():
     try:
         data = json.load(sys.stdin)
     except Exception as e:
-        print(f"[cc-memory] session_start stdin error: {e}", file=sys.stderr)
+        _log.error(f"session_start stdin error: {e}")
         sys.exit(0)
 
     cwd = data.get("cwd", "")
@@ -441,7 +537,7 @@ def main():
         memory_dir = Path(cwd) / "memory"
         db_path = memory_dir / "memory.db"
         if not db_path.exists():
-            print(f"[cc-memory] no DB for {cwd}", file=sys.stderr)
+            _log.info(f"no DB for {cwd}")
             sys.exit(0)
 
         db = MemoryDB(db_path)
@@ -449,16 +545,16 @@ def main():
 
         # Job 1: Inject context (MUST happen first, fast)
         print(build_context(memory_dir, db, project_id, Path(cwd).name))
-        print(f"[cc-memory] injected context for {Path(cwd).name}", file=sys.stderr)
+        _log.info(f"injected context for {Path(cwd).name}")
 
         # Job 2: Retroactive save (best effort)
         try:
             retroactive_save(cwd, db, project_id, session_id)
         except Exception as e:
-            print(f"[cc-memory] retroactive save failed: {e}", file=sys.stderr)
+            _log.error(f"retroactive save failed: {e}")
 
     except Exception:
-        print(f"[cc-memory] session_start ERROR:\n{traceback.format_exc()}", file=sys.stderr)
+        _log.error_tb("session_start ERROR")
     sys.exit(0)
 
 

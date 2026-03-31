@@ -34,6 +34,9 @@ from typing import Dict, List, Optional, Tuple
 _PLUGIN_DIR = Path(__file__).parent
 sys.path.insert(0, str(_PLUGIN_DIR))
 from db import MemoryDB
+from logger import get_logger
+
+_log = get_logger("consolidate")
 
 
 # ---------------------------------------------------------------------------
@@ -300,8 +303,7 @@ def _summarize_topic_llm(
                 text += block.get("text", "")
         return text.strip() if text.strip() else None
     except Exception as e:
-        print(f"[cc-memory] consolidation LLM error for {topic_name}: {e}",
-              file=sys.stderr)
+        _log.error(f"consolidation LLM error for {topic_name}: {e}")
         return None
 
 
@@ -418,16 +420,11 @@ def archive_consolidated(
     for topic, memories in by_topic.items():
         if len(memories) <= keep_per_topic:
             continue
-        # Sort by importance desc, then recency
+        # Highest importance first, newest first within same importance
         sorted_mems = sorted(
             memories,
             key=lambda m: (-m["importance"], m["created_at"]),
             reverse=False
-        )
-        # Sort properly: highest importance first, newest first within same importance
-        sorted_mems = sorted(
-            memories,
-            key=lambda m: (-m["importance"], -len(m["created_at"]), m["created_at"]),
         )
         # Keep top N, archive the rest
         for m in sorted_mems[keep_per_topic:]:
@@ -452,7 +449,7 @@ def run_consolidation(
     db_path = memory_dir / "memory.db"
     if not db_path.exists():
         if verbose:
-            print(f"[cc-memory] no DB at {db_path}", file=sys.stderr)
+            _log.info(f"no DB at {db_path}")
         return {}
 
     db = MemoryDB(db_path)
@@ -464,48 +461,47 @@ def run_consolidation(
     n = cleanup_garbage(db, project_id)
     results["garbage_deleted"] = n
     if verbose and n:
-        print(f"[cc-memory] cleanup: {n} garbage memories deleted", file=sys.stderr)
+        _log.info(f"cleanup: {n} garbage memories deleted")
 
     # Step 2: Dedup
     n = merge_near_duplicates(db, project_id)
     results["duplicates_archived"] = n
     if verbose and n:
-        print(f"[cc-memory] dedup: {n} near-duplicates archived", file=sys.stderr)
+        _log.info(f"dedup: {n} near-duplicates archived")
 
     # Step 3: Topic assignment
     n = assign_topics_auto(db, project_id)
     results["topics_assigned"] = n
     if verbose and n:
-        print(f"[cc-memory] topics: {n} memories assigned to topics", file=sys.stderr)
+        _log.info(f"topics: {n} memories assigned to topics")
 
     # Step 4: Topic consolidation
     n = consolidate_topics(db, project_id, use_llm=use_llm)
     results["topics_consolidated"] = n
     if verbose and n:
-        print(f"[cc-memory] consolidated: {n} topic summaries created/updated", file=sys.stderr)
+        _log.info(f"consolidated: {n} topic summaries created/updated")
 
     # Step 5: Importance decay
     n = decay_importance(db, project_id)
     results["importance_decayed"] = n
     if verbose and n:
-        print(f"[cc-memory] decay: {n} memories had importance reduced", file=sys.stderr)
+        _log.info(f"decay: {n} memories had importance reduced")
 
     # Step 6: Archive (only after consolidation has summaries)
     n = archive_consolidated(db, project_id)
     results["archived_after_consolidation"] = n
     if verbose and n:
-        print(f"[cc-memory] archive: {n} memories archived (captured in topic summaries)", file=sys.stderr)
+        _log.info(f"archive: {n} memories archived (captured in topic summaries)")
 
     # Final stats
     stats = db.get_stats(project_id)
     results["final_active"] = stats["n_memories"]
     results["final_topics"] = stats["n_topics"]
     if verbose:
-        print(
-            f"[cc-memory] consolidation done: "
+        _log.info(
+            f"consolidation done: "
             f"{stats['n_memories']} active memories, "
-            f"{stats['n_topics']} topics",
-            file=sys.stderr
+            f"{stats['n_topics']} topics"
         )
 
     return results
