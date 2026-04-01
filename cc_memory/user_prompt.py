@@ -46,10 +46,28 @@ def main():
     if not cwd or not session_id:
         sys.exit(0)
 
-    # Early exit: not a cc-memory project
+    # Auto-initialize: create memory/ and DB on first contact with any project
     db_path = Path(cwd) / "memory" / "memory.db"
     if not db_path.exists():
-        sys.exit(0)
+        try:
+            memory_dir = Path(cwd) / "memory"
+            memory_dir.mkdir(parents=True, exist_ok=True)
+            (memory_dir / "sessions").mkdir(exist_ok=True)
+            (memory_dir / "topics").mkdir(exist_ok=True)
+            from db import MemoryDB
+            db = MemoryDB(db_path)
+            db.upsert_project(cwd)
+            # Create .gitignore
+            gi = memory_dir / ".gitignore"
+            if not gi.exists():
+                gi.write_text(
+                    "memory.db\nmemory.db-wal\nmemory.db-shm\nsessions/\n.last_save.json\n",
+                    encoding="utf-8"
+                )
+            from logger import get_logger
+            get_logger("user_prompt").info(f"auto-initialized memory for {Path(cwd).name}")
+        except Exception:
+            sys.exit(0)
 
     safe = _safe_id(session_id)
     tmp = Path(tempfile.gettempdir())
