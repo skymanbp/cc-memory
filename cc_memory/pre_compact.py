@@ -408,7 +408,7 @@ def _maybe_consolidate(cwd: str, db: MemoryDB, project_id: int):
 # ---------------------------------------------------------------------------
 def main():
     try:
-        data = json.load(sys.stdin)
+        data = json.loads(sys.stdin.buffer.read().decode("utf-8"))
     except Exception as exc:
         _log.error(f"stdin parse error: {exc}")
         sys.exit(0)

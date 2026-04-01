@@ -201,7 +201,7 @@ def _observer_evaluate(cwd, session_id):
 
 def main():
     try:
-        data = json.load(sys.stdin)
+        data = json.loads(sys.stdin.buffer.read().decode("utf-8"))
     except Exception:
         sys.exit(0)
 

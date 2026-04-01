@@ -61,7 +61,7 @@ class Logger:
             _ensure_log_dir()
             log_path = _LOG_DIR / f"cc-memory-{today}.log"
             try:
-                self._file_handle = open(str(log_path), "a", encoding="utf-8")
+                self._file_handle = open(str(log_path), "a", encoding="utf-8", errors="replace")
                 self._today = today
             except Exception:
                 return None

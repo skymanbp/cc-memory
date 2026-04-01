@@ -523,7 +523,7 @@ def retroactive_save(cwd: str, db, project_id: int, current_session_id: str = ""
 # ---------------------------------------------------------------------------
 def main():
     try:
-        data = json.load(sys.stdin)
+        data = json.loads(sys.stdin.buffer.read().decode("utf-8"))
     except Exception as e:
         _log.error(f"session_start stdin error: {e}")
         sys.exit(0)
