@@ -212,6 +212,7 @@ class MemoryDB:
         with self._connect() as conn:
             conn.executescript(SCHEMA_SQL)
         self._run_migrations()
+        self._detect_fts5()
         # Ensure topic column exists for new code paths
         with self._connect() as conn:
             cols = {r[1] for r in conn.execute("PRAGMA table_info(memories)").fetchall()}
@@ -290,6 +291,16 @@ class MemoryDB:
                 SELECT id, content, tags, COALESCE(topic, '') FROM memories
             """)
             self.__class__._fts5_available = True
+        except sqlite3.OperationalError:
+            self.__class__._fts5_available = False
+
+    def _detect_fts5(self):
+        """Probe FTS5 availability on every connect (migration may have run in a prior session)."""
+        try:
+            with self._connect() as conn:
+                # Check if the FTS table exists and is queryable
+                conn.execute("SELECT rowid FROM memories_fts LIMIT 0")
+                self.__class__._fts5_available = True
         except sqlite3.OperationalError:
             self.__class__._fts5_available = False
 

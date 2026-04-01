@@ -61,6 +61,159 @@ def _table(headers, rows):
 
 # ── Commands ─────────────────────────────────────────────────────────────────
 
+def cmd_status(args):
+    """Comprehensive health check: is cc-memory working?"""
+    import tempfile, os
+    memory_dir, db_path, name = _resolve_db(args.project)
+    project = str(Path(args.project).resolve())
+
+    print(f"\n{'='*55}")
+    print(f"  cc-memory v2.0 Status Check: {name}")
+    print(f"{'='*55}\n")
+
+    # 1. Plugin files
+    plugin_dir = Path.home() / ".claude" / "hooks" / "cc-memory"
+    required = ["db.py", "pre_compact.py", "session_start.py", "stop.py",
+                "post_tool_use.py", "user_prompt.py", "logger.py", "privacy.py", "modes.py"]
+    missing = [f for f in required if not (plugin_dir / f).exists()]
+    if missing:
+        print(f"  [FAIL] Plugin files missing: {', '.join(missing)}")
+    else:
+        print(f"  [OK]   Plugin installed ({plugin_dir})")
+
+    # 2. Hooks in settings.json
+    settings_path = Path.home() / ".claude" / "settings.json"
+    expected_hooks = ["PreCompact", "SessionStart", "Stop", "PostToolUse", "UserPromptSubmit"]
+    if settings_path.exists():
+        settings = json.loads(settings_path.read_text(encoding="utf-8"))
+        hooks = settings.get("hooks", {})
+        registered = []
+        for event in expected_hooks:
+            hook_list = hooks.get(event, [])
+            has_cc = any(
+                "cc-memory" in h.get("command", "")
+                for mg in hook_list
+                for h in (mg.get("hooks", []) if isinstance(mg, dict) else [])
+            )
+            registered.append((event, has_cc))
+        all_ok = all(ok for _, ok in registered)
+        if all_ok:
+            print(f"  [OK]   All 5 hooks registered")
+        else:
+            for event, ok in registered:
+                status = "OK" if ok else "MISSING"
+                print(f"  [{status:4}] {event}")
+    else:
+        print(f"  [FAIL] settings.json not found")
+
+    # 3. Database
+    if not db_path.exists():
+        print(f"  [FAIL] No database at {db_path}")
+        print(f"\n  Run: python mem.py --project {args.project} init")
+        return
+    db = MemoryDB(db_path)
+    pid = db.upsert_project(project)
+    stats = db.get_stats(pid)
+    print(f"  [OK]   Database: {stats['n_memories']} memories, {stats['n_sessions']} sessions, {stats.get('n_topics', 0)} topics")
+
+    # 4. FTS5
+    print(f"  [{'OK' if db._fts5_available else 'WARN'}]   FTS5: {'available' if db._fts5_available else 'unavailable (using LIKE fallback)'}")
+
+    # 5. Observations
+    n_obs = db.get_observation_count(pid)
+    print(f"  [{'OK' if n_obs > 0 else 'INFO'}]   Observations: {n_obs} recorded")
+
+    # 6. Last save
+    last_save = memory_dir / ".last_save.json"
+    if last_save.exists():
+        try:
+            info = json.loads(last_save.read_text(encoding="utf-8"))
+            ts = info.get("timestamp", "?")
+            ok = info.get("success", False)
+            method = info.get("method", "?")
+            n = info.get("n_saved", 0)
+            status = "OK" if ok else "FAIL"
+            print(f"  [{status:4}]   Last save: {ts} ({n} memories via {method})")
+        except Exception:
+            print(f"  [WARN] Last save status unreadable")
+    else:
+        print(f"  [INFO] No save recorded yet (PreCompact hasn't fired)")
+
+    # 7. Session summary
+    summary = db.get_latest_summary(pid)
+    if summary:
+        print(f"  [OK]   Session summary: \"{(summary.get('request') or '(empty)')[:60]}\"")
+    else:
+        print(f"  [INFO] No session summary yet")
+
+    # 8. Observer (Stop hook) - check eval marker
+    tmp = Path(tempfile.gettempdir())
+    eval_files = list(tmp.glob("cc_mem_eval_*"))
+    if eval_files:
+        latest = max(eval_files, key=lambda f: f.stat().st_mtime)
+        try:
+            last_eval = latest.read_text(encoding="utf-8").strip()
+            print(f"  [OK]   Observer last evaluated: {last_eval}")
+        except Exception:
+            pass
+    else:
+        print(f"  [INFO] Observer hasn't evaluated yet (needs 3+ observations per turn)")
+
+    # 9. API key
+    sys.path.insert(0, str(plugin_dir))
+    try:
+        from auth import get_api_key
+        key, source = get_api_key()
+        if key:
+            print(f"  [OK]   API key: {source} ({key[:8]}...)")
+        else:
+            reason = "OAuth expired" if source == "oauth_expired" else "not found"
+            print(f"  [WARN] API key: {reason} (LLM extraction disabled)")
+    except Exception as e:
+        print(f"  [WARN] API key check failed: {e}")
+
+    # 10. Log files
+    log_dir = plugin_dir / "logs"
+    if log_dir.exists():
+        logs = sorted(log_dir.glob("cc-memory-*.log"), reverse=True)
+        if logs:
+            latest_log = logs[0]
+            size = latest_log.stat().st_size
+            print(f"  [OK]   Logs: {latest_log.name} ({size} bytes)")
+            # Show last few lines
+            try:
+                lines = latest_log.read_text(encoding="utf-8").strip().splitlines()
+                if lines:
+                    print(f"\n  Last log entries:")
+                    for line in lines[-5:]:
+                        print(f"    {line}")
+            except Exception:
+                pass
+        else:
+            print(f"  [INFO] No log files yet")
+    else:
+        print(f"  [INFO] Log directory not created yet")
+
+    # 11. Mode
+    mode = db.get_project_mode(pid)
+    print(f"\n  Mode: {mode}")
+
+    # Summary
+    print(f"\n{'='*55}")
+    issues = []
+    if missing:
+        issues.append("plugin files missing")
+    if not db_path.exists():
+        issues.append("no database")
+    if not key:
+        issues.append("no API key")
+    if issues:
+        print(f"  Issues: {', '.join(issues)}")
+    else:
+        print(f"  Everything looks good!")
+    print(f"{'='*55}")
+
+
 def cmd_stats(args):
     _, db_path, name = _resolve_db(args.project)
     conn = _require_db(db_path)
@@ -373,6 +526,7 @@ def make_parser():
     p.add_argument("--project", required=True, help="Project root path")
     sub = p.add_subparsers(dest="command", required=True)
 
+    sub.add_parser("status", help="Health check: verify cc-memory is working")
     sub.add_parser("stats", help="Database statistics + topic distribution")
 
     pl = sub.add_parser("list", help="List memories")
@@ -423,7 +577,7 @@ def make_parser():
 if __name__ == "__main__":
     args = make_parser().parse_args()
     dispatch = {
-        "stats": cmd_stats, "list": cmd_list, "search": cmd_search,
+        "status": cmd_status, "stats": cmd_stats, "list": cmd_list, "search": cmd_search,
         "sessions": cmd_sessions, "sql": cmd_sql, "add": cmd_add,
         "keywords": cmd_keywords, "topics": cmd_topics,
         "consolidate": cmd_consolidate, "cleanup": cmd_cleanup,
