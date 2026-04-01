@@ -252,6 +252,15 @@ def init_project(project_path: str):
         shutil.copy2(str(skill_src), str(skill_dst))
         print(f"[OK] Deployed /save-memories skill to {skill_dir}")
 
+    # Deploy /mem-status skill
+    status_dir = project / ".claude" / "skills" / "mem-status"
+    status_dst = status_dir / "skill.md"
+    status_src = PLUGIN_DIR / "skill_status.md"
+    if not status_dst.exists() and status_src.exists():
+        status_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(str(status_src), str(status_dst))
+        print(f"[OK] Deployed /mem-status skill to {status_dir}")
+
 
 def print_usage():
     print("""

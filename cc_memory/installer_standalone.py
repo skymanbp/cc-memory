@@ -289,15 +289,16 @@ class StandaloneInstaller:
                     encoding="utf-8"
                 )
 
-            # Deploy /save-memories skill
-            skill_dir = project / ".claude" / "skills" / "save-memories"
-            skill_dst = skill_dir / "skill.md"
-            skill_src = TARGET_DIR / "skill_template.md"
-            if not skill_dst.exists() and skill_src.exists():
-                skill_dir.mkdir(parents=True, exist_ok=True)
-                import shutil
-                shutil.copy2(str(skill_src), str(skill_dst))
-                self._log(f"[OK] Deployed /save-memories skill")
+            # Deploy skills
+            import shutil as _shutil
+            for skill_name, src_file in [("save-memories", "skill_template.md"), ("mem-status", "skill_status.md")]:
+                skill_dir = project / ".claude" / "skills" / skill_name
+                skill_dst = skill_dir / "skill.md"
+                skill_src = TARGET_DIR / src_file
+                if not skill_dst.exists() and skill_src.exists():
+                    skill_dir.mkdir(parents=True, exist_ok=True)
+                    _shutil.copy2(str(skill_src), str(skill_dst))
+                    self._log(f"[OK] Deployed /{skill_name} skill")
 
             self._log(f"[OK] Memory initialized for {project.name}")
             self._log(f"     {memory_dir}")

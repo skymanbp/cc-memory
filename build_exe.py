@@ -30,6 +30,7 @@ def build_installer():
         # v2.0 new modules
         "post_tool_use.py", "user_prompt.py", "privacy.py", "logger.py", "modes.py",
         "mcp_server.py", "web_viewer.py", "consolidate.py",
+        "skill_status.md",
     ]
 
     # Verify all files exist
