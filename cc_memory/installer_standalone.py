@@ -274,8 +274,10 @@ class StandaloneInstaller:
             (memory_dir / "sessions").mkdir(exist_ok=True)
             (memory_dir / "topics").mkdir(exist_ok=True)
 
-            # Initialize DB using installed plugin
-            sys.path.insert(0, str(TARGET_DIR))
+            # Initialize DB — use bundled db.py (works in exe before install)
+            db_path_str = str(BUNDLE_DIR)
+            if db_path_str not in sys.path:
+                sys.path.insert(0, db_path_str)
             from db import MemoryDB
             db = MemoryDB(memory_dir / "memory.db")
             db.upsert_project(str(project))
@@ -295,6 +297,8 @@ class StandaloneInstaller:
                 skill_dir = project / ".claude" / "skills" / skill_name
                 skill_dst = skill_dir / "skill.md"
                 skill_src = TARGET_DIR / src_file
+                if not skill_src.exists():
+                    skill_src = BUNDLE_DIR / src_file  # fallback to bundled copy
                 if not skill_dst.exists() and skill_src.exists():
                     skill_dir.mkdir(parents=True, exist_ok=True)
                     _shutil.copy2(str(skill_src), str(skill_dst))
