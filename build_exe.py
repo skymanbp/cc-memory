@@ -51,6 +51,9 @@ def build_installer():
         "--windowed",
         "--name", "cc-memory-installer",
         "--icon", "NONE",
+        "--hidden-import", "sqlite3",
+        "--hidden-import", "_sqlite3",
+        "--collect-all", "sqlite3",
         *data_args,
         str(SRC / "installer_standalone.py"),
     ]
