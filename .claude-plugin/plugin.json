@@ -1,0 +1,15 @@
+{
+  "name": "cc-memory",
+  "version": "2.0.0",
+  "description": "Persistent memory for Claude Code — automatic save/restore of conversation context across compactions and sessions via SQLite, real-time tool observation, FTS5 search, and AI-judged extraction.",
+  "author": {
+    "name": "skymanbp",
+    "url": "https://github.com/skymanbp"
+  },
+  "homepage": "https://github.com/skymanbp/cc-memory",
+  "repository": "https://github.com/skymanbp/cc-memory",
+  "license": "MIT",
+  "keywords": ["memory", "persistence", "context", "sqlite", "observation", "fts5"],
+  "hooks": "./hooks/hooks.json",
+  "skills": "./skills/"
+}
