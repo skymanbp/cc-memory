@@ -377,32 +377,13 @@ def _extract_via_llm(messages: list) -> "list[dict] | None":
     if len(transcript_text) < 100:
         return None
 
-    body = json.dumps({
-        "model": _HAIKU_MODEL,
-        "max_tokens": 2000,
-        "messages": [{"role": "user", "content": f"Extract memories:\n\n{transcript_text}"}],
-        "system": _EXTRACTION_PROMPT,
-    }, ensure_ascii=False).encode("utf-8")
-
-    req = urllib.request.Request(
-        _API_URL, data=body,
-        headers={
-            "Content-Type": "application/json",
-            "x-api-key": api_key,
-            "anthropic-version": "2023-06-01",
-        },
-        method="POST",
-    )
-
     try:
-        with urllib.request.urlopen(req, timeout=_API_TIMEOUT) as resp:
-            result = json.loads(resp.read().decode("utf-8"))
-
-        text_content = ""
-        for block in result.get("content", []):
-            if block.get("type") == "text":
-                text_content += block.get("text", "")
-
+        from ccl_backend import call_llm
+        text_content = call_llm(
+            _EXTRACTION_PROMPT,
+            f"Extract memories:\n\n{transcript_text}",
+            api_key, max_tokens=2000, timeout=_API_TIMEOUT,
+        )
         text_content = text_content.strip()
         if text_content.startswith("```"):
             lines = text_content.split("\n")
@@ -544,7 +525,14 @@ def main():
         project_id = db.upsert_project(cwd)
 
         # Job 1: Inject context (MUST happen first, fast)
+        print(f"\n[cc-memory] Session start — loading memory for '{Path(cwd).name}'...")
         print(build_context(memory_dir, db, project_id, Path(cwd).name))
+        _stats = db.get_stats(project_id)
+        print(
+            f"[cc-memory ✓] Context loaded: "
+            f"{_stats['n_memories']} memories, "
+            f"{_stats.get('n_topics', 0)} topics"
+        )
         _log.info(f"injected context for {Path(cwd).name}")
 
         # Job 2: Retroactive save (best effort)

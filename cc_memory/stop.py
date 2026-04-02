@@ -119,34 +119,12 @@ def _observer_evaluate(cwd, session_id):
     obs_text = "\n".join(obs_lines)
     user_context = f"User request: {user_prompt}\n\n" if user_prompt else ""
 
-    body = json.dumps({
-        "model": _HAIKU_MODEL,
-        "max_tokens": 1000,
-        "messages": [{
-            "role": "user",
-            "content": f"{user_context}Tool observations:\n{obs_text}",
-        }],
-        "system": _OBSERVER_PROMPT,
-    }, ensure_ascii=False).encode("utf-8")
-
-    req = urllib.request.Request(
-        _API_URL, data=body,
-        headers={
-            "Content-Type": "application/json",
-            "x-api-key": api_key,
-            "anthropic-version": "2023-06-01",
-        },
-        method="POST",
-    )
+    user_msg = f"{user_context}Tool observations:\n{obs_text}"
 
     try:
-        with urllib.request.urlopen(req, timeout=_API_TIMEOUT) as resp:
-            result = json.loads(resp.read().decode("utf-8"))
-
-        text_content = ""
-        for block in result.get("content", []):
-            if block.get("type") == "text":
-                text_content += block.get("text", "")
+        from ccl_backend import call_llm
+        text_content = call_llm(_OBSERVER_PROMPT, user_msg, api_key,
+                                max_tokens=1000, timeout=_API_TIMEOUT)
 
         text_content = text_content.strip()
         if text_content.startswith("```"):
@@ -224,6 +202,21 @@ def main():
             get_logger("stop").error_tb("observer error")
         except Exception:
             pass
+
+    # ── Job 1.5: Always print brief status (visible every turn) ────────
+    try:
+        from db import MemoryDB
+        _db = MemoryDB(memory_dir / "memory.db")
+        _pid = _db.upsert_project(cwd)
+        _stats = _db.get_stats(_pid)
+        _n_obs = _db.get_observation_count(_pid)
+        print(
+            f"\n[cc-memory ✓] {_stats['n_memories']} memories"
+            f" | {_n_obs} obs total"
+            f" | {_stats.get('n_topics', 0)} topics"
+        )
+    except Exception:
+        print("\n[cc-memory ✓] stop hook ran")
 
     # ── Job 2: Reminder (after 8+ turns, once per session) ────────────
     marker = Path(tempfile.gettempdir()) / f"{_MARKER_PREFIX}{session_id[:16]}"

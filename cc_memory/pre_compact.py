@@ -155,36 +155,10 @@ def _extract_via_llm(messages: list, observations: list = None) -> "list[dict] |
 
     user_content = f"Extract memories from this conversation:\n\n{transcript_text}{obs_context}"
 
-    body = json.dumps({
-        "model": _HAIKU_MODEL,
-        "max_tokens": 2500,
-        "messages": [
-            {
-                "role": "user",
-                "content": user_content,
-            }
-        ],
-        "system": _EXTRACTION_PROMPT,
-    }, ensure_ascii=False).encode("utf-8")
-
-    req = urllib.request.Request(
-        _API_URL, data=body,
-        headers={
-            "Content-Type": "application/json",
-            "x-api-key": api_key,
-            "anthropic-version": "2023-06-01",
-        },
-        method="POST",
-    )
-
     try:
-        with urllib.request.urlopen(req, timeout=_API_TIMEOUT) as resp:
-            result = json.loads(resp.read().decode("utf-8"))
-
-        text_content = ""
-        for block in result.get("content", []):
-            if block.get("type") == "text":
-                text_content += block.get("text", "")
+        from ccl_backend import call_llm
+        text_content = call_llm(_EXTRACTION_PROMPT, user_content, api_key,
+                                max_tokens=2500, timeout=_API_TIMEOUT)
 
         text_content = text_content.strip()
         if text_content.startswith("```"):
@@ -587,6 +561,11 @@ def main():
             f"{n_saved} new memories via {method}, "
             f"{len(observations)} observations, "
             f"{len(ext['keywords'])} keywords)"
+        )
+        # Notify via stdout — appears in next session's compacted context
+        print(
+            f"[cc-memory] Pre-compact: {n_saved} memories saved"
+            f" ({ext['msg_count']} msgs, {len(observations)} obs, via {method})"
         )
 
     except Exception:

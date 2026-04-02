@@ -791,40 +791,17 @@ Be aggressive about removing noise. Only KEEP memories that would be genuinely u
 Memories:
 {mem_text}"""
 
-        body = json.dumps({
-            "model": "claude-haiku-4-5-20251001",
-            "max_tokens": 3000,
-            "messages": [{"role": "user", "content": prompt}],
-            "system": "You are a memory database curator. Output ONLY valid JSON, no markdown.",
-        }).encode("utf-8")
-
-        req = urllib.request.Request(
-            "https://api.anthropic.com/v1/messages",
-            data=body,
-            headers={
-                "Content-Type": "application/json",
-                "x-api-key": api_key,
-                "anthropic-version": "2023-06-01",
-            },
-            method="POST",
-        )
-
         try:
-            with urllib.request.urlopen(req, timeout=25) as resp:
-                result = json.loads(resp.read().decode("utf-8"))
-
-            text_content = ""
-            for block in result.get("content", []):
-                if block.get("type") == "text":
-                    text_content += block.get("text", "")
-
+            from ccl_backend import call_llm
+            text_content = call_llm(
+                "You are a memory database curator. Output ONLY valid JSON, no markdown.",
+                prompt, api_key, max_tokens=3000, timeout=25,
+            )
             text_content = text_content.strip()
             if text_content.startswith("```"):
                 lines = text_content.split("\n")
                 text_content = "\n".join(l for l in lines if not l.strip().startswith("```"))
-
             analysis = json.loads(text_content)
-
         except Exception as e:
             self.status_var.set("Ready")
             messagebox.showerror("API Error", f"LLM analysis failed:\n\n{e}")
@@ -1306,32 +1283,13 @@ Output ONLY valid JSON array."""
         if len(transcript_text) < 100:
             return None
 
-        body = json.dumps({
-            "model": self._HAIKU_MODEL,
-            "max_tokens": 2000,
-            "messages": [{"role": "user", "content": f"Extract memories:\n\n{transcript_text}"}],
-            "system": self._EXTRACTION_PROMPT,
-        }).encode("utf-8")
-
-        req = urllib.request.Request(
-            self._API_URL, data=body,
-            headers={
-                "Content-Type": "application/json",
-                "x-api-key": api_key,
-                "anthropic-version": "2023-06-01",
-            },
-            method="POST",
-        )
-
         try:
-            with urllib.request.urlopen(req, timeout=25) as resp:
-                result = json.loads(resp.read().decode("utf-8"))
-
-            text_content = ""
-            for block in result.get("content", []):
-                if block.get("type") == "text":
-                    text_content += block.get("text", "")
-
+            from ccl_backend import call_llm
+            text_content = call_llm(
+                self._EXTRACTION_PROMPT,
+                f"Extract memories:\n\n{transcript_text}",
+                api_key, max_tokens=2000, timeout=25,
+            )
             text_content = text_content.strip()
             if text_content.startswith("```"):
                 lines = text_content.split("\n")

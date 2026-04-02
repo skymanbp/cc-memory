@@ -277,30 +277,13 @@ def _summarize_topic_llm(
         for m in memories
     )
 
-    body = json.dumps({
-        "model": _HAIKU_MODEL,
-        "max_tokens": 500,
-        "messages": [{"role": "user", "content": f"Memories for topic \"{topic_name}\":\n\n{mem_text}"}],
-        "system": _CONSOLIDATION_PROMPT.format(topic_name=topic_name),
-    }, ensure_ascii=False).encode("utf-8")
-
-    req = urllib.request.Request(
-        _API_URL, data=body,
-        headers={
-            "Content-Type": "application/json",
-            "x-api-key": api_key,
-            "anthropic-version": "2023-06-01",
-        },
-        method="POST",
-    )
-
     try:
-        with urllib.request.urlopen(req, timeout=_API_TIMEOUT) as resp:
-            result = json.loads(resp.read().decode("utf-8"))
-        text = ""
-        for block in result.get("content", []):
-            if block.get("type") == "text":
-                text += block.get("text", "")
+        from ccl_backend import call_llm
+        text = call_llm(
+            _CONSOLIDATION_PROMPT.format(topic_name=topic_name),
+            f"Memories for topic \"{topic_name}\":\n\n{mem_text}",
+            api_key, max_tokens=500, timeout=_API_TIMEOUT,
+        )
         return text.strip() if text.strip() else None
     except Exception as e:
         _log.error(f"consolidation LLM error for {topic_name}: {e}")
