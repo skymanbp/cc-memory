@@ -529,7 +529,7 @@ def main():
         print(build_context(memory_dir, db, project_id, Path(cwd).name))
         _stats = db.get_stats(project_id)
         print(
-            f"[cc-memory ✓] Context loaded: "
+            f"[cc-memory OK] Context loaded: "
             f"{_stats['n_memories']} memories, "
             f"{_stats.get('n_topics', 0)} topics"
         )

@@ -211,12 +211,12 @@ def main():
         _stats = _db.get_stats(_pid)
         _n_obs = _db.get_observation_count(_pid)
         print(
-            f"\n[cc-memory ✓] {_stats['n_memories']} memories"
+            f"\n[cc-memory OK] {_stats['n_memories']} memories"
             f" | {_n_obs} obs total"
             f" | {_stats.get('n_topics', 0)} topics"
         )
     except Exception:
-        print("\n[cc-memory ✓] stop hook ran")
+        print("\n[cc-memory OK] stop hook ran")
 
     # ── Job 2: Reminder (after 8+ turns, once per session) ────────────
     marker = Path(tempfile.gettempdir()) / f"{_MARKER_PREFIX}{session_id[:16]}"
