@@ -500,6 +500,83 @@ def retroactive_save(cwd: str, db, project_id: int, current_session_id: str = ""
 
 
 # ---------------------------------------------------------------------------
+# CCL upstream update check
+# ---------------------------------------------------------------------------
+def _ccl_update_check(cwd: str):
+    """
+    Check if tracked CCL source repos have new upstream commits.
+    Only runs when cwd is under the CCL root, once per session.
+    """
+    import subprocess
+    import tempfile
+
+    ccl_root = Path("D:/Projects/Claude-Code-Local")
+    try:
+        if not Path(cwd).resolve().is_relative_to(ccl_root.resolve()):
+            return
+    except Exception:
+        return
+
+    # Once per session marker
+    marker = Path(tempfile.gettempdir()) / "ccl_update_checked"
+    if marker.exists():
+        return
+
+    sources_cfg = ccl_root / ".ccl" / "sources.json"
+    if not sources_cfg.exists():
+        return
+
+    cfg = json.loads(sources_cfg.read_text(encoding="utf-8"))
+    if not cfg.get("update_check", {}).get("enabled", True):
+        return
+
+    updates = []
+    errors = []
+    for src in cfg.get("sources", []):
+        if not src.get("track", False):
+            continue
+        name = src.get("name", "?")
+        local = Path(src.get("local", ""))
+        url = src.get("url", "")
+        branch = src.get("branch", "HEAD")
+        if not local.exists() or not url:
+            continue
+        try:
+            local_head = subprocess.check_output(
+                ["git", "rev-parse", "HEAD"],
+                cwd=str(local), stderr=subprocess.DEVNULL, timeout=3,
+            ).decode().strip()
+
+            remote_out = subprocess.check_output(
+                ["git", "ls-remote", url, f"refs/heads/{branch}"],
+                stderr=subprocess.DEVNULL, timeout=10,
+            ).decode().strip()
+
+            if not remote_out:
+                continue
+            remote_head = remote_out.split()[0]
+
+            if local_head != remote_head:
+                updates.append(name)
+        except Exception as e:
+            errors.append(name)
+
+    # Write marker regardless of result
+    try:
+        marker.touch()
+    except Exception:
+        pass
+
+    if updates:
+        print(
+            f"\n[CCL] Update check: new commits available in: {', '.join(updates)}\n"
+            f"[CCL] Run /ccl-update to fetch, or: git -C <path> fetch && git merge"
+        )
+    elif not errors:
+        _log.info(f"ccl update check: all tracked repos up to date")
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 def main():
@@ -540,6 +617,12 @@ def main():
             retroactive_save(cwd, db, project_id, session_id)
         except Exception as e:
             _log.error(f"retroactive save failed: {e}")
+
+        # Job 3: CCL upstream update check (only for CCL project, once per session)
+        try:
+            _ccl_update_check(cwd)
+        except Exception as e:
+            _log.error(f"ccl update check failed: {e}")
 
     except Exception:
         _log.error_tb("session_start ERROR")
