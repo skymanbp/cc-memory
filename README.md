@@ -1,326 +1,240 @@
 # cc-memory
 
-**Claude Code persistent memory plugin** — automatic LLM-powered save/restore of conversation context across compactions and sessions via SQLite + lifecycle hooks.
+**Claude Code persistent memory plugin (v2.1)** — anti-patch reconcile-on-write,
+forced PROGRESS.md handoff, FTS5 search, AI-judged extraction with Haiku +
+local Ollama fallback.
 
-## Problem
+## What it solves
 
-Claude Code compresses (compacts) conversations when the context window fills up, causing information loss: decisions, experiment results, task lists, and project knowledge disappear. Conversations that end normally (user closes terminal) also lose context.
+Claude Code compresses (compacts) conversations when the context window fills up,
+causing information loss: decisions, results, todos, and project knowledge
+disappear. Conversations that end normally (terminal closed) also lose context.
 
-## Solution
+cc-memory captures structured memories at every conversation boundary AND
+**forces the next session to read a handoff document** before it starts work.
 
-cc-memory provides **three layers of automatic memory capture** so no important information is ever lost:
+## What's new in v2.1
 
-1. **PreCompact** (hook) — Before compaction, extracts structured memories from the full transcript using Haiku LLM API, saves to SQLite.
-2. **SessionStart** (hook) — On any new session, (a) injects saved context into Claude's prompt, and (b) retroactively saves any previous unsaved transcripts.
-3. **/save-memories** (skill) — Claude reviews the conversation with its own judgment and saves structured memories. Triggered manually or by CLAUDE.md rules.
-
-Plus a **Stop hook** that reminds Claude to call `/save-memories` before the conversation ends.
-
-## Features
-
-- **LLM-powered extraction** — Uses Claude Haiku API for high-quality, structured memory extraction
-- **OAuth auto-detection** — Automatically reads Claude's own OAuth token from `~/.claude/.credentials.json` (no separate API key needed)
-- **Token expiry checking** — Validates OAuth token before use; warns when expired
-- **Retroactive save** — SessionStart detects unsaved previous transcripts and extracts from them
-- **Save status notifications** — SessionStart reports last auto-save result and API key status
-- **Zero information loss** — Every conversation boundary (start/end/compaction) is covered
-- **Per-project** — Each project gets its own `memory/` directory with SQLite DB
-- **Structured memories** — Categorized: decision, result, config, bug, task, architecture, note
-- **Importance scoring** — 1-5 scale; critical (5) memories always survive
-- **Deduplication** — All save paths check against existing memories before inserting
-- **Visual Dashboard** — Tkinter GUI with memory management, plan execution, LLM-powered cleanup
-- **Project Registry** — Persistent project list with add/remove/reorder/scan
-- **Plan Queue** — Task planning system with Claude Code CLI execution
-- **CLI query tool** — `mem.py` with full SQL access
-- **Standalone exe** — PyInstaller-built executables for one-click install and dashboard
-- **Zero-dependency runtime** — Pure Python stdlib (sqlite3, json, pathlib, tkinter, urllib)
+- **Anti-patch writes.** Every save goes through `llm.memory_writer.upsert_smart`,
+  which MERGES (overwrites a similar memory in place), SUPERSEDES (archives the
+  old, links the new via `supersedes_id`), or INSERTS — chosen by trigram-Jaccard
+  similarity. No more stacked duplicates. See [docs/MEMORY_RULES.md](docs/MEMORY_RULES.md).
+- **Forced handoff via PROGRESS.md.** `memory/PROGRESS.md` is the single source
+  of truth for session handoff, always full-rewritten from a SQL row, never
+  appended. SessionStart emits a `<system-reminder>` block that requires the
+  next Claude to Read it before responding. See [docs/HANDOFF_PROTOCOL.md](docs/HANDOFF_PROTOCOL.md).
+- **Auto-fresh MEMORY.md.** Regenerated after every write — no more 50-day-stale
+  index files.
+- **Idle reorg.** Stop hook runs lightweight cleanup every 5 turns (no LLM).
+- **Clean subpackage layout.** `cc_memory/{core,hooks,llm,cli,mcp,ui}/`.
+- **One installer, one skills location, one version number.** Removed `.claude/skills/`
+  duplicate, removed the third copy of `save-memories`, removed dual installers.
 
 ## Installation
 
-### Option 1: Standalone exe (recommended for Windows)
+### Via marketplace (recommended once published)
+
+```bash
+claude /plugin marketplace add skymanbp/cc-memory
+claude /plugin install cc-memory
+```
+
+### Local marketplace from this repo
+
+```bash
+claude /plugin marketplace add /path/to/cc-memory
+claude /plugin install cc-memory
+```
+
+### Standalone exe (Windows)
 
 1. Download `cc-memory-installer.exe` from [Releases](https://github.com/skymanbp/cc-memory/releases)
-2. Double-click to run
-3. Click "Install Plugin" → "Configure Hooks" → select project → "Initialize Project"
+2. Double-click → Install Plugin → Configure Hooks → done.
 
-### Option 2: From source
+### From source
 
 ```bash
-# Clone the repo
 git clone https://github.com/skymanbp/cc-memory.git
-
-# Run the installer GUI
-python cc-memory/cc_memory/installer.py
-
-# Or CLI setup
-python cc-memory/cc_memory/setup.py
-
-# Initialize a project
-python cc-memory/cc_memory/setup.py --init /path/to/your/project
+python cc-memory/cc_memory/ui/installer.py        # GUI
+# or
+python cc-memory/cc_memory/ui/installer.py --cli  # CLI
 ```
 
-The installer will:
-1. Copy hook scripts to `~/.claude/hooks/cc-memory/`
-2. Add PreCompact + SessionStart + Stop hooks to `~/.claude/settings.json`
-3. Create `memory/` directory in the specified project
+The installer:
+1. Copies the subpackage tree to `~/.claude/hooks/cc-memory/`.
+2. Adds the 5 hook entries to `~/.claude/settings.json`.
+3. Auto-detects + upgrades any v2.0 flat-layout install.
 
-### API Key (automatic)
+Per-project initialization is **automatic** — the first user message creates
+`<project>/memory/` and the SQLite DB.
 
-cc-memory **auto-detects** your Claude OAuth token from `~/.claude/.credentials.json`. No manual API key setup is needed if you're logged into Claude Code.
-
-If auto-detection fails (e.g., running outside Claude Code), you can:
-
-```bash
-# Set env var manually
-setx ANTHROPIC_API_KEY "sk-ant-..."   # Windows
-export ANTHROPIC_API_KEY="sk-ant-..."  # Linux/macOS
-
-# Or use the Dashboard Settings dialog
-```
-
-API key resolution order: **manual setting** → **ANTHROPIC_API_KEY env var** → **Claude OAuth token**
-
-### Optional: /save-memories skill
-
-Copy the skill template into any project for Claude-judged memory saves:
-
-```bash
-mkdir -p <project>/.claude/skills/save-memories
-cp cc_memory/skill_template.md <project>/.claude/skills/save-memories/SKILL.md
-```
-
-Then invoke with `/save-memories` during any conversation, or add a CLAUDE.md rule to auto-trigger it.
-
-## Architecture
+## Architecture at a glance
 
 ```
-Global (installed once, shared by all projects)
-├── ~/.claude/hooks/cc-memory/     ← Plugin code (14 .py files + config.json)
-├── ~/.claude/settings.json        ← Hook trigger configuration
-└── ~/.claude/.credentials.json    ← OAuth token (read-only, managed by Claude Code)
+Hooks (registered in ~/.claude/settings.json):
 
-Per-project (initialized per project)
-└── <project>/
-    ├── .claude/skills/save-memories/SKILL.md  ← Optional skill
-    └── memory/
-        ├── memory.db                  ← SQLite database (auto-updated)
-        ├── MEMORY.md                  ← Auto-generated index
-        ├── SESSION_HANDOFF.md         ← Latest session state
-        ├── .last_save.json            ← Last auto-save status
-        ├── .gitignore                 ← Excludes DB + sessions from git
-        ├── sessions/YYYY/MM/          ← Archived session summaries
-        └── topics/                    ← Long-term topic files
+  UserPromptSubmit ─► turn count + first-prompt seeding of PROGRESS.md
+                      auto-init memory/ on first contact
+
+  PostToolUse     ─► insert one observation row per tool call (no LLM)
+
+  Stop            ─► Haiku observer extracts memories from this turn
+                     patch_progress(files_touched=...)
+                     idle reorg every 5 turns
+
+  PreCompact      ─► Haiku extracts memories from the full transcript
+                     ALL writes go through llm.memory_writer.upsert_smart
+                     FULL-REWRITE memory/PROGRESS.md from SQL row
+                     archive session, regen MEMORY.md, maybe LLM-consolidate
+
+  SessionStart    ─► inject context (topics + critical + timeline + PROGRESS preview)
+                     emit FORCED <system-reminder>: "Read PROGRESS.md FIRST"
+                     retroactive save of unsaved prior JSONLs
 ```
 
-### Memory Save Flow
+Per-project state lives at `<project>/memory/`:
 
 ```
-Conversation in progress
-│
-├── [Stop hook fires after each response]
-│   └── After 8+ turns, reminds Claude to call /save-memories (once per session)
-│
-├── [User calls /save-memories]
-│   ├── Claude reviews conversation with its own judgment
-│   ├── Extracts 5-15 structured memories
-│   ├── Dedup against existing
-│   └── Save via Python command
-│
-├── [PreCompact hook fires before compaction]
-│   ├── Auto-detect API key (env var or OAuth token)
-│   ├── Call Haiku API for structured extraction
-│   ├── Dedup against existing memories
-│   ├── Save to SQLite + update MEMORY.md
-│   └── Write .last_save.json status
-│
-├── [Conversation ends without compaction]
-│   └── (no hook fires — handled retroactively)
-│
-└── [Next session starts — SessionStart hook]
-    ├── Job 1: Inject saved context into Claude's prompt
-    │   ├── Critical memories (importance=5)
-    │   ├── Recent memories (last 3 sessions)
-    │   ├── Last session handoff
-    │   ├── Last auto-save status report
-    │   └── API key status warning (if expired/missing)
-    └── Job 2: Retroactive save
-        ├── Scan ~/.claude/projects/<hash>/*.jsonl
-        ├── Find transcripts not yet in sessions table
-        ├── Extract via Haiku API
-        ├── Dedup + save to SQLite
-        └── Update MEMORY.md
+memory/
+├── memory.db                SQLite WAL, see core/db.py for schema
+├── MEMORY.md                auto-generated index, refreshed every write
+├── PROGRESS.md              full-rewrite from `progress` row at every Stop+PreCompact
+├── .last_save.json          status from last PreCompact
+├── .gitignore               excludes DB + sessions
+├── sessions/YYYY/MM/        per-session archives
+└── topics/                  reserved for future per-topic exports
 ```
 
-## Hooks Configuration
-
-Three hooks are registered in `~/.claude/settings.json`:
-
-| Hook | Trigger | Timeout | Purpose |
-|------|---------|---------|---------|
-| PreCompact | Before compaction | 30s | Extract + save memories from full transcript |
-| SessionStart | Every session start | 10s | Inject context + retroactive save |
-| Stop | After each response | 5s | Remind to call /save-memories |
-
-## Visual Dashboard
-
-Launch the dashboard to manage any initialized project:
-
-```bash
-# As script
-python ~/.claude/hooks/cc-memory/dashboard.py
-
-# Or standalone exe
-cc-memory-dashboard.exe
-```
-
-6 tabs: **Memories** (search/filter/add) | **Plans** (add/approve/execute) | **Sessions** | **Keywords** | **SQL Console** | **Stats**
-
-### Dashboard Actions
-
-- **Save Session** — Manually trigger memory extraction from the latest transcript (uses Haiku API)
-- **Tidy Memories** — LLM-powered cleanup: sends all memories to Haiku API for analysis, identifies garbage/duplicates/mergeable entries, shows confirmation dialog
-- **Add Memory** — Manually add a structured memory with category and importance
-- **Search** — Full-text search across all memories with category/importance filters
-- **Manage Projects** — Persistent project registry with add/remove/reorder/scan
-- **Execute Plan** — Launch Claude Code CLI with selected plan content in a new console
-- **Settings** — API key configuration with source display (manual/env/OAuth)
-
-## Plan Queue
-
-Task planning system integrated into the memory database:
-
-```bash
-PLAN="python ~/.claude/hooks/cc-memory/plan.py --project /path/to/project"
-
-# Add tasks
-$PLAN add "Implement feature X" "Write tests for Y" "Deploy Z"
-
-# View active plans
-$PLAN list
-
-# Workflow: evaluate -> approve -> execute -> mark done
-$PLAN evaluate           # Output plans for Claude to assess
-$PLAN approve --all      # Approve all evaluated plans
-$PLAN exec --next        # Execute next ready plan
-$PLAN done 1 "Completed" # Mark plan as done
-
-# Status overview
-$PLAN status
-
-# Cleanup
-$PLAN clear
-```
-
-Status flow: `draft` → `evaluating` → `ready` → `executing` → `done`/`failed`/`skipped`
-
-Plans can also be managed via the Dashboard GUI (Plans tab) with Execute button launching Claude Code CLI.
-
-## CLI Usage (mem.py)
-
-```bash
-MEM="python ~/.claude/hooks/cc-memory/mem.py --project /path/to/project"
-
-# Database statistics
-$MEM stats
-
-# List memories by category
-$MEM list decisions
-$MEM list result --limit 10
-
-# Full-text search
-$MEM search "F1=0.741"
-
-# Run raw SQL queries
-$MEM sql "SELECT category, COUNT(*) FROM memories GROUP BY category"
-$MEM sql "SELECT * FROM memories WHERE importance >= 4 ORDER BY created_at DESC"
-
-# Manually add a memory
-$MEM add decision "Chose architecture X" --importance 5
-
-# Show project keyword vocabulary
-$MEM keywords
-
-# View session history
-$MEM sessions
-
-# Print full database schema
-$MEM schema
-```
-
-## How Extraction Works
-
-### Primary: LLM extraction (Haiku API)
-
-cc-memory calls `claude-haiku-4-5-20251001` to analyze a condensed transcript (~12K chars) and extract structured memories. The LLM returns a JSON array of `{category, content, importance}` objects.
-
-API key is auto-detected from Claude's OAuth token (`~/.claude/.credentials.json`). If the token is expired or unavailable, extraction is skipped (archive and handoff are still saved).
-
-### Deduplication
-
-All extraction paths (LLM, manual, Claude-judged) check `content.strip().lower()` against existing active memories before inserting. Memories are tagged with their extraction method (`["llm", "auto"]`, `["claude-judged"]`, `["retroactive"]`, `["manual"]`).
-
-## Memory Categories
+## Memory model
 
 | Category | What gets extracted | Default importance |
 |----------|--------------------|--------------------|
-| decision | Explicit choices, confirmations, design changes | 3 |
-| result   | Numerical metrics (F1, AUC, loss, accuracy, etc.) | 3 |
-| config   | Configuration values, hyperparameters, constants | 2 |
-| bug      | Identified and fixed problems, "NEVER do X" warnings | 4 |
-| task     | Pending/completed work items | 2 |
-| arch     | Model architecture, pipeline design, data flow | 3 |
-| note     | Everything else above noise threshold | 1 |
+| `decision` | Explicit choices, design changes | 3 |
+| `result`   | Measured outcomes (numbers + units) | 3 |
+| `config`   | Hyperparameters, env vars, constants | 2 |
+| `bug`      | Identified+fixed problems, "NEVER do X" | 4 |
+| `task`     | Pending/blocked work items | 2 |
+| `arch`     | Module/pipeline structure, data flow | 3 |
+| `note`     | Everything else above noise | 1 |
 
-## SQLite Schema
+Importance scale: `1`=noise, `2`=low, `3`=normal, `4`=important, `5`=critical (never forget).
 
-6 tables with proper normalization, foreign keys, and indexes:
+## CLI
 
-- **projects** — One row per project path
-- **sessions** — One row per save event (timestamp, message count, trigger type, claude_session_id)
-- **memories** — Extracted facts with category, importance (1-5), tags (JSON), active/archived
-- **topics** — Long-form knowledge blobs per topic name (versioned)
-- **keywords** — Auto-detected project vocabulary with frequency counters
-- **plans** — Task queue with status, execution order, feasibility notes, results
+```bash
+M="python ~/.claude/hooks/cc-memory/cc_memory/cli/mem.py --project ."
 
-## Project Structure
-
-```
-cc_memory/                    ← Main package (14 modules)
-  __init__.py                 ← Version info
-  auth.py                     ← Shared API key resolution (env > OAuth > expiry check)
-  config.json                 ← Extraction/injection/archive settings
-  db.py                       ← SQLite abstraction (MemoryDB class, 6 tables)
-  extractor.py                ← Transcript parsing & structured extraction
-  pre_compact.py              ← PreCompact hook entry point
-  session_start.py            ← SessionStart hook + retroactive save
-  stop.py                     ← Stop hook (save-memories reminder)
-  mem.py                      ← CLI query tool (stats/list/search/sql/add)
-  plan.py                     ← Plan queue CLI (add/list/approve/exec/done)
-  dashboard.py                ← Tkinter visual dashboard GUI (6 tabs)
-  installer.py                ← Tkinter GUI installer
-  installer_standalone.py     ← Standalone exe entry point
-  setup.py                    ← CLI setup script
-  skill_template.md           ← /save-memories skill template
-build_exe.py                  ← PyInstaller build script
-dist/                         ← Built executables
-  cc-memory-installer.exe     ← One-click install
-  cc-memory-dashboard.exe     ← Visual dashboard
+$M status              # Full health check
+$M stats               # Memory + supersede-chain counts
+$M list decisions      # Recent memories by category
+$M search "auth flow"  # FTS5 search
+$M topics              # Topic summaries
+$M progress            # Regenerate memory/PROGRESS.md and print
+$M supersedes 42       # Walk the supersede chain for memory #42
+$M consolidate         # Full LLM-backed consolidation
+$M cleanup             # Lightweight no-LLM cleanup
+$M add decision "Chose X" --importance 4 --topic auth   # Anti-patch upsert
 ```
 
-## Building exe files
+Slash command: `/cc-mem <subcommand>` does the same.
+
+## MCP tools
+
+8 tools exposed via `cc_memory/mcp/server.py`:
+
+| Tool | Purpose |
+|------|---------|
+| `memory_search` | FTS5 search (compact results) |
+| `memory_get_details` | Batch fetch full details by IDs |
+| `memory_add` | Add via anti-patch upsert |
+| `memory_stats` | Project statistics |
+| `memory_topics` | List topic summaries |
+| `memory_recent` | Recent memories with filters |
+| `progress_get` | Read PROGRESS.md state (structured fields) |
+| `progress_regenerate` | Force-rewrite memory/PROGRESS.md from SQL state |
+
+Enable via `~/.claude/mcp.json` (set `cc_memory.mcp.auto_register=true` in
+`cc_memory/config.json` and re-install).
+
+## Visual Dashboard
+
+```bash
+python ~/.claude/hooks/cc-memory/cc_memory/ui/dashboard.py
+# or
+cc-memory-dashboard.exe
+```
+
+6 tabs: Memories · Plans · Sessions · Keywords · SQL Console · Stats.
+
+## Web viewer
+
+```bash
+python ~/.claude/hooks/cc-memory/cc_memory/cli/mem.py --project . serve
+# opens http://127.0.0.1:9377 in your browser
+```
+
+## Plan Queue
+
+Task planning system using the same SQLite DB:
+
+```bash
+P="python ~/.claude/hooks/cc-memory/cc_memory/cli/plan.py --project ."
+
+$P add "Task A" "Task B" "Task C"
+$P list
+$P evaluate           # mark draft → evaluating; Claude evaluates feasibility
+$P approve --all      # evaluating → ready
+$P exec --next        # ready → executing (launches Claude Code CLI)
+$P done 1 "Result"    # mark complete
+$P status             # queue summary
+$P clear              # drop done/failed/skipped
+```
+
+Status flow: `draft` → `evaluating` → `ready` → `executing` → `done`/`failed`/`skipped`.
+
+## Configuration
+
+Edit `~/.claude/hooks/cc-memory/cc_memory/config.json`:
+
+- `extraction.*` — extraction caps (sentences, metrics, todos, file changes)
+- `writer.*` — anti-patch thresholds (`high_similarity_threshold`,
+  `mid_similarity_threshold`)
+- `injection.*` — SessionStart token budget and per-layer fractions
+- `observation.*` — PostToolUse truncation limits, skip lists
+- `idle_reorg.interval_turns` — N turns between idle reorg runs (default 5)
+- `consolidation.*` — full LLM consolidation schedule
+- `ccl.*` — Ollama fallback URL + model
+- `modes.default` — default project mode (code/research/writing)
+
+## API key
+
+cc-memory auto-detects your Claude OAuth token from `~/.claude/.credentials.json`.
+No manual API key setup is needed if you're logged into Claude Code.
+
+Resolution order: `ANTHROPIC_API_KEY` env var → Claude OAuth token.
+
+## Build executables
 
 ```bash
 pip install pyinstaller
 python build_exe.py
+# produces:
+#   dist/cc-memory-installer.exe
+#   dist/cc-memory-dashboard.exe
 ```
-
-Produces `dist/cc-memory-installer.exe` and `dist/cc-memory-dashboard.exe`.
 
 ## Requirements
 
-- Python 3.8+ (stdlib only, no pip install needed)
+- Python 3.8+ (stdlib only — no pip dependencies at runtime)
 - Claude Code with hooks support
-- PyInstaller (only for building exe, not for running)
+- PyInstaller (only for building the exe, not for running)
+
+## Documentation
+
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — full architecture overview
+- [docs/MEMORY_RULES.md](docs/MEMORY_RULES.md) — anti-patch write contract
+- [docs/HANDOFF_PROTOCOL.md](docs/HANDOFF_PROTOCOL.md) — PROGRESS.md spec
+- [CHANGELOG.md](CHANGELOG.md) — version history
 
 ## License
 

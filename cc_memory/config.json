@@ -1,5 +1,5 @@
 {
-  "version": "2.0.0",
+  "version": "2.1.0",
   "description": "cc-memory — Claude Code persistent memory plugin",
 
   "extraction": {
@@ -11,20 +11,26 @@
     "keyword_max_count": 40
   },
 
+  "writer": {
+    "high_similarity_threshold": 0.80,
+    "mid_similarity_threshold": 0.50,
+    "min_content_length": 10,
+    "max_candidates_to_scan": 50,
+    "notes": "Tuned for anti-patch upsert. See docs/MEMORY_RULES.md."
+  },
+
   "injection": {
     "total_budget_tokens": 4000,
     "layers": {
-      "topics": 0.35,
+      "topics": 0.30,
       "critical": 0.15,
-      "timeline": 0.25,
-      "handoff": 0.15,
+      "timeline": 0.20,
+      "progress": 0.25,
       "footer": 0.10
     },
     "max_recent_sessions": 3,
     "min_importance_for_display": 3,
-    "critical_importance_threshold": 5,
-    "show_token_economics": true,
-    "show_previously": false
+    "critical_importance_threshold": 5
   },
 
   "observation": {
@@ -35,6 +41,19 @@
     "retention_sessions": 2
   },
 
+  "idle_reorg": {
+    "interval_turns": 5,
+    "notes": "Light cleanup runs every N user turns in Stop hook (no LLM)."
+  },
+
+  "consolidation": {
+    "auto_interval_sessions": 5,
+    "min_memories_per_topic": 3,
+    "duplicate_jaccard_threshold": 0.65,
+    "decay_age_days": 30,
+    "keep_per_topic_after_consolidation": 5
+  },
+
   "archive": {
     "session_retention_days": 180,
     "max_archive_files": 100
@@ -42,6 +61,11 @@
 
   "modes": {
     "default": "code"
+  },
+
+  "ccl": {
+    "ollama_url": "http://localhost:11434",
+    "local_model": "ccl-9b"
   },
 
   "web_viewer": {
@@ -62,6 +86,8 @@
   "notes": {
     "importance_scale": "1=noise, 2=low, 3=normal, 4=important, 5=critical(never forget)",
     "categories": "decision, result, config, bug, task, arch, note",
-    "storage": "<project>/memory/memory.db (SQLite, project-local)"
+    "storage": "<project>/memory/memory.db (SQLite, project-local)",
+    "handoff_spec": "docs/HANDOFF_PROTOCOL.md",
+    "anti_patch_contract": "docs/MEMORY_RULES.md"
   }
 }

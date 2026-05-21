@@ -5,20 +5,18 @@
     "url": "https://github.com/skymanbp"
   },
   "metadata": {
-    "description": "Claude Code persistent memory plugins"
+    "description": "cc-memory — Claude Code persistent memory plugin (anti-patch + forced handoff)"
   },
   "plugins": [
     {
       "name": "cc-memory",
       "source": ".",
-      "description": "Persistent memory — real-time observation, FTS5 search, AI-judged extraction, progressive disclosure injection",
-      "version": "2.0.0",
-      "author": {
-        "name": "skymanbp"
-      },
+      "description": "Persistent memory: reconcile-on-write (no more stacked duplicates), forced PROGRESS.md handoff at every SessionStart, FTS5 search, AI-judged extraction with Haiku + Ollama fallback.",
+      "version": "2.1.0",
+      "author": {"name": "skymanbp"},
       "repository": "https://github.com/skymanbp/cc-memory",
       "license": "MIT",
-      "keywords": ["memory", "persistence", "context", "sqlite"]
+      "keywords": ["memory", "persistence", "context", "handoff", "compact", "sqlite"]
     }
   ]
 }

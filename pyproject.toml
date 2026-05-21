@@ -1,0 +1,54 @@
+[project]
+name = "cc-memory"
+version = "2.1.0"
+description = "Persistent memory for Claude Code: anti-patch reconcile-on-write, forced PROGRESS.md handoff, FTS5 search, AI-judged extraction with Haiku + Ollama fallback."
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.8"
+authors = [{ name = "skymanbp" }]
+keywords = [
+    "claude-code",
+    "memory",
+    "persistence",
+    "context",
+    "handoff",
+    "compact",
+    "sqlite",
+    "fts5",
+    "anti-patch",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/skymanbp/cc-memory"
+Repository = "https://github.com/skymanbp/cc-memory"
+Documentation = "https://github.com/skymanbp/cc-memory#readme"
+
+[project.optional-dependencies]
+build = ["pyinstaller>=6.0"]
+
+[project.scripts]
+cc-memory = "cc_memory.cli.mem:main"
+cc-memory-plan = "cc_memory.cli.plan:main"
+
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+include = ["cc_memory*"]
+
+[tool.setuptools.package-data]
+cc_memory = ["config.json"]

@@ -2,145 +2,191 @@
 
 ## Project: cc-memory
 
-**Claude Code persistent memory plugin** — automatic LLM-powered save/restore of conversation context across compactions and new sessions via SQLite + lifecycle hooks.
+**Claude Code persistent memory plugin (v2.1)** — anti-patch reconcile-on-write,
+forced PROGRESS.md handoff, FTS5 search, AI-judged extraction with Haiku +
+local Ollama fallback.
 
-- **Language**: Python 3.8+ (pure stdlib, zero external dependencies)
-- **Version**: 1.1.0
+- **Language**: Python 3.8+ (pure stdlib, zero pip dependencies at runtime)
+- **Version**: 2.1.0
 - **License**: MIT
-- **Platform**: Windows-primary, cross-platform compatible
+- **Platform**: Windows-primary, cross-platform compatible (Tkinter required for GUI)
 
-## Problem Solved
+## What changed in v2.1 (over v2.0)
 
-Claude Code compresses (compacts) conversations when the context window fills up, causing information loss. Conversations that end normally (user closes terminal) also lose context. cc-memory captures structured memories at every boundary so nothing important is ever lost.
+1. **Subpackage layout.** Source is split into
+   `cc_memory/{core,hooks,llm,cli,mcp,ui}/`. No more 22-file flat directory.
+2. **Anti-patch writes.** `llm.memory_writer.upsert_smart` is the single
+   entry for any save path. It MERGES / SUPERSEDES / INSERTS based on
+   similarity — no stacking of duplicates. See `docs/MEMORY_RULES.md`.
+3. **Forced handoff.** `memory/PROGRESS.md` (new in v2.1) replaces
+   `SESSION_HANDOFF.md`. SessionStart emits a `<system-reminder>` block that
+   directs the next Claude to `Read memory/PROGRESS.md` BEFORE responding.
+   See `docs/HANDOFF_PROTOCOL.md`.
+4. **Auto-fresh MEMORY.md.** Regenerated after every batch upsert.
+5. **Idle reorg.** Stop hook runs lightweight cleanup every 5 turns (no LLM).
+6. **One installer, one skills location, one version number** across all files.
 
-## Architecture Overview
-
-### Three-Layer Memory Capture + Stop Reminder
-
-1. **PreCompact hook** (30s timeout) — Before compaction, extracts structured memories from the full JSONL transcript using Haiku LLM API. Writes to stderr only; stdout must stay empty. Always exits 0 to never block compaction. Writes `.last_save.json` status file.
-2. **SessionStart hook** (10s timeout) — On new session, (a) injects saved context into Claude's prompt via stdout (including last save status and API key warnings), and (b) retroactively saves any unsaved previous transcripts.
-3. **/save-memories skill** — Claude reviews conversation with its own judgment and saves 5-15 structured memories. Manual or auto-triggered via CLAUDE.md rules.
-4. **Stop hook** (5s timeout) — After each Claude response, counts user turns. After 8+ turns, injects a one-time reminder to call `/save-memories` before ending.
-
-### API Key Resolution (auth.py)
-
-Shared module used by all components. Resolution order:
-1. `ANTHROPIC_API_KEY` environment variable
-2. Claude OAuth token from `~/.claude/.credentials.json` (auto-detected, with `expiresAt` validation)
-
-Returns `(key, source)` where source is `"env"`, `"oauth"`, `"oauth_expired"`, or `""`.
-
-### LLM Extraction
-
-- Calls `claude-haiku-4-5-20251001` on ~12KB condensed transcript
-- Returns structured JSON `[{category, content, importance}]`
-- If no API key or token expired, extraction is skipped (archive/handoff still saved)
-- Regex extraction is **disabled** (produced 78% garbage; only LLM or /save-memories)
-
-### Storage Layout
+## Repository layout
 
 ```
-Global (installed once):
-  ~/.claude/hooks/cc-memory/     ← All .py files (14 modules + config.json)
-  ~/.claude/hooks/cc-memory/projects.json  ← Persistent project registry
-  ~/.claude/settings.json        ← Hook trigger configuration
-
-Per-project (initialized per project):
-  <project>/memory/
-    ├── memory.db                ← SQLite (6 tables, WAL mode)
-    ├── MEMORY.md                ← Auto-generated index (loaded into context)
-    ├── SESSION_HANDOFF.md       ← Latest session state
-    ├── .last_save.json          ← Last PreCompact save status
-    ├── .gitignore
-    ├── sessions/YYYY/MM/        ← Archived session summaries
-    └── topics/                  ← Long-term topic files
+cc-memory/
+├── .claude-plugin/
+│   ├── plugin.json              ← Plugin manifest (v2.1.0)
+│   └── marketplace.json         ← /plugin marketplace add entry
+├── hooks/hooks.json             ← 5 hook declarations
+├── skills/                      ← THE canonical skills location
+│   ├── save-memories/SKILL.md   (routes through memory_writer)
+│   ├── mem-init/SKILL.md
+│   └── mem-status/SKILL.md
+├── commands/cc-mem.md           ← /cc-mem slash command
+├── docs/
+│   ├── ARCHITECTURE.md
+│   ├── MEMORY_RULES.md          ← Anti-patch contract
+│   └── HANDOFF_PROTOCOL.md      ← PROGRESS.md spec
+├── cc_memory/
+│   ├── __init__.py              (version 2.1.0)
+│   ├── config.json
+│   ├── core/                    db, extractor, consolidate, idle, progress,
+│   │                            privacy, modes, auth, logger
+│   ├── hooks/                   post_tool_use, pre_compact, session_start,
+│   │                            stop, user_prompt
+│   ├── llm/                     ccl_backend, memory_writer
+│   ├── cli/                     mem, plan
+│   ├── mcp/                     server
+│   └── ui/                      installer, dashboard, web_viewer
+├── build_exe.py
+├── pyproject.toml
+├── README.md
+├── CLAUDE.md                    ← This file
+├── CHANGELOG.md
+└── LICENSE
 ```
 
-## Project Structure
+## Hooks (5)
 
-```
-cc_memory/                      ← Main package (14 modules)
-  __init__.py                   ← Version info (1.1.0)
-  auth.py                       ← Shared API key resolution (env > OAuth > expiry check)
-  config.json                   ← Extraction/injection/archive settings
-  db.py                         ← SQLite abstraction (MemoryDB class, 6 tables)
-  extractor.py                  ← Transcript parsing & structured extraction
-  pre_compact.py                ← PreCompact hook entry point
-  session_start.py              ← SessionStart hook + retroactive save
-  stop.py                       ← Stop hook (save-memories reminder)
-  mem.py                        ← CLI query tool (stats/list/search/sql/add)
-  plan.py                       ← Plan queue CLI (add/list/approve/exec/done)
-  dashboard.py                  ← Tkinter visual dashboard GUI (6 tabs)
-  installer.py                  ← Tkinter GUI installer
-  installer_standalone.py       ← Standalone exe entry point
-  setup.py                      ← CLI setup script
-  skill_template.md             ← /save-memories skill template
-build_exe.py                    ← PyInstaller build script
-dist/                           ← Built executables
-```
+Registered in `~/.claude/settings.json` and declared in `hooks/hooks.json`:
 
-## Database Schema (6 tables)
+| Hook | Entry | Timeout | Purpose |
+|------|-------|---------|---------|
+| `PreCompact` | `cc_memory/hooks/pre_compact.py` | 45s | LLM extract → memory_writer.upsert_batch → FULL-REWRITE PROGRESS.md → archive |
+| `SessionStart` | `cc_memory/hooks/session_start.py` | 15s | Inject layered context + FORCED `<system-reminder>` to Read PROGRESS.md |
+| `Stop` | `cc_memory/hooks/stop.py` | 22s | Observer (Haiku) + per-turn PROGRESS.md patch + idle reorg every 5 turns |
+| `PostToolUse` | `cc_memory/hooks/post_tool_use.py` | 8s | Insert observation row (no LLM) |
+| `UserPromptSubmit` | `cc_memory/hooks/user_prompt.py` | 8s | Auto-init memory/ + turn count + seed `progress.current_request` on turn 1 |
 
-- **projects** — `id, path (UNIQUE), name, created_at, last_active`
-- **sessions** — `id, project_id (FK), claude_session_id, trigger_type, compacted_at, msg_count, archive_path, brief_summary`
-- **memories** — `id, project_id (FK), session_id (FK nullable), category, content, importance (1-5), tags (JSON), created_at, updated_at, is_active`
-- **topics** — `id, project_id (FK), name, content, updated_at, version; UNIQUE(project_id, name)`
-- **keywords** — `id, project_id (FK), keyword, frequency, last_seen; UNIQUE(project_id, keyword)`
-- **plans** — `id, project_id (FK), content, exec_order, status, feasibility, result, created_at, updated_at`
+Hook contract (NEVER violate):
+- Hooks must NEVER write to stderr (Claude Code shows stderr as error UI).
+  Use `core.logger.get_logger(...)`; it writes to `~/.claude/hooks/cc-memory/logs/`.
+- Hooks must NEVER raise an unhandled exception. Always `sys.exit(0)`.
+- Each hook's stdout has a specific role:
+  - `SessionStart` stdout → injected context (read by Claude)
+  - `Stop` stdout → status line (read by Claude)
+  - `PreCompact` stdout → ONE status line (shows in next session's compacted context)
+  - `PostToolUse`/`UserPromptSubmit` stdout → empty
 
-**Memory categories**: decision, result, config, bug, task, arch, note
-**Importance scale**: 1=noise, 2=low, 3=normal, 4=important, 5=critical
-**Plan status flow**: draft → evaluating → ready → executing → done/failed/skipped
-**Trigger types**: auto, manual_dashboard_llm, retroactive_llm, retroactive_none
+## Database schema (10 tables)
 
-## Key APIs
+Defined in `cc_memory/core/db.py`. See `docs/ARCHITECTURE.md` for full diagram.
 
-### MemoryDB (db.py)
-- `upsert_project(cwd) -> int` — Get or create project ID
-- `insert_session(...)` / `get_recent_session_ids(project_id, n)`
-- `insert_memory(project_id, session_id, category, content, importance, tags)`
-- `get_recent_memories(project_id, sessions_back, categories, min_importance)`
-- `get_critical_memories(project_id, min_importance=4)`
-- `archive_memory(memory_id)` — Soft-delete (sets is_active=0)
-- `upsert_topic(project_id, name, content)` / `get_topics(project_id)`
-- `upsert_keywords(project_id, freq_map)` / `get_top_keywords(project_id, n)`
-- `add_plan(...)` / `get_plans(...)` / `update_plan_status(...)` / `get_next_plan(...)`
-- `get_stats(project_id)` — Returns {n_sessions, n_memories, by_category, last_session}
+- `projects`, `sessions`, `memories`, `topics`, `keywords`, `plans`
+- `observations` (PostToolUse events, cleaned after extraction)
+- `session_summaries` (6-field structured summary per session)
+- `progress` (NEW in v2.1: single row per project, SOT for PROGRESS.md)
+- `_migrations` (tracks applied migrations)
 
-### auth.py
-- `get_api_key() -> (str, str)` — Returns `(key, source)`. Source is "env", "oauth", "oauth_expired", or "".
+Key columns added in v2.1:
+- `memories.supersedes_id` — forms the update chain (anti-patch contract)
+- `memories.content_hash` — sha256[:16] of normalized content for cheap dedup
 
-## Development Guidelines
+## Anti-patch contract
 
-- **Pure stdlib only** — No pip dependencies at runtime. Only sqlite3, json, pathlib, urllib, datetime, subprocess, tkinter, time.
-- **Hook contracts** — PreCompact: stderr only, exit 0 always. SessionStart: stdout = injected context, must complete within timeout. Stop: stdout = reminder text (seen by Claude).
-- **Deduplication** — All save paths must check `content.strip().lower()` against existing active memories before inserting.
-- **SQL safety** — All queries use parameterized statements. Never use string formatting for SQL.
-- **No regex extraction** — Regex fallback is disabled (produced garbage). Only LLM extraction or /save-memories skill.
-- **OAuth auto-detection** — Always use `auth.get_api_key()` for API key resolution. Never hardcode key reading.
-- Follow existing code conventions and patterns.
-- Read files before modifying them.
+> Every memory save path routes through `llm.memory_writer.upsert_smart`,
+> which MERGES in place, SUPERSEDES with a chain link, or INSERTS based on
+> trigram-Jaccard similarity. Never call `db.insert_memory` directly from a
+> caller path. See `docs/MEMORY_RULES.md` for the full spec.
 
-## Data & Safety Rules
+Save paths converted to use the writer:
+- `hooks/pre_compact.py` ✓
+- `hooks/stop.py` (observer) ✓
+- `cli/mem.py add` ✓
+- `mcp/server.py memory_add` ✓
+- `skills/save-memories/SKILL.md` ✓ (calls `upsert_batch`)
+
+Not yet converted (still on direct `db.insert_memory` for legacy reasons):
+- `ui/dashboard.py` "Add Memory" dialog — slated for v2.2.
+- `ui/dashboard.py` "Save Session" — slated for v2.2.
+
+## Forced handoff contract
+
+> `memory/PROGRESS.md` is the single source of truth for session handoff.
+> It is ALWAYS full-rewritten from the `progress` SQL row, never appended.
+> SessionStart emits a `<system-reminder>` requiring the next Claude to Read
+> it BEFORE responding. See `docs/HANDOFF_PROTOCOL.md`.
+
+The `progress` row has 11 user-facing fields (`current_request`, `status_*`,
+`open_todos`, `plan`, `critical_context`, `files_touched`, `transcript_ptr`,
+`updated_at`, `trigger_type`). It is updated by three paths:
+- `PreCompact` does a full overwrite (`upsert_progress`).
+- `Stop` patches `files_touched` per turn (`patch_progress`).
+- `UserPromptSubmit` patches `current_request` on turn 1 (`patch_progress`).
+
+`SESSION_HANDOFF.md` from v2.0 is renamed to `SESSION_HANDOFF.md.v2.bak` on
+first PreCompact under v2.1 (one-shot migration in `core/progress.py`).
+
+## Development guidelines
+
+- **Pure stdlib only at runtime.** Only `sqlite3, json, pathlib, urllib,
+  datetime, subprocess, tkinter, time, hashlib, re, http.server`. No pip
+  dependencies. PyInstaller is build-time only.
+- **Hook safety > anything else.** A broken hook can hang or break Claude
+  Code itself. `try: ... except Exception: pass` with a `# why: ...` comment
+  is appropriate in hook code. Log to file via `core.logger`.
+- **SQL safety.** All queries use parameterized statements. Never use string
+  formatting for SQL.
+- **OAuth auto-detection.** Always use `core.auth.get_api_key()` for API key
+  resolution. Never hardcode key reading.
+- **Anti-patch.** Never call `db.insert_memory` directly from a caller path
+  — use `llm.memory_writer.upsert_smart` or `upsert_batch`. See
+  `docs/MEMORY_RULES.md`.
+- **Plugin-agnostic.** Don't add project-specific keywords (e.g. ML/astro
+  vocab) to `extractor.py` or `consolidate.py`. Those were removed in v2.1
+  for a reason.
+- Read files before modifying them; respect the cc-enslaver-style discipline.
+
+## Data & safety rules
 
 - Never delete or overwrite `memory.db` or archived sessions without asking.
 - Never fabricate extraction results or memory content.
-- Hooks must never block Claude Code operation — always exit cleanly.
-- Tag all memories with their extraction method for traceability.
+- Hooks must never block Claude Code — always exit cleanly (`sys.exit(0)`).
+- Tag memories with their extraction method (`["llm", "auto"]`,
+  `["observer", "realtime"]`, `["manual"]`, `["mcp"]`, `["merged"]`,
+  `["supersedes"]`, etc.) for traceability.
+- `memory/PROGRESS.md` and `memory/MEMORY.md` are generated artifacts. Edit
+  the SQL source of truth (`progress` table for PROGRESS.md, `memories`/
+  `topics`/`keywords` for MEMORY.md) instead.
 
 ## Build
 
 ```bash
 pip install pyinstaller
 python build_exe.py
-# Produces dist/cc-memory-installer.exe + dist/cc-memory-dashboard.exe
+# produces dist/cc-memory-installer.exe + dist/cc-memory-dashboard.exe
 ```
 
-## Sync Protocol
+## Sync protocol
 
-Plugin code exists in three locations that must stay in sync:
+Plugin code exists in two locations that must stay in sync:
 1. `D:/Projects/cc-memory/cc_memory/` — Git source of truth
 2. `C:/Users/skyma/.claude/hooks/cc-memory/` — Installed hooks (active)
-3. `D:/Projects/cc-memory/dist/*.exe` — Built executables
 
-After any code change: copy to installed location → git commit → rebuild exe.
+After any code change, run the installer (or the CLI form
+`python cc_memory/ui/installer.py --cli`) to push the change to the installed
+location, then `git commit`. The installer auto-cleans v2.0 flat-layout
+remnants on upgrade.
+
+## See also
+
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — full architecture overview
+- [docs/MEMORY_RULES.md](docs/MEMORY_RULES.md) — anti-patch contract
+- [docs/HANDOFF_PROTOCOL.md](docs/HANDOFF_PROTOCOL.md) — PROGRESS.md spec
+- [CHANGELOG.md](CHANGELOG.md) — version history

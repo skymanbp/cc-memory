@@ -1,14 +1,19 @@
 #!/usr/bin/env python3
 """
-build_exe.py — Build standalone exe files for cc-memory plugin.
+Build standalone exe files for cc-memory plugin.
 
 Produces:
   dist/cc-memory-installer.exe   (one-click install on any machine)
   dist/cc-memory-dashboard.exe   (visual memory management)
 
 Requirements: pip install pyinstaller
+
+v2.1 changes: bundles the subpackage layout (cc_memory/{core,hooks,llm,cli,mcp,ui}/)
+into cc_memory_files/ so the installer can mirror it under ~/.claude/hooks/cc-memory/.
 """
-import subprocess, sys, shutil
+import shutil
+import subprocess
+import sys
 from pathlib import Path
 
 ROOT = Path(__file__).parent
@@ -16,34 +21,54 @@ SRC = ROOT / "cc_memory"
 DIST = ROOT / "dist"
 BUILD = ROOT / "build"
 
+
+# Subpackage files to bundle. Mirrors ui/installer.py SUBPACKAGE_FILES.
+SUBPACKAGE_FILES = {
+    "":      ["__init__.py", "config.json"],
+    "core":  ["__init__.py", "auth.py", "consolidate.py", "db.py", "extractor.py",
+              "idle.py", "logger.py", "modes.py", "privacy.py", "progress.py"],
+    "hooks": ["__init__.py", "post_tool_use.py", "pre_compact.py",
+              "session_start.py", "stop.py", "user_prompt.py"],
+    "llm":   ["__init__.py", "ccl_backend.py", "memory_writer.py"],
+    "cli":   ["__init__.py", "mem.py", "plan.py"],
+    "mcp":   ["__init__.py", "server.py"],
+    "ui":    ["__init__.py", "dashboard.py", "installer.py", "web_viewer.py"],
+}
+
+
+def _flat_file_list():
+    """Yield (src_path, dest_subdir_in_bundle) for every plugin file."""
+    pairs = []
+    for subdir, files in SUBPACKAGE_FILES.items():
+        for f in files:
+            if subdir:
+                pairs.append((SRC / subdir / f, f"cc_memory_files/{subdir}"))
+            else:
+                pairs.append((SRC / f, "cc_memory_files"))
+    return pairs
+
+
+def _check_files():
+    missing = [str(p) for p, _ in _flat_file_list() if not p.exists()]
+    if missing:
+        print("ERROR: Missing files:")
+        for m in missing:
+            print(f"  {m}")
+        sys.exit(1)
+
+
 def build_installer():
-    """Build the self-contained installer exe."""
     print("=" * 50)
-    print("  Building cc-memory-installer.exe")
+    print("  Building cc-memory-installer.exe (v2.1)")
     print("=" * 50)
 
-    # Plugin files to bundle as data (v2.0: includes all new modules)
-    plugin_files = [
-        "auth.py", "db.py", "extractor.py", "pre_compact.py", "session_start.py",
-        "stop.py", "mem.py", "plan.py", "dashboard.py", "installer.py",
-        "setup.py", "config.json", "skill_template.md",
-        # v2.0 new modules
-        "post_tool_use.py", "user_prompt.py", "privacy.py", "logger.py", "modes.py",
-        "mcp_server.py", "web_viewer.py", "consolidate.py",
-        "skill_status.md",
-    ]
+    _check_files()
 
-    # Verify all files exist
-    for f in plugin_files:
-        if not (SRC / f).exists():
-            print(f"ERROR: Missing {SRC / f}")
-            sys.exit(1)
-
-    # Build data args: --add-data "src;dest_folder_in_bundle"
     data_args = []
-    for f in plugin_files:
-        src_path = str(SRC / f)
-        data_args.extend(["--add-data", f"{src_path};cc_memory_files"])
+    for src_path, dest in _flat_file_list():
+        # PyInstaller --add-data syntax: "src;dest" on Windows, "src:dest" on Unix
+        sep = ";" if sys.platform == "win32" else ":"
+        data_args.extend(["--add-data", f"{src_path}{sep}{dest}"])
 
     cmd = [
         sys.executable, "-m", "PyInstaller",
@@ -55,34 +80,33 @@ def build_installer():
         "--hidden-import", "_sqlite3",
         "--collect-all", "sqlite3",
         *data_args,
-        str(SRC / "installer_standalone.py"),
+        str(SRC / "ui" / "installer.py"),
     ]
 
-    print(f"Running: {' '.join(cmd[:6])} ...")
+    print(f"Running PyInstaller with {len(data_args)//2} bundled files...")
     result = subprocess.run(cmd, cwd=str(ROOT))
     if result.returncode == 0:
         exe_path = DIST / "cc-memory-installer.exe"
-        size_mb = exe_path.stat().st_size / 1024 / 1024
-        print(f"\n[OK] Built: {exe_path} ({size_mb:.1f} MB)")
+        if exe_path.exists():
+            size_mb = exe_path.stat().st_size / 1024 / 1024
+            print(f"\n[OK] Built: {exe_path} ({size_mb:.1f} MB)")
     else:
         print("\n[FAIL] Build failed")
         sys.exit(1)
 
 
 def build_dashboard():
-    """Build the dashboard exe."""
     print("=" * 50)
-    print("  Building cc-memory-dashboard.exe")
+    print("  Building cc-memory-dashboard.exe (v2.1)")
     print("=" * 50)
 
-    # Dashboard needs core modules + v2.0 deps
-    dashboard_deps = [
-        "auth.py", "db.py", "config.json", "plan.py", "extractor.py",
-        "logger.py", "privacy.py", "modes.py", "consolidate.py",
-    ]
+    _check_files()
+
+    # Dashboard needs everything the installer does (it imports core + llm).
     data_args = []
-    for f in dashboard_deps:
-        data_args.extend(["--add-data", f"{SRC / f};cc_memory_files"])
+    for src_path, dest in _flat_file_list():
+        sep = ";" if sys.platform == "win32" else ":"
+        data_args.extend(["--add-data", f"{src_path}{sep}{dest}"])
 
     cmd = [
         sys.executable, "-m", "PyInstaller",
@@ -90,31 +114,32 @@ def build_dashboard():
         "--windowed",
         "--name", "cc-memory-dashboard",
         "--icon", "NONE",
+        "--hidden-import", "sqlite3",
+        "--hidden-import", "_sqlite3",
+        "--collect-all", "sqlite3",
         *data_args,
-        str(SRC / "dashboard.py"),
+        str(SRC / "ui" / "dashboard.py"),
     ]
 
-    print(f"Running: {' '.join(cmd[:6])} ...")
+    print(f"Running PyInstaller with {len(data_args)//2} bundled files...")
     result = subprocess.run(cmd, cwd=str(ROOT))
     if result.returncode == 0:
         exe_path = DIST / "cc-memory-dashboard.exe"
-        size_mb = exe_path.stat().st_size / 1024 / 1024
-        print(f"\n[OK] Built: {exe_path} ({size_mb:.1f} MB)")
+        if exe_path.exists():
+            size_mb = exe_path.stat().st_size / 1024 / 1024
+            print(f"\n[OK] Built: {exe_path} ({size_mb:.1f} MB)")
     else:
         print("\n[FAIL] Build failed")
         sys.exit(1)
 
 
 if __name__ == "__main__":
-    # Clean previous builds
     for d in [BUILD, DIST]:
         if d.exists():
             shutil.rmtree(d)
-
     build_installer()
     print()
     build_dashboard()
-
     print("\n" + "=" * 50)
     print("  Build complete!")
     print("=" * 50)

@@ -1,8 +1,9 @@
 """
-cc-memory — Claude Code persistent memory plugin
-Automatic save/restore of conversation context across compactions.
+cc-memory — Claude Code persistent memory plugin.
 
-v2.0: PostToolUse capture, FTS5 search, progressive disclosure,
-      MCP server, web viewer, privacy tags, mode system.
+v2.1: Reorganized into core/hooks/llm/ui/cli/mcp subpackages.
+      Unified memory_writer (anti-patch reconcile-on-write).
+      PROGRESS.md forced-handoff replaces SESSION_HANDOFF.md.
+      MEMORY.md auto-regenerates on every write.
 """
-__version__ = "2.0.0"
+__version__ = "2.1.0"

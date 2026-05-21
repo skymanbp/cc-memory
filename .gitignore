@@ -14,3 +14,12 @@ build/
 *.spec
 *.exe
 projects.json
+
+# cc-memory's OWN memory/ directory is a runtime artifact, not source.
+# Anyone who clones this repo will generate their own when they enable the
+# plugin. Don't commit the maintainer's local memory data.
+memory/
+
+# Per-user local Claude Code overrides; never shared.
+.claude/settings.local.json
+
