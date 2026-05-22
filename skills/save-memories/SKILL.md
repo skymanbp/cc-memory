@@ -1,8 +1,6 @@
 ---
 name: save-memories
 description: Save important memories from this conversation to the cc-memory database via the anti-patch upsert path (merge / supersede / insert based on similarity to existing memories).
-disable-model-invocation: false
-argument-hint: "[optional: focus area or specific things to remember]"
 ---
 
 ## Save Memories to cc-memory Database

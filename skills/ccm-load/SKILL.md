@@ -1,8 +1,6 @@
 ---
 name: ccm-load
 description: Load cc-memory for this project — verify the plugin is globally enabled, ensure the project's memory/ directory is initialized, and report end-to-end health. The cc-memory equivalent of "make sure I'm wired up here".
-disable-model-invocation: false
-argument-hint: ""
 ---
 
 ## /ccm-load — Load cc-memory into this project

@@ -1,6 +1,5 @@
 ---
-name: cc-mem
-description: Query and manage cc-memory state for the current project. Subcommands run the CLI in ~/.claude/hooks/cc-memory/cc_memory/cli/mem.py.
+description: Query and manage cc-memory state for the current project. Subcommands run the CLI in the installed plugin's cc_memory/cli/mem.py.
 argument-hint: "<subcommand> [args]    e.g. stats | search <q> | progress | consolidate | supersedes <id>"
 ---
 

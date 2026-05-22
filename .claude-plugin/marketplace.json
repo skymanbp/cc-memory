@@ -10,7 +10,7 @@
   "plugins": [
     {
       "name": "cc-memory",
-      "source": ".",
+      "source": "./",
       "description": "Persistent memory: reconcile-on-write (no more stacked duplicates), forced PROGRESS.md handoff at every SessionStart, FTS5 search, AI-judged extraction with Haiku + Ollama fallback.",
       "version": "2.1.0",
       "author": {"name": "skymanbp"},

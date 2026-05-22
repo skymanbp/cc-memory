@@ -1,8 +1,6 @@
 ---
 name: mem-status
 description: Check if cc-memory is working. Shows hook registration, database stats, observations, observer activity, API key, supersede chains, and recent logs.
-disable-model-invocation: false
-argument-hint: ""
 ---
 
 ## cc-memory Health Check

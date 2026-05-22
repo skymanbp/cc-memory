@@ -1,8 +1,6 @@
 ---
 name: mem-init
 description: Verify that cc-memory is initialized for the current project. (Initialization is automatic on the first UserPromptSubmit — this skill is for explicit check / re-init.)
-disable-model-invocation: false
-argument-hint: ""
 ---
 
 ## Initialize cc-memory for This Project

@@ -9,8 +9,5 @@
   "homepage": "https://github.com/skymanbp/cc-memory",
   "repository": "https://github.com/skymanbp/cc-memory",
   "license": "MIT",
-  "keywords": ["memory", "persistence", "context", "handoff", "compact", "sqlite", "fts5", "anti-patch"],
-  "hooks": "./hooks/hooks.json",
-  "skills": "./skills/",
-  "commands": "./commands/"
+  "keywords": ["memory", "persistence", "context", "handoff", "compact", "sqlite", "fts5", "anti-patch"]
 }
