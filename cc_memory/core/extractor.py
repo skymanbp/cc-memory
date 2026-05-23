@@ -141,6 +141,12 @@ def _iter_assistant_texts(messages: List[Dict]) -> List[str]:
 
 
 def extract_todos(messages: List[Dict]) -> List[Dict]:
+    """Aggregate ALL TodoWrite invocations across the transcript.
+
+    Useful for archive rendering (full task history). For the CURRENT state
+    of the todo list (what's still pending), call extract_latest_todo_state
+    below instead — that one is last-wins and is what PROGRESS.md needs.
+    """
     todos: List[Dict] = []
     for name, inp in _iter_tool_uses(messages):
         if name != "TodoWrite":
@@ -163,6 +169,82 @@ def extract_todos(messages: List[Dict]) -> List[Dict]:
                         "content":  content,
                     })
     return todos
+
+
+def extract_latest_todo_state(messages: List[Dict]) -> List[Dict]:
+    """Return ONLY the last TodoWrite snapshot — the live todo state.
+
+    extract_todos() above aggregates across ALL TodoWrite invocations, which
+    stacks the same task as it moves pending → in_progress → completed. For
+    PROGRESS.md and resume-protocol handoff we want the FINAL state of the
+    list — whatever the user/Claude has at the moment of compaction.
+
+    Last-writer-wins semantics: an explicit empty TodoWrite (user cleared
+    the list) is honored and returns []. Returns [] if no TodoWrite ever ran.
+    """
+    latest: List[Dict] = []
+    found_any = False
+    for name, inp in _iter_tool_uses(messages):
+        if name != "TodoWrite":
+            continue
+        raw_todos = inp.get("todos", [])
+        if not isinstance(raw_todos, list):
+            continue
+        found_any = True
+        snapshot: List[Dict] = []
+        for item in raw_todos:
+            if isinstance(item, dict):
+                content = (item.get("content") or "").strip()
+                if len(content) > 3:
+                    snapshot.append({
+                        "status":   item.get("status", "pending"),
+                        "priority": item.get("priority", "medium"),
+                        "content":  content,
+                    })
+            elif isinstance(item, str) and len(item.strip()) > 3:
+                snapshot.append({"status": "pending", "priority": "medium",
+                                 "content": item.strip()})
+        # Last-writer-wins: assign every iteration (including empty snapshots)
+        latest = snapshot
+    return latest if found_any else []
+
+
+def find_latest_transcript(cwd: str,
+                           exclude_session_id: Optional[str] = None) -> Optional["Path"]:
+    """Locate the newest .jsonl transcript for this project (by mtime).
+
+    Resolves `~/.claude/projects/<dir-hash>/` using the same convention as
+    session_start.py:_find_transcript_dir (Windows uses '-' in place of
+    drive ':' and path separators).
+
+    Pass `exclude_session_id` (the current Claude session UUID) to avoid
+    picking the freshly-opened transcript for the current session — we want
+    to mine the PREVIOUS session's history, not the empty one just starting.
+    Returns None if no project transcript directory or no .jsonl exists.
+    """
+    from pathlib import Path
+    claude_projects = Path.home() / ".claude" / "projects"
+    if not claude_projects.exists():
+        return None
+    path_str = str(Path(cwd).resolve())
+    hash_candidate = path_str.replace(":", "-").replace("\\", "-").replace("/", "-")
+    transcript_dir = claude_projects / hash_candidate
+    if not transcript_dir.exists():
+        hash_lower = hash_candidate.lower()
+        transcript_dir = None
+        for d in claude_projects.iterdir():
+            if d.is_dir() and d.name.lower() == hash_lower:
+                transcript_dir = d
+                break
+        if transcript_dir is None:
+            return None
+    jsonls = sorted(transcript_dir.glob("*.jsonl"),
+                    key=lambda f: f.stat().st_mtime, reverse=True)
+    for jsonl in jsonls:
+        if exclude_session_id and jsonl.stem == exclude_session_id:
+            continue
+        return jsonl
+    return None
 
 
 def extract_file_changes(messages: List[Dict]) -> List[str]:
@@ -284,6 +366,10 @@ def build_extraction(messages: List[Dict],
 
     return {
         "todos":           extract_todos(messages),
+        # latest_todos = the CURRENT state of the todo list (last TodoWrite call);
+        # use this for PROGRESS.md.open_todos. extract_todos above is stacking
+        # history — only use it for archive rendering.
+        "latest_todos":    extract_latest_todo_state(messages),
         "file_changes":    extract_file_changes(messages),
         "bash_commands":   extract_bash_commands(messages),
         "sentences":       sentences,

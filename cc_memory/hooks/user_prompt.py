@@ -110,7 +110,18 @@ def main():
                     from core.progress import write_progress_md
                     db = MemoryDB(Path(cwd) / "memory" / "memory.db")
                     pid = db.upsert_project(cwd)
-                    db.patch_progress(pid, current_request=prompt, trigger_type="user_prompt")
+                    # Detect resume signal: exact-match whitelist (trim+lower).
+                    # Contracted by the SessionStart forced reminder's RESUME
+                    # PROTOCOL — when the user says one of these tokens, the
+                    # next Claude is required to auto-execute open_todos[0].
+                    # Tagging trigger_type here makes the intent auditable.
+                    normalized = prompt.strip().lower()
+                    resume_signals = {
+                        "", "继续", "接着", "接着做", "接着干", "继续干",
+                        "resume", "continue", "go on", "keep going",
+                    }
+                    trigger = "resume_request" if normalized in resume_signals else "user_prompt"
+                    db.patch_progress(pid, current_request=prompt, trigger_type=trigger)
                     write_progress_md(db, pid, Path(cwd) / "memory")
                 except Exception:
                     # why: PROGRESS seeding is best-effort; PreCompact will

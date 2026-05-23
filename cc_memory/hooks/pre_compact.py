@@ -334,6 +334,17 @@ def main():
         ))
         first_user_msg = _first_user_request(messages)
         task_mems = [m["content"] for m in extracted if m.get("category") == "task"]
+        # Pull the CURRENT todo snapshot from the transcript (last TodoWrite
+        # tool_use). This is the live state — much more reliable than LLM-
+        # extracted "task" memories or regex aggregation. Used as the primary
+        # source for both PROGRESS.md.open_todos and session_summary.next_steps.
+        latest_todos = ext.get("latest_todos") or []
+        pending_todos = [t["content"] for t in latest_todos
+                         if t.get("status") != "completed"]
+        next_steps_str = (
+            "; ".join(pending_todos[:5]) if pending_todos
+            else "; ".join(task_mems[:5])
+        )
 
         try:
             db.insert_session_summary(session_id, project_id, {
@@ -341,7 +352,7 @@ def main():
                 "investigated": ", ".join(obs_files_read[:10]),
                 "learned": "",
                 "completed": ", ".join(obs_files_modified[:10]),
-                "next_steps": "; ".join(task_mems[:5]),
+                "next_steps": next_steps_str,
                 "notes": "",
                 "files_read": obs_files_read[:20],
                 "files_modified": obs_files_modified[:20],
@@ -353,7 +364,7 @@ def main():
         progress_state = collect_progress_state(
             db, project_id, memory_dir,
             current_request=first_user_msg,
-            todos=ext.get("todos", []),
+            todos=latest_todos or ext.get("todos", []),
             files_read=obs_files_read,
             files_modified=obs_files_modified,
             transcript_ptr=str(Path(transcript_path).resolve()),

@@ -175,14 +175,29 @@ python build_exe.py
 
 ## Sync protocol
 
-Plugin code exists in two locations that must stay in sync:
-1. `D:/Projects/cc-memory/cc_memory/` — Git source of truth
-2. `C:/Users/skyma/.claude/hooks/cc-memory/` — Installed hooks (active)
+**Since v2.1.1 (marketplace registration), no sync to `~/.claude/hooks/` is
+needed for code changes on this machine.** Claude Code discovers cc-memory
+via `~/.claude/settings.json`:
 
-After any code change, run the installer (or the CLI form
-`python cc_memory/ui/installer.py --cli`) to push the change to the installed
-location, then `git commit`. The installer auto-cleans v2.0 flat-layout
-remnants on upgrade.
+```jsonc
+"enabledPlugins":       { "cc-memory@cc-memory": true },
+"extraKnownMarketplaces": {
+  "cc-memory": { "source": { "source": "directory",
+                             "path": "D:\\Projects\\cc-memory" } }
+}
+```
+
+`hooks/hooks.json` uses `${CLAUDE_PLUGIN_ROOT}/cc_memory/hooks/<name>.py`,
+which resolves to **the git working tree itself**. Editing
+`cc_memory/**.py` here updates the live hooks on the next Claude Code
+session — no copy step.
+
+`~/.claude/hooks/cc-memory/` only holds `logs/` now (logger output target).
+
+To deploy to another machine without a git checkout, build
+`cc-memory-installer.exe` (see `build_exe.py`). That installer lays code
+under `~/.claude/hooks/cc-memory/cc_memory/` and registers hooks the v2.0
+way — same package, alternate install path.
 
 ## See also
 

@@ -30,6 +30,7 @@ sys.path.insert(0, str(_PKG_ROOT))
 from core.db import MemoryDB
 from core.extractor import load_transcript
 from core.logger import get_logger
+from core.progress import write_progress_md
 from llm.memory_writer import upsert_batch
 
 _log = get_logger("session_start")
@@ -214,6 +215,17 @@ def _build_forced_reminder(memory_dir):
         "",
         "After reading, explicitly state in your first reply:",
         '  "Read PROGRESS.md — prior progress: <one-sentence summary>."',
+        "",
+        "RESUME PROTOCOL — if the user's first message is exactly one of:",
+        '    "" (empty)  ·  "继续"  ·  "接着"  ·  "接着做"  ·  "接着干"  ·',
+        '    "继续干"  ·  "resume"  ·  "continue"  ·  "go on"  ·  "keep going"',
+        "  then DO NOT ask for clarification. Instead:",
+        "    1. Read PROGRESS.md §3 (Open Todos) and §4 (Plan).",
+        "    2. If §3 has at least one open todo, announce",
+        '       "Resuming prior task: <todos[0].content>" and start executing it.',
+        "    3. If §3 is empty but §4 (Plan) is non-empty, follow the plan's first step.",
+        "    4. If both are empty, fall back to a one-sentence prior-progress",
+        '       summary plus "what would you like to do next?".',
         "",
         "Why: this is the project's handoff contract (single source of truth).",
         "Skipping it risks duplicating work or contradicting prior decisions.",
@@ -400,6 +412,149 @@ def _retroactive_extract(messages):
         return None
 
 
+def _refresh_progress_row(db, project_id, memory_dir, current_session_id=None):
+    """Fill EMPTY progress fields from authoritative sources before injection.
+
+    Three-tier fallback (run in order; each only fills currently-empty fields):
+
+      Tier 1 (PreCompact upstream):
+        If a PreCompact already wrote the row, all fields are non-empty and
+        this function is effectively a no-op.
+
+      Tier 2 (DB):
+        - critical_context  ← db.get_critical_memories(min_importance=4)[:10]
+        - status_done       ← latest session_summary.completed
+        - status_in_flight  ← latest session_summary.learned
+        - plan              ← latest session_summary.next_steps
+        - open_todos        ← split next_steps by ';' (heuristic)
+        - files_touched     ← recent observations table
+
+      Tier 3 (transcript JSONL of the PREVIOUS session):
+        - open_todos     ← extract_latest_todo_state on the prior .jsonl
+        - files_touched  ← extract_file_changes on the prior .jsonl
+        - transcript_ptr ← absolute path to the prior .jsonl
+        (Last resort — only fires when DB sources are also empty, e.g. very
+         short prior session, or PreCompact never ran for that session.)
+
+    Fill-only-empty contract: a non-empty value written by upsert_progress()
+    or patch_progress() upstream is NEVER overwritten. This guarantees the
+    PreCompact full-rewrite remains authoritative.
+    """
+    cur = db.get_progress(project_id) or {}
+    patch = {}
+
+    # ── Tier 2A: critical_context from DB ──────────────────────────────────
+    if not cur.get("critical_context"):
+        crit = db.get_critical_memories(project_id, min_importance=4)[:10]
+        if crit:
+            patch["critical_context"] = [
+                {"id": m["id"], "category": m["category"],
+                 "topic": m.get("topic", "") or "",
+                 "content": (m["content"] or "")[:200]}
+                for m in crit
+            ]
+
+    # ── Tier 2B: status + plan from latest session_summary ────────────────
+    # NOTE: open_todos is deliberately NOT filled here. Tier 3 (transcript
+    # mining) gives much cleaner data via TodoWrite tool_use blocks; we let
+    # tier 3 fire first and only fall back to next_steps split below if
+    # tier 3 has nothing.
+    summary = db.get_latest_summary(project_id) or {}
+    next_steps_text = (summary.get("next_steps") or "").strip()
+    if summary:
+        if not cur.get("status_done") and summary.get("completed"):
+            patch["status_done"] = summary["completed"]
+        if not cur.get("status_in_flight") and summary.get("learned"):
+            patch["status_in_flight"] = summary["learned"]
+        if not cur.get("plan") and next_steps_text:
+            patch["plan"] = next_steps_text
+
+    # ── Tier 2C: files_touched from recent observations ────────────────────
+    if not cur.get("files_touched"):
+        obs = db.get_recent_observations(project_id, limit=40)
+        files_read = list(dict.fromkeys(
+            o["tool_input"] for o in obs
+            if o["tool_name"] == "Read" and o["tool_input"]
+        ))[:15]
+        files_modified = list(dict.fromkeys(
+            o["tool_input"] for o in obs
+            if o["tool_name"] in ("Edit", "Write", "MultiEdit") and o["tool_input"]
+        ))[:15]
+        ft = (
+            [{"path": p, "action": "edit"} for p in files_modified] +
+            [{"path": p, "action": "read"} for p in files_read if p not in files_modified]
+        )
+        if ft:
+            patch["files_touched"] = ft
+
+    # ── Tier 3: mine the previous session's transcript JSONL ───────────────
+    # Higher quality than tier-2 heuristics — TodoWrite tool_use blocks are
+    # structured data, far more reliable than splitting next_steps text by
+    # semicolons. Reads IO only when there are still empty fields to fill.
+    cwd = str(memory_dir.parent.resolve())
+    needs_todos = not cur.get("open_todos")
+    needs_files = "files_touched" not in patch and not cur.get("files_touched")
+    needs_ptr   = not cur.get("transcript_ptr")
+    todos_from_transcript = None
+
+    if needs_todos or needs_files or needs_ptr:
+        try:
+            from core.extractor import (
+                find_latest_transcript, load_transcript,
+                extract_latest_todo_state, extract_file_changes,
+            )
+            prior_jsonl = find_latest_transcript(cwd, exclude_session_id=current_session_id)
+            if prior_jsonl and prior_jsonl.stat().st_size > 200:
+                if needs_ptr:
+                    patch["transcript_ptr"] = str(prior_jsonl.resolve())
+                if needs_todos or needs_files:
+                    prior_msgs = load_transcript(str(prior_jsonl))
+                    if prior_msgs:
+                        if needs_todos:
+                            mined = extract_latest_todo_state(prior_msgs)
+                            pending = [t for t in mined
+                                       if t.get("status") != "completed"]
+                            if pending:
+                                todos_from_transcript = [
+                                    {"content": t["content"][:300],
+                                     "priority": t.get("priority", "medium"),
+                                     "status": t.get("status", "pending")}
+                                    for t in pending[:10]
+                                ]
+                                patch["open_todos"] = todos_from_transcript
+                        if needs_files:
+                            mined_files = extract_file_changes(prior_msgs)[:15]
+                            if mined_files:
+                                patch["files_touched"] = [
+                                    {"path": p, "action": "edit"}
+                                    for p in mined_files
+                                ]
+        except Exception as e:
+            _log.error(f"tier-3 transcript mine failed: {e}")
+
+    # ── Tier 2B (deferred): next_steps split as LAST-RESORT open_todos ─────
+    # Only fires if tier 3 transcript mining didn't find a TodoWrite snapshot.
+    # The split-by-semicolon heuristic produces low-quality items (a single
+    # long prose sentence collapses to one phantom todo) so we keep it as a
+    # final fallback to avoid an empty §3 in PROGRESS.md.
+    if needs_todos and todos_from_transcript is None and next_steps_text:
+        steps = [s.strip() for s in next_steps_text.split(";") if s.strip()]
+        if steps:
+            patch["open_todos"] = [
+                {"content": s[:300], "priority": "medium", "status": "pending"}
+                for s in steps[:8]
+            ]
+
+    if patch:
+        patch["trigger_type"] = "session_start_refresh"
+        db.patch_progress(project_id, **patch)
+        try:
+            write_progress_md(db, project_id, memory_dir)
+        except Exception as e:
+            _log.error(f"PROGRESS.md write after refresh failed: {e}")
+        _log.info(f"refreshed empty progress fields: {sorted(k for k in patch if k != 'trigger_type')}")
+
+
 def retroactive_save(cwd, db, project_id, current_session_id=""):
     transcript_dir = _find_transcript_dir(cwd)
     if not transcript_dir:
@@ -465,6 +620,16 @@ def main():
 
         db = MemoryDB(db_path)
         project_id = db.upsert_project(cwd)
+
+        # Tier 2 + 3 fallback: fill PROGRESS.md empty fields before injection.
+        # PreCompact remains the authoritative full-rewrite path; this only
+        # populates fields PreCompact didn't get to. See _refresh_progress_row
+        # docstring for the source priority and fill-only-empty contract.
+        try:
+            _refresh_progress_row(db, project_id, memory_dir,
+                                  current_session_id=session_id)
+        except Exception as e:
+            _log.error(f"progress refresh failed: {e}")
 
         print(f"\n[cc-memory] Session start — loading memory for '{Path(cwd).name}'...")
         print(build_context(memory_dir, db, project_id, Path(cwd).name))

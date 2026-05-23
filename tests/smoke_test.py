@@ -152,6 +152,184 @@ def main():
     assert prog2["current_request"] == "Implement JWT-based auth for the dashboard"
     print("[OK] patch_progress: trigger_type updated, current_request preserved")
 
+    # === v2.2 features: forced-reminder RESUME PROTOCOL ====================
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "cc_memory" / "hooks"))
+    from hooks.session_start import _build_forced_reminder, _refresh_progress_row
+    reminder = _build_forced_reminder(mem_dir)
+    assert "RESUME PROTOCOL" in reminder, "forced reminder missing RESUME PROTOCOL block"
+    assert "继续" in reminder, "resume signal whitelist missing Chinese tokens"
+    assert "resume" in reminder.lower(), "resume signal whitelist missing English tokens"
+    assert "open_todos[0]" in reminder.lower() or "todos[0]" in reminder.lower(), \
+        "forced reminder doesn't direct Claude to open_todos[0]"
+    print("[OK] forced reminder contains RESUME PROTOCOL + signal whitelist")
+
+    # === v2.2 features: fill-only-empty progress refresh ===================
+    # Build a SECOND test project with an EMPTY progress row + session_summary
+    # so we can verify _refresh_progress_row populates the right fields.
+    tmp2 = Path(tempfile.mkdtemp(prefix="cc-memory-refresh-"))
+    mem2 = tmp2 / "memory"; mem2.mkdir(parents=True, exist_ok=True)
+    db2 = MemoryDB(mem2 / "memory.db")
+    pid2 = db2.upsert_project(str(tmp2))
+
+    # Seed critical memory (importance >= 4) + a session_summary
+    db2.insert_memory(pid2, None, "decision",
+                      "Use PostgreSQL with pgvector for embeddings (must-remember)",
+                      importance=5, tags=["critical"], topic="db")
+    sid2 = db2.insert_session(pid2, "fake-claude-sid", "auto", 42, "", "")
+    db2.insert_session_summary(sid2, pid2, {
+        "request": "Set up vector search",
+        "investigated": "src/embed.py",
+        "learned": "pgvector index on cosine distance is 4x faster than IVFFlat",
+        "completed": "Migrated schema; reindexed 12k rows",
+        "next_steps": "Add hybrid BM25+vector ranker; Wire up reranker; Add eval harness",
+        "notes": "",
+        "files_read": ["src/embed.py", "tests/test_embed.py"],
+        "files_modified": ["src/embed.py", "src/search.py"],
+    })
+    # Seed observations (so files_touched can be derived)
+    db2.insert_observation(pid2, "s", "Read",  "src/embed.py", "")
+    db2.insert_observation(pid2, "s", "Edit",  "src/search.py", "")
+    db2.insert_observation(pid2, "s", "Write", "tests/test_search.py", "")
+
+    # Pre-condition: progress row is completely empty
+    db2.upsert_progress(pid2)  # writes default empties
+    pre = db2.get_progress(pid2)
+    assert not pre["critical_context"] and not pre["status_done"] \
+        and not pre["plan"] and not pre["files_touched"] \
+        and not pre["open_todos"], "precondition: empty progress row"
+
+    # Run refresh
+    _refresh_progress_row(db2, pid2, mem2)
+
+    post = db2.get_progress(pid2)
+    assert len(post["critical_context"]) == 1, \
+        f"expected 1 critical context, got {len(post['critical_context'])}"
+    assert "PostgreSQL" in post["critical_context"][0]["content"]
+    assert "Migrated schema" in post["status_done"]
+    assert "pgvector index" in post["status_in_flight"]
+    assert "hybrid BM25" in post["plan"]
+    assert len(post["open_todos"]) == 3, \
+        f"open_todos derived from next_steps split: expected 3, got {len(post['open_todos'])}"
+    assert any(t["content"].startswith("Add hybrid") for t in post["open_todos"])
+    assert len(post["files_touched"]) >= 2
+    assert post["trigger_type"] == "session_start_refresh"
+    print(f"[OK] _refresh_progress_row fills empty fields: "
+          f"crit={len(post['critical_context'])}, "
+          f"todos={len(post['open_todos'])}, "
+          f"files={len(post['files_touched'])}")
+
+    # === v2.2 features: extract_latest_todo_state (last-wins) ==============
+    from core.extractor import extract_latest_todo_state
+
+    def _mk_tu(name, **inp):
+        return {"message": {"role": "assistant", "content": [
+            {"type": "tool_use", "name": name, "input": inp}
+        ]}}
+
+    msgs_todo = [
+        _mk_tu("TodoWrite", todos=[
+            {"content": "task A", "status": "pending",   "activeForm": "Doing A"},
+            {"content": "task B", "status": "pending",   "activeForm": "Doing B"},
+        ]),
+        _mk_tu("TodoWrite", todos=[
+            {"content": "task A", "status": "completed",   "activeForm": "Doing A"},
+            {"content": "task B", "status": "in_progress", "activeForm": "Doing B"},
+            {"content": "task C", "status": "pending",     "activeForm": "Doing C"},
+        ]),
+    ]
+    snap = extract_latest_todo_state(msgs_todo)
+    assert len(snap) == 3, f"expected last-wins=3, got {len(snap)} (stacked?)"
+    assert snap[0]["status"] == "completed" and snap[2]["content"] == "task C"
+    print(f"[OK] extract_latest_todo_state: last-wins, {len(snap)} items (no stacking)")
+
+    msgs_cleared = msgs_todo + [_mk_tu("TodoWrite", todos=[])]
+    assert extract_latest_todo_state(msgs_cleared) == [], "empty TodoWrite should clear"
+    print("[OK] extract_latest_todo_state: explicit empty TodoWrite clears list")
+
+    assert extract_latest_todo_state(
+        [{"message": {"role": "user", "content": "hi"}}]
+    ) == []
+    print("[OK] extract_latest_todo_state: no TodoWrite ever ran returns []")
+
+    # === v2.2 features: tier-3 transcript fallback =========================
+    # Build a synthetic prior-session JSONL and monkey-patch
+    # find_latest_transcript so _refresh_progress_row's tier-3 code path
+    # mines it. Verifies: open_todos + files_touched + transcript_ptr all
+    # get populated when DB sources have nothing to offer.
+    tmp4 = Path(tempfile.mkdtemp(prefix="cc-memory-tier3-"))
+    mem4 = tmp4 / "memory"; mem4.mkdir(parents=True, exist_ok=True)
+    db4 = MemoryDB(mem4 / "memory.db")
+    pid4 = db4.upsert_project(str(tmp4))
+
+    import json as _json
+    prior_jsonl = tmp4 / "prior_session.jsonl"
+    prior_msgs_data = [
+        {"message": {"role": "user", "content": "build feature X"}},
+        _mk_tu("TodoWrite", todos=[
+            {"content": "Implement step 1", "status": "completed", "activeForm": "Doing 1"},
+            {"content": "Implement step 2", "status": "pending",   "activeForm": "Doing 2"},
+            {"content": "Write tests",      "status": "pending",   "activeForm": "Writing"},
+        ]),
+        _mk_tu("Edit",  file_path="src/feature_x.py"),
+        _mk_tu("Write", file_path="tests/test_feature_x.py"),
+    ]
+    with open(prior_jsonl, "w", encoding="utf-8") as fh:
+        for m in prior_msgs_data:
+            fh.write(_json.dumps(m) + "\n")
+
+    import core.extractor as _ex_mod
+    orig_find = _ex_mod.find_latest_transcript
+    _ex_mod.find_latest_transcript = lambda *a, **kw: prior_jsonl
+    try:
+        db4.upsert_progress(pid4)  # empty defaults
+        _refresh_progress_row(db4, pid4, mem4,
+                              current_session_id="not-the-fake-session")
+    finally:
+        _ex_mod.find_latest_transcript = orig_find
+
+    post4 = db4.get_progress(pid4)
+    assert post4["open_todos"], "tier-3 must fill open_todos from transcript"
+    assert len(post4["open_todos"]) == 2, \
+        f"expected 2 (1 completed filtered out), got {len(post4['open_todos'])}"
+    assert any("step 2" in t["content"] for t in post4["open_todos"])
+    assert any("Write tests" in t["content"] for t in post4["open_todos"])
+    assert post4["transcript_ptr"] == str(prior_jsonl.resolve())
+    assert post4["files_touched"], "tier-3 must fill files_touched from transcript"
+    assert any("feature_x.py" in f["path"] for f in post4["files_touched"])
+    print(f"[OK] tier-3 transcript fallback: "
+          f"{len(post4['open_todos'])} todos + "
+          f"{len(post4['files_touched'])} files + transcript_ptr set")
+
+    # === Fill-only-empty contract: pre-set fields are NOT overwritten ======
+    tmp3 = Path(tempfile.mkdtemp(prefix="cc-memory-fillonly-"))
+    mem3 = tmp3 / "memory"; mem3.mkdir(parents=True, exist_ok=True)
+    db3 = MemoryDB(mem3 / "memory.db")
+    pid3 = db3.upsert_project(str(tmp3))
+
+    # Pre-populate with non-empty values (simulating PreCompact's full rewrite)
+    db3.upsert_progress(pid3,
+                        status_done="Already recorded by PreCompact",
+                        plan="Authoritative plan from PreCompact",
+                        open_todos=[{"content": "PreCompact todo", "priority": "high",
+                                     "status": "pending"}])
+    # Add session_summary that WOULD overwrite if not for fill-only contract
+    sid3 = db3.insert_session(pid3, "s3", "auto", 10, "", "")
+    db3.insert_session_summary(sid3, pid3, {
+        "completed": "STALE SHOULD NOT APPEAR",
+        "next_steps": "STALE STEPS",
+        "files_read": [], "files_modified": [],
+    })
+
+    _refresh_progress_row(db3, pid3, mem3)
+    after = db3.get_progress(pid3)
+    assert after["status_done"] == "Already recorded by PreCompact", \
+        "fill-only-empty violated: status_done was overwritten"
+    assert after["plan"] == "Authoritative plan from PreCompact", \
+        "fill-only-empty violated: plan was overwritten"
+    assert len(after["open_todos"]) == 1 and after["open_todos"][0]["content"] == "PreCompact todo", \
+        "fill-only-empty violated: open_todos was overwritten"
+    print("[OK] fill-only-empty contract: non-empty fields preserved")
+
     print("\n===== ALL SMOKE TESTS PASSED =====")
     print(f"Test project preserved at: {tmp}")
     print("\nProduced files:")
