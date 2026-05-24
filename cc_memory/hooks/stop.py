@@ -25,6 +25,11 @@ _HERE = Path(__file__).resolve().parent
 _PKG_ROOT = _HERE.parent
 sys.path.insert(0, str(_PKG_ROOT))
 
+# Force UTF-8 on stdio (Stop hook's status line can contain ↻ via the
+# observer's supersede-count print); avoid gbk crashes on Windows.
+from core.encoding_setup import enable_utf8_io
+enable_utf8_io()
+
 from core.db import MemoryDB
 from core.logger import get_logger
 from core.idle import maybe_run_idle

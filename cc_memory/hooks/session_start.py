@@ -27,6 +27,12 @@ _HERE = Path(__file__).resolve().parent
 _PKG_ROOT = _HERE.parent
 sys.path.insert(0, str(_PKG_ROOT))
 
+# Force UTF-8 on stdio BEFORE injecting context; the injected text can hold
+# arbitrary unicode (emoji in MEMORY.md, ↻ in status, math symbols), and
+# Windows gbk default would crash the hook on first print().
+from core.encoding_setup import enable_utf8_io
+enable_utf8_io()
+
 from core.db import MemoryDB
 from core.extractor import load_transcript
 from core.logger import get_logger

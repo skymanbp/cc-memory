@@ -23,6 +23,11 @@ _HERE = Path(__file__).resolve().parent
 _PKG_ROOT = _HERE.parent
 sys.path.insert(0, str(_PKG_ROOT))
 
+# Force UTF-8 on stdio so `mem.py status / list / search` doesn't crash
+# when memory content contains emoji / math glyphs on Windows gbk consoles.
+from core.encoding_setup import enable_utf8_io
+enable_utf8_io()
+
 from core.db import MemoryDB
 
 
@@ -62,48 +67,218 @@ def _table(headers, rows):
         print(fmt.format(*t))
 
 
+_REQUIRED_PLUGIN_FILES = [
+    "cc_memory/core/db.py",
+    "cc_memory/core/logger.py",
+    "cc_memory/core/privacy.py",
+    "cc_memory/core/modes.py",
+    "cc_memory/core/progress.py",
+    "cc_memory/core/encoding_setup.py",
+    "cc_memory/hooks/pre_compact.py",
+    "cc_memory/hooks/session_start.py",
+    "cc_memory/hooks/stop.py",
+    "cc_memory/hooks/post_tool_use.py",
+    "cc_memory/hooks/user_prompt.py",
+    "cc_memory/llm/memory_writer.py",
+    "hooks/hooks.json",
+]
+
+
+def _detect_install_layouts():
+    """Detect every cc-memory install layout active on this machine.
+
+    A machine can have more than one (e.g. dev-checkout marketplace +
+    a stale marketplace-cache entry). Returns a list of dicts, one per
+    layout, with file-presence + hook-registration verdicts inside.
+
+    Recognized:
+      - marketplace-directory: extraKnownMarketplaces["cc-memory"].source.type
+                               == "directory"; root = source.path (dev checkout)
+      - marketplace-cache:     installed_plugins.json[cc-memory@cc-memory][0].installPath
+      - legacy-install:        ~/.claude/hooks/cc-memory/cc_memory/ exists
+    """
+    layouts = []
+    home = Path.home() / ".claude"
+
+    settings = {}
+    settings_path = home / "settings.json"
+    if settings_path.exists():
+        try:
+            settings = json.loads(settings_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            # why: settings.json being malformed is a recoverable diagnostic
+            # state — we still want to report on the OTHER layouts (legacy,
+            # cache) so the user can see they're broken too; default to {}
+            settings = {}
+
+    enabled_marketplace = bool(
+        settings.get("enabledPlugins", {}).get("cc-memory@cc-memory", False)
+    )
+
+    mp_entry = settings.get("extraKnownMarketplaces", {}).get("cc-memory", {})
+    mp_src = mp_entry.get("source", {})
+    if mp_src.get("type") == "directory" or mp_src.get("source") == "directory":
+        mp_path = mp_src.get("path")
+        if mp_path:
+            layouts.append(_inspect_layout(
+                "marketplace-directory", Path(mp_path),
+                hooks_via="plugin-manifest", enabled=enabled_marketplace,
+            ))
+
+    inst_path = home / "plugins" / "installed_plugins.json"
+    if inst_path.exists():
+        try:
+            inst = json.loads(inst_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            # why: corrupt installed_plugins.json blocks ALL plugin discovery
+            # at the Claude Code level too — we surface that elsewhere; here
+            # we just skip the cache layout so the report continues
+            inst = {}
+        for entry in inst.get("plugins", {}).get("cc-memory@cc-memory", []):
+            p = entry.get("installPath")
+            if not p:
+                continue
+            root = Path(p)
+            if not root.exists():
+                layouts.append({
+                    "layout": "marketplace-cache",
+                    "root": root,
+                    "hooks_via": "plugin-manifest",
+                    "enabled": enabled_marketplace,
+                    "plugin_files_ok": False,
+                    "missing_files": ["<installPath does not exist>"],
+                    "hooks_json": None,
+                    "hooks_registered": [],
+                    "broken_reason": f"installPath {root} not found on disk",
+                })
+                continue
+            layouts.append(_inspect_layout(
+                "marketplace-cache", root,
+                hooks_via="plugin-manifest", enabled=enabled_marketplace,
+            ))
+
+    legacy = home / "hooks" / "cc-memory"
+    if (legacy / "cc_memory").exists():
+        layouts.append(_inspect_layout(
+            "legacy-install", legacy,
+            hooks_via="user-settings",
+            enabled=True,  # legacy install doesn't gate on enabledPlugins
+            settings_dict=settings,
+        ))
+    return layouts
+
+
+def _inspect_layout(layout_name, root: Path,
+                    hooks_via: str, enabled: bool,
+                    settings_dict=None):
+    """Check plugin file presence + hook registration for one install root."""
+    missing = [rel for rel in _REQUIRED_PLUGIN_FILES if not (root / rel).exists()]
+    plugin_files_ok = not missing
+
+    hooks_registered = []
+    hooks_json_path = None
+    if hooks_via == "plugin-manifest":
+        hooks_json_path = root / "hooks" / "hooks.json"
+        if hooks_json_path.exists():
+            try:
+                hj = json.loads(hooks_json_path.read_text(encoding="utf-8"))
+                hooks_registered = list(hj.get("hooks", {}).keys())
+            except (json.JSONDecodeError, OSError):
+                # why: malformed hooks.json IS a bug we want to surface, but
+                # at the LAYOUT-detection level we just report 0 hooks — the
+                # downstream _print_layout_report will flag the mismatch
+                hooks_registered = []
+    elif hooks_via == "user-settings" and settings_dict is not None:
+        hooks_block = settings_dict.get("hooks", {})
+        for ev in ("PreCompact", "SessionStart", "Stop",
+                   "PostToolUse", "UserPromptSubmit"):
+            for mg in hooks_block.get(ev, []):
+                if not isinstance(mg, dict):
+                    continue
+                for h in mg.get("hooks", []):
+                    if "cc-memory" in (h.get("command") or ""):
+                        hooks_registered.append(ev)
+                        break
+                if ev in hooks_registered:
+                    break
+
+    return {
+        "layout": layout_name,
+        "root": root,
+        "hooks_via": hooks_via,
+        "enabled": enabled,
+        "plugin_files_ok": plugin_files_ok,
+        "missing_files": missing,
+        "hooks_json": hooks_json_path,
+        "hooks_registered": hooks_registered,
+    }
+
+
+def _print_layout_report(layout: dict) -> bool:
+    """Print one layout's status. Returns True iff this layout is fully functional."""
+    name = layout["layout"]
+    root = layout["root"]
+    if "broken_reason" in layout:
+        print(f"  [FAIL] {name} at {root}")
+        print(f"         {layout['broken_reason']}")
+        return False
+    files_tag = "OK  " if layout["plugin_files_ok"] else "FAIL"
+    enabled_tag = "" if layout["hooks_via"] != "plugin-manifest" else (
+        " · enabled" if layout["enabled"] else " · NOT enabled in settings.json"
+    )
+    print(f"  [{files_tag}] {name} at {root}{enabled_tag}")
+    if layout["missing_files"]:
+        print(f"         missing: {', '.join(layout['missing_files'][:5])}"
+              + (" ..." if len(layout["missing_files"]) > 5 else ""))
+
+    expected_events = {"PreCompact", "SessionStart", "Stop",
+                       "PostToolUse", "UserPromptSubmit"}
+    got = set(layout["hooks_registered"])
+    n = len(got & expected_events)
+    if n == 5:
+        via = "hooks/hooks.json" if layout["hooks_via"] == "plugin-manifest" \
+              else "~/.claude/settings.json[hooks]"
+        print(f"         hooks: 5/5 registered via {via}")
+    elif n > 0:
+        print(f"         hooks: {n}/5 registered "
+              f"(missing: {', '.join(expected_events - got)})")
+    else:
+        print(f"         hooks: 0/5 — neither hooks.json nor settings.json[hooks] "
+              f"registers cc-memory")
+
+    return layout["plugin_files_ok"] and n == 5 and layout["enabled"]
+
+
 def cmd_status(args):
-    import tempfile
     memory_dir, db_path, name = _resolve_db(args.project)
     project = str(Path(args.project).resolve())
 
     print(f"\n{'='*55}\n  cc-memory v2.1 Status Check: {name}\n{'='*55}\n")
 
-    plugin_dir = Path.home() / ".claude" / "hooks" / "cc-memory"
-    required = ["core/db.py", "hooks/pre_compact.py", "hooks/session_start.py",
-                "hooks/stop.py", "hooks/post_tool_use.py", "hooks/user_prompt.py",
-                "core/logger.py", "core/privacy.py", "core/modes.py",
-                "llm/memory_writer.py", "core/progress.py"]
-    missing = [f for f in required if not (plugin_dir / f).exists()]
-    if missing:
-        print(f"  [FAIL] Plugin files missing: {', '.join(missing)}")
+    layouts = _detect_install_layouts()
+    if not layouts:
+        print("  [FAIL] No cc-memory install detected.")
+        print("         Checked: marketplace-directory (settings.json"
+              ".extraKnownMarketplaces),")
+        print("                  marketplace-cache (plugins/installed_plugins.json),")
+        print("                  legacy install (~/.claude/hooks/cc-memory/)")
     else:
-        print(f"  [OK]   Plugin installed ({plugin_dir})")
+        functional = False
+        for layout in layouts:
+            if _print_layout_report(layout):
+                functional = True
+        if not functional:
+            print("  [WARN] No fully-functional install layout. Hooks may still "
+                  "fire if one source is partially configured.")
 
-    settings_path = Path.home() / ".claude" / "settings.json"
-    expected = ["PreCompact", "SessionStart", "Stop", "PostToolUse", "UserPromptSubmit"]
-    if settings_path.exists():
-        settings = json.loads(settings_path.read_text(encoding="utf-8"))
-        hooks = settings.get("hooks", {})
-        all_ok = True
-        for ev in expected:
-            hl = hooks.get(ev, [])
-            ok = any(
-                "cc-memory" in h.get("command", "")
-                for mg in hl
-                for h in (mg.get("hooks", []) if isinstance(mg, dict) else [])
-            )
-            if not ok:
-                all_ok = False
-                print(f"  [MISS] {ev} hook not registered")
-        if all_ok:
-            print(f"  [OK]   All 5 hooks registered")
-    else:
-        print(f"  [FAIL] settings.json not found")
+    active_layout = next((L for L in layouts
+                          if "broken_reason" not in L
+                          and L.get("plugin_files_ok")), None)
 
     if not db_path.exists():
         print(f"  [FAIL] No database at {db_path}")
         return
+
     db = MemoryDB(db_path)
     pid = db.upsert_project(project)
     stats = db.get_stats(pid)
@@ -122,7 +297,23 @@ def cmd_status(args):
             status = "OK" if ok else "FAIL"
             method = info.get("method", "?")
             ni = info.get("n_inserted", info.get("n_saved", 0))
-            print(f"  [{status:4}] Last save: {ts} (+{ni} via {method})")
+            stale_warn = ""
+            from datetime import datetime, timedelta
+            try:
+                last_dt = datetime.fromisoformat(
+                    ts.replace("Z", "+00:00").split(".")[0]
+                )
+                age = datetime.now() - last_dt.replace(tzinfo=None)
+                if age > timedelta(days=14):
+                    stale_warn = (
+                        f"  [WARN] STALE ({age.days}d old — "
+                        f"check for direct MEMORY.md edits)"
+                    )
+            except (ValueError, TypeError):
+                # why: malformed timestamp shouldn't suppress the rest of the
+                # status report; we leave stale_warn empty and continue
+                stale_warn = ""
+            print(f"  [{status:4}] Last save: {ts} (+{ni} via {method}){stale_warn}")
         except (json.JSONDecodeError, OSError):
             print(f"  [WARN] Last save status unreadable")
     else:
@@ -135,17 +326,20 @@ def cmd_status(args):
     else:
         print(f"  [INFO] No progress recorded yet")
 
-    sys.path.insert(0, str(plugin_dir))
-    try:
-        from core.auth import get_api_key
-        key, source = get_api_key()
-        if key:
-            print(f"  [OK]   API key: {source} ({key[:8]}...)")
-        else:
-            reason = "OAuth expired" if source == "oauth_expired" else "not found"
-            print(f"  [WARN] API key: {reason}")
-    except Exception as e:
-        print(f"  [WARN] API key check failed: {e}")
+    if active_layout:
+        sys.path.insert(0, str(active_layout["root"] / "cc_memory"))
+        try:
+            from core.auth import get_api_key
+            key, source = get_api_key()
+            if key:
+                print(f"  [OK]   API key: {source} ({key[:8]}...)")
+            else:
+                reason = "OAuth expired" if source == "oauth_expired" else "not found"
+                print(f"  [WARN] API key: {reason}")
+        except Exception as e:
+            print(f"  [WARN] API key check failed: {e}")
+    else:
+        print(f"  [SKIP] API key check (no functional install layout)")
 
     mode = db.get_project_mode(pid)
     print(f"\n  Mode: {mode}")

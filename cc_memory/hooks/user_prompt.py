@@ -20,6 +20,11 @@ _HERE = Path(__file__).resolve().parent
 _PKG_ROOT = _HERE.parent
 sys.path.insert(0, str(_PKG_ROOT))
 
+# Force UTF-8 on stdio (defensive — UserPromptSubmit's stdout is empty by
+# contract, but error tracebacks could contain user prompt content).
+from core.encoding_setup import enable_utf8_io
+enable_utf8_io()
+
 _TURN_FILE_PREFIX = "cc_mem_turns_"
 _PROMPT_FILE_PREFIX = "cc_mem_prompt_"
 

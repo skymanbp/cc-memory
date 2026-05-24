@@ -32,6 +32,10 @@ _HERE = Path(__file__).resolve().parent
 _PKG_ROOT = _HERE.parent  # cc_memory/
 sys.path.insert(0, str(_PKG_ROOT))
 
+# Force UTF-8 on stdio BEFORE anything prints; Windows gbk crashes on ↻ etc.
+from core.encoding_setup import enable_utf8_io
+enable_utf8_io()
+
 from core.db import MemoryDB
 from core.extractor import build_extraction, load_transcript, group_sentences, CATEGORY_ORDER, CATEGORY_LABELS
 from core.logger import get_logger

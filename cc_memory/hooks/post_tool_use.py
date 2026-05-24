@@ -16,6 +16,11 @@ _HERE = Path(__file__).resolve().parent
 _PKG_ROOT = _HERE.parent
 sys.path.insert(0, str(_PKG_ROOT))
 
+# Force UTF-8 on stdio. PostToolUse has empty stdout by contract, but error
+# paths still print tracebacks; gbk would crash the hook on emoji glyphs.
+from core.encoding_setup import enable_utf8_io
+enable_utf8_io()
+
 _MAX_INPUT_CHARS = 2000
 _MAX_OUTPUT_CHARS = 1000
 _MAX_STDIN_BYTES = 1024 * 512
