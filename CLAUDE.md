@@ -35,6 +35,7 @@ cc-memory/
 │   └── marketplace.json         ← /plugin marketplace add entry
 ├── hooks/hooks.json             ← 5 hook declarations
 ├── skills/                      ← THE canonical skills location
+│   ├── ccm-load/SKILL.md        (one-shot end-to-end activation + init)
 │   ├── save-memories/SKILL.md   (routes through memory_writer)
 │   ├── mem-init/SKILL.md
 │   └── mem-status/SKILL.md
@@ -47,13 +48,16 @@ cc-memory/
 │   ├── __init__.py              (version 2.1.0)
 │   ├── config.json
 │   ├── core/                    db, extractor, consolidate, idle, progress,
-│   │                            privacy, modes, auth, logger
+│   │                            privacy, modes, auth, logger, encoding_setup
 │   ├── hooks/                   post_tool_use, pre_compact, session_start,
 │   │                            stop, user_prompt
 │   ├── llm/                     ccl_backend, memory_writer
 │   ├── cli/                     mem, plan
 │   ├── mcp/                     server
 │   └── ui/                      installer, dashboard, web_viewer
+├── tests/
+│   └── smoke_test.py            end-to-end anti-patch + PROGRESS.md +
+│                                tier-3 transcript + layout-inspector tests
 ├── build_exe.py
 ├── pyproject.toml
 ├── README.md
@@ -105,16 +109,15 @@ Key columns added in v2.1:
 > trigram-Jaccard similarity. Never call `db.insert_memory` directly from a
 > caller path. See `docs/MEMORY_RULES.md` for the full spec.
 
-Save paths converted to use the writer:
+All save paths route through the writer (no remaining direct callers of
+`db.insert_memory` outside the writer itself):
 - `hooks/pre_compact.py` ✓
 - `hooks/stop.py` (observer) ✓
 - `cli/mem.py add` ✓
 - `mcp/server.py memory_add` ✓
 - `skills/save-memories/SKILL.md` ✓ (calls `upsert_batch`)
-
-Not yet converted (still on direct `db.insert_memory` for legacy reasons):
-- `ui/dashboard.py` "Add Memory" dialog — slated for v2.2.
-- `ui/dashboard.py` "Save Session" — slated for v2.2.
+- `ui/dashboard.py` "Add Memory" dialog ✓ (`upsert_smart`)
+- `ui/dashboard.py` "Save Session" ✓ (`upsert_batch`)
 
 ## Forced handoff contract
 
@@ -164,6 +167,36 @@ first PreCompact under v2.1 (one-shot migration in `core/progress.py`).
 - `memory/PROGRESS.md` and `memory/MEMORY.md` are generated artifacts. Edit
   the SQL source of truth (`progress` table for PROGRESS.md, `memories`/
   `topics`/`keywords` for MEMORY.md) instead.
+
+## Tests
+
+`tests/smoke_test.py` is the canonical end-to-end check. It exercises the
+v2.1 + v2.2 contracts in a throwaway temp project: v3 migrations,
+`upsert_smart` decisions (INSERT/MERGE/SUPERSEDE/SKIP), the `progress`
+row + `PROGRESS.md` full-rewrite, the fill-only-empty refresh contract,
+last-wins TodoWrite extraction, the tier-3 transcript fallback, the
+legacy `SESSION_HANDOFF.md` migration, and the layout inspector.
+
+```bash
+python tests/smoke_test.py
+# expect: a series of [OK] lines ending with "===== ALL SMOKE TESTS PASSED ====="
+```
+
+No pytest / pip dependencies — the file is a stdlib script and reflects
+the runtime contract (pure stdlib, see Development guidelines below).
+When you add a behavior to `memory_writer`, `progress`, or
+`session_start._refresh_progress_row`, add a corresponding assertion block
+here.
+
+## Interpreter requirement
+
+`hooks/hooks.json` invokes `python3`. On Linux/macOS this is the standard
+Python 3 binary. On Windows the python.org installer ships `python.exe`
+plus the `py.exe` launcher but NOT `python3.exe` by default — install
+"Add Python to PATH" + tick "py launcher", or symlink/alias `python3 ->
+python` before installing the plugin. Otherwise hooks will fail silently
+(logged to `~/.claude/hooks/cc-memory/logs/`, but Claude Code shows no
+error UI for missing-command hooks).
 
 ## Build
 

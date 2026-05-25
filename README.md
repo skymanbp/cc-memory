@@ -213,6 +213,19 @@ No manual API key setup is needed if you're logged into Claude Code.
 
 Resolution order: `ANTHROPIC_API_KEY` env var → Claude OAuth token.
 
+## Tests
+
+`tests/smoke_test.py` is an end-to-end stdlib script (no pytest needed)
+that verifies the anti-patch writer decisions, PROGRESS.md full-rewrite,
+the fill-only-empty refresh contract, last-wins TodoWrite extraction, the
+tier-3 transcript fallback, legacy `SESSION_HANDOFF.md` migration, and
+the layout inspector.
+
+```bash
+python tests/smoke_test.py
+# expect a series of [OK] lines ending with "===== ALL SMOKE TESTS PASSED ====="
+```
+
 ## Build executables
 
 ```bash
@@ -228,6 +241,10 @@ python build_exe.py
 - Python 3.8+ (stdlib only — no pip dependencies at runtime)
 - Claude Code with hooks support
 - PyInstaller (only for building the exe, not for running)
+- On Windows: ensure `python3` resolves to a Python 3 interpreter, since
+  `hooks/hooks.json` invokes `python3` and the python.org installer does
+  not provide `python3.exe` by default. The simplest fix is to symlink or
+  shim `python3` to `python` on PATH.
 
 ## Documentation
 

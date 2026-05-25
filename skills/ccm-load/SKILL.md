@@ -27,21 +27,24 @@ Idempotent — safe to re-run.
 
 ```bash
 python3 -c "
-import json, sys
+import json, os, sys
 from pathlib import Path
 
 # ── (1) Global activation check ────────────────────────────────────────
 settings = Path.home() / '.claude' / 'settings.json'
+marketplace_path = None
 issues = []
 if settings.exists():
     try:
         s = json.loads(settings.read_text(encoding='utf-8'))
         enabled = s.get('enabledPlugins', {}).get('cc-memory@cc-memory') is True
-        marketplace = 'cc-memory' in s.get('extraKnownMarketplaces', {})
+        mk = s.get('extraKnownMarketplaces', {}).get('cc-memory')
         if not enabled:
             issues.append('enabledPlugins[\"cc-memory@cc-memory\"] is not true')
-        if not marketplace:
+        if not mk:
             issues.append('extraKnownMarketplaces.cc-memory is missing')
+        else:
+            marketplace_path = (mk.get('source') or {}).get('path')
     except Exception as e:
         issues.append(f'settings.json unreadable: {e}')
 else:
@@ -53,7 +56,7 @@ if issues:
         print(f'  - {i}')
     print()
     print('To activate, run inside Claude Code:')
-    print('  /plugin marketplace add D:\\\\Projects\\\\cc-memory')
+    print('  /plugin marketplace add <path-to-cc-memory-repo>')
     print('  /plugin install cc-memory@cc-memory')
     sys.exit(0)
 print('[OK] cc-memory plugin globally activated')
@@ -72,9 +75,30 @@ if not db_path.exists():
     if not gi.exists():
         gi.write_text('memory.db\nmemory.db-wal\nmemory.db-shm\nsessions/\n.last_save.json\n', encoding='utf-8')
 
-# ── (3) Bootstrap DB + write PROGRESS.md/MEMORY.md ─────────────────────
-PLUGIN = Path('D:/Projects/cc-memory/cc_memory').resolve()
-sys.path.insert(0, str(PLUGIN))
+# ── (3) Resolve plugin root (env > marketplace > standard install) ─────
+# why: hardcoding the maintainer's path breaks the skill on every other
+# machine. Try CLAUDE_PLUGIN_ROOT first (set by Claude Code when invoked
+# from a plugin context), then settings.json marketplace path, then the
+# v2.0-style standalone install location under ~/.claude/hooks/.
+def _find_plugin_root():
+    env_root = os.environ.get('CLAUDE_PLUGIN_ROOT')
+    if env_root and (Path(env_root) / 'cc_memory' / 'core' / 'db.py').exists():
+        return Path(env_root)
+    if marketplace_path:
+        p = Path(marketplace_path)
+        if (p / 'cc_memory' / 'core' / 'db.py').exists():
+            return p
+    standalone = Path.home() / '.claude' / 'hooks' / 'cc-memory'
+    if (standalone / 'cc_memory' / 'core' / 'db.py').exists():
+        return standalone
+    return None
+
+plugin_root = _find_plugin_root()
+if plugin_root is None:
+    print('[error] cannot locate cc-memory plugin tree.')
+    print('  Set CLAUDE_PLUGIN_ROOT, or re-run /plugin install cc-memory.')
+    sys.exit(0)
+sys.path.insert(0, str((plugin_root / 'cc_memory').resolve()))
 
 from core.db import MemoryDB
 from core.progress import write_progress_md, migrate_legacy_handoff
