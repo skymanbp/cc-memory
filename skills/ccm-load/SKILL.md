@@ -148,13 +148,14 @@ Summarize to the user in 1-2 sentences:
 - **Whenever PROGRESS.md or MEMORY.md is missing** but you expected them
   (e.g. you suspect a partial uninstall).
 
-### Relation to other cc-memory skills
+### Relation to other cc-memory entry points
 
-| Skill | Scope |
-|-------|-------|
+| Entry point | Scope |
+|-------------|-------|
 | `/ccm-load` (this) | One-shot end-to-end activation + init + status |
-| `/mem-init` | Just project memory/ creation (subset of ccm-load step 2) |
-| `/mem-status` | Just the health check (subset of ccm-load step 4) |
+| `/cc-mem status` | Just the health check (subset of ccm-load step 4) |
+| `/cc-mem dashboard` | Launch the Tkinter GUI for the current project |
 | `/save-memories` | Manual memory save through the anti-patch writer |
 
 `/ccm-load` is the recommended single entry point for new projects.
+Day-to-day inspection uses `/cc-mem <subcommand>`.

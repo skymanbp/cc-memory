@@ -667,6 +667,24 @@ def cmd_serve(args):
     web_main()
 
 
+def cmd_dashboard(args):
+    """Launch the Tkinter dashboard for this project.
+
+    Resolves dashboard.py relative to this file so it works under both
+    marketplace install (plugin tree in source repo) and standalone install
+    (~/.claude/hooks/cc-memory/), without env vars or hardcoded paths.
+    """
+    import subprocess
+    dashboard_py = Path(__file__).resolve().parent.parent / "ui" / "dashboard.py"
+    if not dashboard_py.exists():
+        print(f"[FAIL] dashboard.py not found at expected location: {dashboard_py}")
+        sys.exit(1)
+    cmd = [sys.executable, str(dashboard_py), "--project", args.project]
+    # why: detach so the CLI returns immediately; the GUI lives in its own window
+    subprocess.Popen(cmd)
+    print(f"[OK] Launched dashboard for project: {args.project}")
+
+
 def make_parser():
     p = argparse.ArgumentParser(prog="cc-memory", description="cc-memory CLI v2.1",
         formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -722,6 +740,8 @@ def make_parser():
     pv = sub.add_parser("serve", help="Launch web dashboard")
     pv.add_argument("--port", type=int, default=9377)
 
+    sub.add_parser("dashboard", help="Launch the Tkinter GUI dashboard")
+
     return p
 
 
@@ -734,7 +754,7 @@ def main():
         "consolidate": cmd_consolidate, "cleanup": cmd_cleanup,
         "schema": cmd_schema, "progress": cmd_progress, "supersedes": cmd_supersedes,
         "observations": cmd_observations, "mode": cmd_mode,
-        "summary": cmd_summary, "serve": cmd_serve,
+        "summary": cmd_summary, "serve": cmd_serve, "dashboard": cmd_dashboard,
     }
     dispatch[args.command](args)
 

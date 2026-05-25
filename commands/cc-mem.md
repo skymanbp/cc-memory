@@ -23,18 +23,30 @@ Run cc-memory CLI commands against the current project. The wrapper resolves
 | `cleanup` | Lightweight no-LLM cleanup + MEMORY.md regen |
 | `summary` | Latest session summary (request/done/next_steps) |
 | `mode [name]` | Show/set project mode (code/research/writing) |
+| `serve [--port N]` | Launch the browser-based web viewer (stdlib http.server) |
+| `dashboard` | Launch the Tkinter GUI dashboard for this project |
 
 ### How to invoke
 
-Run this exact command, substituting `$ARGS`:
+Resolve the CLI path against the plugin root (works for both marketplace
+and standalone-exe installs), then run the subcommand:
 
 ```bash
-python3 ~/.claude/hooks/cc-memory/cc_memory/cli/mem.py --project . $ARGS
+# Resolve plugin root: env var (marketplace/plugin context) → standalone install
+if [ -n "${CLAUDE_PLUGIN_ROOT}" ] && [ -f "${CLAUDE_PLUGIN_ROOT}/cc_memory/cli/mem.py" ]; then
+    CCMEM="${CLAUDE_PLUGIN_ROOT}/cc_memory/cli/mem.py"
+elif [ -f "$HOME/.claude/hooks/cc-memory/cc_memory/cli/mem.py" ]; then
+    CCMEM="$HOME/.claude/hooks/cc-memory/cc_memory/cli/mem.py"
+else
+    echo "cc-memory plugin not found"; exit 1
+fi
+python3 "$CCMEM" --project . $ARGS
 ```
 
 Then summarize the output to the user. For `progress` and `stats`, give a 1-2
 sentence highlight (what's happening, what's stuck). For `supersedes`, show the
-chain length and any active head.
+chain length and any active head. For `dashboard`/`serve`, just confirm the
+launch and stop — the GUI/web viewer lives in its own window/browser tab.
 
 ### Anti-patch reminder
 

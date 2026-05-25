@@ -35,10 +35,8 @@ cc-memory/
 │   └── marketplace.json         ← /plugin marketplace add entry
 ├── hooks/hooks.json             ← 5 hook declarations
 ├── skills/                      ← THE canonical skills location
-│   ├── ccm-load/SKILL.md        (one-shot end-to-end activation + init)
-│   ├── save-memories/SKILL.md   (routes through memory_writer)
-│   ├── mem-init/SKILL.md
-│   └── mem-status/SKILL.md
+│   ├── ccm-load/SKILL.md        (one-shot end-to-end activation + init + status)
+│   └── save-memories/SKILL.md   (routes through memory_writer)
 ├── commands/cc-mem.md           ← /cc-mem slash command
 ├── docs/
 │   ├── ARCHITECTURE.md

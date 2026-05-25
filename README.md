@@ -121,22 +121,32 @@ Importance scale: `1`=noise, `2`=low, `3`=normal, `4`=important, `5`=critical (n
 
 ## CLI
 
-```bash
-M="python ~/.claude/hooks/cc-memory/cc_memory/cli/mem.py --project ."
+**Inside Claude Code** (recommended, path-agnostic):
 
-$M status              # Full health check
-$M stats               # Memory + supersede-chain counts
-$M list decisions      # Recent memories by category
-$M search "auth flow"  # FTS5 search
-$M topics              # Topic summaries
-$M progress            # Regenerate memory/PROGRESS.md and print
-$M supersedes 42       # Walk the supersede chain for memory #42
-$M consolidate         # Full LLM-backed consolidation
-$M cleanup             # Lightweight no-LLM cleanup
-$M add decision "Chose X" --importance 4 --topic auth   # Anti-patch upsert
+```
+/cc-mem status                                    # Full health check
+/cc-mem stats                                     # Memory + supersede-chain counts
+/cc-mem list decisions                            # Recent memories by category
+/cc-mem search "auth flow"                        # FTS5 search
+/cc-mem topics                                    # Topic summaries
+/cc-mem progress                                  # Regenerate memory/PROGRESS.md and print
+/cc-mem supersedes 42                             # Walk the supersede chain for memory #42
+/cc-mem consolidate                               # Full LLM-backed consolidation
+/cc-mem cleanup                                   # Lightweight no-LLM cleanup
+/cc-mem add decision "Chose X" --importance 4     # Anti-patch upsert
+/cc-mem dashboard                                 # Launch the Tkinter GUI
+/cc-mem serve                                     # Launch the browser-based web viewer
 ```
 
-Slash command: `/cc-mem <subcommand>` does the same.
+**Outside Claude Code** (shell, standalone-install path shown — adjust for
+marketplace install):
+
+```bash
+M="python ~/.claude/hooks/cc-memory/cc_memory/cli/mem.py --project ."
+$M status
+$M search "auth flow"
+# ... same subcommands as above
+```
 
 ## MCP tools
 
@@ -159,8 +169,13 @@ Enable via `~/.claude/mcp.json` (set `cc_memory.mcp.auto_register=true` in
 ## Visual Dashboard
 
 ```bash
-python ~/.claude/hooks/cc-memory/cc_memory/ui/dashboard.py
-# or
+# Marketplace install or standalone — auto-resolves the plugin path:
+/cc-mem dashboard
+
+# Or invoke the CLI directly (replace <plugin-root> with your install path):
+python <plugin-root>/cc_memory/cli/mem.py --project . dashboard
+
+# Or the standalone exe (Windows):
 cc-memory-dashboard.exe
 ```
 
@@ -169,7 +184,7 @@ cc-memory-dashboard.exe
 ## Web viewer
 
 ```bash
-python ~/.claude/hooks/cc-memory/cc_memory/cli/mem.py --project . serve
+/cc-mem serve
 # opens http://127.0.0.1:9377 in your browser
 ```
 
