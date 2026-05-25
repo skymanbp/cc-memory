@@ -30,6 +30,19 @@ cc-memory captures structured memories at every conversation boundary AND
 - **One installer, one skills location, one version number.** Removed `.claude/skills/`
   duplicate, removed the third copy of `save-memories`, removed dual installers.
 
+## What's new in v2.2
+
+- **Live plan anchor (`memory/PLAN.md`).** Captures `ExitPlanMode` output
+  (or user-supplied raw plans) into a structured, step-tracked document
+  that survives session boundaries. `TodoWrite` syncs step statuses
+  mechanically; sensitive Bash calls (`git push`, deploys, ...) flag
+  drift. See [docs/PLAN_PROTOCOL.md](docs/PLAN_PROTOCOL.md).
+- **Plugin-shipped subagents.** `plan-refiner` normalises raw plans into
+  JSON; `plan-guardian` checks alignment when drift counters trip.
+  Definitions live in `agents/` and are auto-discovered after install.
+- **`/cc-mem dashboard`** subcommand: launches the Tkinter GUI without
+  needing to know the plugin install path.
+
 ## Installation
 
 ### Via marketplace (recommended once published)
@@ -136,6 +149,15 @@ Importance scale: `1`=noise, `2`=low, `3`=normal, `4`=important, `5`=critical (n
 /cc-mem add decision "Chose X" --importance 4     # Anti-patch upsert
 /cc-mem dashboard                                 # Launch the Tkinter GUI
 /cc-mem serve                                     # Launch the browser-based web viewer
+
+# Live plan anchor (v2.2):
+/cc-mem plan-status                               # Counters + freshness summary
+/cc-mem plan-show                                 # Regenerate + print memory/PLAN.md
+/cc-mem plan-set --raw "Build feature X by ..."   # Capture raw plan, mark needs_refine
+/cc-mem plan-set --from-refiner                   # Store structured JSON (stdin)
+/cc-mem plan-check                                # Reset counters + emit guardian hint
+/cc-mem plan-replan                               # Re-arm needs_refine on stored raw
+/cc-mem plan-clear                                # Drop the active plan
 ```
 
 **Outside Claude Code** (shell, standalone-install path shown — adjust for

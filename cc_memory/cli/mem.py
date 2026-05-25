@@ -73,6 +73,7 @@ _REQUIRED_PLUGIN_FILES = [
     "cc_memory/core/privacy.py",
     "cc_memory/core/modes.py",
     "cc_memory/core/progress.py",
+    "cc_memory/core/plan.py",
     "cc_memory/core/encoding_setup.py",
     "cc_memory/hooks/pre_compact.py",
     "cc_memory/hooks/session_start.py",
@@ -667,6 +668,149 @@ def cmd_serve(args):
     web_main()
 
 
+# ── /cc-mem plan-* subcommands (v2.2) ──────────────────────────────────────
+
+def _plan_db(project):
+    """Open the project DB + ensure memory/ exists. Returns (db, pid, memory_dir)."""
+    memory_dir, db_path, _ = _resolve_db(project)
+    if not db_path.exists():
+        print(f"Error: no memory database at {db_path}")
+        sys.exit(1)
+    memory_dir.mkdir(parents=True, exist_ok=True)
+    db = MemoryDB(db_path)
+    pid = db.upsert_project(str(Path(project).resolve()))
+    return db, pid, memory_dir
+
+
+def cmd_plan_show(args):
+    """Regenerate memory/PLAN.md from SQL and print it. No-op-safe if no plan."""
+    from core.plan import write_plan_md
+    db, pid, memory_dir = _plan_db(args.project)
+    path = write_plan_md(db, pid, memory_dir)
+    print(path.read_text(encoding="utf-8"))
+
+
+def cmd_plan_status(args):
+    """One-screen summary of the live plan: counters, active step, freshness."""
+    from core.plan import is_valid_structured
+    db, pid, _ = _plan_db(args.project)
+    row = db.get_plan_active(pid)
+    if not row:
+        print("No active plan. Enter Claude's plan mode or run "
+              "`/cc-mem plan-set --raw '<text>'`.")
+        return
+    structured = row.get("structured") or {}
+    if not is_valid_structured(structured):
+        raw_len = len(row.get("raw") or "")
+        print(f"Raw plan captured ({raw_len} chars) — NOT yet refined.")
+        print(f"  Last update: {row.get('updated_at')}")
+        print("  Next step: invoke @plan-refiner subagent, then "
+              "`/cc-mem plan-set --from-refiner` with its JSON output.")
+        return
+    steps = structured.get("steps", [])
+    n_done = sum(1 for s in steps if s.get("status") == "done")
+    print(f"Goal: {structured.get('goal')}")
+    print(f"Progress: {n_done}/{len(steps)} steps done · active step #{row.get('active_step', 0)}")
+    print(f"Refined: {row.get('last_refined_at') or '(never)'} "
+          f"by {structured.get('refined_by', 'unknown')}")
+    print(f"Last guardian check: {row.get('last_guardian_at') or '(never)'}")
+    print(f"Counters since last check: {row.get('turns_since_last_guardian', 0)} turns, "
+          f"{row.get('edits_since_last_guardian', 0)} edits")
+
+
+def cmd_plan_set(args):
+    """Three modes:
+      --from-refiner   : read JSON structured plan from stdin, store it
+      --raw '<text>'   : capture a raw plan, mark needs_refine=1
+      --raw-file FILE  : same, but read raw from a file
+    """
+    from core import plan as plan_mod
+    db, pid, memory_dir = _plan_db(args.project)
+
+    if args.from_refiner:
+        try:
+            structured = json.loads(sys.stdin.read())
+        except json.JSONDecodeError as e:
+            print(f"[FAIL] stdin is not valid JSON: {e}")
+            sys.exit(1)
+        try:
+            result = plan_mod.apply_refined_plan(db, pid, structured, memory_dir=memory_dir)
+        except ValueError as e:
+            print(f"[FAIL] refined plan rejected: {e}")
+            sys.exit(1)
+        print(f"[OK] Plan stored — goal: {result['goal']!r}")
+        print(f"     {len(result['steps'])} steps · PLAN.md regenerated at "
+              f"{memory_dir / 'PLAN.md'}")
+        return
+
+    if args.raw_file:
+        raw = Path(args.raw_file).read_text(encoding="utf-8")
+    elif args.raw:
+        raw = args.raw
+    else:
+        print("[FAIL] need one of: --from-refiner, --raw '<text>', --raw-file PATH")
+        sys.exit(1)
+    plan_mod.capture_exit_plan_mode(db, pid, raw, memory_dir=memory_dir)
+    print(f"[OK] Raw plan captured ({len(raw)} chars) at memory/.plan_raw.md.")
+    print("     Next: invoke @plan-refiner subagent, then "
+          "`/cc-mem plan-set --from-refiner < <its-json-output>`.")
+
+
+def cmd_plan_clear(args):
+    db, pid, memory_dir = _plan_db(args.project)
+    if not db.get_plan_active(pid):
+        print("No active plan to clear.")
+        return
+    db.clear_plan_active(pid)
+    plan_md = memory_dir / "PLAN.md"
+    if plan_md.exists():
+        plan_md.unlink()
+    raw_md = memory_dir / ".plan_raw.md"
+    if raw_md.exists():
+        raw_md.unlink()
+    print("[OK] Active plan cleared.")
+
+
+def cmd_plan_replan(args):
+    """Force a re-refine: re-arm needs_refine=1 against the current raw text.
+    No-op if no raw is stored."""
+    db, pid, memory_dir = _plan_db(args.project)
+    row = db.get_plan_active(pid)
+    if not row or not (row.get("raw") or "").strip():
+        print("[FAIL] no raw plan stored. Use `/cc-mem plan-set --raw` first.")
+        sys.exit(1)
+    db.upsert_plan_active(pid, needs_refine=1)
+    (memory_dir / ".plan_raw.md").write_text(row["raw"], encoding="utf-8")
+    print("[OK] Marked for re-refining. Invoke @plan-refiner subagent on "
+          "memory/.plan_raw.md, then `/cc-mem plan-set --from-refiner`.")
+
+
+def cmd_plan_check(args):
+    """Recommend a guardian check. Resets the guardian counters so the next
+    nudge waits a full interval. The CLI itself doesn't invoke the subagent —
+    the calling Claude is expected to follow up with `Task(...)`."""
+    from core.plan import is_valid_structured, write_plan_md
+    db, pid, memory_dir = _plan_db(args.project)
+    row = db.get_plan_active(pid)
+    if not row or not is_valid_structured(row.get("structured")):
+        print("No refined plan to check.")
+        return
+    # Refresh PLAN.md so the guardian subagent reads the current state
+    write_plan_md(db, pid, memory_dir)
+    db.reset_plan_guardian_counters(pid)
+    steps = row["structured"]["steps"]
+    print(f"PLAN guardian check requested.")
+    print(f"  Goal: {row['structured']['goal']}")
+    print(f"  Progress: {sum(1 for s in steps if s['status']=='done')}/{len(steps)} done")
+    print(f"  Active step: #{row.get('active_step', 0)}")
+    print()
+    print("Now invoke the plan-guardian subagent:")
+    print("  Task(subagent_type='plan-guardian', prompt='Read memory/PLAN.md and")
+    print("       memory/PROGRESS.md, compare against the last 20 messages of this")
+    print("       session, and report: (a) current step alignment, (b) any drift,")
+    print("       (c) recommended next action. ≤150 words.')")
+
+
 def cmd_dashboard(args):
     """Launch the Tkinter dashboard for this project.
 
@@ -742,6 +886,21 @@ def make_parser():
 
     sub.add_parser("dashboard", help="Launch the Tkinter GUI dashboard")
 
+    # ── plan-* subcommands (v2.2) ──────────────────────────────────────────
+    sub.add_parser("plan-show", help="Regenerate memory/PLAN.md and print it")
+    sub.add_parser("plan-status", help="Show plan counters / freshness summary")
+
+    pps = sub.add_parser("plan-set", help="Set a raw or refined plan")
+    pps.add_argument("--raw", help="Raw plan markdown/text (verbatim)")
+    pps.add_argument("--raw-file", help="Read raw plan from a file")
+    pps.add_argument("--from-refiner", action="store_true",
+                     help="Read structured JSON plan from stdin (refiner output)")
+
+    sub.add_parser("plan-clear", help="Drop the active plan + delete PLAN.md")
+    sub.add_parser("plan-replan", help="Re-arm needs_refine on the current raw")
+    sub.add_parser("plan-check",
+                   help="Reset guardian counters + emit subagent invocation hint")
+
     return p
 
 
@@ -755,6 +914,9 @@ def main():
         "schema": cmd_schema, "progress": cmd_progress, "supersedes": cmd_supersedes,
         "observations": cmd_observations, "mode": cmd_mode,
         "summary": cmd_summary, "serve": cmd_serve, "dashboard": cmd_dashboard,
+        "plan-show": cmd_plan_show, "plan-status": cmd_plan_status,
+        "plan-set": cmd_plan_set, "plan-clear": cmd_plan_clear,
+        "plan-replan": cmd_plan_replan, "plan-check": cmd_plan_check,
     }
     dispatch[args.command](args)
 

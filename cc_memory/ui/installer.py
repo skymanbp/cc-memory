@@ -36,8 +36,9 @@ SETTINGS_PATH = Path.home() / ".claude" / "settings.json"
 # Subdirectory contents (relative to cc_memory/ on disk OR cc_memory_files/ in exe)
 SUBPACKAGE_FILES = {
     "":      ["__init__.py", "config.json"],
-    "core":  ["__init__.py", "auth.py", "consolidate.py", "db.py", "extractor.py",
-              "idle.py", "logger.py", "modes.py", "privacy.py", "progress.py"],
+    "core":  ["__init__.py", "auth.py", "consolidate.py", "db.py",
+              "encoding_setup.py", "extractor.py", "idle.py", "logger.py",
+              "modes.py", "plan.py", "privacy.py", "progress.py"],
     "hooks": ["__init__.py", "post_tool_use.py", "pre_compact.py",
               "session_start.py", "stop.py", "user_prompt.py"],
     "llm":   ["__init__.py", "ccl_backend.py", "memory_writer.py"],

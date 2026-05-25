@@ -37,16 +37,21 @@ cc-memory/
 ├── skills/                      ← THE canonical skills location
 │   ├── ccm-load/SKILL.md        (one-shot end-to-end activation + init + status)
 │   └── save-memories/SKILL.md   (routes through memory_writer)
+├── agents/                      ← Plugin-shipped subagents (v2.2+)
+│   ├── plan-refiner.md          (raw plan → structured JSON, one-shot)
+│   └── plan-guardian.md         (drift check, read-only, ≤150 words)
 ├── commands/cc-mem.md           ← /cc-mem slash command
 ├── docs/
 │   ├── ARCHITECTURE.md
 │   ├── MEMORY_RULES.md          ← Anti-patch contract
-│   └── HANDOFF_PROTOCOL.md      ← PROGRESS.md spec
+│   ├── HANDOFF_PROTOCOL.md      ← PROGRESS.md spec
+│   └── PLAN_PROTOCOL.md         ← PLAN.md spec (live plan anchor, v2.2)
 ├── cc_memory/
 │   ├── __init__.py              (version 2.1.0)
 │   ├── config.json
 │   ├── core/                    db, extractor, consolidate, idle, progress,
-│   │                            privacy, modes, auth, logger, encoding_setup
+│   │                            plan, privacy, modes, auth, logger,
+│   │                            encoding_setup
 │   ├── hooks/                   post_tool_use, pre_compact, session_start,
 │   │                            stop, user_prompt
 │   ├── llm/                     ccl_backend, memory_writer
@@ -55,7 +60,8 @@ cc-memory/
 │   └── ui/                      installer, dashboard, web_viewer
 ├── tests/
 │   └── smoke_test.py            end-to-end anti-patch + PROGRESS.md +
-│                                tier-3 transcript + layout-inspector tests
+│                                tier-3 transcript + layout-inspector +
+│                                live-plan tests
 ├── build_exe.py
 ├── pyproject.toml
 ├── README.md
@@ -86,14 +92,15 @@ Hook contract (NEVER violate):
   - `PreCompact` stdout → ONE status line (shows in next session's compacted context)
   - `PostToolUse`/`UserPromptSubmit` stdout → empty
 
-## Database schema (10 tables)
+## Database schema (11 tables)
 
 Defined in `cc_memory/core/db.py`. See `docs/ARCHITECTURE.md` for full diagram.
 
 - `projects`, `sessions`, `memories`, `topics`, `keywords`, `plans`
 - `observations` (PostToolUse events, cleaned after extraction)
 - `session_summaries` (6-field structured summary per session)
-- `progress` (NEW in v2.1: single row per project, SOT for PROGRESS.md)
+- `progress` (v2.1: single row per project, SOT for PROGRESS.md)
+- `plan_active` (NEW in v2.2: single row per project, SOT for PLAN.md)
 - `_migrations` (tracks applied migrations)
 
 Key columns added in v2.1:
@@ -133,6 +140,32 @@ The `progress` row has 11 user-facing fields (`current_request`, `status_*`,
 
 `SESSION_HANDOFF.md` from v2.0 is renamed to `SESSION_HANDOFF.md.v2.bak` on
 first PreCompact under v2.1 (one-shot migration in `core/progress.py`).
+
+## Live plan anchor (v2.2)
+
+> `memory/PLAN.md` is the single source of truth for the current goal +
+> step status. Distinct from PROGRESS.md (session handoff) — PLAN.md
+> outlives sessions. See `docs/PLAN_PROTOCOL.md` for the full spec.
+
+The `plan_active` table (one row per project) backs PLAN.md. Lifecycle:
+
+- `PostToolUse` captures `ExitPlanMode` → `plan_active.raw`, sets
+  `needs_refine = 1`.
+- A **`plan-refiner`** subagent (shipped in `agents/`) is invoked by the
+  main Claude on the Stop-hook nudge; it outputs structured JSON which is
+  written back via `/cc-mem plan-set --from-refiner`.
+- `PostToolUse` on `TodoWrite` mechanically syncs todos → step statuses
+  via trigram-Jaccard match (no LLM). On `Edit`/`Write`/`MultiEdit`, it
+  bumps `edits_since_last_guardian`.
+- `Stop` hook emits a single status line when guardian thresholds are
+  crossed (default: 8 turns OR 12 edits). Main Claude responds by
+  invoking the **`plan-guardian`** subagent (also in `agents/`), then
+  `/cc-mem plan-check` to reset counters.
+
+Hooks never spawn subagents themselves — they only nudge. The plugin's
+two subagents (`agents/plan-refiner.md`, `agents/plan-guardian.md`) live
+in the plugin so they're discoverable under both marketplace and
+standalone installs.
 
 ## Development guidelines
 
@@ -235,4 +268,5 @@ way — same package, alternate install path.
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — full architecture overview
 - [docs/MEMORY_RULES.md](docs/MEMORY_RULES.md) — anti-patch contract
 - [docs/HANDOFF_PROTOCOL.md](docs/HANDOFF_PROTOCOL.md) — PROGRESS.md spec
+- [docs/PLAN_PROTOCOL.md](docs/PLAN_PROTOCOL.md) — PLAN.md + subagent spec (v2.2)
 - [CHANGELOG.md](CHANGELOG.md) — version history

@@ -188,6 +188,27 @@ _MIGRATIONS = [
             updated_at        TEXT    NOT NULL,
             trigger_type      TEXT    DEFAULT ''
         )"""),
+
+    # ── v4 migrations (live plan anchor) ─────────────────────────────────────
+
+    # Single live plan per project. ExitPlanMode raw output lands in `raw`,
+    # the refiner subagent normalises it into `structured` (JSON). TodoWrite
+    # syncs step status mechanically (no LLM). Drift counters drive the
+    # guardian-nudge logic in the Stop hook.
+    ("v4_plan_active", """
+        CREATE TABLE IF NOT EXISTS plan_active (
+            project_id                INTEGER PRIMARY KEY REFERENCES projects(id),
+            raw                       TEXT    DEFAULT '',
+            structured                TEXT    DEFAULT '',
+            active_step               INTEGER DEFAULT 0,
+            edits_since_last_guardian INTEGER DEFAULT 0,
+            turns_since_last_guardian INTEGER DEFAULT 0,
+            last_guardian_at          TEXT    DEFAULT '',
+            last_refined_at           TEXT    DEFAULT '',
+            needs_refine              INTEGER DEFAULT 0,
+            created_at                TEXT    NOT NULL,
+            updated_at                TEXT    NOT NULL
+        )"""),
 ]
 
 
@@ -813,6 +834,115 @@ class MemoryDB:
             conn.execute(
                 f"UPDATE progress SET {set_clause} WHERE project_id = ?",
                 params
+            )
+
+    # ── plan_active (live plan anchor, v4) ──────────────────────────────────
+
+    def get_plan_active(self, project_id):
+        """Return the live plan row as a dict with `structured` decoded, or None."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM plan_active WHERE project_id = ?",
+                (project_id,)
+            ).fetchone()
+        if not row:
+            return None
+        d = dict(row)
+        try:
+            d["structured"] = json.loads(d.get("structured") or "{}") or {}
+        except (json.JSONDecodeError, TypeError):
+            # why: malformed JSON — return raw + empty struct so the refiner
+            # can retry rather than crashing the read path
+            d["structured"] = {}
+        return d
+
+    def upsert_plan_active(self, project_id, **fields):
+        """Insert-or-update the single plan_active row. Fields not provided
+        retain their existing values; the row is bootstrapped if absent."""
+        now = self._now()
+        existing = self.get_plan_active(project_id)
+        if "structured" in fields and isinstance(fields["structured"], (dict, list)):
+            fields["structured"] = json.dumps(fields["structured"], ensure_ascii=False)
+        with self._connect() as conn:
+            if existing is None:
+                row = {
+                    "project_id": project_id,
+                    "raw": "",
+                    "structured": "",
+                    "active_step": 0,
+                    "edits_since_last_guardian": 0,
+                    "turns_since_last_guardian": 0,
+                    "last_guardian_at": "",
+                    "last_refined_at": "",
+                    "needs_refine": 0,
+                    "created_at": now,
+                    "updated_at": now,
+                }
+                row.update({k: v for k, v in fields.items() if k in row})
+                conn.execute(
+                    """INSERT INTO plan_active
+                       (project_id, raw, structured, active_step,
+                        edits_since_last_guardian, turns_since_last_guardian,
+                        last_guardian_at, last_refined_at, needs_refine,
+                        created_at, updated_at)
+                       VALUES (:project_id, :raw, :structured, :active_step,
+                               :edits_since_last_guardian, :turns_since_last_guardian,
+                               :last_guardian_at, :last_refined_at, :needs_refine,
+                               :created_at, :updated_at)""",
+                    row,
+                )
+            else:
+                if not fields:
+                    return
+                set_clause = ", ".join(f"{k} = ?" for k in fields) + ", updated_at = ?"
+                params = list(fields.values()) + [now, project_id]
+                conn.execute(
+                    f"UPDATE plan_active SET {set_clause} WHERE project_id = ?",
+                    params,
+                )
+
+    def clear_plan_active(self, project_id):
+        """Drop the live plan row entirely (e.g. when user pivots projects)."""
+        with self._connect() as conn:
+            conn.execute(
+                "DELETE FROM plan_active WHERE project_id = ?",
+                (project_id,)
+            )
+
+    def bump_plan_edit_counter(self, project_id, n=1):
+        """Atomically increment edits_since_last_guardian. No-op if no plan."""
+        with self._connect() as conn:
+            conn.execute(
+                """UPDATE plan_active
+                   SET edits_since_last_guardian = edits_since_last_guardian + ?,
+                       updated_at = ?
+                   WHERE project_id = ?""",
+                (n, self._now(), project_id),
+            )
+
+    def bump_plan_turn_counter(self, project_id, n=1):
+        """Atomically increment turns_since_last_guardian."""
+        with self._connect() as conn:
+            conn.execute(
+                """UPDATE plan_active
+                   SET turns_since_last_guardian = turns_since_last_guardian + ?,
+                       updated_at = ?
+                   WHERE project_id = ?""",
+                (n, self._now(), project_id),
+            )
+
+    def reset_plan_guardian_counters(self, project_id):
+        """Mark a guardian check just happened: reset both counters + timestamp."""
+        now = self._now()
+        with self._connect() as conn:
+            conn.execute(
+                """UPDATE plan_active
+                   SET edits_since_last_guardian = 0,
+                       turns_since_last_guardian = 0,
+                       last_guardian_at = ?,
+                       updated_at = ?
+                   WHERE project_id = ?""",
+                (now, now, project_id),
             )
 
     # ── FTS5 search ─────────────────────────────────────────────────────────

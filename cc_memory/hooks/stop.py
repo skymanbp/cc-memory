@@ -34,6 +34,7 @@ from core.db import MemoryDB
 from core.logger import get_logger
 from core.idle import maybe_run_idle
 from core.progress import write_progress_md
+from core import plan as plan_mod
 from llm.memory_writer import upsert_batch
 
 _log = get_logger("stop")
@@ -257,6 +258,37 @@ def main():
             f" | {stats.get('n_topics', 0)} topics"
             f" | PROGRESS.md fresh"
         )
+
+        # Job 4 (v2.2): live plan nudges. Two kinds, mutually exclusive:
+        #   (a) a raw plan was captured but not yet refined → suggest refiner
+        #   (b) drift counters crossed thresholds → suggest guardian check
+        # Both emit a SINGLE extra status line. We do NOT force-reminder
+        # via <system-reminder> here — that's the SessionStart's job; the
+        # Stop hook stays in "advisory" tone.
+        plan_row = db.get_plan_active(project_id)
+        if plan_row:
+            # Always bump turn counter so guardian thresholds accrue
+            db.bump_plan_turn_counter(project_id, n=1)
+            plan_row = db.get_plan_active(project_id)  # re-read post-bump
+
+            if plan_row.get("needs_refine") and (plan_row.get("raw") or "").strip():
+                print(
+                    "[cc-memory.plan] NEW PLAN captured (memory/.plan_raw.md). "
+                    "Invoke @plan-refiner subagent to normalise it, then "
+                    "`/cc-mem plan-set --from-refiner` with the JSON."
+                )
+            else:
+                should_nudge, reason = plan_mod.should_nudge_guardian(plan_row)
+                if should_nudge:
+                    steps = plan_row.get("structured", {}).get("steps", [])
+                    active_id = plan_row.get("active_step", 0)
+                    n_total = len(steps)
+                    n_done = sum(1 for s in steps if s.get("status") == "done")
+                    print(
+                        f"[cc-memory.plan] guardian check recommended "
+                        f"({reason}) · {n_done}/{n_total} done · "
+                        f"active step #{active_id} · run `/cc-mem plan-check`."
+                    )
     except Exception:
         _log.error_tb("stop hook tail")
         print("\n[cc-memory] stop hook ran (degraded)")

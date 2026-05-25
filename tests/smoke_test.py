@@ -385,6 +385,149 @@ def main():
     assert "/cc-mem add" in mem_text
     print("[OK] MEMORY.md regenerated with strong DO-NOT-EDIT warning block")
 
+    # === v2.2 features: live plan anchor ====================================
+    # Verify the full plan lifecycle: v4 migration → capture → refine →
+    # TodoWrite sync → guardian nudge thresholds → sensitive-tool bump.
+    from core import plan as plan_mod
+
+    tmp_plan = Path(tempfile.mkdtemp(prefix="cc-memory-plan-"))
+    mem_p = tmp_plan / "memory"; mem_p.mkdir(parents=True, exist_ok=True)
+    db_p = MemoryDB(mem_p / "memory.db")
+    pid_p = db_p.upsert_project(str(tmp_plan))
+
+    # v4 migration applied?
+    with db_p._connect() as conn:
+        tables = [r[0] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()]
+        assert "plan_active" in tables, "v4_plan_active migration missing"
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(plan_active)").fetchall()]
+        for col in ("raw", "structured", "active_step", "needs_refine",
+                    "edits_since_last_guardian", "turns_since_last_guardian"):
+            assert col in cols, f"plan_active.{col} missing"
+    print("[OK] v4 migration: plan_active table + all expected columns")
+
+    # Capture: simulate ExitPlanMode firing
+    raw = (
+        "Implement JWT auth for the dashboard.\n\n"
+        "Steps:\n"
+        "1. Wire up token refresh\n"
+        "2. Add CSRF protection\n"
+        "3. Write integration tests in tests/test_auth.py\n\n"
+        "Success: all routes return 401 without token; tests pass."
+    )
+    plan_mod.capture_exit_plan_mode(db_p, pid_p, raw, memory_dir=mem_p)
+    row = db_p.get_plan_active(pid_p)
+    assert row["raw"] == raw
+    assert row["needs_refine"] == 1
+    assert (mem_p / ".plan_raw.md").exists()
+    print("[OK] capture_exit_plan_mode: raw stored, needs_refine=1, .plan_raw.md written")
+
+    # Refine: apply a simulated refiner output
+    refined = {
+        "goal": "Implement JWT auth for the dashboard",
+        "success_criteria": [
+            "All routes return 401 without token",
+            "tests in tests/test_auth.py pass",
+        ],
+        "steps": [
+            {"id": 1, "title": "Wire up token refresh",   "status": "pending", "notes": ""},
+            {"id": 2, "title": "Add CSRF protection",     "status": "pending", "notes": ""},
+            {"id": 3, "title": "Write integration tests", "status": "pending", "notes": ""},
+        ],
+        "context": "JWT chosen over sessions for horizontal scaling.",
+    }
+    result = plan_mod.apply_refined_plan(db_p, pid_p, refined, memory_dir=mem_p)
+    assert plan_mod.is_valid_structured(result), "refined plan failed validation"
+    row = db_p.get_plan_active(pid_p)
+    assert row["needs_refine"] == 0
+    assert row["last_refined_at"]
+    assert row["active_step"] == 1, f"expected active_step=1 (first pending), got {row['active_step']}"
+    assert (mem_p / "PLAN.md").exists()
+    plan_md_text = (mem_p / "PLAN.md").read_text(encoding="utf-8")
+    assert "Implement JWT auth" in plan_md_text
+    assert "DO NOT EDIT" in plan_md_text
+    print("[OK] apply_refined_plan: structured stored, needs_refine=0, PLAN.md generated")
+
+    # Schema validation should reject malformed plans
+    try:
+        plan_mod.apply_refined_plan(db_p, pid_p, {"goal": ""}, memory_dir=mem_p)
+        assert False, "empty goal should have raised"
+    except ValueError:
+        pass
+    print("[OK] apply_refined_plan: rejects malformed plans")
+
+    # TodoWrite sync
+    todos = [
+        {"content": "Wire up token refresh", "status": "completed", "activeForm": "Wiring"},
+        {"content": "Add CSRF protection",   "status": "in_progress", "activeForm": "Adding CSRF"},
+        {"content": "Random unrelated task", "status": "pending",     "activeForm": "Doing random"},
+    ]
+    info = plan_mod.apply_todowrite_sync(db_p, pid_p, todos, memory_dir=mem_p)
+    assert info["n_matched"] == 2, f"expected 2 matches, got {info['n_matched']}"
+    assert info["n_unmatched"] == 1, f"expected 1 unmatched (drift signal), got {info['n_unmatched']}"
+    row = db_p.get_plan_active(pid_p)
+    steps = row["structured"]["steps"]
+    assert steps[0]["status"] == "done"
+    assert steps[1]["status"] == "in_progress"
+    assert steps[2]["status"] == "pending"  # untouched
+    assert row["active_step"] == 2
+    print(f"[OK] sync_todos_to_steps: {info['n_matched']} matched, "
+          f"{info['n_unmatched']} unmatched, active=#{row['active_step']}")
+
+    # Done steps don't regress
+    plan_mod.apply_todowrite_sync(db_p, pid_p, [
+        {"content": "Wire up token refresh", "status": "pending", "activeForm": "X"},
+    ], memory_dir=mem_p)
+    assert db_p.get_plan_active(pid_p)["structured"]["steps"][0]["status"] == "done", \
+        "done step regressed to pending"
+    print("[OK] done steps don't regress on TodoWrite re-sync")
+
+    # Guardian nudge thresholds
+    row = db_p.get_plan_active(pid_p)
+    nudge, reason = plan_mod.should_nudge_guardian(row)
+    assert not nudge, f"should not nudge on fresh plan: {reason}"
+
+    # Bump turns past threshold
+    for _ in range(10):
+        db_p.bump_plan_turn_counter(pid_p)
+    row = db_p.get_plan_active(pid_p)
+    nudge, reason = plan_mod.should_nudge_guardian(row, turn_threshold=8)
+    assert nudge and "turn_threshold" in reason, f"turn nudge missing: {reason}"
+    print(f"[OK] guardian nudge: triggered on turn threshold ({reason})")
+
+    # Reset, then bump edits
+    db_p.reset_plan_guardian_counters(pid_p)
+    for _ in range(15):
+        db_p.bump_plan_edit_counter(pid_p)
+    row = db_p.get_plan_active(pid_p)
+    nudge, reason = plan_mod.should_nudge_guardian(row, edit_threshold=12)
+    assert nudge and "edit_threshold" in reason, f"edit nudge missing: {reason}"
+    print(f"[OK] guardian nudge: triggered on edit threshold ({reason})")
+
+    # Sensitive tool detection
+    assert plan_mod.is_sensitive_tool_call("Bash", {"command": "git push origin main"})
+    assert plan_mod.is_sensitive_tool_call("Bash", {"command": "rm -rf node_modules"})
+    assert plan_mod.is_sensitive_tool_call("Bash", {"command": "npm publish"})
+    assert not plan_mod.is_sensitive_tool_call("Bash", {"command": "git status"})
+    assert not plan_mod.is_sensitive_tool_call("Bash", {"command": "ls -la"})
+    assert not plan_mod.is_sensitive_tool_call("Edit", {"file_path": "/x"})
+    print("[OK] is_sensitive_tool_call: matches git push / rm -rf / publish, not status/ls/Edit")
+
+    # needs_refine=1 should NOT trigger guardian nudge (refiner nudge takes priority)
+    db_p.upsert_plan_active(pid_p, needs_refine=1)
+    row = db_p.get_plan_active(pid_p)
+    nudge, reason = plan_mod.should_nudge_guardian(row)
+    assert not nudge and reason == "needs_refine_first", \
+        f"expected needs_refine_first, got {reason}"
+    print("[OK] guardian suppressed while needs_refine=1 (refiner takes priority)")
+
+    # plan-clear pathway
+    db_p.upsert_plan_active(pid_p, needs_refine=0)
+    db_p.clear_plan_active(pid_p)
+    assert db_p.get_plan_active(pid_p) is None
+    print("[OK] clear_plan_active: row deleted")
+
     print("\n===== ALL SMOKE TESTS PASSED =====")
     print(f"Test project preserved at: {tmp}")
     print("\nProduced files:")

@@ -25,6 +25,14 @@ Run cc-memory CLI commands against the current project. The wrapper resolves
 | `mode [name]` | Show/set project mode (code/research/writing) |
 | `serve [--port N]` | Launch the browser-based web viewer (stdlib http.server) |
 | `dashboard` | Launch the Tkinter GUI dashboard for this project |
+| `plan-status` | Live-plan counters + freshness summary (no LLM) |
+| `plan-show` | Regenerate + print `memory/PLAN.md` |
+| `plan-set --raw '<text>'` | Capture a raw plan, mark `needs_refine=1` |
+| `plan-set --raw-file FILE` | Same, but read raw from a file |
+| `plan-set --from-refiner` | Read structured JSON from stdin (refiner output) |
+| `plan-check` | Reset guardian counters + emit plan-guardian invocation hint |
+| `plan-replan` | Re-arm `needs_refine` on the current raw |
+| `plan-clear` | Drop the active plan + delete PLAN.md |
 
 ### How to invoke
 

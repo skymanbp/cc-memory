@@ -106,6 +106,49 @@ def main():
             is_private=is_private,
         )
 
+        # ── v2.2: live plan integration ──────────────────────────────────
+        # All three branches are best-effort: any exception falls into the
+        # generic `except` below and is logged — never propagated. The plan
+        # subsystem must never break the observation pipeline.
+        try:
+            from core import plan as plan_mod
+            memory_dir = Path(cwd) / "memory"
+
+            if tool_name == "ExitPlanMode":
+                raw_plan = tool_input.get("plan", "") if isinstance(tool_input, dict) else ""
+                if raw_plan:
+                    plan_mod.capture_exit_plan_mode(
+                        db, project_id, raw_plan, memory_dir=memory_dir
+                    )
+
+            elif tool_name == "TodoWrite":
+                todos = tool_input.get("todos", []) if isinstance(tool_input, dict) else []
+                if todos and db.get_plan_active(project_id):
+                    plan_mod.apply_todowrite_sync(
+                        db, project_id, todos, memory_dir=memory_dir
+                    )
+
+            elif tool_name in ("Edit", "Write", "MultiEdit", "NotebookEdit"):
+                if db.get_plan_active(project_id):
+                    db.bump_plan_edit_counter(project_id, n=1)
+
+            # Sensitive tool calls (git push, rm -rf, drop table, deploys, ...)
+            # bump the counter by a lot — semantically "this single act carries
+            # the same drift risk as ~20 ordinary edits", so the next Stop hook
+            # will surface a guardian-recommendation line immediately.
+            if plan_mod.is_sensitive_tool_call(tool_name, tool_input):
+                if db.get_plan_active(project_id):
+                    db.bump_plan_edit_counter(project_id, n=20)
+
+        except Exception:
+            try:
+                from core.logger import get_logger
+                get_logger("post_tool_use").error_tb("plan integration error")
+            except Exception:
+                # why: logger itself failing means observability is already
+                # lost; just continue (the observation row was already written)
+                pass
+
     except Exception:
         try:
             from core.logger import get_logger
