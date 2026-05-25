@@ -20,6 +20,10 @@ projects.json
 # plugin. Don't commit the maintainer's local memory data.
 memory/
 
-# Per-user local Claude Code overrides; never shared.
-.claude/settings.local.json
+# Per-user local Claude Code state — settings, agents, project skills.
+# The PLUGIN itself ships its hooks/skills/commands/agents from the repo
+# root (hooks.json, skills/, commands/, agents/), not from .claude/. So
+# everything under .claude/ is the maintainer's local Claude Code config
+# (cc-enslaver enforcement, personal skill toolkits, etc.) and stays local.
+.claude/
 
