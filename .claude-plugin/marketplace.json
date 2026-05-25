@@ -5,18 +5,18 @@
     "url": "https://github.com/skymanbp"
   },
   "metadata": {
-    "description": "cc-memory — Claude Code persistent memory plugin (anti-patch + forced handoff)"
+    "description": "cc-memory — Claude Code persistent memory plugin (anti-patch + forced handoff + live plan anchor)"
   },
   "plugins": [
     {
       "name": "cc-memory",
       "source": "./",
-      "description": "Persistent memory: reconcile-on-write (no more stacked duplicates), forced PROGRESS.md handoff at every SessionStart, FTS5 search, AI-judged extraction with Haiku + Ollama fallback.",
-      "version": "2.1.0",
+      "description": "Persistent memory: reconcile-on-write (no more stacked duplicates), forced PROGRESS.md handoff at every SessionStart, live PLAN.md anchor with plan-refiner/plan-guardian subagents, FTS5 search, AI-judged extraction with Haiku + Ollama fallback.",
+      "version": "2.2.0",
       "author": {"name": "skymanbp"},
       "repository": "https://github.com/skymanbp/cc-memory",
       "license": "MIT",
-      "keywords": ["memory", "persistence", "context", "handoff", "compact", "sqlite"]
+      "keywords": ["memory", "persistence", "context", "handoff", "plan", "compact", "sqlite", "subagent"]
     }
   ]
 }

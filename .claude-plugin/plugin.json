@@ -1,7 +1,7 @@
 {
   "name": "cc-memory",
-  "version": "2.1.0",
-  "description": "Persistent memory for Claude Code — automatic save/restore across compactions and sessions. Anti-patch reconcile-on-write, forced PROGRESS.md handoff, FTS5 search, AI-judged extraction with Haiku + local Ollama fallback.",
+  "version": "2.2.0",
+  "description": "Persistent memory for Claude Code — automatic save/restore across compactions and sessions. Anti-patch reconcile-on-write, forced PROGRESS.md handoff, live PLAN.md anchor with plan-refiner / plan-guardian subagents, FTS5 search, AI-judged extraction with Haiku + local Ollama fallback.",
   "author": {
     "name": "skymanbp",
     "url": "https://github.com/skymanbp"

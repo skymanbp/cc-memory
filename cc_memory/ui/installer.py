@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-cc-memory standalone installer (v2.1).
+cc-memory standalone installer (v2.2).
 
 Self-contained installer that extracts plugin files and configures Claude Code.
 Used as PyInstaller exe entry point.
@@ -8,7 +8,7 @@ Used as PyInstaller exe entry point.
 When run as exe, bundled files are in sys._MEIPASS/cc_memory_files/<subdir>/
 When run as script, files are in cc_memory/<subdir>/ relative to this file.
 
-v2.1 changes vs v2.0:
+v2.2 changes vs v2.0:
 - Plugin layout reorganized into subpackages (core/hooks/llm/ui/cli/mcp).
 - hooks/settings paths point to cc_memory/hooks/<name>.py (not flat).
 - Old SESSION_HANDOFF.md is migrated to .v2.bak (not deleted).
@@ -206,14 +206,14 @@ def _init_project(project_path, log_fn=print):
 class Installer:
     def __init__(self, root):
         self.root = root
-        self.root.title("cc-memory Installer (v2.1)")
+        self.root.title("cc-memory Installer (v2.2)")
         self.root.geometry("680x600")
         self.root.resizable(False, False)
         self._build_ui()
         self._pre_check()
 
     def _build_ui(self):
-        ttk.Label(self.root, text="cc-memory — Claude Code Memory Plugin (v2.1)",
+        ttk.Label(self.root, text="cc-memory — Claude Code Memory Plugin (v2.2)",
                   font=("", 14, "bold")).pack(pady=(18, 4))
         ttk.Label(self.root,
                   text="Anti-patch reconcile-on-write · Forced PROGRESS.md handoff",
@@ -278,13 +278,13 @@ class Installer:
 
     def _pre_check(self):
         if (TARGET_DIR / "core" / "db.py").exists():
-            self.install_status.set(f"Plugin already installed (v2.1 layout) at {TARGET_DIR}")
+            self.install_status.set(f"Plugin already installed (v2.2 layout) at {TARGET_DIR}")
             self.install_btn.configure(text="Reinstall")
             self._log(f"[OK] Plugin found at {TARGET_DIR}")
         elif (TARGET_DIR / "db.py").exists():
-            self.install_status.set("OLD v2.0 layout detected. Click Install to upgrade to v2.1.")
-            self.install_btn.configure(text="Upgrade to v2.1")
-            self._log("[WARN] Found v2.0 flat-layout files; upgrading to v2.1 subpackage layout.")
+            self.install_status.set("OLD v2.0 layout detected. Click Install to upgrade to v2.2.")
+            self.install_btn.configure(text="Upgrade to v2.2")
+            self._log("[WARN] Found v2.0 flat-layout files; upgrading to v2.2 subpackage layout.")
         else:
             self.install_status.set("Plugin not yet installed")
             self._log("[  ] Plugin not found — click 'Install Plugin'")
@@ -423,7 +423,7 @@ class Installer:
 
 def cli_install():
     print("=" * 50)
-    print("  cc-memory v2.1 — CLI Installer")
+    print("  cc-memory v2.2 — CLI Installer")
     print("=" * 50)
     print(f"\n[1/2] Installing plugin to {TARGET_DIR}...")
     # Remove old flat-layout files
@@ -442,7 +442,7 @@ def cli_install():
     print("[OK] 5 hooks configured (PreCompact, SessionStart, Stop, PostToolUse, UserPromptSubmit)")
 
     print("\n" + "=" * 50)
-    print("  cc-memory v2.1 installation complete!")
+    print("  cc-memory v2.2 installation complete!")
     print("=" * 50)
     print(f"\nQuery a project:")
     print(f"  python \"{TARGET_DIR / 'cc_memory' / 'cli' / 'mem.py'}\" --project <path> status")
@@ -452,7 +452,7 @@ def cli_install():
 
 def cli_uninstall():
     print("=" * 50)
-    print("  cc-memory v2.1 — Uninstall")
+    print("  cc-memory v2.2 — Uninstall")
     print("=" * 50)
     _uninstall_settings()
     if TARGET_DIR.exists():

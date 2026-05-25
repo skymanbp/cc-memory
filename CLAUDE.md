@@ -2,14 +2,37 @@
 
 ## Project: cc-memory
 
-**Claude Code persistent memory plugin (v2.1)** — anti-patch reconcile-on-write,
-forced PROGRESS.md handoff, FTS5 search, AI-judged extraction with Haiku +
+**Claude Code persistent memory plugin (v2.2)** — anti-patch reconcile-on-write,
+forced PROGRESS.md handoff, live PLAN.md anchor with plan-refiner /
+plan-guardian subagents, FTS5 search, AI-judged extraction with Haiku +
 local Ollama fallback.
 
 - **Language**: Python 3.8+ (pure stdlib, zero pip dependencies at runtime)
-- **Version**: 2.1.0
+- **Version**: 2.2.0
 - **License**: MIT
 - **Platform**: Windows-primary, cross-platform compatible (Tkinter required for GUI)
+
+## What's new in v2.2 (over v2.1)
+
+1. **Live PLAN.md anchor.** `memory/PLAN.md` is a new generated artifact that
+   captures the project's current goal + step status. ExitPlanMode output
+   (or user-supplied `/cc-mem plan-set` text) lands in the `plan_active`
+   SQL table; TodoWrite events sync step statuses mechanically; sensitive
+   Bash patterns (`git push`, `rm -rf`, deploys) flag drift.
+2. **Two plugin-shipped subagents.** `agents/plan-refiner.md` normalises a
+   raw plan into a structured JSON schema; `agents/plan-guardian.md` does a
+   read-only ≤150-word drift check on demand. Stop hook emits an advisory
+   status line when guardian thresholds trip (default: 8 turns OR 12 edits).
+3. **`/cc-mem dashboard` + 7 new `/cc-mem plan-*` subcommands.** The GUI
+   launcher auto-resolves its path under both marketplace and standalone
+   installs. Plan CLI:  `plan-status`, `plan-show`, `plan-set
+   (--raw|--raw-file|--from-refiner)`, `plan-check`, `plan-replan`,
+   `plan-clear`.
+4. **Skill consolidation.** `skills/mem-init` and `skills/mem-status` removed
+   (subsets of `/ccm-load` + `/cc-mem status`). `skills/ccm-load` rewritten
+   to auto-resolve plugin root instead of the maintainer's hardcoded path.
+
+See `docs/PLAN_PROTOCOL.md` for the full v2.2 contract.
 
 ## What changed in v2.1 (over v2.0)
 
@@ -31,7 +54,7 @@ local Ollama fallback.
 ```
 cc-memory/
 ├── .claude-plugin/
-│   ├── plugin.json              ← Plugin manifest (v2.1.0)
+│   ├── plugin.json              ← Plugin manifest (v2.2.0)
 │   └── marketplace.json         ← /plugin marketplace add entry
 ├── hooks/hooks.json             ← 5 hook declarations
 ├── skills/                      ← THE canonical skills location
@@ -47,7 +70,7 @@ cc-memory/
 │   ├── HANDOFF_PROTOCOL.md      ← PROGRESS.md spec
 │   └── PLAN_PROTOCOL.md         ← PLAN.md spec (live plan anchor, v2.2)
 ├── cc_memory/
-│   ├── __init__.py              (version 2.1.0)
+│   ├── __init__.py              (version 2.2.0)
 │   ├── config.json
 │   ├── core/                    db, extractor, consolidate, idle, progress,
 │   │                            plan, privacy, modes, auth, logger,

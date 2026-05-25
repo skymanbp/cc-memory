@@ -1,7 +1,8 @@
 # cc-memory
 
-**Claude Code persistent memory plugin (v2.1)** — anti-patch reconcile-on-write,
-forced PROGRESS.md handoff, FTS5 search, AI-judged extraction with Haiku +
+**Claude Code persistent memory plugin (v2.2)** — anti-patch reconcile-on-write,
+forced PROGRESS.md handoff, live PLAN.md anchor with plan-refiner /
+plan-guardian subagents, FTS5 search, AI-judged extraction with Haiku +
 local Ollama fallback.
 
 ## What it solves

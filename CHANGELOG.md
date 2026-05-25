@@ -7,6 +7,148 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [2.2.0] — 2026-05-25
+
+The "live plan anchor + subagent" release. Adds `memory/PLAN.md` as a
+project-level task anchor backed by a new SQL table, two plugin-shipped
+subagents (`plan-refiner`, `plan-guardian`) that the main Claude invokes
+on Stop-hook nudges, and a polished CLI/Skill surface. Backwards-compatible
+for stored data; the v4 migration applies to existing DBs on the next hook
+that touches them.
+
+### Added
+
+- **`memory/PLAN.md`** — live plan document, full-rewritten from the
+  `plan_active` SQL row on every relevant event. Distinct from
+  `PROGRESS.md` (which remains the session-handoff doc). See
+  [`docs/PLAN_PROTOCOL.md`](docs/PLAN_PROTOCOL.md).
+- **`plan_active` SQL table (v4 migration)** — single row per project with
+  `raw`, `structured` (JSON), `active_step`, `edits_since_last_guardian`,
+  `turns_since_last_guardian`, `last_guardian_at`, `last_refined_at`,
+  `needs_refine`, `created_at`, `updated_at`.
+- **`cc_memory/core/plan.py`** — schema validation
+  (`is_valid_structured`, `normalize_structured`), trigram-Jaccard
+  TodoWrite→step matching (`match_todos_to_steps`, `sync_todos_to_steps`),
+  PLAN.md renderer (`render_plan_md`, `write_plan_md`), capture/apply
+  entry points (`capture_exit_plan_mode`, `apply_refined_plan`,
+  `apply_todowrite_sync`), and drift-nudge logic
+  (`should_nudge_guardian`, `is_sensitive_tool_call`).
+- **`agents/plan-refiner.md`** — one-shot subagent that converts a raw
+  plan document into the canonical JSON schema. Tools: Read, Grep, Bash.
+  Model: haiku.
+- **`agents/plan-guardian.md`** — read-only subagent that compares
+  PLAN.md + PROGRESS.md against recent activity and reports alignment in
+  ≤150 words. Tools: Read, Grep, Bash (read-only operations only).
+- **Seven new `/cc-mem` subcommands**: `plan-status`, `plan-show`,
+  `plan-set --raw / --raw-file / --from-refiner`, `plan-check`,
+  `plan-replan`, `plan-clear`.
+- **`/cc-mem dashboard`** subcommand — launches the Tkinter GUI by
+  auto-resolving `dashboard.py` relative to `cli/mem.py`. Works under
+  marketplace and standalone installs without hardcoded paths.
+- **PostToolUse hook** now special-cases three tool types: `ExitPlanMode`
+  (captures raw plan + marks needs_refine), `TodoWrite` (mechanical
+  step-status sync, no LLM), and `Edit/Write/MultiEdit/NotebookEdit`
+  (bumps the guardian drift counter).
+- **Sensitive Bash patterns** (`git push`, `rm -rf`, `drop table`,
+  `npm/cargo publish`, `kubectl/terraform/ansible apply`) bump the
+  drift counter by 20 so the next Stop emits a guardian-recommendation
+  status line.
+- **Stop hook plan nudges** — single advisory status line (no
+  `<system-reminder>` spam):
+  - `[cc-memory.plan] NEW PLAN captured … invoke @plan-refiner` when
+    `needs_refine = 1`,
+  - `[cc-memory.plan] guardian check recommended (turn_threshold | edit_threshold)`
+    when counters cross thresholds.
+- **`docs/PLAN_PROTOCOL.md`** — full spec: lifecycle diagram, JSON
+  schema, sync algorithm, nudge thresholds, sensitive-tool list.
+- **`enable_utf8_io()` in `core/encoding_setup.py`** — idempotent stdio
+  UTF-8 reconfigure called by every hook entry. Prevents `gbk`-crash on
+  Windows when status lines contain glyphs (e.g. `↻`).
+- **MEMORY.md auto-warning block** — every regen emits a strong
+  "AUTO-GENERATED · DO NOT EDIT BY HAND" header pointing to the
+  `/cc-mem add` workflow.
+- **`_inspect_layout`** + `_print_layout_report` in `cli/mem.py` —
+  marketplace-aware install-layout health check used by `/cc-mem status`.
+- **RESUME PROTOCOL** in `session_start._build_forced_reminder` — the
+  forced `<system-reminder>` now includes Chinese + English resume-signal
+  whitelist tokens and a directive to read `open_todos[0]` first.
+- **Tier-3 transcript fallback** in `session_start._refresh_progress_row`
+  — when DB sources are empty, mine the prior session's JSONL transcript
+  for TodoWrite snapshots and file edits to seed PROGRESS.md.
+- **Last-wins TodoWrite extraction** in `core/extractor.extract_latest_todo_state`
+  — replaces the previous "stack every TodoWrite" behaviour, eliminating
+  duplicate todos in PROGRESS.md.
+
+### Changed
+
+- **Repository layout**: new `agents/` directory (plugin-shipped
+  subagents) and `cc_memory/core/plan.py`.  `core/encoding_setup.py`
+  promoted from incidental import to a first-class module listed in
+  `_REQUIRED_PLUGIN_FILES`, packaging manifests, and CLAUDE.md.
+- **`commands/cc-mem.md`** — the bash invocation block now resolves the
+  plugin root via `CLAUDE_PLUGIN_ROOT` with a fallback to
+  `~/.claude/hooks/cc-memory/`, fixing the v2.1 issue where the slash
+  command only worked for standalone installs.
+- **`skills/ccm-load/SKILL.md`** — replaced the hardcoded
+  `D:/Projects/cc-memory/cc_memory` path with a 3-tier resolver
+  (`CLAUDE_PLUGIN_ROOT` → settings.json marketplace path → standalone
+  install). Skill now works on any host.
+- **`ui/dashboard.py`** — "Add Memory" dialog and "Save Session"
+  workflow both routed through `upsert_smart` / `upsert_batch`
+  respectively. No more direct `db.insert_memory` callers in the
+  dashboard (closes the v2.1 known gap).
+- **Hooks**: `post_tool_use.py`, `stop.py`, and `session_start.py` all
+  call `enable_utf8_io()` first thing on entry.
+- **`installer.py`** + **`build_exe.py`**: `SUBPACKAGE_FILES` now lists
+  `core/plan.py` and `core/encoding_setup.py` (the latter was missing
+  from packaging in v2.1).
+- Version bumped from `2.1.0` to `2.2.0` in all locations
+  (`__init__.py`, `config.json`, `plugin.json`, `marketplace.json`,
+  `pyproject.toml`, `mcp/server.py`).
+
+### Removed
+
+- **`skills/mem-init/SKILL.md`** — its only job (creating `memory/`) is
+  auto-done by `UserPromptSubmit` and `/ccm-load` step 2 covers manual
+  re-init.
+- **`skills/mem-status/SKILL.md`** — duplicate of the more discoverable
+  `/cc-mem status` slash command.
+
+### Fixed
+
+- **Plugin manifest schema** — non-standard fields in `plugin.json`
+  that blocked Claude Code's plugin discovery have been stripped.
+- **`ccm-load` skill** had a hardcoded Windows path (`D:/Projects/...`)
+  that made it work only on the maintainer's machine.
+- **`/cc-mem` slash command path** — `commands/cc-mem.md` used the
+  v2.0 standalone install path (`~/.claude/hooks/cc-memory/...`) which
+  doesn't exist under marketplace installs. Now uses
+  `${CLAUDE_PLUGIN_ROOT}` with the standalone path as fallback.
+- **Dashboard discoverability** — marketplace-installed users had no
+  obvious entry point to the GUI. `/cc-mem dashboard` now resolves
+  it under any install layout.
+- **`session_start.py` fill-only-empty contract** — pre-set fields on
+  the `progress` row (from a fresh PreCompact) are no longer
+  overwritten by a stale `session_summary` during refresh.
+- **TodoWrite stacking** in PROGRESS.md — was accumulating every
+  TodoWrite snapshot ever made; now uses last-wins via
+  `extract_latest_todo_state`.
+
+### Migration notes
+
+- **Existing v2.1 installations**: the v4 migration runs the first
+  time any hook touches `memory.db`. No action needed.
+- **Plan feature is opt-in**: until the user enters Claude's plan mode
+  or invokes `/cc-mem plan-set --raw`, `plan_active` stays empty and
+  no `PLAN.md` is generated. Existing projects are unaffected.
+- **Subagents must be discoverable**: this release ships
+  `agents/plan-refiner.md` and `agents/plan-guardian.md` inside the
+  plugin tree. After upgrading, run `/ccm-load` and confirm the
+  subagents appear (a future cc-memory CLI subcommand may verify
+  discovery; for now check with `Task(...)`).
+
+---
+
 ## [2.1.0] — 2026-05-21
 
 The "anti-patch + forced handoff" release. Major restructure of save paths and
