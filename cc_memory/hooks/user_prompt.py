@@ -115,6 +115,11 @@ def main():
                     from core.progress import write_progress_md
                     db = MemoryDB(Path(cwd) / "memory" / "memory.db")
                     pid = db.upsert_project(cwd)
+                    # v5: tag this session BEFORE patching other fields so
+                    # PROGRESS.md §0 reflects the new owner. Idempotent — if
+                    # stop / pre_compact already tagged the same session this
+                    # turn, no-op.
+                    db.tag_progress_session(pid, session_id)
                     # Detect resume signal: exact-match whitelist (trim+lower).
                     # Contracted by the SessionStart forced reminder's RESUME
                     # PROTOCOL — when the user says one of these tokens, the

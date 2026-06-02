@@ -209,6 +209,17 @@ _MIGRATIONS = [
             created_at                TEXT    NOT NULL,
             updated_at                TEXT    NOT NULL
         )"""),
+
+    # ── v5 migrations (session annotation) ───────────────────────────────────
+
+    # Tag the progress row with which Claude session owns it. Without this,
+    # multi-session workflows can't tell from PROGRESS.md whether they're
+    # reading their own write or a stale write from a different session.
+    # Both columns are TEXT (Claude session UUIDs + ISO timestamps).
+    ("v5_progress_session_id",
+     "ALTER TABLE progress ADD COLUMN current_session_id TEXT DEFAULT ''"),
+    ("v5_progress_session_started_at",
+     "ALTER TABLE progress ADD COLUMN session_started_at TEXT DEFAULT ''"),
 ]
 
 
@@ -751,7 +762,15 @@ class MemoryDB:
     # ── progress (per-project, single row, ALWAYS overwrite) ────────────────
 
     def upsert_progress(self, project_id, **fields):
-        """Overwrite the project's progress row. Anti-patch: never appends."""
+        """Overwrite the project's progress row. Anti-patch: never appends.
+
+        Session-annotation cols (current_session_id / session_started_at) are
+        deliberately EXCLUDED from defaults — they're managed by
+        tag_progress_session() and preserved here across full-rewrites unless
+        the caller explicitly passes them. This guarantees a PreCompact upsert
+        from session A doesn't wipe a tag a UserPromptSubmit just wrote for
+        the same session.
+        """
         now = self._now()
         defaults = {
             "current_request": "",
@@ -769,6 +788,19 @@ class MemoryDB:
             if isinstance(v, (list, dict)):
                 fields[k] = json.dumps(v, ensure_ascii=False)
         merged = {**defaults, **fields}
+
+        # Preserve session tag across upsert: read existing row only if at
+        # least one tag field is missing from the caller's fields.
+        if "current_session_id" not in fields or "session_started_at" not in fields:
+            existing_row = self.get_progress(project_id) or {}
+            if "current_session_id" not in fields:
+                merged["current_session_id"] = existing_row.get("current_session_id", "") or ""
+            if "session_started_at" not in fields:
+                merged["session_started_at"] = existing_row.get("session_started_at", "") or ""
+        else:
+            merged["current_session_id"] = fields["current_session_id"]
+            merged["session_started_at"] = fields["session_started_at"]
+
         with self._connect() as conn:
             existing = conn.execute(
                 "SELECT project_id FROM progress WHERE project_id = ?",
@@ -835,6 +867,56 @@ class MemoryDB:
                 f"UPDATE progress SET {set_clause} WHERE project_id = ?",
                 params
             )
+
+    def tag_progress_session(self, project_id, claude_session_id):
+        """Mark `progress.current_session_id` with the active Claude session.
+
+        Semantics:
+          - Empty/None claude_session_id → no-op (some hooks don't get sid).
+          - Stored sid == new sid → no-op (idempotent within a session).
+          - Stored sid differs (or empty) → write new sid AND reset
+            session_started_at to _now(), marking the boundary.
+
+        Bootstraps an empty progress row if absent. Distinct from
+        upsert_progress (full rewrite) and patch_progress (arbitrary fields):
+        this helper is the ONLY caller that should touch session_started_at,
+        keeping the boundary semantics consistent across all hook write paths.
+        """
+        if not claude_session_id:
+            return
+        cur = self.get_progress(project_id) or {}
+        stored = (cur.get("current_session_id") or "").strip()
+        if stored == claude_session_id:
+            return
+        self.patch_progress(
+            project_id,
+            current_session_id=claude_session_id,
+            session_started_at=self._now(),
+        )
+
+    def get_recent_sessions(self, project_id, n=5):
+        """Recent compacted sessions for PROGRESS.md §0 timeline.
+
+        Joins `sessions` with the most recent `session_summaries` row per
+        session (LEFT JOIN — sessions without a summary still appear). Sorted
+        newest-first. Each row: claude_session_id, trigger_type, compacted_at,
+        msg_count, brief_summary, summary_completed, summary_next_steps.
+        """
+        with self._connect() as conn:
+            rows = conn.execute(
+                """SELECT s.id, s.claude_session_id, s.trigger_type,
+                          s.compacted_at, s.msg_count, s.brief_summary,
+                          ss.completed  AS summary_completed,
+                          ss.next_steps AS summary_next_steps
+                   FROM sessions s
+                   LEFT JOIN session_summaries ss
+                     ON ss.session_id = s.id
+                   WHERE s.project_id = ?
+                   ORDER BY s.compacted_at DESC
+                   LIMIT ?""",
+                (project_id, n)
+            ).fetchall()
+        return [dict(r) for r in rows]
 
     # ── plan_active (live plan anchor, v4) ──────────────────────────────────
 

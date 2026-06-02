@@ -247,6 +247,11 @@ def main():
     try:
         db = MemoryDB(memory_dir / "memory.db")
         project_id = db.upsert_project(cwd)
+        # v5: tag the session BEFORE patching files_touched so PROGRESS.md §0
+        # attributes "Files Touched This Session" to the right session.
+        # Idempotent — only writes if this session_id differs from the stored
+        # current_session_id.
+        db.tag_progress_session(project_id, session_id)
         _patch_progress_from_recent_obs(db, project_id, memory_dir)
 
         # Compact status line for Claude (one line, every turn)

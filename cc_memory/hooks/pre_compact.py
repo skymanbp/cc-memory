@@ -374,6 +374,12 @@ def main():
             transcript_ptr=str(Path(transcript_path).resolve()),
             trigger_type=trigger,
         )
+        # v5: tag the session BEFORE the full-rewrite. upsert_progress
+        # preserves the (sid, started_at) tag when the caller doesn't pass
+        # it (see db.upsert_progress docstring), so the tag we set here
+        # survives the rewrite and PROGRESS.md §0 attributes this compaction
+        # to the right session.
+        db.tag_progress_session(project_id, claude_sid)
         db.upsert_progress(project_id, **progress_state)
         progress_path = write_progress_md(db, project_id, memory_dir)
 

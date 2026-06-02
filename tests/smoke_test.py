@@ -528,6 +528,115 @@ def main():
     assert db_p.get_plan_active(pid_p) is None
     print("[OK] clear_plan_active: row deleted")
 
+    # === v5 features: session annotation on progress row ====================
+    # Verifies the v5 migration + tag_progress_session semantics + §0 render.
+    tmp_s = Path(tempfile.mkdtemp(prefix="cc-memory-session-tag-"))
+    mem_s = tmp_s / "memory"; mem_s.mkdir(parents=True, exist_ok=True)
+    db_s = MemoryDB(mem_s / "memory.db")
+    pid_s = db_s.upsert_project(str(tmp_s))
+
+    # v5 migration applied?
+    with db_s._connect() as conn:
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(progress)").fetchall()]
+        assert "current_session_id" in cols, "v5_progress_session_id missing"
+        assert "session_started_at" in cols, "v5_progress_session_started_at missing"
+    print("[OK] v5 migration: progress.current_session_id + session_started_at present")
+
+    # 1) Empty progress + first tag → both fields set
+    db_s.upsert_progress(pid_s)  # bootstrap empty row
+    prog0 = db_s.get_progress(pid_s)
+    assert prog0["current_session_id"] == ""
+    assert prog0["session_started_at"] == ""
+
+    SID_A = "aaaa1111-2222-3333-4444-555566667777"
+    db_s.tag_progress_session(pid_s, SID_A)
+    prog1 = db_s.get_progress(pid_s)
+    assert prog1["current_session_id"] == SID_A
+    started_a = prog1["session_started_at"]
+    assert started_a, "started_at should be set on first tag"
+    print(f"[OK] tag_progress_session: first call sets sid + started_at ({started_a})")
+
+    # 2) Same sid again → no-op (started_at preserved)
+    db_s.tag_progress_session(pid_s, SID_A)
+    prog2 = db_s.get_progress(pid_s)
+    assert prog2["session_started_at"] == started_a, \
+        f"idempotency violated: started_at changed from {started_a} to {prog2['session_started_at']}"
+    print("[OK] tag_progress_session: idempotent on same sid (started_at preserved)")
+
+    # 3) Empty / None sid → no-op
+    db_s.tag_progress_session(pid_s, "")
+    db_s.tag_progress_session(pid_s, None)
+    prog3 = db_s.get_progress(pid_s)
+    assert prog3["current_session_id"] == SID_A
+    print("[OK] tag_progress_session: empty/None sid is no-op")
+
+    # 4) Different sid → new tag + new started_at
+    import time as _time
+    _time.sleep(1.05)  # ensure timestamp differs at second resolution
+    SID_B = "bbbb9999-8888-7777-6666-555544443333"
+    db_s.tag_progress_session(pid_s, SID_B)
+    prog4 = db_s.get_progress(pid_s)
+    assert prog4["current_session_id"] == SID_B
+    assert prog4["session_started_at"] != started_a, "new session must reset started_at"
+    started_b = prog4["session_started_at"]
+    print(f"[OK] tag_progress_session: switching sid resets started_at "
+          f"({started_a} -> {started_b})")
+
+    # 5) upsert_progress preserves tag when caller doesn't pass session fields
+    db_s.upsert_progress(pid_s, current_request="some new request",
+                          status_done="something completed")
+    prog5 = db_s.get_progress(pid_s)
+    assert prog5["current_session_id"] == SID_B, \
+        f"upsert wiped the tag: expected {SID_B}, got {prog5['current_session_id']!r}"
+    assert prog5["session_started_at"] == started_b, \
+        "upsert wiped started_at"
+    assert prog5["current_request"] == "some new request"
+    print("[OK] upsert_progress preserves session tag across full-rewrite")
+
+    # 6) get_recent_sessions returns the right shape (with summaries joined)
+    sess_id1 = db_s.insert_session(pid_s, SID_A, "auto", 100, "", "Session A archive")
+    db_s.insert_session_summary(sess_id1, pid_s, {
+        "request": "first thing",
+        "completed": "First session got JWT wired up",
+        "next_steps": "Add CSRF; Write tests",
+        "files_read": [], "files_modified": [],
+    })
+    sess_id2 = db_s.insert_session(pid_s, "cccc0000", "manual", 42, "", "Older session")
+    recent = db_s.get_recent_sessions(pid_s, n=5)
+    assert len(recent) == 2
+    assert recent[0]["claude_session_id"] == "cccc0000" or recent[0]["claude_session_id"] == SID_A, \
+        f"got unexpected first session: {recent[0]}"
+    # The session with a summary should have summary_completed populated
+    sess_a = next(r for r in recent if r["claude_session_id"] == SID_A)
+    assert "JWT" in (sess_a["summary_completed"] or "")
+    print(f"[OK] get_recent_sessions: {len(recent)} rows, summary JOIN works")
+
+    # 7) PROGRESS.md render contains §0 with current sid + prior session
+    write_progress_md(db_s, pid_s, mem_s)
+    prog_md = (mem_s / "PROGRESS.md").read_text(encoding="utf-8")
+    assert "## 0. Session" in prog_md, "§0 Session section missing from PROGRESS.md"
+    assert "Current session" in prog_md
+    # Short SID is first 8 chars of SID_B = "bbbb9999"
+    assert "bbbb9999" in prog_md, "current short sid not rendered"
+    assert "Prior sessions" in prog_md, "prior sessions block missing"
+    assert "JWT" in prog_md or "first thing" in prog_md, \
+        "prior session summary not rendered"
+    # SID_A is the current's PRIOR session (it was inserted into `sessions` after
+    # SID_B took over), so SID_A should appear in the timeline.
+    assert "aaaa1111" in prog_md, "prior session sid not in timeline"
+    print("[OK] PROGRESS.md §0: current sid + prior session timeline rendered")
+
+    # 8) Untagged → graceful render
+    db_s2 = MemoryDB(Path(tempfile.mkdtemp(prefix="cc-mem-untag-")) / "memory.db")
+    pid_s2 = db_s2.upsert_project("/tmp/untagged-proj")
+    db_s2.upsert_progress(pid_s2)
+    tmp_mem = Path(tempfile.mkdtemp(prefix="cc-mem-untag-mem-"))
+    write_progress_md(db_s2, pid_s2, tmp_mem)
+    untagged_md = (tmp_mem / "PROGRESS.md").read_text(encoding="utf-8")
+    assert "no session tagged" in untagged_md, "untagged path should say so explicitly"
+    assert "no prior compacted sessions" in untagged_md
+    print("[OK] PROGRESS.md §0: untagged + empty-history path renders gracefully")
+
     print("\n===== ALL SMOKE TESTS PASSED =====")
     print(f"Test project preserved at: {tmp}")
     print("\nProduced files:")

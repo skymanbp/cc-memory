@@ -446,6 +446,14 @@ def _refresh_progress_row(db, project_id, memory_dir, current_session_id=None):
     or patch_progress() upstream is NEVER overwritten. This guarantees the
     PreCompact full-rewrite remains authoritative.
     """
+    # v5: tag the session BEFORE reading `cur` so the fill-only-empty checks
+    # below see the same row a downstream patch_progress would. If this
+    # session is brand new, both current_session_id and session_started_at
+    # get set here, which makes PROGRESS.md §0 attribute the next writes to
+    # the correct owner.
+    if current_session_id:
+        db.tag_progress_session(project_id, current_session_id)
+
     cur = db.get_progress(project_id) or {}
     patch = {}
 

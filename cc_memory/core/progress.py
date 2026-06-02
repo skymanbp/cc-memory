@@ -105,6 +105,89 @@ def collect_progress_state(db: MemoryDB, project_id: int,
     }
 
 
+def _short_sid(sid: str, width: int = 8) -> str:
+    """First N chars of a Claude session UUID, with a leading hash to make it
+    visually distinct from plain numbers in the rendered table."""
+    s = (sid or "").strip()
+    return ("#" + s[:width]) if s else "(untagged)"
+
+
+def _short_ts(ts: str) -> str:
+    """Trim ISO timestamps to date+HH:MM for readability in the timeline."""
+    s = (ts or "").strip()
+    if not s:
+        return "(unknown)"
+    # accept '2026-06-02T12:56:18' or '2026-06-02T12:56:18.123' etc.
+    return s.replace("T", " ")[:16]
+
+
+def _render_session_section(db: MemoryDB, project_id: int, prog: Dict) -> List[str]:
+    """Build the §0 Session block.
+
+    Reads:
+      - current session tag from `prog` (progress row)
+      - prior session history from db.get_recent_sessions()
+
+    The current session is marked with 🟢 + "YOU" so a new Claude reading
+    the file knows immediately whether the row belongs to its own session.
+    Prior sessions are listed newest-first with brief summaries.
+    """
+    cur_sid = (prog.get("current_session_id") or "").strip()
+    started = (prog.get("session_started_at") or "").strip()
+    trigger = (prog.get("trigger_type") or "").strip()
+    updated = (prog.get("updated_at") or "").strip()
+
+    out: List[str] = ["## 0. Session", ""]
+
+    # --- Current session line ------------------------------------------------
+    if cur_sid:
+        out.append(
+            f"🟢 **Current session**: `{_short_sid(cur_sid)}`  ·  "
+            f"started `{_short_ts(started)}`  ·  "
+            f"last write `{_short_ts(updated)}`"
+            + (f"  ·  trigger `{trigger}`" if trigger else "")
+        )
+        out.append("")
+        out.append(
+            "> If your Claude session ID does NOT start with "
+            f"`{_short_sid(cur_sid)[1:]}`, this row was written by a "
+            "different session — treat the §3 todos / §6 files as that "
+            "session's work, not yours."
+        )
+    else:
+        out.append("⚪ **Current session**: *(no session tagged — first run, or a write path bypassed `tag_progress_session`)*")
+    out.append("")
+
+    # --- Prior session timeline ---------------------------------------------
+    recent = db.get_recent_sessions(project_id, n=5) or []
+    # Filter out the current session from the timeline so it isn't listed twice
+    prior = [r for r in recent
+             if (r.get("claude_session_id") or "") != cur_sid]
+    if not prior:
+        out.append("*(no prior compacted sessions yet)*")
+    else:
+        out.append("**Prior sessions** (most recent first):")
+        out.append("")
+        for r in prior[:5]:
+            sid = _short_sid(r.get("claude_session_id") or "")
+            ended = _short_ts(r.get("compacted_at") or "")
+            msgs = r.get("msg_count") or 0
+            # Prefer the session_summary.completed line; fall back to brief_summary
+            summary = (
+                (r.get("summary_completed") or "").strip()
+                or (r.get("brief_summary") or "").strip()
+                or "(no summary)"
+            )
+            # Flatten embedded newlines + collapse runs of whitespace so a
+            # multi-line brief_summary doesn't break the list-item alignment.
+            summary = " ".join(summary.split())
+            if len(summary) > 100:
+                summary = summary[:97] + "..."
+            out.append(f"- `{sid}`  ·  ended `{ended}`  ·  {msgs} msgs  ·  {summary}")
+    out.append("")
+    return out
+
+
 def write_progress_md(db: MemoryDB, project_id: int, memory_dir: Path) -> Path:
     """Render the `progress` row to memory/PROGRESS.md (FULL REWRITE).
 
@@ -137,6 +220,12 @@ def write_progress_md(db: MemoryDB, project_id: int, memory_dir: Path) -> Path:
         "> table `progress`. **Never append. Never patch by hand.**",
         "",
     ]
+
+    # --- Session Annotation (v5) ---------------------------------------------
+    # Top of the file so any reader can immediately tell:
+    #   (a) is this MY session's progress or a stale write from a different one?
+    #   (b) what did the prior sessions accomplish (project-wide context)?
+    lines += _render_session_section(db, project_id, prog)
 
     # --- Current Request -----------------------------------------------------
     lines += ["## 1. Current Request", ""]
