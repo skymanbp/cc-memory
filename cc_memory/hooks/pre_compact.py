@@ -24,6 +24,7 @@ Output:
 """
 import json
 import sys
+import time
 import urllib.error
 from datetime import datetime
 from pathlib import Path
@@ -233,19 +234,25 @@ def _first_user_request(messages):
     return ""
 
 
-def _maybe_consolidate(cwd, db, project_id):
+def _maybe_consolidate(cwd, db, project_id, hook_start=None):
     n_sessions = db.get_session_count(project_id)
     if n_sessions % CONSOLIDATION_INTERVAL != 0:
         return
     _log.info(f"auto-consolidation triggered (session #{n_sessions})")
     try:
-        from core.consolidate import run_consolidation
-        run_consolidation(cwd, use_llm=True, verbose=True)
+        from core.consolidate import run_consolidation, BudgetGate
+        # Residual-budget gate: PreCompact has 45s total and extraction already
+        # spent time before this point. Passing hook_start makes elapsed()
+        # reflect real hook time so in-hook LLM dedup/obsolescence calls stop
+        # before the hook is killed (deferring the rest to /cc-mem consolidate).
+        gate = BudgetGate(total_s=45.0, safety_s=8.0, start=hook_start)
+        run_consolidation(cwd, use_llm=True, verbose=True, budget=gate)
     except Exception as e:
         _log.error(f"auto-consolidation error: {e}")
 
 
 def main():
+    hook_start = time.monotonic()  # for the consolidation residual-budget gate
     try:
         data = json.loads(sys.stdin.buffer.read().decode("utf-8"))
     except Exception as exc:
@@ -413,8 +420,8 @@ def main():
             # disk failure here must not propagate into the compact path
             _log.error(f".last_save.json write failed: {e}")
 
-        # Maybe run LLM consolidation (expensive — gated)
-        _maybe_consolidate(cwd, db, project_id)
+        # Maybe run LLM consolidation (expensive — gated by residual budget)
+        _maybe_consolidate(cwd, db, project_id, hook_start=hook_start)
 
         _log.info(
             f"pre_compact OK: ins={n_inserted} mrg={n_merged} sup={n_super} skp={n_skipped} "

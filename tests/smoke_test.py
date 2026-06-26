@@ -637,6 +637,170 @@ def main():
     assert "no prior compacted sessions" in untagged_md
     print("[OK] PROGRESS.md §0: untagged + empty-history path renders gracefully")
 
+    # === v2.3 features: memory-quality (dedup / staleness / topic / aging) ===
+    import core.consolidate as C
+
+    # v6 migration present
+    tmp_q = Path(tempfile.mkdtemp(prefix="cc-mem-quality-"))
+    mem_q = tmp_q / "memory"; mem_q.mkdir(parents=True, exist_ok=True)
+    db_q = MemoryDB(mem_q / "memory.db")
+    pid_q = db_q.upsert_project(str(tmp_q))
+    with db_q._connect() as conn:
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(memories)").fetchall()]
+        assert "last_referenced_at" in cols, "v6_last_referenced_at migration missing"
+    print("[OK] v6 migration: memories.last_referenced_at present")
+
+    # Step 0 helpers
+    assert C.is_decodable("normal text here") is True
+    assert C.is_decodable("���������������� mostly fffd ��������") is False
+    assert C.is_decodable("") is False
+    assert C.is_decodable("有效的中文内容不是乱码") is True, "valid CJK must be decodable"
+    print("[OK] is_decodable: rejects FFFD-dominated, accepts CJK")
+
+    g = C.BudgetGate(total_s=45, safety_s=8)
+    assert g.can_spend(10) is True
+    gu = C.BudgetGate.unbounded_gate()
+    assert gu.can_spend(1e9) is True and gu.remaining() == float("inf")
+    g0 = C.BudgetGate(total_s=5, safety_s=8)  # already over budget
+    assert g0.can_spend(1) is False, "exhausted gate must refuse"
+    print("[OK] BudgetGate: bounded/unbounded/exhausted behave correctly")
+
+    # _nominate_groups: NO giant transitive cluster from a shared hub token
+    def _mk(idv, cat, content, imp=3):
+        return {"id": idv, "category": cat, "content": content,
+                "importance": imp, "created_at": "2026-01-01T00:00:00",
+                "tags": "[]", "topic": ""}
+    # 5 rows all sharing 'cc-memory settings hooks' but DISTINCT facts +
+    # 2 genuine dups. Hub tokens must NOT chain the distinct ones into one blob.
+    hub = [
+        _mk(1, "config", "cc-memory stores settings in settings.json hooks block"),
+        _mk(2, "config", "cc-memory memory database lives at memory/memory.db path"),
+        _mk(3, "config", "cc-memory installer copies hooks into settings.json on setup"),
+        _mk(4, "config", "cc-memory uninstall removes hooks from settings.json file"),
+        _mk(5, "decision", "cc-memory uses SQLite with settings hooks for storage"),
+        # genuine near-dup pair (same fact reworded), same category:
+        _mk(6, "arch", "The plugin captures memories at every conversation boundary hook"),
+        _mk(7, "arch", "The plugin captures memories at each conversation boundary via hooks"),
+    ]
+    groups = C._nominate_groups(hub, floor=0.30, max_group=4, max_groups=12)
+    for grp in groups:
+        assert len(grp) <= 4, f"group exceeded max size: {len(grp)}"
+        cats = {m["category"] for m in grp}
+        assert len(cats) == 1, f"cross-category group formed: {cats}"
+    # the genuine arch pair (6,7) should be nominated together
+    arch_grouped = any({6, 7} <= {m["id"] for m in grp} for grp in groups)
+    assert arch_grouped, "genuine reworded-dup pair (6,7) not nominated"
+    # no single group should swallow all 5 config hub rows
+    assert not any(len([m for m in grp if m["category"] == "config"]) >= 5
+                   for grp in groups), "hub tokens created a giant cross-fact cluster"
+    print(f"[OK] _nominate_groups: {len(groups)} groups, all <=4 + same-category, "
+          f"genuine dup paired, no hub mega-cluster")
+
+    # mojibake rows are skipped by nomination
+    moji = [_mk(10, "note", "����������������������������������������"),
+            _mk(11, "note", "����������������������������������������")]
+    assert C._nominate_groups(moji) == [], "mojibake rows must be skipped"
+    print("[OK] _nominate_groups: skips non-decodable (mojibake) rows")
+
+    # semantic_dedup no-ops gracefully without an API key (don't assume one)
+    sd = C.semantic_dedup(db_q, pid_q, use_llm=False)
+    assert sd["memories_archived"] == 0
+    print("[OK] semantic_dedup: safe no-op when use_llm=False")
+
+    # Step 4: decay_and_archive — durable spared, old+low+unreferenced archived
+    from datetime import datetime as _dt, timedelta as _td
+    old = (_dt.now() - _td(days=200)).isoformat(timespec="seconds")
+    recent = _dt.now().isoformat(timespec="seconds")
+    with db_q._connect() as conn:
+        # durable, important, recent → keep
+        conn.execute("INSERT INTO memories (project_id,category,content,importance,tags,created_at,updated_at,is_active) VALUES (?,?,?,?,?,?,?,1)",
+                     (pid_q, "arch", "Durable architecture invariant still true", 4, "[]", recent, recent))
+        # old + low importance + never referenced → archive net catches it
+        conn.execute("INSERT INTO memories (project_id,category,content,importance,tags,created_at,updated_at,is_active) VALUES (?,?,?,?,?,?,?,1)",
+                     (pid_q, "note", "Ancient trivial note nobody referenced", 1, "[]", old, old))
+        # old + low BUT referenced → spared
+        conn.execute("INSERT INTO memories (project_id,category,content,importance,tags,created_at,updated_at,last_referenced_at,is_active) VALUES (?,?,?,?,?,?,?,?,1)",
+                     (pid_q, "note", "Old but injected recently so still relevant", 1, "[]", old, old, recent))
+    da = C.decay_and_archive(db_q, pid_q)
+    active = {m["id"]: m for m in db_q.get_all_active_memories(pid_q)}
+    contents = {m["content"] for m in active.values()}
+    assert "Durable architecture invariant still true" in contents, "durable row wrongly archived"
+    assert "Ancient trivial note nobody referenced" not in contents, "old+low+unref not archived"
+    assert "Old but injected recently so still relevant" in contents, "referenced row wrongly archived"
+    assert da["archived_stale"] == 1, f"expected 1 stale archived, got {da['archived_stale']}"
+    print(f"[OK] decay_and_archive: durable+referenced spared, old+low+unref archived ({da})")
+
+    # Step 0 db helpers: bump_last_referenced + get_referenced_id_set + archive_obsolete
+    fresh_id = db_q.insert_memory(pid_q, None, "note", "reference me please", importance=2)
+    assert fresh_id not in db_q.get_referenced_id_set(pid_q)
+    db_q.bump_last_referenced([fresh_id])
+    assert fresh_id in db_q.get_referenced_id_set(pid_q)
+    surv = db_q.insert_memory(pid_q, None, "note", "survivor canonical fact", importance=3)
+    loser = db_q.insert_memory(pid_q, None, "note", "loser duplicate fact", importance=2)
+    n = db_q.archive_obsolete([loser], canonical_id=surv)
+    assert n == 1
+    loser_active = {m["id"] for m in db_q.get_all_active_memories(pid_q)}
+    assert loser not in loser_active, "archive_obsolete didn't archive"
+    chain = db_q.get_supersede_chain(loser)
+    assert any(c["id"] == loser and c["supersedes_id"] == surv for c in chain), \
+        "archive_obsolete didn't set forward supersedes_id link"
+    print("[OK] bump_last_referenced + get_referenced_id_set + archive_obsolete(forward-link)")
+
+    # Step 5: canonicalize_topics — cc-memory family merges, distinct memory-* stays
+    tmp_t = Path(tempfile.mkdtemp(prefix="cc-mem-topic-"))
+    mem_t = tmp_t / "memory"; mem_t.mkdir(parents=True, exist_ok=True)
+    db_t = MemoryDB(mem_t / "memory.db")
+    pid_t = db_t.upsert_project(str(tmp_t))
+    topic_seed = [
+        ("cc-memory", "fact a about the plugin"),
+        ("cc-memory-fixes", "fact b about fixes"),
+        ("cc-memory backend", "fact c about backend"),
+        ("memory-bloat", "distinct fact about bloat problem"),
+        ("memory-injection", "distinct fact about injection layer"),
+    ]
+    for tp, ct in topic_seed:
+        mid = db_t.insert_memory(pid_t, None, "note", ct, importance=3, topic=tp)
+    merged = C.canonicalize_topics(db_t, pid_t)
+    final_topics = set(db_t.get_topic_memory_counts(pid_t).keys())
+    # cc-memory family collapses to one
+    ccmem_family = {t for t in final_topics if t.startswith("cc-memory") or t == "cc-memory"}
+    assert len(ccmem_family) == 1, f"cc-memory family not unified: {ccmem_family}"
+    # distinct memory-* survive as their own topics (hub-token guard)
+    assert "memory-bloat" in final_topics, "memory-bloat wrongly merged via hub token"
+    assert "memory-injection" in final_topics, "memory-injection wrongly merged via hub token"
+    print(f"[OK] canonicalize_topics: cc-memory family unified ({merged} merged), "
+          f"distinct memory-* preserved")
+
+    # archive_consolidated content-dup guard: distinct facts sharing a topic are NOT archived
+    tmp_a = Path(tempfile.mkdtemp(prefix="cc-mem-archcon-"))
+    mem_a = tmp_a / "memory"; mem_a.mkdir(parents=True, exist_ok=True)
+    db_a = MemoryDB(mem_a / "memory.db")
+    pid_a = db_a.upsert_project(str(tmp_a))
+    distinct_facts = [
+        "JWT tokens expire after fifteen minutes by configuration",
+        "PostgreSQL connection pool capped at twenty workers",
+        "The dashboard renders charts with a canvas backend",
+        "Nightly backups upload to an offsite bucket at 3am",
+        "Rate limiting uses a sliding window of sixty seconds",
+        "Email delivery routes through an SMTP relay on port 465",
+        "Search indexes rebuild incrementally every six hours",
+        "Feature flags load from a YAML file at boot time",
+    ]
+    for fct in distinct_facts:  # 8 genuinely-distinct facts, same topic, > cap 5
+        db_a.insert_memory(pid_a, None, "note", fct, importance=3, topic="shared")
+    db_a.upsert_topic(pid_a, "shared", "summary of shared topic")
+    n_arch = C.archive_consolidated(db_a, pid_a, keep_per_topic=5)
+    assert n_arch == 0, f"content-dup guard failed: archived {n_arch} distinct facts"
+    print("[OK] archive_consolidated: distinct facts sharing a topic NOT archived (content guard)")
+
+    # ...and the guard DOES archive a genuine content near-duplicate over the cap
+    db_a.insert_memory(pid_a, None, "note",
+                       "JWT tokens expire after fifteen minutes by config setting",
+                       importance=2, topic="shared")
+    n_arch2 = C.archive_consolidated(db_a, pid_a, keep_per_topic=5)
+    assert n_arch2 >= 1, "content-dup guard should archive a genuine near-duplicate"
+    print(f"[OK] archive_consolidated: genuine content near-dup IS archived ({n_arch2})")
+
     print("\n===== ALL SMOKE TESTS PASSED =====")
     print(f"Test project preserved at: {tmp}")
     print("\nProduced files:")

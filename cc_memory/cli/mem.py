@@ -829,6 +829,121 @@ def cmd_dashboard(args):
     print(f"[OK] Launched dashboard for project: {args.project}")
 
 
+# ── observability + encoding (v2.3) ─────────────────────────────────────────
+
+def cmd_inject_show(args):
+    """Dump memory/.last_inject.json — exactly what the last SessionStart
+    injected (ground truth, independent of whether Claude echoed it)."""
+    memory_dir, db_path, _ = _resolve_db(args.project)
+    manifest = memory_dir / ".last_inject.json"
+    if not manifest.exists():
+        print("No inject manifest yet. It is written on the next SessionStart "
+              "(open a new Claude Code session in this project).")
+        return
+    data = json.loads(manifest.read_text(encoding="utf-8"))
+    print(f"Last injection — session {data.get('session_id','?')[:8] or '(none)'} "
+          f"at {data.get('ts','?')}")
+    print(f"  memories injected : {data.get('n_injected_memories', 0)} "
+          f"(critical={len(data.get('critical_ids', []))}, "
+          f"timeline={len(data.get('timeline_ids', []))})")
+    print(f"  topics            : {', '.join(data.get('topic_names', [])) or '(none)'}")
+    print(f"  PROGRESS.md preview: {'yes' if data.get('progress_preview_included') else 'no'}")
+    print(f"  size              : {data.get('total_chars', 0)} chars "
+          f"(~{data.get('est_tokens', 0)} tokens)")
+    if data.get("critical_ids"):
+        print(f"  critical ids      : {data['critical_ids']}")
+    if data.get("timeline_ids"):
+        print(f"  timeline ids      : {data['timeline_ids']}")
+
+
+def cmd_inject_usage(args):
+    """Deterministic read-signals: did Claude actually consult the injected
+    context this session? Reports ONLY signals that can't be faked:
+      - Read-tool observations targeting PROGRESS.md / MEMORY.md
+      - whether the forced-reminder ack string appears in the latest turn
+    (No per-memory #id guessing — ids are never shown to Claude, so that
+    would be a coincidence detector, not real usage.)"""
+    memory_dir, db_path, _ = _resolve_db(args.project)
+    if not db_path.exists():
+        print(f"Error: no memory database at {db_path}")
+        sys.exit(1)
+    db = MemoryDB(db_path)
+    pid = db.upsert_project(str(Path(args.project).resolve()))
+    obs = db.get_recent_observations(pid, limit=200)
+    reads = [o for o in obs if o["tool_name"] == "Read" and o["tool_input"]]
+    progress_reads = [o for o in reads if "PROGRESS.md" in o["tool_input"]]
+    memory_reads = [o for o in reads if "MEMORY.md" in o["tool_input"]]
+    print("cc-memory usage signals (this project, recent observations):")
+    print(f"  PROGRESS.md Read by Claude : {len(progress_reads)} time(s)"
+          + (f" — last {progress_reads[0]['timestamp']}" if progress_reads else ""))
+    print(f"  MEMORY.md   Read by Claude : {len(memory_reads)} time(s)"
+          + (f" — last {memory_reads[0]['timestamp']}" if memory_reads else ""))
+    if not (progress_reads or memory_reads):
+        print("  (no handoff-file reads observed — either a fresh session, or "
+              "Claude hasn't consulted the injected context yet)")
+    man = memory_dir / ".last_inject.json"
+    if man.exists():
+        d = json.loads(man.read_text(encoding="utf-8"))
+        print(f"  last injection             : {d.get('n_injected_memories', 0)} memories "
+              f"at {d.get('ts','?')} (see `/cc-mem inject-show`)")
+
+
+def cmd_encoding_check(args):
+    """Read-only scan for genuine U+FFFD corruption across text tables.
+
+    On a healthy DB this finds 0 in memories/topics/progress (CJK/unicode is
+    NOT corruption). Any FFFD in observations is transient (cleaned after
+    extraction) and harmless. With --apply, quarantines (is_active=0) ONLY
+    corrupted memory rows — never guesses a repair."""
+    _, db_path, _ = _resolve_db(args.project)
+    if not db_path.exists():
+        print(f"Error: no memory database at {db_path}")
+        sys.exit(1)
+    db = MemoryDB(db_path)
+    pid = db.upsert_project(str(Path(args.project).resolve()))
+    scan = {
+        "memories": ["content", "topic"],
+        "topics": ["name", "content"],
+        "progress": ["current_request", "plan", "status_done", "status_in_flight"],
+        "observations": ["tool_input", "tool_output"],
+    }
+    corrupt_memory_ids = []
+    with db._connect() as conn:
+        for table, cols in scan.items():
+            try:
+                rows = conn.execute(f"SELECT * FROM {table}").fetchall()
+            except Exception:
+                continue
+            total = 0
+            hit_rows = 0
+            for r in rows:
+                row_has = False
+                for c in cols:
+                    try:
+                        v = r[c] or ""
+                    except (IndexError, KeyError):
+                        continue
+                    cnt = v.count("�")
+                    total += cnt
+                    if cnt:
+                        row_has = True
+                if row_has:
+                    hit_rows += 1
+                    if table == "memories":
+                        corrupt_memory_ids.append(r["id"])
+            print(f"  {table:14s} rows={len(rows):4d}  U+FFFD chars={total}  rows_with_fffd={hit_rows}")
+    if corrupt_memory_ids:
+        print(f"\nCorrupted MEMORY rows: {corrupt_memory_ids}")
+        if args.apply:
+            n = db.archive_obsolete(corrupt_memory_ids)
+            print(f"[applied] quarantined {n} corrupted memory rows (is_active=0, recoverable)")
+        else:
+            print("Re-run with --apply to quarantine them (is_active=0, recoverable).")
+    else:
+        print("\nNo corrupted memory/topic/progress rows. "
+              "Any observation FFFD is transient + harmless.")
+
+
 def make_parser():
     p = argparse.ArgumentParser(prog="cc-memory", description="cc-memory CLI v2.1",
         formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -901,6 +1016,13 @@ def make_parser():
     sub.add_parser("plan-check",
                    help="Reset guardian counters + emit subagent invocation hint")
 
+    # ── observability + encoding (v2.3) ────────────────────────────────────
+    sub.add_parser("inject-show", help="Show what the last SessionStart injected")
+    sub.add_parser("inject-usage", help="Deterministic signals: did Claude read the memory?")
+    pe = sub.add_parser("encoding-check", help="Scan for U+FFFD corruption (read-only)")
+    pe.add_argument("--apply", action="store_true",
+                    help="Quarantine corrupted memory rows (is_active=0, recoverable)")
+
     return p
 
 
@@ -917,6 +1039,8 @@ def main():
         "plan-show": cmd_plan_show, "plan-status": cmd_plan_status,
         "plan-set": cmd_plan_set, "plan-clear": cmd_plan_clear,
         "plan-replan": cmd_plan_replan, "plan-check": cmd_plan_check,
+        "inject-show": cmd_inject_show, "inject-usage": cmd_inject_usage,
+        "encoding-check": cmd_encoding_check,
     }
     dispatch[args.command](args)
 

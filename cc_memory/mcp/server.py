@@ -271,7 +271,7 @@ def _handle_request(req):
                "result": {
                    "protocolVersion": "2024-11-05",
                    "capabilities": {"tools": {}},
-                   "serverInfo": {"name": "cc-memory", "version": "2.2.0"},
+                   "serverInfo": {"name": "cc-memory", "version": "2.3.0"},
                }})
     elif method == "notifications/initialized":
         return

@@ -18,7 +18,9 @@ Stdout: injected context (Claude reads it as additional system input).
 Stderr: suppressed (file log only).
 """
 import json
+import os
 import sys
+import tempfile
 import urllib.error
 from datetime import datetime
 from pathlib import Path
@@ -99,16 +101,19 @@ def _build_critical_layer(db, project_id, budget, topic_names):
 
 
 def _build_timeline_layer(db, project_id, budget, shown_ids, mode_name="code"):
+    """Returns (text, injected_ids). injected_ids are the memory ids actually
+    rendered into the timeline (used for the inject manifest + reference bump)."""
     from core.modes import get_injection_priority
     priority = get_injection_priority(mode_name)
     recent = db.get_recent_memories(project_id, sessions_back=3, min_importance=3, limit=20)
     fresh = [m for m in recent if m["id"] not in shown_ids]
     if not fresh:
-        return ""
+        return "", []
     cat_rank = {cat: i for i, cat in enumerate(priority)}
     fresh.sort(key=lambda m: (cat_rank.get(m["category"], 99), -m["importance"]))
     lines = ["### Recent", ""]
     used = 0
+    injected = []
     for i, m in enumerate(fresh):
         if i < 5:
             prefix = "! " if m["importance"] >= 4 else "- "
@@ -120,8 +125,9 @@ def _build_timeline_layer(db, project_id, budget, shown_ids, mode_name="code"):
             break
         lines.append(entry)
         used += len(entry)
+        injected.append(m["id"])
     lines.append("")
-    return "\n".join(lines)
+    return "\n".join(lines), injected
 
 
 def _build_progress_preview(memory_dir, budget):
@@ -242,7 +248,28 @@ def _build_forced_reminder(memory_dir):
     return "\n".join(lines)
 
 
-def build_context(memory_dir, db, project_id, project_name):
+def _write_inject_manifest(memory_dir, manifest):
+    """Atomically persist the inject manifest to memory/.last_inject.json.
+
+    tempfile + os.replace is genuinely atomic (unlike the plain write_text used
+    by .last_save.json), so a concurrent /cc-mem inject-show never reads a
+    half-written file. Best-effort: failure must not break SessionStart.
+    """
+    try:
+        fd, tmp = tempfile.mkstemp(dir=str(memory_dir), prefix=".last_inject.",
+                                   suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                json.dump(manifest, fh, ensure_ascii=False, indent=2)
+            os.replace(tmp, str(memory_dir / ".last_inject.json"))
+        finally:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+    except OSError as e:
+        _log.error(f".last_inject.json write failed: {e}")
+
+
+def build_context(memory_dir, db, project_id, project_name, current_session_id=""):
     total_budget = _DEFAULT_BUDGET
     mode_name = db.get_project_mode(project_id)
 
@@ -263,7 +290,8 @@ def build_context(memory_dir, db, project_id, project_name):
         parts.append(critical_text)
 
     budget = int(total_budget * _LAYER_BUDGETS["timeline"])
-    timeline_text = _build_timeline_layer(db, project_id, budget, shown_ids, mode_name)
+    timeline_text, timeline_ids = _build_timeline_layer(
+        db, project_id, budget, shown_ids, mode_name)
     if timeline_text:
         parts.append(timeline_text)
 
@@ -279,7 +307,34 @@ def build_context(memory_dir, db, project_id, project_name):
     parts.append(_build_forced_reminder(memory_dir))
 
     result = "\n".join(parts)
-    _log.info(f"injected ~{len(result)//4} tokens ({len(result)} chars)")
+
+    # ── v2.3 observability: persist exactly WHAT was injected, and mark those
+    # memories as referenced (keeps them "young" for the staleness net). The
+    # manifest backs `/cc-mem inject-show` so the user has ground truth of what
+    # cc-memory loaded, independent of whether Claude echoes it.
+    critical_ids = sorted(shown_ids)
+    timeline_ids = sorted(set(timeline_ids))
+    all_ids = sorted(set(critical_ids) | set(timeline_ids))
+    manifest = {
+        "session_id": current_session_id,
+        "ts": datetime.now().isoformat(timespec="seconds"),
+        "project": project_name,
+        "topic_names": sorted(topic_names),
+        "critical_ids": critical_ids,
+        "timeline_ids": timeline_ids,
+        "n_injected_memories": len(all_ids),
+        "progress_preview_included": bool(progress_text),
+        "total_chars": len(result),
+        "est_tokens": len(result) // 4,
+    }
+    _write_inject_manifest(memory_dir, manifest)
+    try:
+        db.bump_last_referenced(all_ids)
+    except Exception as e:
+        _log.error(f"bump_last_referenced failed: {e}")
+
+    _log.info(f"injected ~{len(result)//4} tokens ({len(result)} chars), "
+              f"{len(all_ids)} memories tagged referenced")
     return result
 
 
@@ -646,12 +701,25 @@ def main():
             _log.error(f"progress refresh failed: {e}")
 
         print(f"\n[cc-memory] Session start — loading memory for '{Path(cwd).name}'...")
-        print(build_context(memory_dir, db, project_id, Path(cwd).name))
+        print(build_context(memory_dir, db, project_id, Path(cwd).name,
+                            current_session_id=session_id))
         stats = db.get_stats(project_id)
-        print(
-            f"[cc-memory OK] Context loaded: "
-            f"{stats['n_memories']} memories, {stats.get('n_topics', 0)} topics"
-        )
+        # v2.3 observability: user-visible one-liner of WHAT was injected, read
+        # from the manifest build_context just wrote (ground truth, not a guess).
+        try:
+            man = json.loads((memory_dir / ".last_inject.json").read_text(encoding="utf-8"))
+            print(
+                f"[cc-memory OK] Injected {man.get('n_injected_memories', 0)} memories"
+                f" ({len(man.get('topic_names', []))} topics, "
+                f"~{man.get('est_tokens', 0)} tokens"
+                f"{', +PROGRESS.md' if man.get('progress_preview_included') else ''})"
+                f" · see `/cc-mem inject-show`"
+            )
+        except (OSError, json.JSONDecodeError, ValueError):
+            print(
+                f"[cc-memory OK] Context loaded: "
+                f"{stats['n_memories']} memories, {stats.get('n_topics', 0)} topics"
+            )
         _log.info(f"injected context for {Path(cwd).name}")
 
         try:

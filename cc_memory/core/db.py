@@ -220,6 +220,21 @@ _MIGRATIONS = [
      "ALTER TABLE progress ADD COLUMN current_session_id TEXT DEFAULT ''"),
     ("v5_progress_session_started_at",
      "ALTER TABLE progress ADD COLUMN session_started_at TEXT DEFAULT ''"),
+
+    # ── v6 migrations (reference-aware aging) ────────────────────────────────
+
+    # last_referenced_at records the last time a memory was INJECTED into a
+    # session (SessionStart). "Effective age" for the staleness/decay net is
+    # computed as now - COALESCE(last_referenced_at, created_at). We key on
+    # created_at (immutable) NOT updated_at — because maintenance ops
+    # (decay, bulk_set_topic, archive) bump updated_at and would otherwise
+    # corrupt the age signal. A referenced fact stays "young"; an
+    # un-injected low-importance fact ages out. NULL until first injection.
+    ("v6_last_referenced_at",
+     "ALTER TABLE memories ADD COLUMN last_referenced_at TEXT"),
+    ("v6_last_referenced_idx",
+     "CREATE INDEX IF NOT EXISTS idx_memories_lastref "
+     "ON memories (project_id, is_active, last_referenced_at)"),
 ]
 
 
@@ -634,6 +649,65 @@ class MemoryDB:
         with self._connect() as conn:
             ph = ",".join("?" * len(memory_ids))
             conn.execute(f"DELETE FROM memories WHERE id IN ({ph})", memory_ids)
+
+    # ── reference-aware aging (v6) ──────────────────────────────────────────
+
+    def bump_last_referenced(self, memory_ids):
+        """Mark memories as referenced NOW (called from SessionStart when a
+        memory is injected into context). Keeps referenced facts 'young' for
+        the staleness net. No-op on empty list. Does NOT touch updated_at."""
+        ids = [i for i in (memory_ids or []) if i is not None]
+        if not ids:
+            return
+        now = self._now()
+        with self._connect() as conn:
+            ph = ",".join("?" * len(ids))
+            conn.execute(
+                f"UPDATE memories SET last_referenced_at = ? WHERE id IN ({ph})",
+                [now] + ids
+            )
+
+    def archive_obsolete(self, stale_ids, canonical_id=None):
+        """Archive memories as obsolete (is_active=0), optionally linking each
+        to the canonical memory that replaced it via supersedes_id (forward
+        history pointer). Used by the staleness/dedup consolidation stages.
+
+        Distinct from supersede_memory: NO new row is inserted (the canonical
+        already exists), so this never duplicates content. Distinct from
+        bulk_archive: it sets supersedes_id so get_supersede_chain can still
+        trace the lineage.
+        """
+        ids = [i for i in (stale_ids or []) if i is not None and i != canonical_id]
+        if not ids:
+            return 0
+        now = self._now()
+        with self._connect() as conn:
+            ph = ",".join("?" * len(ids))
+            if canonical_id is not None:
+                conn.execute(
+                    f"UPDATE memories SET is_active = 0, supersedes_id = ?, "
+                    f"updated_at = ? WHERE id IN ({ph})",
+                    [canonical_id, now] + ids
+                )
+            else:
+                conn.execute(
+                    f"UPDATE memories SET is_active = 0, updated_at = ? "
+                    f"WHERE id IN ({ph})",
+                    [now] + ids
+                )
+            return len(ids)
+
+    def get_referenced_id_set(self, project_id):
+        """Return the set of memory ids that have EVER been injected
+        (last_referenced_at IS NOT NULL). Used by the staleness net to spare
+        any fact that was surfaced to a session."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT id FROM memories WHERE project_id = ? "
+                "AND last_referenced_at IS NOT NULL",
+                (project_id,)
+            ).fetchall()
+            return {r["id"] for r in rows}
 
     def update_importance(self, memory_id, importance):
         with self._connect() as conn:

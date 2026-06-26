@@ -7,6 +7,88 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [2.3.0] — 2026-06-26
+
+The "memory quality + observability" release. Fixes two long-standing problems:
+(1) the database accumulated unboundedly because the anti-patch writer's
+char-level trigram-Jaccard only catches near-VERBATIM restatement, so the same
+fact reworded each session always took the INSERT branch; (2) there was no way
+to tell whether injected memory was actually read or used. Designed and
+adversarially verified against the live DB (a 21-node false-merge cluster and
+~15 wrongly-archived durable facts in the naive approaches were caught and
+designed out before implementation).
+
+### Added
+
+- **LLM-judged semantic de-duplication** (`consolidate.semantic_dedup`). Word-
+  Jaccard nominates small SAME-CATEGORY candidate groups (≤4, no transitive
+  union-find — that produced a giant cross-fact blob on the live DB), Haiku
+  confirms same-fact, the survivor's content is refreshed to a merged canonical
+  and losers are archived (`is_active=0`) with a forward `supersedes_id` link.
+  Validated on the live DB: 4/4 correct merges, distinct facts left alone.
+- **Obsolescence detection** (`consolidate.detect_obsolete_llm`). Per category,
+  oldest+newest rows are shown together so old-vs-new contradictions co-occur;
+  Haiku names `{stale_id, current_id}` pairs. A **temporal guard** (the
+  superseding memory must be NEWER) + an **anti-event prompt** (a one-time
+  action like "uninstalled X" never obsoletes descriptive facts) prevent the
+  false archives the live-DB dry-run exposed (15 → 3, 0 dangerous).
+- **Reference-aware staleness net** (`consolidate.decay_and_archive`). Archives
+  ONLY rows that are simultaneously very old (`effective_age > 180d` via
+  `created_at`/`last_referenced_at`, immune to `updated_at` churn), low
+  importance (≤2), AND never injected — a zero-false-archive safety net.
+- **Conservative topic canonicalization** (`consolidate.canonicalize_topics`).
+  Merges fragmented labels ('cc-memory','cc-memory backend','cc-memory-fixes' →
+  'cc-memory') with token-Jaccard≥0.6, but REFUSES single-bare-token hub merges
+  (so distinct 'memory-bloat'/'memory-injection' stay separate). Relabel-only,
+  fully decoupled from archiving.
+- **Injection observability**: SessionStart writes `memory/.last_inject.json`
+  (atomic) recording exactly which memories/topics were injected; SessionStart
+  prints a one-line recap; new `/cc-mem inject-show` (ground-truth dump) and
+  `/cc-mem inject-usage` (deterministic signals: did Claude Read
+  PROGRESS.md/MEMORY.md). No unreliable `#id`-guessing.
+- **`/cc-mem encoding-check [--apply]`** — read-only U+FFFD corruption scan
+  across text tables (confirmed live: 0 in memories/topics/progress).
+- **`v6` migration**: `memories.last_referenced_at` + index. Reference bumping
+  on every SessionStart injection keeps surfaced facts "young".
+- **Shared substrate** in `consolidate.py`: `is_decodable` (mojibake guard,
+  preserves valid CJK), `effective_age_days` (created_at-based), and a
+  `BudgetGate` that bounds in-hook LLM calls against the 45s PreCompact budget.
+- New DB methods: `bump_last_referenced`, `archive_obsolete` (forward-linked,
+  no new row), `get_referenced_id_set`.
+
+### Changed
+
+- `run_consolidation` stage order is now load-bearing: garbage → lexical dedup
+  → **semantic dedup** → topic assign → **canonicalize** → summarize →
+  **decay+staleness net** → **obsolescence** → archive_consolidated (content-
+  near-dup guarded). All in-hook LLM stages are budget-gated; `_maybe_consolidate`
+  passes a residual-budget gate seeded with the PreCompact hook start time.
+- `archive_consolidated` now only archives over-cap members that are CONTENT
+  near-duplicates (trigram≥0.65) of a kept member — so topic label merging can
+  never cause a distinct fact to be archived.
+- `build_context` (SessionStart) returns/records injected memory ids and bumps
+  their `last_referenced_at`.
+
+### Fixed
+
+- **Unbounded memory accumulation** (the "shit mountain"): the root cause was
+  lexical-only dedup. Confirmed on the live DB — 122 active memories but only
+  2 pairs reached trigram-Jaccard ≥0.5 while many were the same fact reworded.
+- **No read/use observability**: SessionStart injected context silently with no
+  user-visible signal.
+- **Corrected a misdiagnosis**: rows that looked like GBK mojibake (#98/#105/
+  #107) are valid Chinese (`重构目标`, `marketplace清单`, `安装脚本`); the
+  garble was a cp936 terminal rendering artifact. `memories`/`topics`/`progress`
+  have 0 U+FFFD. No data-repair migration was warranted.
+
+### Notes
+
+- All consolidation archival is recoverable (`is_active=0`, never `DELETE`).
+  `docs/MEMORY_RULES.md` documents the consolidation-backstop exception to the
+  "route every write through memory_writer" rule.
+
+---
+
 ## [2.2.0] — 2026-05-25
 
 The "live plan anchor + subagent" release. Adds `memory/PLAN.md` as a

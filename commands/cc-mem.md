@@ -33,6 +33,17 @@ Run cc-memory CLI commands against the current project. The wrapper resolves
 | `plan-check` | Reset guardian counters + emit plan-guardian invocation hint |
 | `plan-replan` | Re-arm `needs_refine` on the current raw |
 | `plan-clear` | Drop the active plan + delete PLAN.md |
+| `inject-show` | Show exactly what the last SessionStart injected (ground truth) |
+| `inject-usage` | Deterministic signals: did Claude actually Read PROGRESS.md/MEMORY.md |
+| `encoding-check [--apply]` | Scan for U+FFFD corruption (read-only; `--apply` quarantines) |
+
+> **Memory quality (v2.3).** `consolidate` now also runs LLM-judged **semantic
+> de-duplication** (same fact reworded across sessions → merged, recoverable via
+> `is_active=0` + `supersedes_id`) and **obsolescence detection** (a newer fact
+> that directly contradicts an older one archives the stale one; a temporal
+> guard + anti-event prompt prevent historical actions from wrongly obsoleting
+> live facts). A reference-aware staleness net only archives very old +
+> low-importance + never-injected rows. All archival is recoverable.
 
 ### How to invoke
 

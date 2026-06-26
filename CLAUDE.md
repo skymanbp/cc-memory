@@ -2,13 +2,14 @@
 
 ## Project: cc-memory
 
-**Claude Code persistent memory plugin (v2.2)** — anti-patch reconcile-on-write,
-forced PROGRESS.md handoff, live PLAN.md anchor with plan-refiner /
-plan-guardian subagents, FTS5 search, AI-judged extraction with Haiku +
-local Ollama fallback.
+**Claude Code persistent memory plugin (v2.3)** — anti-patch reconcile-on-write
++ LLM-judged semantic de-duplication, forced PROGRESS.md handoff with
+per-session annotation, live PLAN.md anchor with plan-refiner / plan-guardian
+subagents, injection observability, FTS5 search, AI-judged extraction with
+Haiku + local Ollama fallback.
 
 - **Language**: Python 3.8+ (pure stdlib, zero pip dependencies at runtime)
-- **Version**: 2.2.0
+- **Version**: 2.3.0
 - **License**: MIT
 - **Platform**: Windows-primary, cross-platform compatible (Tkinter required for GUI)
 

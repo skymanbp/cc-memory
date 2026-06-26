@@ -115,6 +115,23 @@ bypassing `upsert_smart`:
 | `mcp/server.py handle_memory_add` | `upsert_smart(...)` + `regenerate_memory_index(...)` |
 | Dashboard UI Add Memory | TODO — currently still calls `db.insert_memory` directly. Pre-existing v2.0 path slated for v2.2. |
 
+## Consolidation backstop exception (v2.3)
+
+The **consolidation** pipeline (`core/consolidate.py`) is the documented
+exception to "route every write through `memory_writer`". It is the cleanup
+backstop, not a save path, and it operates on memories that ALREADY exist:
+
+- `semantic_dedup` (LLM-judged same-fact merge) and `detect_obsolete_llm`
+  (newer-fact-contradicts-older) call `db.update_memory` + `db.archive_obsolete`
+  directly. They never create user-facing content from scratch — a survivor row
+  already exists; losers are archived (`is_active=0`) with a forward
+  `supersedes_id` link so the lineage stays traceable and recoverable.
+- `decay_and_archive` (reference-aware staleness net) archives ONLY very old +
+  low-importance + never-injected rows — a zero-false-archive safety net.
+- All consolidation archival is reversible (`is_active=0`, never `DELETE`).
+
+This is intentional and bounded; it does not loosen the rule for SAVE paths.
+
 ## What you should NOT do
 
 - Don't call `db.insert_memory` directly from any save path. (It's still
