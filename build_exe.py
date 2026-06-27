@@ -8,7 +8,7 @@ Produces:
 
 Requirements: pip install pyinstaller
 
-v2.2 changes: bundles the subpackage layout (cc_memory/{core,hooks,llm,cli,mcp,ui}/)
+Packaging: bundles the subpackage layout (cc_memory/{core,hooks,llm,cli,mcp,ui}/)
 into cc_memory_files/ so the installer can mirror it under ~/.claude/hooks/cc-memory/.
 """
 import shutil
@@ -60,7 +60,7 @@ def _check_files():
 
 def build_installer():
     print("=" * 50)
-    print("  Building cc-memory-installer.exe (v2.2)")
+    print("  Building cc-memory-installer.exe (v2.3)")
     print("=" * 50)
 
     _check_files()
@@ -98,7 +98,7 @@ def build_installer():
 
 def build_dashboard():
     print("=" * 50)
-    print("  Building cc-memory-dashboard.exe (v2.2)")
+    print("  Building cc-memory-dashboard.exe (v2.3)")
     print("=" * 50)
 
     _check_files()
