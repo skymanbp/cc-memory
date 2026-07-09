@@ -12,7 +12,7 @@
       "name": "cc-memory",
       "source": "./",
       "description": "Persistent memory: reconcile-on-write + LLM-judged semantic de-dup (no more stacked OR reworded duplicates), forced PROGRESS.md handoff with per-session annotation, live PLAN.md anchor, injection observability, FTS5 search, AI-judged extraction with Haiku + Ollama fallback.",
-      "version": "2.3.0",
+      "version": "2.3.1",
       "author": {"name": "skymanbp"},
       "repository": "https://github.com/skymanbp/cc-memory",
       "license": "MIT",

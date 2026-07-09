@@ -7,7 +7,7 @@
           {
             "type": "command",
             "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/cc_memory/hooks/pre_compact.py\"",
-            "timeout": 45
+            "timeout": 120
           }
         ]
       }

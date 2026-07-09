@@ -241,10 +241,18 @@ def _maybe_consolidate(cwd, db, project_id, hook_start=None):
     _log.info(f"auto-consolidation triggered (session #{n_sessions})")
     try:
         from core.consolidate import run_consolidation, BudgetGate
-        # Residual-budget gate: PreCompact has 45s total and extraction already
-        # spent time before this point. Passing hook_start makes elapsed()
-        # reflect real hook time so in-hook LLM dedup/obsolescence calls stop
-        # before the hook is killed (deferring the rest to /cc-mem consolidate).
+        # Residual-budget gate. The PreCompact hook's HARD timeout is 120s
+        # (hooks/hooks.json); this gate deliberately budgets in-hook LLM
+        # consolidation to a CONSERVATIVE 45s sub-budget that sits well below
+        # that ceiling. Why the gap matters: the gate can only refuse to START
+        # a new LLM call, it cannot interrupt one already in flight. A judge
+        # call it allows can worst-case run ~80s (Haiku timeout -> Ollama
+        # fallback), so the sub-budget must stay far enough under the 120s
+        # ceiling that even a late in-flight call finishes before Claude Code
+        # kills the hook. (When gate == ceiling, that overrun == the hook is
+        # killed mid-write and Claude Code reports "Hook cancelled".) Passing
+        # hook_start makes elapsed() include extraction time already spent,
+        # deferring the rest to manual /cc-mem consolidate.
         gate = BudgetGate(total_s=45.0, safety_s=8.0, start=hook_start)
         run_consolidation(cwd, use_llm=True, verbose=True, budget=gate)
     except Exception as e:

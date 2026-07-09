@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [2.3.1] — 2026-07-09
+
+Patch release. Fixes the frequent `Compacted PreCompact [...] failed: Hook
+cancelled` message during compaction.
+
+### Fixed
+
+- **PreCompact hook timeout raised 45s → 120s** (`hooks/hooks.json`; the
+  exe-installer path in `ui/installer.py` bumped in lockstep, base 30 → 80 ×
+  the 1.5 Windows multiplier = 120s, matching the marketplace manifest). The
+  hook does synchronous network LLM work — up to ~25s Haiku extraction, worst-
+  case ~100s if Haiku fails and falls back to local Ollama, plus a heavier
+  consolidation pass every 5th session — and the old 45s ceiling was too tight,
+  so the hook was killed mid-write.
+- **Root cause: the consolidation `BudgetGate` sub-budget equalled the hook's
+  hard timeout.** The gate can only refuse to START a new LLM call, never
+  interrupt one already in flight, so a call it allowed at the budget edge
+  always overran the ceiling. The 120s ceiling now sits comfortably above the
+  45s consolidation sub-budget + worst-case in-flight call (~80s), so
+  consolidation can no longer trigger a kill. Documented at the gate site;
+  de-hardcoded the stale "45s" references in `core/consolidate.py`.
+
+Marketplace / git-checkout users pick up the new timeout on their next Claude
+Code session (hooks.json is read at session start); exe-install users get it
+after reinstalling with the v2.3.1 installer.
+
+---
+
 ## [2.3.0] — 2026-06-26
 
 The "memory quality + observability" release. Fixes two long-standing problems:

@@ -74,7 +74,9 @@ def effective_age_days(row: dict, now: Optional[datetime] = None) -> float:
 class BudgetGate:
     """Residual-time budget for in-hook LLM calls.
 
-    PreCompact has a 45s total timeout and extraction already spends ~25s.
+    The caller passes `total_s` as a sub-budget that MUST sit well below the
+    host hook's hard timeout (PreCompact's is 120s in hooks/hooks.json), since
+    this gate can only refuse to START a call, not interrupt one in flight.
     Before each judge call, ask `can_spend(cost)`; once the remaining budget
     (total - elapsed - safety) drops below the call cost, the gate closes and
     the caller defers the rest to manual `/cc-mem consolidate` (which builds
@@ -785,7 +787,8 @@ def run_consolidation(cwd, use_llm=True, verbose=True, budget=None):
 
     `budget` (BudgetGate) bounds the in-hook LLM stages; pass None on the
     manual CLI path for an unbounded gate. On PreCompact, _maybe_consolidate
-    passes a residual-budget gate so the 45s hook timeout is respected.
+    passes a residual-budget gate that stays below the hook's hard timeout
+    (120s in hooks/hooks.json) so consolidation never triggers a hook-kill.
     """
     memory_dir = Path(cwd) / "memory"
     db_path = memory_dir / "memory.db"

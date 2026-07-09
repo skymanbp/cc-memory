@@ -48,7 +48,12 @@ SUBPACKAGE_FILES = {
 }
 
 HOOK_SCRIPTS = {
-    "PreCompact":       ("hooks/pre_compact.py", 30),
+    # PreCompact base 80 * 1.5 (Windows mult below) = 120s, matching the
+    # hooks/hooks.json ceiling. Raised in v2.3.1: the old 30 (-> 45s on
+    # Windows) was too tight for the in-hook network LLM extraction +
+    # every-5th-session consolidation, which got killed mid-write and Claude
+    # Code reported "Hook cancelled". Keep this in lockstep with hooks.json.
+    "PreCompact":       ("hooks/pre_compact.py", 80),
     "SessionStart":     ("hooks/session_start.py", 10),
     "Stop":             ("hooks/stop.py", 22),
     "PostToolUse":      ("hooks/post_tool_use.py", 8),

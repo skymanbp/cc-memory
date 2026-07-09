@@ -9,7 +9,7 @@ subagents, injection observability, FTS5 search, AI-judged extraction with
 Haiku + local Ollama fallback.
 
 - **Language**: Python 3.8+ (pure stdlib, zero pip dependencies at runtime)
-- **Version**: 2.3.0
+- **Version**: 2.3.1
 - **License**: MIT
 - **Platform**: Windows-primary, cross-platform compatible (Tkinter required for GUI)
 
