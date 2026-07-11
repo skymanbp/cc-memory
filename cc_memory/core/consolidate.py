@@ -72,15 +72,24 @@ def effective_age_days(row: dict, now: Optional[datetime] = None) -> float:
 
 
 class BudgetGate:
-    """Residual-time budget for in-hook LLM calls.
+    """Residual-time budget for time-boxed LLM calls.
 
-    The caller passes `total_s` as a sub-budget that MUST sit well below the
-    host hook's hard timeout (PreCompact's is 120s in hooks/hooks.json), since
-    this gate can only refuse to START a call, not interrupt one in flight.
-    Before each judge call, ask `can_spend(cost)`; once the remaining budget
-    (total - elapsed - safety) drops below the call cost, the gate closes and
-    the caller defers the rest to manual `/cc-mem consolidate` (which builds
-    an UNBOUNDED gate). Prevents a hook-kill mid-write.
+    The caller passes `total_s` as a sub-budget that MUST sit below the host's
+    hard timeout, since this gate can only refuse to START a call, not
+    interrupt one in flight. Consolidation runs in the `async` PreCompact hook
+    (consolidate_async.py, timeout 300s in hooks/hooks.json) — off the blocking
+    compaction path since v2.3.2 — with total_s=240; the manual `/cc-mem
+    consolidate` path builds an UNBOUNDED gate.
+
+    Correctness guarantee: every budgeted stage passes `can_spend(cost)` the
+    TRUE worst-case wall-clock of one call (_worst_call_cost = haiku_timeout +
+    ollama_fallback_timeout, both capped via call_llm(fallback_timeout=...)).
+    Because the gate only starts a call when `remaining() >= cost`, the last
+    call it allows finishes no later than `total_s - safety_s`. So as long as
+    total_s - safety_s < the hook's hard timeout, the worker can NEVER be killed
+    mid-write. (The pre-v2.3.2 bug: costs were a flat 20s while a real call
+    could run haiku_timeout + min(3*timeout,120) ≈ 120s, so a call the gate
+    "allowed" overran the 120s ceiling → "Hook cancelled".)
     """
 
     def __init__(self, total_s: float = 45.0, safety_s: float = 8.0,
@@ -106,6 +115,21 @@ class BudgetGate:
 
     def can_spend(self, cost_s: float) -> bool:
         return self.unbounded or self.remaining() >= cost_s
+
+
+# Budgeted LLM call bounds. Each budgeted stage caps BOTH call_llm legs so the
+# gate knows the exact worst-case wall-clock of one call up front (see
+# BudgetGate docstring). Keep haiku+fallback per stage well under total_s so
+# several calls fit in one run.
+_JUDGE_HAIKU_S,   _JUDGE_FALLBACK_S   = 20, 20   # semantic_dedup / obsolete judges
+_SUMMARY_HAIKU_S, _SUMMARY_FALLBACK_S = 25, 20   # consolidate_topics summaries
+
+
+def _worst_call_cost(haiku_s: int, fallback_s: int) -> float:
+    """Max wall-clock one budgeted call_llm can consume: Haiku hang to its
+    timeout THEN the capped Ollama fallback. This is the cost a BudgetGate
+    must reserve before starting the call for its deadline guarantee to hold."""
+    return float(haiku_s + fallback_s)
 
 
 # ── 1. Garbage cleanup ─────────────────────────────────────────────────────
@@ -291,7 +315,8 @@ def _judge_group_llm(group, api_key):
         raw = call_llm(
             _DEDUP_JUDGE_PROMPT,
             f"Memories (same category '{group[0]['category']}'):\n\n{mem_text}",
-            api_key, max_tokens=400, timeout=20,
+            api_key, max_tokens=400,
+            timeout=_JUDGE_HAIKU_S, fallback_timeout=_JUDGE_FALLBACK_S,
         )
         raw = raw.strip()
         if raw.startswith("```"):
@@ -333,7 +358,7 @@ def semantic_dedup(db, project_id, budget=None, use_llm=True,
     if not groups:
         return result
 
-    PER_CALL_COST = 20.0  # matches judge timeout
+    PER_CALL_COST = _worst_call_cost(_JUDGE_HAIKU_S, _JUDGE_FALLBACK_S)
     for group in groups:
         if not budget.can_spend(PER_CALL_COST):
             _log.info("dedup: budget exhausted, deferring remaining groups")
@@ -531,7 +556,8 @@ def _summarize_topic_llm(topic_name, memories):
         text = call_llm(
             _CONSOLIDATION_PROMPT.format(topic_name=topic_name),
             f"Memories for topic \"{topic_name}\":\n\n{mem_text}",
-            api_key, max_tokens=500, timeout=30,
+            api_key, max_tokens=500,
+            timeout=_SUMMARY_HAIKU_S, fallback_timeout=_SUMMARY_FALLBACK_S,
         )
         return text.strip() if text.strip() else None
     except Exception as e:
@@ -545,7 +571,19 @@ def _summarize_topic_fallback(topic_name, memories):
     return "\n".join(f"- {m['content']}" for m in sorted_mems[:8])
 
 
-def consolidate_topics(db, project_id, use_llm=True, min_memories_per_topic=3):
+def consolidate_topics(db, project_id, use_llm=True, min_memories_per_topic=3,
+                       budget=None):
+    """Summarize each topic (>=min_memories) into the topics table.
+
+    Budget-gated (v2.3.2): the LLM summary is only attempted while the gate can
+    cover a full worst-case call; once exhausted, the topic falls back to the
+    deterministic no-LLM summary so it is still refreshed (never skipped) and
+    the worker never STARTS a call it can't finish before its deadline. This
+    closes the pre-v2.3.2 hole where this stage was the one ungated LLM loop
+    and overran the PreCompact hook timeout on large DBs → "Hook cancelled".
+    """
+    budget = budget or BudgetGate.unbounded_gate()
+    PER_CALL_COST = _worst_call_cost(_SUMMARY_HAIKU_S, _SUMMARY_FALLBACK_S)
     all_memories = db.get_all_active_memories(project_id)
     by_topic: Dict[str, List[Dict]] = defaultdict(list)
     for m in all_memories:
@@ -553,19 +591,25 @@ def consolidate_topics(db, project_id, use_llm=True, min_memories_per_topic=3):
         by_topic[topic].append(m)
 
     n_consolidated = 0
+    n_deferred_llm = 0
     for topic, memories in by_topic.items():
         if topic == "_unassigned":
             continue
         if len(memories) < min_memories_per_topic:
             continue
         summary = None
-        if use_llm:
+        if use_llm and budget.can_spend(PER_CALL_COST):
             summary = _summarize_topic_llm(topic, memories)
         if not summary:
+            if use_llm and not budget.can_spend(PER_CALL_COST):
+                n_deferred_llm += 1
             summary = _summarize_topic_fallback(topic, memories)
         db.upsert_topic(project_id, topic, summary)
         n_consolidated += 1
 
+    if n_deferred_llm:
+        _log.info(f"consolidate_topics: budget exhausted, {n_deferred_llm} "
+                  f"topic(s) used the no-LLM fallback summary")
     return n_consolidated
 
 
@@ -684,7 +728,7 @@ def detect_obsolete_llm(db, project_id, budget=None, use_llm=True,
     for m in mems:
         by_cat[m["category"]].append(m)
 
-    PER_CALL_COST = 20.0
+    PER_CALL_COST = _worst_call_cost(_JUDGE_HAIKU_S, _JUDGE_FALLBACK_S)
     valid_ids = {m["id"] for m in mems}
     # Temporal guard (validated on the live DB): obsolescence flows FORWARD in
     # time — a fact can only be made obsolete by a NEWER one. Without this, the
@@ -710,7 +754,8 @@ def detect_obsolete_llm(db, project_id, budget=None, use_llm=True,
             raw = call_llm(
                 _OBSOLETE_PROMPT,
                 f"Category '{cat}':\n\n{mem_text}",
-                api_key, max_tokens=500, timeout=20,
+                api_key, max_tokens=500,
+                timeout=_JUDGE_HAIKU_S, fallback_timeout=_JUDGE_FALLBACK_S,
             ).strip()
             if raw.startswith("```"):
                 raw = raw.split("```")[1].lstrip("json").strip() if "```" in raw[3:] else raw.strip("`")
@@ -785,10 +830,13 @@ def archive_consolidated(db, project_id, keep_per_topic=5, dup_threshold=0.65):
 def run_consolidation(cwd, use_llm=True, verbose=True, budget=None):
     """Full consolidation pipeline. Stage order is load-bearing (see comments).
 
-    `budget` (BudgetGate) bounds the in-hook LLM stages; pass None on the
-    manual CLI path for an unbounded gate. On PreCompact, _maybe_consolidate
-    passes a residual-budget gate that stays below the hook's hard timeout
-    (120s in hooks/hooks.json) so consolidation never triggers a hook-kill.
+    `budget` (BudgetGate) bounds EVERY LLM stage (semantic_dedup,
+    consolidate_topics, detect_obsolete_llm); pass None on the manual CLI path
+    for an unbounded gate. Since v2.3.2 this runs in the `async` PreCompact hook
+    (consolidate_async.py, timeout 300s) — off the blocking compaction path —
+    with a total_s=240 gate. Because each stage reserves the TRUE worst-case
+    call cost before starting, the run finishes by total_s - safety_s < 300s,
+    so it can never be killed mid-write.
     """
     memory_dir = Path(cwd) / "memory"
     db_path = memory_dir / "memory.db"
@@ -813,8 +861,10 @@ def run_consolidation(cwd, use_llm=True, verbose=True, budget=None):
     # 4. topic assignment then CANONICALIZE labels (relabel only, no archive)
     results["topics_assigned"] = assign_topics_auto(db, project_id)
     results["topics_canonicalized"] = canonicalize_topics(db, project_id)
-    # 5. summarize topics into the topics table
-    results["topics_consolidated"] = consolidate_topics(db, project_id, use_llm=use_llm)
+    # 5. summarize topics into the topics table (budget-gated: LLM while the
+    #    gate allows, deterministic fallback once exhausted)
+    results["topics_consolidated"] = consolidate_topics(
+        db, project_id, use_llm=use_llm, budget=budget)
     # 6. staleness: reference-aware decay + zero-false-archive SQL net
     da = decay_and_archive(db, project_id)
     results["importance_decayed"] = da["importance_decayed"]

@@ -7,6 +7,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [2.3.2] — 2026-07-10
+
+Patch release. **Permanently** fixes the intermittent `Compacted PreCompact
+[...] failed: Hook cancelled` that still occurred on large memory DBs after
+v2.3.1's timeout raise. Raising a timeout only moves the goalpost; v2.3.2
+removes the failure mode by taking the variable-latency LLM work off the
+blocking compaction path entirely.
+
+### Fixed
+
+- **Consolidation moved to a sibling `async` PreCompact hook.** `PreCompact`
+  now declares two command hooks in `hooks/hooks.json`: the sync leg
+  (`hooks/pre_compact.py`, timeout 120s) does only fast extraction +
+  PROGRESS.md (~1-5s), and a new background leg (`hooks/consolidate_async.py`,
+  `"async": true`, timeout 300s) runs the every-Nth-session consolidation.
+  Claude Code starts the async hook and continues compaction without waiting,
+  so a slow consolidation can no longer surface as a compaction failure no
+  matter how large the DB grows. The exe-installer path (`ui/installer.py`)
+  emits the same two-hook shape (async flag, flat 300s) and ships the new file.
+- **Root cause of the residual overrun: one ungated LLM stage + a dishonest
+  budget cost model.** `consolidate_topics` (`core/consolidate.py`) looped an
+  LLM summary per topic with NO budget gate, and every "gated" stage under-
+  counted a call's cost as a flat 20s while a real `call_llm` could run
+  `haiku_timeout + min(3×timeout, 120)` ≈ 120s (Haiku hang → Ollama fallback).
+  A call the gate "allowed" near the budget edge therefore overran. Fixes:
+  `consolidate_topics` is now budget-gated (falls back to the no-LLM summary
+  when exhausted); `call_llm` takes a bounded `fallback_timeout`; and each
+  stage reserves the TRUE worst-case call cost (`_worst_call_cost`). The gate
+  now GUARANTEES a run finishes by `total_s − safety_s` (232s) < the 300s async
+  timeout, so the worker is never killed mid-write.
+- **Consolidation cadence hardened.** Replaced the `session_count % N` trigger
+  (racy against the concurrent sync hook) with an interval marker
+  (`memory/.last_consolidation.json`) + a lock file (`.consolidation.lock`,
+  stale-reclaimed). Race-immune and single-owner; concurrent DB access with the
+  sync leg is safe on the existing WAL + `busy_timeout=5000` connection.
+
+Marketplace / git-checkout users pick up the two-hook PreCompact on their next
+Claude Code session (hooks.json is read at session start); exe-install users get
+it after reinstalling with the v2.3.2 installer.
+
+---
+
 ## [2.3.1] — 2026-07-09
 
 Patch release. Fixes the frequent `Compacted PreCompact [...] failed: Hook

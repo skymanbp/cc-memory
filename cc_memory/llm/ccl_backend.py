@@ -95,11 +95,24 @@ def _call_ollama(system, user, max_tokens, timeout):
     return text
 
 
-def call_llm(system, user, api_key="", max_tokens=2000, timeout=30):
+def call_llm(system, user, api_key="", max_tokens=2000, timeout=30,
+             fallback_timeout=None):
     """Call LLM with Haiku as primary, local Ollama as fallback.
 
     Returns text response string. Raises RuntimeError if both backends fail.
+
+    `fallback_timeout` bounds the Ollama fallback leg. When None (default), the
+    fallback gets `min(timeout*3, 120)` — generous, for un-timed callers. A
+    TIME-BUDGETED caller (e.g. consolidation under a BudgetGate) MUST pass an
+    explicit value so the worst-case in-flight wall-clock is a known quantity:
+    a single call can take at most `timeout` (Haiku hang) + `fallback_timeout`
+    (Ollama). That bound is what lets a BudgetGate GUARANTEE completion before
+    its deadline — see core.consolidate._worst_call_cost. Without it, a call
+    the gate "allowed" could run ~120s and overrun the hook. See docs/MEMORY_RULES.md.
     """
+    if fallback_timeout is None:
+        fallback_timeout = min(timeout * 3, 120)
+
     if api_key:
         try:
             return _call_haiku(system, user, api_key, max_tokens, timeout)
@@ -110,7 +123,7 @@ def call_llm(system, user, api_key="", max_tokens=2000, timeout=30):
             pass
 
     try:
-        return _call_ollama(system, user, max_tokens, min(timeout * 3, 120))
+        return _call_ollama(system, user, max_tokens, fallback_timeout)
     except Exception as ollama_err:
         raise RuntimeError(
             f"Both Haiku and Ollama failed. Ollama error: {ollama_err}"

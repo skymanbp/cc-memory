@@ -801,6 +801,78 @@ def main():
     assert n_arch2 >= 1, "content-dup guard should archive a genuine near-duplicate"
     print(f"[OK] archive_consolidated: genuine content near-dup IS archived ({n_arch2})")
 
+    # === v2.3.2: async consolidation off the blocking compaction path ========
+    import json as _json2
+    import inspect as _inspect
+    import importlib as _il
+    _REPO = Path(__file__).resolve().parent.parent
+
+    # (a) call_llm gained a bounded `fallback_timeout`; _worst_call_cost is honest
+    from llm.ccl_backend import call_llm as _call_llm
+    assert "fallback_timeout" in _inspect.signature(_call_llm).parameters, \
+        "call_llm must accept fallback_timeout (bounded Ollama fallback)"
+    assert C._worst_call_cost(20, 20) == 40.0 and C._worst_call_cost(25, 20) == 45.0, \
+        "_worst_call_cost must sum haiku + fallback legs"
+    print("[OK] v2.3.2 call_llm.fallback_timeout + _worst_call_cost honest cost model")
+
+    # (b) consolidate_topics is budget-gated: an EXHAUSTED gate must NOT start an
+    #     LLM call it can't afford, yet still summarize every topic via the
+    #     no-LLM fallback (closes the pre-2.3.2 ungated-loop → "Hook cancelled").
+    assert "budget" in _inspect.signature(C.consolidate_topics).parameters, \
+        "consolidate_topics must accept a budget"
+    tmp_ct = Path(tempfile.mkdtemp(prefix="cc-mem-ctopic-"))
+    mem_ct = tmp_ct / "memory"; mem_ct.mkdir(parents=True, exist_ok=True)
+    db_ct = MemoryDB(mem_ct / "memory.db")
+    pid_ct = db_ct.upsert_project(str(tmp_ct))
+    for i in range(3):
+        db_ct.insert_memory(pid_ct, None, "note",
+                            f"topic-alpha fact number {i} with specific detail",
+                            importance=3, topic="alpha")
+    exhausted = C.BudgetGate(total_s=1, safety_s=8)  # remaining < 0 → refuses all
+    assert exhausted.can_spend(
+        C._worst_call_cost(C._SUMMARY_HAIKU_S, C._SUMMARY_FALLBACK_S)) is False
+    n_ct = C.consolidate_topics(db_ct, pid_ct, use_llm=True, budget=exhausted)
+    assert n_ct >= 1 and "alpha" in {t["name"] for t in db_ct.get_topics(pid_ct)}, \
+        "consolidate_topics must fallback-summarize the topic under an exhausted budget"
+    print("[OK] v2.3.2 consolidate_topics: budget-gated, fallback-summarizes when exhausted")
+
+    # (c) hooks.json: PreCompact carries TWO command hooks; 2nd is async + 300s
+    hj = _json2.loads((_REPO / "hooks" / "hooks.json").read_text(encoding="utf-8"))
+    pc_hooks = hj["hooks"]["PreCompact"][0]["hooks"]
+    assert len(pc_hooks) == 2, f"PreCompact must declare 2 hooks, got {len(pc_hooks)}"
+    sync_h = [h for h in pc_hooks if "pre_compact.py" in h["command"]]
+    async_h = [h for h in pc_hooks if "consolidate_async.py" in h["command"]]
+    assert sync_h and not sync_h[0].get("async"), "sync leg must be pre_compact.py (not async)"
+    assert async_h and async_h[0].get("async") is True and async_h[0]["timeout"] == 300, \
+        "consolidate_async.py must be async:true with timeout 300"
+    print("[OK] v2.3.2 hooks.json: PreCompact = sync pre_compact + async consolidate (300s)")
+
+    # (d) installer emits the same 2-hook PreCompact shape + ships the new file
+    from ui import installer as _inst
+    ipc = _inst._make_hooks_config(Path("/tmp/cc-mem-install"))["PreCompact"][0]["hooks"]
+    assert len(ipc) == 2 and any(h.get("async") for h in ipc), \
+        "installer PreCompact must emit sync + async hooks"
+    assert "consolidate_async.py" in _inst.SUBPACKAGE_FILES["hooks"], \
+        "installer must ship consolidate_async.py"
+    assert "cc_memory/hooks/consolidate_async.py" in _REQUIRED_PLUGIN_FILES, \
+        "layout inspector must require consolidate_async.py"
+    print("[OK] v2.3.2 installer: 2-hook PreCompact parity + ships/requires consolidate_async.py")
+
+    # (e) consolidate_async hook: importable + marker/lock/interval primitives
+    _ca = _il.import_module("hooks.consolidate_async")
+    assert _ca._auto_interval() >= 1
+    tmp_ca = Path(tempfile.mkdtemp(prefix="cc-mem-async-"))
+    lock = tmp_ca / ".consolidation.lock"
+    assert _ca._acquire_lock(lock) is True, "first lock acquire must succeed"
+    assert _ca._acquire_lock(lock) is False, "second acquire (fresh lock) must fail"
+    _ca._release_lock(lock)
+    assert not lock.exists(), "release must remove the lock"
+    marker = tmp_ca / ".last_consolidation.json"
+    assert _ca._read_marker(marker) == {}, "missing marker reads as {}"
+    _ca._write_marker(marker, {"last_session_count": 42})
+    assert _ca._read_marker(marker)["last_session_count"] == 42
+    print("[OK] v2.3.2 consolidate_async: importable + lock/marker/interval logic")
+
     print("\n===== ALL SMOKE TESTS PASSED =====")
     print(f"Test project preserved at: {tmp}")
     print("\nProduced files:")

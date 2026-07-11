@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
-PreCompact hook.
+PreCompact hook (SYNC leg).
 
-Triggered by Claude Code BEFORE context compaction. Three jobs:
+Triggered by Claude Code BEFORE context compaction. Two jobs — the fast,
+handoff-critical work that must complete before the next session:
 
   1. Extract memories from the full transcript via Haiku LLM,
      routing every save through llm.memory_writer.upsert_smart so
@@ -11,8 +12,11 @@ Triggered by Claude Code BEFORE context compaction. Three jobs:
   2. FULL-REWRITE memory/PROGRESS.md from the `progress` SQLite table.
      This is the handoff contract for the next session.
 
-  3. Optionally run consolidation (every CONSOLIDATION_INTERVAL sessions)
-     for LLM-based topic summarization that's too expensive for Stop hook.
+Consolidation (the every-Nth-session LLM cleanup) is NO LONGER done here.
+As of v2.3.2 it runs in the sibling `async` PreCompact hook
+(hooks/consolidate_async.py, declared with "async": true in hooks/hooks.json),
+so its variable LLM latency can never block compaction or trigger the
+"Hook cancelled" timeout. This sync leg finishes in ~1-5s.
 
 Stdin (JSON):
   session_id, transcript_path, cwd, trigger ("auto"|"manual")
@@ -24,7 +28,6 @@ Output:
 """
 import json
 import sys
-import time
 import urllib.error
 from datetime import datetime
 from pathlib import Path
@@ -45,7 +48,6 @@ from llm.memory_writer import upsert_batch, regenerate_memory_index
 
 _log = get_logger("pre_compact")
 
-CONSOLIDATION_INTERVAL = 5  # every N sessions, run full LLM consolidation
 _API_TIMEOUT = 25
 
 _EXTRACTION_PROMPT = """\
@@ -234,33 +236,7 @@ def _first_user_request(messages):
     return ""
 
 
-def _maybe_consolidate(cwd, db, project_id, hook_start=None):
-    n_sessions = db.get_session_count(project_id)
-    if n_sessions % CONSOLIDATION_INTERVAL != 0:
-        return
-    _log.info(f"auto-consolidation triggered (session #{n_sessions})")
-    try:
-        from core.consolidate import run_consolidation, BudgetGate
-        # Residual-budget gate. The PreCompact hook's HARD timeout is 120s
-        # (hooks/hooks.json); this gate deliberately budgets in-hook LLM
-        # consolidation to a CONSERVATIVE 45s sub-budget that sits well below
-        # that ceiling. Why the gap matters: the gate can only refuse to START
-        # a new LLM call, it cannot interrupt one already in flight. A judge
-        # call it allows can worst-case run ~80s (Haiku timeout -> Ollama
-        # fallback), so the sub-budget must stay far enough under the 120s
-        # ceiling that even a late in-flight call finishes before Claude Code
-        # kills the hook. (When gate == ceiling, that overrun == the hook is
-        # killed mid-write and Claude Code reports "Hook cancelled".) Passing
-        # hook_start makes elapsed() include extraction time already spent,
-        # deferring the rest to manual /cc-mem consolidate.
-        gate = BudgetGate(total_s=45.0, safety_s=8.0, start=hook_start)
-        run_consolidation(cwd, use_llm=True, verbose=True, budget=gate)
-    except Exception as e:
-        _log.error(f"auto-consolidation error: {e}")
-
-
 def main():
-    hook_start = time.monotonic()  # for the consolidation residual-budget gate
     try:
         data = json.loads(sys.stdin.buffer.read().decode("utf-8"))
     except Exception as exc:
@@ -428,9 +404,8 @@ def main():
             # disk failure here must not propagate into the compact path
             _log.error(f".last_save.json write failed: {e}")
 
-        # Maybe run LLM consolidation (expensive — gated by residual budget)
-        _maybe_consolidate(cwd, db, project_id, hook_start=hook_start)
-
+        # Consolidation runs in the sibling async hook (consolidate_async.py),
+        # NOT here — see module docstring. This sync leg is done.
         _log.info(
             f"pre_compact OK: ins={n_inserted} mrg={n_merged} sup={n_super} skp={n_skipped} "
             f"obs={len(observations)} archive={archive_path.name}"

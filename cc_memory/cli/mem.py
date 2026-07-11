@@ -76,6 +76,7 @@ _REQUIRED_PLUGIN_FILES = [
     "cc_memory/core/plan.py",
     "cc_memory/core/encoding_setup.py",
     "cc_memory/hooks/pre_compact.py",
+    "cc_memory/hooks/consolidate_async.py",
     "cc_memory/hooks/session_start.py",
     "cc_memory/hooks/stop.py",
     "cc_memory/hooks/post_tool_use.py",

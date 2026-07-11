@@ -39,20 +39,20 @@ SUBPACKAGE_FILES = {
     "core":  ["__init__.py", "auth.py", "consolidate.py", "db.py",
               "encoding_setup.py", "extractor.py", "idle.py", "logger.py",
               "modes.py", "plan.py", "privacy.py", "progress.py"],
-    "hooks": ["__init__.py", "post_tool_use.py", "pre_compact.py",
-              "session_start.py", "stop.py", "user_prompt.py"],
+    "hooks": ["__init__.py", "consolidate_async.py", "post_tool_use.py",
+              "pre_compact.py", "session_start.py", "stop.py", "user_prompt.py"],
     "llm":   ["__init__.py", "ccl_backend.py", "memory_writer.py"],
     "cli":   ["__init__.py", "mem.py", "plan.py"],
     "mcp":   ["__init__.py", "server.py"],
     "ui":    ["__init__.py", "dashboard.py", "installer.py", "web_viewer.py"],
 }
 
+# The 5 SYNC single-command hooks (one command each). PreCompact ALSO gets a
+# second, async command hook appended in _make_hooks_config (see below).
+# PreCompact sync base 80 * 1.5 (Windows mult) = 120s, matching hooks/hooks.json.
+# Since v2.3.2 the sync leg only does fast extraction + PROGRESS.md (~1-5s);
+# consolidation moved to the async sibling. Keep in lockstep with hooks.json.
 HOOK_SCRIPTS = {
-    # PreCompact base 80 * 1.5 (Windows mult below) = 120s, matching the
-    # hooks/hooks.json ceiling. Raised in v2.3.1: the old 30 (-> 45s on
-    # Windows) was too tight for the in-hook network LLM extraction +
-    # every-5th-session consolidation, which got killed mid-write and Claude
-    # Code reported "Hook cancelled". Keep this in lockstep with hooks.json.
     "PreCompact":       ("hooks/pre_compact.py", 80),
     "SessionStart":     ("hooks/session_start.py", 10),
     "Stop":             ("hooks/stop.py", 22),
@@ -101,17 +101,27 @@ def _make_hooks_config(target_dir):
     win_mult = 1.5 if platform.system() == "Windows" else 1.0
     python_cmd = _detect_python_cmd()
 
-    def _h(rel_script, base_timeout):
-        return {
-            "matcher": "",
-            "hooks": [{
-                "type": "command",
-                "command": f'{python_cmd} "{target_dir / rel_script}"',
-                "timeout": int(base_timeout * win_mult),
-            }],
+    def _cmd(rel_script, timeout_s, is_async=False, apply_mult=True):
+        c = {
+            "type": "command",
+            "command": f'{python_cmd} "{target_dir / rel_script}"',
+            "timeout": int(timeout_s * win_mult) if apply_mult else int(timeout_s),
         }
+        if is_async:
+            c["async"] = True
+        return c
 
-    return {ev: [_h(script, t)] for ev, (script, t) in HOOK_SCRIPTS.items()}
+    config = {ev: [{"matcher": "", "hooks": [_cmd(script, t)]}]
+              for ev, (script, t) in HOOK_SCRIPTS.items()}
+
+    # PreCompact carries a SECOND, async command hook: background consolidation.
+    # It runs off the blocking compaction path (hooks/consolidate_async.py), so a
+    # slow consolidation can never surface as "Hook cancelled". Async timeout is a
+    # FLAT 300s (apply_mult=False) — a background deadline, not a blocking-UI
+    # budget — matching hooks/hooks.json exactly. Keep the two paths in lockstep.
+    config["PreCompact"][0]["hooks"].append(
+        _cmd("hooks/consolidate_async.py", 300, is_async=True, apply_mult=False))
+    return config
 
 
 def _merge_into_settings(hooks_config, log_fn=print):

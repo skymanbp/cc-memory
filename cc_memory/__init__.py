@@ -1,6 +1,13 @@
 """
 cc-memory — Claude Code persistent memory plugin.
 
+v2.3.2: Consolidation moved OFF the blocking compaction path into a sibling
+      `async` PreCompact hook (hooks/consolidate_async.py). Permanently fixes
+      the intermittent "Compacted PreCompact ... failed: Hook cancelled": the
+      sync leg now only does fast extraction + PROGRESS.md, while variable-
+      latency LLM consolidation runs in the background under a time-budget it
+      can never overrun (honest per-call cost model + bounded Ollama fallback).
+
 v2.3: LLM-judged SEMANTIC de-duplication (same fact reworded -> merged) +
       obsolescence detection (newer fact contradicts older) + reference-aware
       staleness net — fixes unbounded memory accumulation. Per-session
@@ -18,4 +25,4 @@ v2.1: Reorganized into core/hooks/llm/ui/cli/mcp subpackages.
       PROGRESS.md forced-handoff replaces SESSION_HANDOFF.md.
       MEMORY.md auto-regenerates on every write.
 """
-__version__ = "2.3.1"
+__version__ = "2.3.2"

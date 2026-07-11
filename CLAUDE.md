@@ -9,9 +9,32 @@ subagents, injection observability, FTS5 search, AI-judged extraction with
 Haiku + local Ollama fallback.
 
 - **Language**: Python 3.8+ (pure stdlib, zero pip dependencies at runtime)
-- **Version**: 2.3.1
+- **Version**: 2.3.2
 - **License**: MIT
 - **Platform**: Windows-primary, cross-platform compatible (Tkinter required for GUI)
+
+## What changed in v2.3.2 (over v2.3.1)
+
+**Consolidation moved off the blocking compaction path.** v2.3.1 raised the
+PreCompact timeout 45→120s, but the every-Nth-session LLM consolidation could
+still overrun on large DBs (one ungated LLM stage + a dishonest budget cost
+model), so `Compacted PreCompact ... failed: Hook cancelled` still surfaced.
+v2.3.2 fixes the root cause:
+
+1. **`PreCompact` is now two hooks.** The sync leg (`pre_compact.py`) keeps only
+   the fast, handoff-critical work (extraction + PROGRESS.md, ~1-5s). A new
+   sibling `async` leg (`hooks/consolidate_async.py`, `"async": true`,
+   timeout 300s) runs consolidation in the background so Claude Code never
+   waits on it — a slow run can no longer surface as a compaction failure.
+2. **Consolidation cadence is now an interval marker + lock**, not a fragile
+   `session_count % N` check. `memory/.last_consolidation.json` records the
+   count at the last run; a lock file prevents overlapping workers. Race-immune
+   against the concurrent sync leg (WAL + busy_timeout make it safe).
+3. **Honest budget cost model.** `consolidate_topics` is now budget-gated (it
+   was the one ungated LLM loop), and `call_llm` takes a bounded
+   `fallback_timeout` so a budgeted call's worst-case wall-clock is known up
+   front. The BudgetGate therefore GUARANTEES the run finishes by
+   `total_s - safety_s` (232s) < the 300s async timeout — never killed mid-write.
 
 ## What's new in v2.2 (over v2.1)
 
@@ -76,8 +99,8 @@ cc-memory/
 │   ├── core/                    db, extractor, consolidate, idle, progress,
 │   │                            plan, privacy, modes, auth, logger,
 │   │                            encoding_setup
-│   ├── hooks/                   post_tool_use, pre_compact, session_start,
-│   │                            stop, user_prompt
+│   ├── hooks/                   post_tool_use, pre_compact, consolidate_async,
+│   │                            session_start, stop, user_prompt
 │   ├── llm/                     ccl_backend, memory_writer
 │   ├── cli/                     mem, plan
 │   ├── mcp/                     server
@@ -94,13 +117,16 @@ cc-memory/
 └── LICENSE
 ```
 
-## Hooks (5)
+## Hooks (6)
 
-Registered in `~/.claude/settings.json` and declared in `hooks/hooks.json`:
+Registered in `~/.claude/settings.json` and declared in `hooks/hooks.json`.
+`PreCompact` fires TWO command hooks (v2.3.2): a blocking sync leg + a
+background `async` leg.
 
 | Hook | Entry | Timeout | Purpose |
 |------|-------|---------|---------|
-| `PreCompact` | `cc_memory/hooks/pre_compact.py` | 45s | LLM extract → memory_writer.upsert_batch → FULL-REWRITE PROGRESS.md → archive |
+| `PreCompact` (sync) | `cc_memory/hooks/pre_compact.py` | 120s | LLM extract → memory_writer.upsert_batch → FULL-REWRITE PROGRESS.md → archive (fast, ~1-5s) |
+| `PreCompact` (async) | `cc_memory/hooks/consolidate_async.py` | 300s, `async:true` | Background consolidation every N sessions (interval marker + lock, budget-gated) — off the blocking path |
 | `SessionStart` | `cc_memory/hooks/session_start.py` | 15s | Inject layered context + FORCED `<system-reminder>` to Read PROGRESS.md |
 | `Stop` | `cc_memory/hooks/stop.py` | 22s | Observer (Haiku) + per-turn PROGRESS.md patch + idle reorg every 5 turns |
 | `PostToolUse` | `cc_memory/hooks/post_tool_use.py` | 8s | Insert observation row (no LLM) |
@@ -113,8 +139,8 @@ Hook contract (NEVER violate):
 - Each hook's stdout has a specific role:
   - `SessionStart` stdout → injected context (read by Claude)
   - `Stop` stdout → status line (read by Claude)
-  - `PreCompact` stdout → ONE status line (shows in next session's compacted context)
-  - `PostToolUse`/`UserPromptSubmit` stdout → empty
+  - `PreCompact` (sync) stdout → ONE status line (shows in next session's compacted context)
+  - `PreCompact` (async) / `PostToolUse` / `UserPromptSubmit` stdout → empty
 
 ## Database schema (11 tables)
 

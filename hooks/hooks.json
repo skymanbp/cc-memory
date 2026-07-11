@@ -8,6 +8,12 @@
             "type": "command",
             "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/cc_memory/hooks/pre_compact.py\"",
             "timeout": 120
+          },
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/cc_memory/hooks/consolidate_async.py\"",
+            "async": true,
+            "timeout": 300
           }
         ]
       }
