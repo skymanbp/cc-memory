@@ -1,9 +1,11 @@
+> **English** · [简体中文](README.zh.md)
+
 # cc-memory
 
-**Claude Code persistent memory plugin (v2.2)** — anti-patch reconcile-on-write,
-forced PROGRESS.md handoff, live PLAN.md anchor with plan-refiner /
-plan-guardian subagents, FTS5 search, AI-judged extraction with Haiku +
-local Ollama fallback.
+**Claude Code persistent memory plugin (v2.3.3)** — anti-patch reconcile-on-write
+with LLM-judged semantic de-duplication, forced PROGRESS.md handoff, live PLAN.md
+anchor with plan-refiner / plan-guardian subagents, injection observability, FTS5
+search, AI-judged extraction with Haiku + local Ollama fallback.
 
 ## What it solves
 
@@ -13,6 +15,64 @@ disappear. Conversations that end normally (terminal closed) also lose context.
 
 cc-memory captures structured memories at every conversation boundary AND
 **forces the next session to read a handoff document** before it starts work.
+
+## What's new in v2.3.3
+
+- **Documentation multilingual version-control.** English is the canonical
+  skeleton; Chinese docs are drift-tracked `*.zh.md` siblings (starting with
+  [README.zh.md](README.zh.md)), each tied to a normalized-sha256 of its English
+  source recorded in a line-1 marker. A pure-stdlib checker
+  ([tools/i18n_check.py](tools/i18n_check.py)) plus a [tests/smoke_test.py](tests/smoke_test.py)
+  gate turn red the moment an English doc changes without its translation being
+  refreshed. Memory *content* stays language-agnostic — only docs are tracked.
+  See [docs/I18N.md](docs/I18N.md).
+
+This is a docs + version-metadata release — no runtime behavior changed.
+
+## What's new in v2.3
+
+- **LLM-judged semantic de-duplication.** The anti-patch writer's char-trigram
+  similarity only catches near-verbatim restatement, so the same fact reworded
+  each session used to stack up (unbounded DB growth). `consolidate.semantic_dedup`
+  nominates small same-category candidate groups by word-Jaccard, Haiku confirms
+  same-fact, and the survivor is refreshed to a merged canonical while losers are
+  archived (`is_active=0`) with a forward `supersedes_id` link.
+- **Obsolescence detection + reference-aware staleness net.** `detect_obsolete_llm`
+  names `{stale, current}` pairs with a temporal guard (the superseder must be
+  newer) + an anti-event prompt; `decay_and_archive` archives only rows that are
+  simultaneously very old, low-importance, AND never injected. All archival is
+  recoverable (`is_active=0`, never `DELETE`).
+- **Injection observability.** SessionStart writes `memory/.last_inject.json`
+  recording exactly which memories/topics were injected and prints a one-line
+  recap; `/cc-mem inject-show` dumps ground truth, `/cc-mem inject-usage` reports
+  whether Claude actually Read PROGRESS.md / MEMORY.md.
+- **`/cc-mem encoding-check [--apply]`** — read-only U+FFFD corruption scan across
+  the text tables (valid CJK preserved).
+
+### v2.3.1 / v2.3.2 — "Hook cancelled" permanently fixed
+
+The intermittent `Compacted PreCompact [...] failed: Hook cancelled` is gone.
+v2.3.1 raised the PreCompact timeout 45s → 120s, but that only moved the goalpost
+on large DBs. **v2.3.2 removes the failure mode**: `PreCompact` now declares two
+command hooks — a fast **sync** leg (`hooks/pre_compact.py`, extraction +
+PROGRESS.md, ~1-5s) and a background **`async`** leg (`hooks/consolidate_async.py`,
+timeout 300s) that runs the every-Nth-session consolidation off the blocking
+compaction path. A budget gate with an honest worst-case cost model guarantees the
+async worker finishes before its timeout, so it can never be killed mid-write.
+See [CHANGELOG.md](CHANGELOG.md).
+
+## What's new in v2.2
+
+- **Live plan anchor (`memory/PLAN.md`).** Captures `ExitPlanMode` output
+  (or user-supplied raw plans) into a structured, step-tracked document
+  that survives session boundaries. `TodoWrite` syncs step statuses
+  mechanically; sensitive Bash calls (`git push`, deploys, ...) flag
+  drift. See [docs/PLAN_PROTOCOL.md](docs/PLAN_PROTOCOL.md).
+- **Plugin-shipped subagents.** `plan-refiner` normalises raw plans into
+  JSON; `plan-guardian` checks alignment when drift counters trip.
+  Definitions live in `agents/` and are auto-discovered after install.
+- **`/cc-mem dashboard`** subcommand: launches the Tkinter GUI without
+  needing to know the plugin install path.
 
 ## What's new in v2.1
 
@@ -30,19 +90,6 @@ cc-memory captures structured memories at every conversation boundary AND
 - **Clean subpackage layout.** `cc_memory/{core,hooks,llm,cli,mcp,ui}/`.
 - **One installer, one skills location, one version number.** Removed `.claude/skills/`
   duplicate, removed the third copy of `save-memories`, removed dual installers.
-
-## What's new in v2.2
-
-- **Live plan anchor (`memory/PLAN.md`).** Captures `ExitPlanMode` output
-  (or user-supplied raw plans) into a structured, step-tracked document
-  that survives session boundaries. `TodoWrite` syncs step statuses
-  mechanically; sensitive Bash calls (`git push`, deploys, ...) flag
-  drift. See [docs/PLAN_PROTOCOL.md](docs/PLAN_PROTOCOL.md).
-- **Plugin-shipped subagents.** `plan-refiner` normalises raw plans into
-  JSON; `plan-guardian` checks alignment when drift counters trip.
-  Definitions live in `agents/` and are auto-discovered after install.
-- **`/cc-mem dashboard`** subcommand: launches the Tkinter GUI without
-  needing to know the plugin install path.
 
 ## Installation
 
@@ -76,7 +123,8 @@ python cc-memory/cc_memory/ui/installer.py --cli  # CLI
 
 The installer:
 1. Copies the subpackage tree to `~/.claude/hooks/cc-memory/`.
-2. Adds the 5 hook entries to `~/.claude/settings.json`.
+2. Adds the hook entries to `~/.claude/settings.json` (6 commands across 5
+   events — `PreCompact` declares a sync + an `async` leg).
 3. Auto-detects + upgrades any v2.0 flat-layout install.
 
 Per-project initialization is **automatic** — the first user message creates
@@ -96,12 +144,15 @@ Hooks (registered in ~/.claude/settings.json):
                      patch_progress(files_touched=...)
                      idle reorg every 5 turns
 
-  PreCompact      ─► Haiku extracts memories from the full transcript
-                     ALL writes go through llm.memory_writer.upsert_smart
-                     FULL-REWRITE memory/PROGRESS.md from SQL row
-                     archive session, regen MEMORY.md, maybe LLM-consolidate
+  PreCompact      ─► fires TWO hooks:
+                     • sync  (pre_compact.py, 120s): Haiku extracts memories from
+                       the full transcript → memory_writer.upsert_smart →
+                       FULL-REWRITE memory/PROGRESS.md → archive → regen MEMORY.md
+                     • async (consolidate_async.py, 300s, off the blocking path):
+                       every-Nth-session LLM consolidation under a time budget
 
   SessionStart    ─► inject context (topics + critical + timeline + PROGRESS preview)
+                     record memory/.last_inject.json
                      emit FORCED <system-reminder>: "Read PROGRESS.md FIRST"
                      retroactive save of unsaved prior JSONLs
 ```
@@ -113,7 +164,10 @@ memory/
 ├── memory.db                SQLite WAL, see core/db.py for schema
 ├── MEMORY.md                auto-generated index, refreshed every write
 ├── PROGRESS.md              full-rewrite from `progress` row at every Stop+PreCompact
+├── PLAN.md                  full-rewrite from `plan_active` row (live plan anchor)
 ├── .last_save.json          status from last PreCompact
+├── .last_inject.json        what SessionStart injected (observability)
+├── .last_consolidation.json interval marker for the async consolidation leg
 ├── .gitignore               excludes DB + sessions
 ├── sessions/YYYY/MM/        per-session archives
 └── topics/                  reserved for future per-topic exports
@@ -133,6 +187,11 @@ memory/
 
 Importance scale: `1`=noise, `2`=low, `3`=normal, `4`=important, `5`=critical (never forget).
 
+Memory **content** is language-agnostic — the extractor and resume-signal
+detectors recognise both English and Chinese by design, and stored memories may be
+in any language. Only the project's own docs follow the English-skeleton +
+translation convention. See [docs/I18N.md](docs/I18N.md).
+
 ## CLI
 
 **Inside Claude Code** (recommended, path-agnostic):
@@ -148,6 +207,9 @@ Importance scale: `1`=noise, `2`=low, `3`=normal, `4`=important, `5`=critical (n
 /cc-mem consolidate                               # Full LLM-backed consolidation
 /cc-mem cleanup                                   # Lightweight no-LLM cleanup
 /cc-mem add decision "Chose X" --importance 4     # Anti-patch upsert
+/cc-mem inject-show                               # What SessionStart injected last (ground truth)
+/cc-mem inject-usage                              # Whether Claude read PROGRESS.md / MEMORY.md
+/cc-mem encoding-check                            # Scan text tables for U+FFFD corruption
 /cc-mem dashboard                                 # Launch the Tkinter GUI
 /cc-mem serve                                     # Launch the browser-based web viewer
 
@@ -240,7 +302,8 @@ Edit `~/.claude/hooks/cc-memory/cc_memory/config.json`:
 - `injection.*` — SessionStart token budget and per-layer fractions
 - `observation.*` — PostToolUse truncation limits, skip lists
 - `idle_reorg.interval_turns` — N turns between idle reorg runs (default 5)
-- `consolidation.*` — full LLM consolidation schedule
+- `consolidation.*` — full LLM consolidation schedule (incl.
+  `auto_interval_sessions` for the async leg)
 - `ccl.*` — Ollama fallback URL + model
 - `modes.default` — default project mode (code/research/writing)
 
@@ -256,12 +319,19 @@ Resolution order: `ANTHROPIC_API_KEY` env var → Claude OAuth token.
 `tests/smoke_test.py` is an end-to-end stdlib script (no pytest needed)
 that verifies the anti-patch writer decisions, PROGRESS.md full-rewrite,
 the fill-only-empty refresh contract, last-wins TodoWrite extraction, the
-tier-3 transcript fallback, legacy `SESSION_HANDOFF.md` migration, and
-the layout inspector.
+tier-3 transcript fallback, legacy `SESSION_HANDOFF.md` migration, the
+layout inspector, the two-hook PreCompact shape, and the i18n drift gate.
 
 ```bash
 python tests/smoke_test.py
 # expect a series of [OK] lines ending with "===== ALL SMOKE TESTS PASSED ====="
+```
+
+Documentation translations are drift-checked separately:
+
+```bash
+python tools/i18n_check.py          # [OK]/[STALE]/[FAIL] per doc; nonzero exit on drift
+python tools/i18n_check.py --list   # show every English/翻译 pair + recorded vs current hash
 ```
 
 ## Build executables
@@ -289,6 +359,8 @@ python build_exe.py
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — full architecture overview
 - [docs/MEMORY_RULES.md](docs/MEMORY_RULES.md) — anti-patch write contract
 - [docs/HANDOFF_PROTOCOL.md](docs/HANDOFF_PROTOCOL.md) — PROGRESS.md spec
+- [docs/PLAN_PROTOCOL.md](docs/PLAN_PROTOCOL.md) — PLAN.md + subagent spec
+- [docs/I18N.md](docs/I18N.md) — documentation multilingual (English / 中文) version-control
 - [CHANGELOG.md](CHANGELOG.md) — version history
 
 ## License

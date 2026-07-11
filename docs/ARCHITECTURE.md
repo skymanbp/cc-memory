@@ -23,6 +23,17 @@ memory across compactions and sessions**. Three design constraints:
    No three copies of `save-memories`. No 6 files claiming different version
    numbers.
 
+### Bilingual by design — memory content is language-agnostic
+
+Memory **content** is deliberately language-neutral. The category detectors
+(`core/extractor.py` `_PATTERNS` / `_IMPORTANCE_BOOST`) and the resume-signal
+sets (`hooks/user_prompt.py`, `hooks/session_start.py` RESUME PROTOCOL) match
+both Chinese and English on purpose, and stored memories may be in any language.
+This is **Tier 3** of the documentation language model — separate from the
+English-skeleton *docs* convention (Tier 1). Those detectors carry inline
+`i18n Tier 3` comments and must NOT be reduced to English-only. See
+[I18N.md](I18N.md) §1 for the full three-tier model.
+
 ## Repository layout
 
 ```

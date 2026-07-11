@@ -873,6 +873,25 @@ def main():
     assert _ca._read_marker(marker)["last_session_count"] == 42
     print("[OK] v2.3.2 consolidate_async: importable + lock/marker/interval logic")
 
+    # === i18n: documentation multilingual drift gate =========================
+    # Import the dev checker (lives in tools/, outside the package) and assert no
+    # tracked English doc changed without its translation being refreshed. See
+    # docs/I18N.md. STALE/ORPHAN/NO-MARKER are hard failures; MISSING-TRANSLATION
+    # is a soft warning (translations are produced on demand) and does not gate.
+    sys.path.insert(0, str(_REPO / "tools"))
+    import i18n_check
+    _i18n = i18n_check.classify(_REPO)
+    _drift = [r for r in _i18n if r.state in ("STALE", "ORPHAN", "NO-MARKER")]
+    assert not _drift, \
+        f"i18n drift detected: {[(r.state, r.english_rel or r.zh_rel) for r in _drift]}"
+    _zh = _REPO / "README.zh.md"
+    assert _zh.exists(), "README.zh.md missing (reference translation must be committed)"
+    _mk = i18n_check.parse_marker(_zh)
+    assert _mk is not None, "README.zh.md has no valid i18n marker on line 1"
+    assert _mk["digest"] == i18n_check.hash_source(_REPO / "README.md"), \
+        "README.zh.md marker hash != current README.md (stale translation)"
+    print("[OK] i18n: README.zh.md in-sync with README.md; no drift across tracked docs")
+
     print("\n===== ALL SMOKE TESTS PASSED =====")
     print(f"Test project preserved at: {tmp}")
     print("\nProduced files:")

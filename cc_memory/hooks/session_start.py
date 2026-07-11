@@ -229,6 +229,8 @@ def _build_forced_reminder(memory_dir):
         '  "Read PROGRESS.md — prior progress: <one-sentence summary>."',
         "",
         "RESUME PROTOCOL — if the user's first message is exactly one of:",
+        # i18n Tier 3: bilingual resume tokens INTENTIONAL — keep in sync with
+        # user_prompt.py resume_signals; do NOT reduce to English-only (docs/I18N.md §1).
         '    "" (empty)  ·  "继续"  ·  "接着"  ·  "接着做"  ·  "接着干"  ·',
         '    "继续干"  ·  "resume"  ·  "continue"  ·  "go on"  ·  "keep going"',
         "  then DO NOT ask for clarification. Instead:",

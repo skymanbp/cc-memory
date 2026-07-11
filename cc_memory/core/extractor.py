@@ -28,6 +28,9 @@ from typing import Any, Dict, List, Optional, Tuple
 
 
 # ── Generic category detection (project-neutral) ───────────────────────────
+# i18n Tier 3: these patterns match BOTH Chinese and English INTENTIONALLY —
+# stored memory content may be any language. Do NOT reduce to English-only.
+# See docs/I18N.md §1 (three-tier language model).
 _PATTERNS: Dict[str, List[str]] = {
     "decision": [
         r"决定|决策|最终|选择了|改为|确认|已实现|IMPLEMENTED|已完成",
@@ -64,6 +67,8 @@ _PATTERNS: Dict[str, List[str]] = {
     ],
 }
 
+# i18n Tier 3: bilingual boost keys are intentional — do NOT drop the CJK terms
+# (关键/重要). See docs/I18N.md §1.
 _IMPORTANCE_BOOST: Dict[str, int] = {
     "CRITICAL": 2, "关键": 2, "NEVER": 2, "⛔": 2,
     "IMPORTANT": 1, "重要": 1, "WARNING": 1, "⚠": 1,

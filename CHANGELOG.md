@@ -7,6 +7,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [2.3.3] — 2026-07-11
+
+Documentation + version-metadata release. **No runtime behavior changed** — the
+memory engine, hooks, schema, and extraction logic are byte-for-byte unchanged;
+only the docs, the new multilingual version-control system, and the version
+strings move. Bumps `2.3.2 → 2.3.3` across `cc_memory/__init__.py`,
+`config.json`, `.claude-plugin/plugin.json`, `.claude-plugin/marketplace.json`,
+`pyproject.toml`, and the MCP `serverInfo`.
+
+### Docs / Tooling
+
+- **Documentation multilingual version-control (English skeleton + `*.zh.md`).**
+  Established a three-tier language model: English is the canonical skeleton for
+  docs and all LLM-facing strings (Tier 1); Chinese `NAME.zh.md` siblings are
+  drift-tracked translations produced on demand (Tier 2); stored memory content
+  stays any-language via the existing bilingual detectors (Tier 3). Full spec in
+  the new `docs/I18N.md`.
+- **Drift marker + checker.** Each translation carries a first-line HTML-comment
+  marker recording a normalized-sha256 of its English source
+  (`<!-- i18n-source: … | sha256: … | version: … | translated: … -->`). Drift is
+  decided solely by that hash. New pure-stdlib `tools/i18n_check.py` classifies
+  every tracked doc (IN-SYNC / MISSING-TRANSLATION / STALE / ORPHAN / NO-MARKER),
+  emits markers (`--emit-marker`), and lists recorded-vs-current hashes
+  (`--list`). A shared normalizer (strip BOM → LF → per-line rstrip → single
+  trailing newline) makes the digest stable across CRLF/LF and Windows/Unix. The
+  tool is dev/CI-only and deliberately excluded from `SUBPACKAGE_FILES`,
+  `build_exe.py`, and the layout inspector, so the packaged plugin is unchanged.
+- **`README.zh.md`** added as the reference translation, tied to the corrected
+  `README.md` via the marker.
+- **`README.md` brought current to v2.3.3.** Refreshed tagline and subtitle
+  label, "What's new in v2.3.3 / v2.3 / 2.3.1 / 2.3.2" sections, the two-leg
+  `PreCompact` (sync `pre_compact.py` + async `consolidate_async.py`, 300s)
+  architecture diagram, the `inject-show` / `inject-usage` / `encoding-check`
+  CLI surface, and `docs/PLAN_PROTOCOL.md` + `docs/I18N.md` in the docs list.
+  Because the version label lives in a hashed i18n source, `README.zh.md` was
+  re-translated and its marker re-emitted so the drift gate stays green.
+- **Smoke-test drift gate.** `tests/smoke_test.py` now imports `i18n_check` and
+  fails on any STALE/ORPHAN/NO-MARKER, and asserts `README.zh.md`'s marker hash
+  equals the current `README.md` hash — so a stale translation turns the suite red.
+- **Tier-3 durability notes.** Added a "Bilingual by design" subsection to
+  `docs/ARCHITECTURE.md` and behavior-neutral `i18n Tier 3` comments at the
+  any-language detection sites (`core/extractor.py`, `hooks/user_prompt.py`,
+  `hooks/session_start.py`) so a future refactor won't reduce them to English-only.
+
+---
+
 ## [2.3.2] — 2026-07-10
 
 Patch release. **Permanently** fixes the intermittent `Compacted PreCompact

@@ -2,16 +2,41 @@
 
 ## Project: cc-memory
 
-**Claude Code persistent memory plugin (v2.3)** — anti-patch reconcile-on-write
+**Claude Code persistent memory plugin (v2.3.3)** — anti-patch reconcile-on-write
 + LLM-judged semantic de-duplication, forced PROGRESS.md handoff with
 per-session annotation, live PLAN.md anchor with plan-refiner / plan-guardian
 subagents, injection observability, FTS5 search, AI-judged extraction with
 Haiku + local Ollama fallback.
 
 - **Language**: Python 3.8+ (pure stdlib, zero pip dependencies at runtime)
-- **Version**: 2.3.2
+- **Version**: 2.3.3
 - **License**: MIT
 - **Platform**: Windows-primary, cross-platform compatible (Tkinter required for GUI)
+
+## What changed in v2.3.3 (over v2.3.2)
+
+**Documentation multilingual version-control — docs + version metadata only, no
+runtime behavior change.** English is the canonical skeleton; Chinese docs are
+drift-tracked `*.zh.md` siblings (`README.zh.md` first). Each `.zh.md` carries a
+line-1 HTML-comment marker binding it to a *normalized-sha256* of its English
+source (CRLF/BOM/trailing-whitespace-immune, so the digest is stable across
+platforms). Drift is decided **solely** by that hash; `version`/`translated`
+fields are informational, so a version bump never mass-flags translations.
+
+1. **`tools/i18n_check.py`** — pure-stdlib checker (dev/CI tool, deliberately
+   NOT packaged into the installer or exes). States → labels/exit:
+   IN-SYNC `[OK]` 0 · MISSING-TRANSLATION `[WARN]` 0 · STALE `[STALE]` nonzero ·
+   ORPHAN `[FAIL]` nonzero · NO-MARKER `[FAIL]` nonzero. `--emit-marker <doc>`
+   regenerates a marker after an English source changes.
+2. **Smoke-test drift gate.** `tests/smoke_test.py` asserts no STALE/ORPHAN/
+   NO-MARKER docs and that `README.zh.md`'s marker digest matches the live
+   `hash_source(README.md)` — so editing an English doc without refreshing its
+   translation turns the suite red.
+3. **`docs/I18N.md`** — the convention (3-tier language model, naming, switcher,
+   marker + normalization recipe, add/update workflows). Tier 3 = memory content
+   is language-agnostic; the bilingual detectors in `extractor.py` /
+   `user_prompt.py` / `session_start.py` are intentional and carry `# i18n Tier 3`
+   guard comments so a future refactor can't silently reduce them to English.
 
 ## What changed in v2.3.2 (over v2.3.1)
 
