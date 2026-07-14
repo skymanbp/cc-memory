@@ -1,12 +1,24 @@
 """
 Unified LLM call helper.
 
-Strategy: Anthropic Haiku primary, local Ollama fallback.
-- Try Haiku first if api_key is present (fast, accurate)
-- On any Haiku failure (no key, network, rate limit, timeout), fall back to Ollama
-- Raises RuntimeError only if both backends fail
+Strategy (v2.3.4): Anthropic candidates in order, local Ollama OPT-IN only.
+- Iterate ``core.auth.get_api_candidates()`` — typically the ANTHROPIC_API_KEY
+  env var first, then the Claude Code subscription OAuth token. Each candidate
+  is sent with its correct wire format (platform key → ``x-api-key``; OAuth
+  ``sk-ant-oat…`` token → ``Authorization: Bearer`` + oauth beta header —
+  verified live 2026-07-14: oat-via-x-api-key is HTTP 401, oat-via-Bearer 200).
+- A failed candidate FALLS THROUGH to the next (pre-v2.3.4 a dead env key
+  blackholed the healthy OAuth token and silently pushed everything onto
+  Ollama, cold-loading a 5.9 GB local model per consolidation batch).
+- Ollama fallback is DISABLED by default (config.json ``ccl.enabled: false``).
+  Rationale: with OAuth fall-through the Anthropic leg is reliable; the local
+  leg's GPU spike + cold-load latency (observed: repeated ccl-9b loads during
+  gaming) costs more than the memory-extraction nicety is worth. Flip
+  ``ccl.enabled`` to true to restore the old behavior.
 
-Reads ollama_url / local_model from cc_memory/config.json `ccl` section.
+Raises RuntimeError only if every enabled backend fails.
+
+Reads ollama_url / local_model / enabled from cc_memory/config.json ``ccl``.
 """
 import json
 import re
@@ -17,6 +29,8 @@ _ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
 
 _DEFAULT_OLLAMA_URL = "http://localhost:11434"
 _DEFAULT_LOCAL_MODEL = "ccl-9b"
+# v2.3.4: local fallback is opt-in. Missing key in config.json reads as False.
+_DEFAULT_OLLAMA_ENABLED = False
 
 
 def _load_local_config():
@@ -30,14 +44,15 @@ def _load_local_config():
         return (
             ccl.get("ollama_url", _DEFAULT_OLLAMA_URL),
             ccl.get("local_model", _DEFAULT_LOCAL_MODEL),
+            bool(ccl.get("enabled", _DEFAULT_OLLAMA_ENABLED)),
         )
     except (FileNotFoundError, json.JSONDecodeError, OSError):
-        # why: config absent/malformed — use compiled-in defaults so LLM calls
-        # still attempt the local fallback. Hook contract: never raise.
-        return _DEFAULT_OLLAMA_URL, _DEFAULT_LOCAL_MODEL
+        # why: config absent/malformed — compiled-in defaults keep the
+        # Anthropic leg working; local fallback stays off. Hooks never raise.
+        return _DEFAULT_OLLAMA_URL, _DEFAULT_LOCAL_MODEL, _DEFAULT_OLLAMA_ENABLED
 
 
-def _call_haiku(system, user, api_key, max_tokens, timeout):
+def _call_haiku(system, user, api_key, max_tokens, timeout, wire="api_key"):
     body = json.dumps({
         "model": _HAIKU_MODEL,
         "max_tokens": max_tokens,
@@ -45,14 +60,19 @@ def _call_haiku(system, user, api_key, max_tokens, timeout):
         "system": system,
     }, ensure_ascii=False).encode("utf-8")
 
+    headers = {
+        "Content-Type": "application/json",
+        "anthropic-version": "2023-06-01",
+    }
+    if wire == "oauth":
+        # Claude subscription OAuth token — Bearer + beta opt-in header.
+        headers["Authorization"] = f"Bearer {api_key}"
+        headers["anthropic-beta"] = "oauth-2025-04-20"
+    else:
+        headers["x-api-key"] = api_key
+
     req = urllib.request.Request(
-        _ANTHROPIC_URL, data=body,
-        headers={
-            "Content-Type": "application/json",
-            "x-api-key": api_key,
-            "anthropic-version": "2023-06-01",
-        },
-        method="POST",
+        _ANTHROPIC_URL, data=body, headers=headers, method="POST",
     )
 
     with urllib.request.urlopen(req, timeout=timeout) as resp:
@@ -65,9 +85,7 @@ def _call_haiku(system, user, api_key, max_tokens, timeout):
     return text.strip()
 
 
-def _call_ollama(system, user, max_tokens, timeout):
-    ollama_url, local_model = _load_local_config()
-
+def _call_ollama(system, user, max_tokens, timeout, ollama_url, local_model):
     messages = []
     if system:
         messages.append({"role": "system", "content": system})
@@ -97,34 +115,60 @@ def _call_ollama(system, user, max_tokens, timeout):
 
 def call_llm(system, user, api_key="", max_tokens=2000, timeout=30,
              fallback_timeout=None):
-    """Call LLM with Haiku as primary, local Ollama as fallback.
+    """Call LLM: Anthropic candidates in order, Ollama only if enabled.
 
-    Returns text response string. Raises RuntimeError if both backends fail.
+    ``api_key`` keeps its historical meaning (explicit credential from the
+    caller); when non-empty it is tried FIRST with an auto-detected wire
+    format, then the remaining ``get_api_candidates()`` entries.
+
+    Returns text response string. Raises RuntimeError if all enabled
+    backends fail.
 
     `fallback_timeout` bounds the Ollama fallback leg. When None (default), the
     fallback gets `min(timeout*3, 120)` — generous, for un-timed callers. A
     TIME-BUDGETED caller (e.g. consolidation under a BudgetGate) MUST pass an
     explicit value so the worst-case in-flight wall-clock is a known quantity:
-    a single call can take at most `timeout` (Haiku hang) + `fallback_timeout`
-    (Ollama). That bound is what lets a BudgetGate GUARANTEE completion before
-    its deadline — see core.consolidate._worst_call_cost. Without it, a call
-    the gate "allowed" could run ~120s and overrun the hook. See docs/MEMORY_RULES.md.
+    a single call can take at most `timeout` per Anthropic candidate (bounded
+    at 2 candidates) + `fallback_timeout` (Ollama, when enabled). That bound is
+    what lets a BudgetGate GUARANTEE completion before its deadline — see
+    core.consolidate._worst_call_cost. See docs/MEMORY_RULES.md.
     """
     if fallback_timeout is None:
         fallback_timeout = min(timeout * 3, 120)
 
-    if api_key:
-        try:
-            return _call_haiku(system, user, api_key, max_tokens, timeout)
-        except Exception:
-            # why: explicit fall-through to local model. Failure modes captured
-            # (network, 401, 429, 5xx, json parse). We don't log here because
-            # the caller handles the eventual RuntimeError if BOTH fail.
-            pass
+    from core.auth import get_api_candidates, _wire_for
 
-    try:
-        return _call_ollama(system, user, max_tokens, fallback_timeout)
-    except Exception as ollama_err:
-        raise RuntimeError(
-            f"Both Haiku and Ollama failed. Ollama error: {ollama_err}"
-        )
+    candidates = []
+    if api_key:
+        candidates.append((api_key, "caller", _wire_for(api_key)))
+    for key, source, wire in get_api_candidates():
+        if key != api_key:
+            candidates.append((key, source, wire))
+    # Bound the Anthropic legs so the worst-case wall-clock stays a known
+    # quantity for BudgetGate math (2 × timeout).
+    candidates = candidates[:2]
+
+    errors = []
+    for key, source, wire in candidates:
+        try:
+            return _call_haiku(system, user, key, max_tokens, timeout,
+                               wire=wire)
+        except Exception as e:
+            # why: explicit fall-through to the NEXT candidate. Failure modes
+            # captured (network, 400 low-credit, 401, 429, 5xx, json parse);
+            # errors are aggregated into the final RuntimeError if ALL fail.
+            errors.append(f"{source}: {type(e).__name__}: {e}")
+
+    ollama_url, local_model, ollama_enabled = _load_local_config()
+    if ollama_enabled:
+        try:
+            return _call_ollama(system, user, max_tokens, fallback_timeout,
+                                ollama_url, local_model)
+        except Exception as ollama_err:
+            errors.append(f"ollama: {type(ollama_err).__name__}: {ollama_err}")
+    else:
+        errors.append("ollama: disabled (config ccl.enabled=false)")
+
+    raise RuntimeError(
+        "All LLM backends failed: " + " | ".join(errors)
+    )

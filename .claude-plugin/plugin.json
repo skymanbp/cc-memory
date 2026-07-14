@@ -1,6 +1,6 @@
 {
   "name": "cc-memory",
-  "version": "2.3.3",
+  "version": "2.3.4",
   "description": "Persistent memory for Claude Code — automatic save/restore across compactions and sessions. Anti-patch reconcile-on-write + LLM-judged semantic de-duplication, forced PROGRESS.md handoff with per-session annotation, live PLAN.md anchor, injection observability, FTS5 search, AI-judged extraction with Haiku + local Ollama fallback.",
   "author": {
     "name": "skymanbp",

@@ -126,10 +126,13 @@ _SUMMARY_HAIKU_S, _SUMMARY_FALLBACK_S = 25, 20   # consolidate_topics summaries
 
 
 def _worst_call_cost(haiku_s: int, fallback_s: int) -> float:
-    """Max wall-clock one budgeted call_llm can consume: Haiku hang to its
-    timeout THEN the capped Ollama fallback. This is the cost a BudgetGate
-    must reserve before starting the call for its deadline guarantee to hold."""
-    return float(haiku_s + fallback_s)
+    """Max wall-clock one budgeted call_llm can consume: up to TWO Anthropic
+    candidates (v2.3.4 — env key + OAuth fall-through, each bounded by the
+    haiku timeout) THEN the capped Ollama fallback (0 when ccl.enabled=false,
+    but reserving it keeps the guarantee safe in both configurations). This is
+    the cost a BudgetGate must reserve before starting the call for its
+    deadline guarantee to hold."""
+    return float(2 * haiku_s + fallback_s)
 
 
 # ── 1. Garbage cleanup ─────────────────────────────────────────────────────

@@ -2,7 +2,7 @@
 
 ## Project: cc-memory
 
-**Claude Code persistent memory plugin (v2.3.3)** — anti-patch reconcile-on-write
+**Claude Code persistent memory plugin (v2.3.4)** — anti-patch reconcile-on-write
 + LLM-judged semantic de-duplication, forced PROGRESS.md handoff with
 per-session annotation, live PLAN.md anchor with plan-refiner / plan-guardian
 subagents, injection observability, FTS5 search, AI-judged extraction with
@@ -12,6 +12,22 @@ Haiku + local Ollama fallback.
 - **Version**: 2.3.3
 - **License**: MIT
 - **Platform**: Windows-primary, cross-platform compatible (Tkinter required for GUI)
+
+## What changed in v2.3.4 (over v2.3.3)
+
+**Anthropic auth fall-through + opt-in local fallback — no schema change.**
+
+1. **`core.auth.get_api_candidates()`** returns (key, source, wire) candidates
+   in order (env key → Claude Code OAuth token). `get_api_key()` keeps its
+   single-key back-compat surface (incl. the `oauth_expired` signal).
+2. **`llm.ccl_backend.call_llm`** iterates candidates (bounded at 2) with the
+   correct wire per credential: `sk-ant-oat…` → `Authorization: Bearer` +
+   `anthropic-beta: oauth-2025-04-20`; `sk-ant-api…` → `x-api-key`. A dead env
+   key no longer blackholes the healthy subscription token.
+3. **Ollama fallback opt-in**: `config.json` `ccl.enabled` (default false).
+   The error raised when everything fails now aggregates per-leg reasons.
+4. `core.consolidate._worst_call_cost` = `2*haiku + fallback` (BudgetGate
+   deadline guarantee stays honest with fall-through).
 
 ## What changed in v2.3.3 (over v2.3.2)
 

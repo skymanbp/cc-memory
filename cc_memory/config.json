@@ -1,7 +1,6 @@
 {
-  "version": "2.3.3",
+  "version": "2.3.4",
   "description": "cc-memory — Claude Code persistent memory plugin",
-
   "extraction": {
     "max_sentences_per_category": 10,
     "max_metrics": 10,
@@ -10,42 +9,42 @@
     "keyword_min_frequency": 2,
     "keyword_max_count": 40
   },
-
   "writer": {
-    "high_similarity_threshold": 0.80,
-    "mid_similarity_threshold": 0.50,
+    "high_similarity_threshold": 0.8,
+    "mid_similarity_threshold": 0.5,
     "min_content_length": 10,
     "max_candidates_to_scan": 50,
     "notes": "Tuned for anti-patch upsert. See docs/MEMORY_RULES.md."
   },
-
   "injection": {
     "total_budget_tokens": 4000,
     "layers": {
-      "topics": 0.30,
+      "topics": 0.3,
       "critical": 0.15,
-      "timeline": 0.20,
+      "timeline": 0.2,
       "progress": 0.25,
-      "footer": 0.10
+      "footer": 0.1
     },
     "max_recent_sessions": 3,
     "min_importance_for_display": 3,
     "critical_importance_threshold": 5
   },
-
   "observation": {
     "max_input_chars": 2000,
     "max_output_chars": 1000,
-    "skip_tools": ["TodoWrite", "AskUserQuestion", "Skill", "ListMcpResourcesTool"],
+    "skip_tools": [
+      "TodoWrite",
+      "AskUserQuestion",
+      "Skill",
+      "ListMcpResourcesTool"
+    ],
     "cleanup_after_save": true,
     "retention_sessions": 2
   },
-
   "idle_reorg": {
     "interval_turns": 5,
     "notes": "Light cleanup runs every N user turns in Stop hook (no LLM)."
   },
-
   "consolidation": {
     "auto_interval_sessions": 5,
     "min_memories_per_topic": 3,
@@ -53,36 +52,30 @@
     "decay_age_days": 30,
     "keep_per_topic_after_consolidation": 5
   },
-
   "archive": {
     "session_retention_days": 180,
     "max_archive_files": 100
   },
-
   "modes": {
     "default": "code"
   },
-
   "ccl": {
+    "enabled": false,
     "ollama_url": "http://localhost:11434",
-    "local_model": "ccl-9b"
+    "local_model": "ccl-9b",
+    "notes": "v2.3.4: local Ollama fallback is OPT-IN (enabled=false default). Anthropic legs now fall through env-key -> OAuth token with correct wire formats."
   },
-
   "web_viewer": {
     "port": 9377
   },
-
   "mcp": {
     "auto_register": false
   },
-
   "excluded_projects": [],
-
   "logging": {
     "level": "INFO",
     "max_log_days": 7
   },
-
   "notes": {
     "importance_scale": "1=noise, 2=low, 3=normal, 4=important, 5=critical(never forget)",
     "categories": "decision, result, config, bug, task, arch, note",

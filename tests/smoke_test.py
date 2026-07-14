@@ -811,9 +811,11 @@ def main():
     from llm.ccl_backend import call_llm as _call_llm
     assert "fallback_timeout" in _inspect.signature(_call_llm).parameters, \
         "call_llm must accept fallback_timeout (bounded Ollama fallback)"
-    assert C._worst_call_cost(20, 20) == 40.0 and C._worst_call_cost(25, 20) == 45.0, \
-        "_worst_call_cost must sum haiku + fallback legs"
-    print("[OK] v2.3.2 call_llm.fallback_timeout + _worst_call_cost honest cost model")
+    # v2.3.4: worst case = 2 Anthropic candidates (env + OAuth fall-through)
+    # x haiku timeout + the fallback leg reservation.
+    assert C._worst_call_cost(20, 20) == 60.0 and C._worst_call_cost(25, 20) == 70.0, \
+        "_worst_call_cost must reserve 2 Anthropic legs + fallback"
+    print("[OK] v2.3.4 call_llm.fallback_timeout + _worst_call_cost honest cost model")
 
     # (b) consolidate_topics is budget-gated: an EXHAUSTED gate must NOT start an
     #     LLM call it can't afford, yet still summarize every topic via the

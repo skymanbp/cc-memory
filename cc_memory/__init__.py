@@ -33,4 +33,4 @@ v2.1: Reorganized into core/hooks/llm/ui/cli/mcp subpackages.
       PROGRESS.md forced-handoff replaces SESSION_HANDOFF.md.
       MEMORY.md auto-regenerates on every write.
 """
-__version__ = "2.3.3"
+__version__ = "2.3.4"

@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [2.3.4] — 2026-07-14
+
+Auth + local-fallback behavior release. Root-caused why every LLM call was
+landing on the local Ollama model (GPU spikes during gaming) and why compaction
+extraction kept failing while a healthy Claude subscription sat unused.
+
+### Fixed
+
+- **OAuth token no longer blackholed behind a dead env key.** `core.auth` now
+  exposes `get_api_candidates()` — ANTHROPIC_API_KEY env var first, then the
+  Claude Code OAuth token — and `llm.ccl_backend.call_llm` FALLS THROUGH to the
+  next candidate on any failure. Pre-2.3.4, a zero-credit env key (HTTP 400)
+  consumed the only Anthropic attempt and pushed every call onto Ollama.
+- **OAuth tokens sent with the correct wire format.** `sk-ant-oat…` subscription
+  tokens are sent as `Authorization: Bearer` + `anthropic-beta: oauth-2025-04-20`
+  (verified live: the same token via `x-api-key` is HTTP 401; via Bearer it is
+  HTTP 200). Platform `sk-ant-api…` keys keep `x-api-key`.
+- **BudgetGate cost model updated**: `_worst_call_cost` reserves 2 Anthropic
+  legs + the fallback leg, so the deadline guarantee holds with fall-through.
+
+### Changed
+
+- **Local Ollama fallback is now OPT-IN** (`config.json` `ccl.enabled: false`
+  default). With OAuth fall-through the Anthropic leg is reliable; cold-loading
+  a local model per consolidation batch cost more (GPU spikes, timeouts → "Hook
+  cancelled") than the nicety was worth. Set `ccl.enabled: true` to restore.
+- Version bump `2.3.3 → 2.3.4` across the usual six files.
+
+---
+
 ## [2.3.3] — 2026-07-11
 
 Documentation + version-metadata release. **No runtime behavior changed** — the
