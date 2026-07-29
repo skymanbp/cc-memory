@@ -123,6 +123,22 @@ def main() -> None:
     check("dispositions retained for audit",
           len(stored.get("dispositions", [])) == 3, str(stored.keys()))
 
+    print("§4b long notes must not dilute an identical-title auto-carry "
+          "(v2.4.1 regression)")
+    # v2.4.0 matched old titles against title+notes ONLY; a long notes
+    # field diluted the trigram overlap below threshold, so replacing a
+    # plan with ITSELF (status/notes updates) was refused. Found on the
+    # gate's second real replacement (R610).
+    long_notes = ("this is a very long progress note " * 8
+                  + "with ids 298/301/302/386/387 and a ledger pointer")
+    same_title_plan = _plan("third goal", ["one omnibus step"])
+    same_title_plan["steps"][0]["notes"] = long_notes
+    plan_mod.apply_refined_plan(
+        db, pid, same_title_plan, memory_dir=memory_dir)
+    check("identical title with long notes auto-carries",
+          db.get_plan_active(pid)["structured"]["steps"][0]["notes"]
+          == long_notes)
+
     print("§5 disposition without a reason → REFUSED")
     refused2 = None
     try:

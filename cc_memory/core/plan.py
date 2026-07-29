@@ -374,11 +374,20 @@ def check_carryover(old_structured: Optional[Dict], new_plan: Dict) -> List[str]
     olds = unfinished_steps(old_structured)
     if not olds:
         return []
+    # v2.4.1: each new step contributes TWO candidate strings — the bare
+    # title AND title+notes. v2.4.0 compared against title+notes only,
+    # so a long notes field DILUTED the trigram overlap below the
+    # threshold and an IDENTICAL title failed to auto-carry (found on the
+    # gate's second real replacement, R610). title+notes stays as a
+    # candidate so a step folded into another step's notes still carries.
     new_titles: List[str] = []
     for s in (new_plan.get("steps") or []):
         if isinstance(s, dict):
+            bare = str(s.get("title", "")).strip()
+            if bare:
+                new_titles.append(bare)
             t = f"{s.get('title', '')} {s.get('notes', '')}".strip()
-            if t:
+            if t and t != bare:
                 new_titles.append(t)
     dispositions = new_plan.get("dispositions") or []
     violations: List[str] = []
