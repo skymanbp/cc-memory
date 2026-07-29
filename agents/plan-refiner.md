@@ -58,6 +58,28 @@ trailing prose. Stdout must parse with `json.loads()` directly:
    info; skip restating the goal.
 7. **No fewer than 1 step, no more than 12**. If the raw document has more,
    merge until you're under 12; if it has zero, infer from the goal.
+8. **Carryover gate (R610 — MANDATORY when a plan is being REPLACED).**
+   Before producing output, run
+   `python <mem.py path from your instructions> --project . plan-show`
+   (or read `memory/PLAN.md`) to see the CURRENT plan. If it has steps that
+   are not `done`, the storage layer will REFUSE your JSON unless every one
+   of those unfinished steps is either (a) present in your `steps` (title
+   similarity is auto-detected), or (b) explicitly accounted for in a
+   top-level `"dispositions"` array:
+
+   ```
+   "dispositions": [
+     {"old_title": "<the outgoing step's title>",
+      "action": "done|dropped|merged|carried",
+      "reason": "<non-empty: evidence it shipped / why it is dropped /
+                 which new step absorbs it>"}
+   ]
+   ```
+
+   There is NO force flag. If the raw document does not say what happened
+   to an outgoing unfinished step, mark it `carried` and ADD it to your
+   `steps` — never invent a `done`/`dropped` claim without evidence in the
+   raw document or the current PLAN.md.
 
 ## Output ONLY the JSON object. Nothing else.
 

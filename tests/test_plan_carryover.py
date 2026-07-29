@@ -1,0 +1,172 @@
+# -*- coding: utf-8 -*-
+"""R610 carryover gate — 换计划不许丢步骤 (2026-07-29).
+
+The plan slot is single-row; replacing or clearing it was the one moment
+staged work could silently vanish (the SELF-ITER S1-S3 sink). This suite
+pins the mandatory gate:
+
+  §1 replace with NO old plan → allowed (bootstrap unchanged)
+  §2 replace that drops unfinished steps, no dispositions → REFUSED
+  §3 replace that carries them (title similarity) → allowed + archived
+  §4 replace with explicit dispositions (action+reason) → allowed,
+     dispositions stored for audit, old plan archived
+  §5 disposition without a reason → REFUSED
+  §6 CLI plan-clear with unfinished steps → exit 1 without --reason,
+     OK with --reason, archive written
+
+Run:  python tests/test_plan_carryover.py
+"""
+from __future__ import annotations
+
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO / "cc_memory"))
+
+from core.db import MemoryDB          # noqa: E402  -- why: imports must follow the sys.path bootstrap above; repo tests run as plain scripts
+from core import plan as plan_mod     # noqa: E402  -- why: same bootstrap ordering
+
+PASS = 0
+FAIL = 0
+
+
+def check(name: str, cond: bool, detail: str = ""):
+    global PASS, FAIL
+    if cond:
+        PASS += 1
+        print(f"  PASS  {name}")
+    else:
+        FAIL += 1
+        print(f"  FAIL  {name}  {detail}")
+
+
+def _mk_project():
+    root = Path(tempfile.mkdtemp(prefix="ccm_gate_"))
+    memory_dir = root / "memory"
+    memory_dir.mkdir()
+    db = MemoryDB(memory_dir / "memory.db")
+    pid = db.upsert_project(str(root))
+    return root, memory_dir, db, pid
+
+
+def _plan(goal, titles, status="pending", dispositions=None):
+    p = {
+        "version": 1,
+        "goal": goal,
+        "success_criteria": ["testable thing"],
+        "steps": [{"id": i + 1, "title": t, "status": status, "notes": ""}
+                  for i, t in enumerate(titles)],
+        "context": "",
+        "refined_by": "plan-refiner",
+    }
+    if dispositions is not None:
+        p["dispositions"] = dispositions
+    return p
+
+
+def main() -> None:
+    print("§1 bootstrap: no old plan → replacement allowed")
+    root, memory_dir, db, pid = _mk_project()
+    plan_mod.apply_refined_plan(
+        db, pid, _plan("old goal", ["wire the token refresh flow",
+                                    "ship the export panel"]),
+        memory_dir=memory_dir)
+    row = db.get_plan_active(pid)
+    check("first plan stored", len(row["structured"]["steps"]) == 2)
+
+    print("§2 dropping unfinished steps with no dispositions → REFUSED")
+    refused = None
+    try:
+        plan_mod.apply_refined_plan(
+            db, pid, _plan("new goal", ["a completely different thing"]),
+            memory_dir=memory_dir)
+    except ValueError as e:
+        refused = str(e)
+    check("replacement refused", refused is not None
+          and "carryover gate REFUSED" in refused, str(refused))
+    check("refusal names BOTH lost steps",
+          refused is not None and "token refresh" in refused
+          and "export panel" in refused, str(refused))
+    check("old plan untouched after refusal",
+          db.get_plan_active(pid)["structured"]["goal"] == "old goal")
+
+    print("§3 carrying the steps by similar title → allowed + archived")
+    plan_mod.apply_refined_plan(
+        db, pid, _plan("new goal", [
+            "wire the token refresh flow end to end",
+            "ship the export panel with tests",
+            "a completely different thing"]),
+        memory_dir=memory_dir)
+    check("auto-carry replacement stored",
+          db.get_plan_active(pid)["structured"]["goal"] == "new goal")
+    hist = list((memory_dir / ".plan_history").glob("plan_*_replace.json"))
+    check("outgoing plan archived", len(hist) >= 1, str(hist))
+
+    print("§4 explicit dispositions (action+reason) → allowed + audited")
+    dispo = [
+        {"old_title": "wire the token refresh flow end to end",
+         "action": "done", "reason": "shipped in commit abc123"},
+        {"old_title": "ship the export panel with tests",
+         "action": "dropped", "reason": "user ruling 2026-07-29: not needed"},
+        {"old_title": "a completely different thing",
+         "action": "merged", "reason": "absorbed into the omnibus step"},
+    ]
+    plan_mod.apply_refined_plan(
+        db, pid, _plan("third goal", ["one omnibus step"],
+                       dispositions=dispo),
+        memory_dir=memory_dir)
+    stored = db.get_plan_active(pid)["structured"]
+    check("dispositioned replacement stored", stored["goal"] == "third goal")
+    check("dispositions retained for audit",
+          len(stored.get("dispositions", [])) == 3, str(stored.keys()))
+
+    print("§5 disposition without a reason → REFUSED")
+    refused2 = None
+    try:
+        plan_mod.apply_refined_plan(
+            db, pid, _plan("fourth goal", ["unrelated"],
+                           dispositions=[{"old_title": "one omnibus step",
+                                          "action": "dropped",
+                                          "reason": ""}]),
+            memory_dir=memory_dir)
+    except ValueError as e:
+        refused2 = str(e)
+    check("reasonless disposition refused",
+          refused2 is not None and "no reason" in refused2, str(refused2))
+
+    print("§6 CLI plan-clear gate")
+    mem_py = REPO / "cc_memory" / "cli" / "mem.py"
+    # encoding pinned: the child prints UTF-8 (gate message contains an
+    # em-dash); text=True would decode with the locale codec (GBK on this
+    # host), crash the reader thread, and hand back stdout=None.
+    r = subprocess.run(
+        [sys.executable, str(mem_py), "--project", str(root), "plan-clear"],
+        capture_output=True, encoding="utf-8", errors="replace")
+    check("clear without --reason exits 1 and names the gate",
+          r.returncode == 1 and "carryover gate" in r.stdout,
+          f"rc={r.returncode} out={r.stdout[:200]}")
+    check("plan survives the refused clear",
+          db.get_plan_active(pid) is not None
+          and (db.get_plan_active(pid).get("structured") or {}).get("goal")
+          == "third goal")
+    r2 = subprocess.run(
+        [sys.executable, str(mem_py), "--project", str(root), "plan-clear",
+         "--reason", "test teardown ruling"],
+        capture_output=True, encoding="utf-8", errors="replace")
+    check("clear WITH --reason succeeds",
+          r2.returncode in (0, None) and "[OK]" in r2.stdout,
+          f"rc={r2.returncode} out={r2.stdout[:200]}")
+    clear_hist = list((memory_dir / ".plan_history").glob("plan_*_clear.json"))
+    check("cleared plan archived with reason",
+          len(clear_hist) >= 1 and "test teardown ruling"
+          in clear_hist[-1].read_text(encoding="utf-8"), str(clear_hist))
+
+    print(f"\n{'=' * 60}\nRESULT: {PASS} passed, {FAIL} failed\n{'=' * 60}")
+    sys.exit(1 if FAIL else 0)
+
+
+if __name__ == "__main__":
+    main()

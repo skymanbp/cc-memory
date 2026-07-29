@@ -102,6 +102,14 @@ def normalize_structured(plan: Dict) -> Dict:
     if isinstance(sc, list):
         out["success_criteria"] = [str(x).strip() for x in sc if str(x).strip()]
 
+    # R610: keep dispositions in the stored plan for audit (what happened
+    # to the previous plan's unfinished steps, and why).
+    dispositions = plan.get("dispositions", [])
+    if isinstance(dispositions, list):
+        kept = [d for d in dispositions if isinstance(d, dict)]
+        if kept:
+            out["dispositions"] = kept
+
     raw_steps = plan.get("steps", [])
     if isinstance(raw_steps, list):
         for i, s in enumerate(raw_steps, start=1):
@@ -317,6 +325,132 @@ def write_plan_md(db, project_id: int, memory_dir: Path) -> Path:
     return out
 
 
+# ── R610 carryover gate (2026-07-29) ────────────────────────────────────────
+#
+# 换计划不许丢步骤。plan_active is a SINGLE slot: replacing it used to be the
+# one moment where staged work could silently vanish (the documented
+# SELF-ITER S1-S3 sink — ratified follow-up phases that never re-entered any
+# plan and were lost when the next round's plan overwrote the slot).
+# apply_refined_plan therefore REFUSES to replace a plan that still has
+# unfinished steps unless EVERY one of them is accounted for:
+#   (a) auto-carried — a sufficiently similar step exists in the new plan, or
+#   (b) explicitly dispositioned — the new JSON carries a top-level
+#       "dispositions": [{"old_title": ..., "action":
+#       "done|dropped|merged|carried", "reason": "..."}] entry for it.
+# There is deliberately NO force flag: a drop without a recorded reason is
+# exactly the failure mode this gate exists to kill. Belt-and-braces, every
+# outgoing plan (even a cleanly-dispositioned one) is archived append-only
+# under memory/.plan_history/ so a wrong disposition is still recoverable.
+
+CARRYOVER_MATCH_THRESHOLD = 0.5
+_UNFINISHED_STATUSES = ("pending", "in_progress", "blocked")
+_DISPOSITION_ACTIONS = ("done", "dropped", "merged", "carried")
+
+
+def unfinished_steps(structured: Optional[Dict]) -> List[Dict]:
+    """Steps of the active plan that would be LOST by an unaccounted
+    replacement (pending / in_progress / blocked)."""
+    if not is_valid_structured(structured):
+        return []
+    return [s for s in structured["steps"]
+            if s.get("status") in _UNFINISHED_STATUSES]
+
+
+def _best_title_match(title: str, candidates: List[str]) -> float:
+    grams = _trigram_set(title)
+    best = 0.0
+    for c in candidates:
+        best = max(best, _jaccard(grams, _trigram_set(c)))
+    return best
+
+
+def check_carryover(old_structured: Optional[Dict], new_plan: Dict) -> List[str]:
+    """Return violation messages; empty list = replacement is allowed.
+
+    Reads dispositions from the RAW refiner dict (pre-normalisation) so
+    the schema stays additive for older refiner outputs on plans with no
+    unfinished steps.
+    """
+    olds = unfinished_steps(old_structured)
+    if not olds:
+        return []
+    new_titles: List[str] = []
+    for s in (new_plan.get("steps") or []):
+        if isinstance(s, dict):
+            t = f"{s.get('title', '')} {s.get('notes', '')}".strip()
+            if t:
+                new_titles.append(t)
+    dispositions = new_plan.get("dispositions") or []
+    violations: List[str] = []
+    for step in olds:
+        title = str(step.get("title", ""))
+        if _best_title_match(title, new_titles) >= CARRYOVER_MATCH_THRESHOLD:
+            continue  # auto-carried into the new plan
+        matched = None
+        for d in dispositions:
+            if not isinstance(d, dict):
+                continue
+            if _jaccard(_trigram_set(title),
+                        _trigram_set(str(d.get("old_title", "")))) \
+                    >= CARRYOVER_MATCH_THRESHOLD:
+                matched = d
+                break
+        if matched is None:
+            violations.append(
+                f"step #{step.get('id')} {title!r} — not in the new plan "
+                f"and no disposition")
+            continue
+        action = str(matched.get("action", "")).lower()
+        reason = str(matched.get("reason", "")
+                     or matched.get("detail", "")).strip()
+        if action not in _DISPOSITION_ACTIONS:
+            violations.append(
+                f"step #{step.get('id')} {title!r} — disposition action "
+                f"{action!r} not in {_DISPOSITION_ACTIONS}")
+        elif not reason:
+            violations.append(
+                f"step #{step.get('id')} {title!r} — disposition has no "
+                f"reason (a drop without a recorded reason is the exact "
+                f"failure mode this gate kills)")
+    return violations
+
+
+def archive_plan(row: Optional[Dict], memory_dir: Optional[Path],
+                 event: str, reason: str = "") -> Optional[Path]:
+    """Append-only archive of an outgoing plan (replace/clear) under
+    memory/.plan_history/. Last-resort backstop: even a wrong disposition
+    stays recoverable. Returns the path, or None."""
+    if memory_dir is None or not row:
+        return None
+    if not (row.get("structured") or (row.get("raw") or "").strip()):
+        return None
+    try:
+        hist_dir = memory_dir / ".plan_history"
+        hist_dir.mkdir(parents=True, exist_ok=True)
+        ts = datetime.now().strftime("%Y%m%dT%H%M%S")
+        out = hist_dir / f"plan_{ts}_{event}.json"
+        payload = {
+            "archived_at": datetime.now().isoformat(timespec="seconds"),
+            "event": event,
+            "reason": reason,
+            "structured": row.get("structured"),
+            "raw": row.get("raw"),
+            "active_step": row.get("active_step"),
+        }
+        out.write_text(json.dumps(payload, ensure_ascii=False, indent=2),
+                       encoding="utf-8")
+        return out
+    except OSError as e:
+        # why: the gate's dispositions are the primary anti-loss guarantee;
+        # blocking every plan operation on an archive-disk hiccup would turn
+        # the backstop into a denial-of-service on planning. Loudly warn.
+        import sys as _sys
+        print(f"[WARN] plan history archive failed ({e}) — proceeding; "
+              f"the carryover gate already enforced accounting",
+              file=_sys.stderr)
+        return None
+
+
 # ── Capture: ExitPlanMode + raw text path ───────────────────────────────────
 
 def capture_exit_plan_mode(db, project_id: int, plan_text: str,
@@ -351,6 +485,26 @@ def apply_refined_plan(db, project_id: int, structured: Dict,
     normalised = normalize_structured(structured)
     if not is_valid_structured(normalised):
         raise ValueError("refined plan does not satisfy schema (needs goal + ≥1 step)")
+
+    # R610 carryover gate — the ONLY replacement door for plan_active.
+    # Checked against the RAW input dict so top-level "dispositions" are
+    # visible even though normalisation runs on a copy. No force flag.
+    old_row = db.get_plan_active(project_id) or {}
+    violations = check_carryover(
+        old_row.get("structured") or {},
+        structured if isinstance(structured, dict) else {})
+    if violations:
+        raise ValueError(
+            "carryover gate REFUSED — the outgoing plan still has "
+            "unfinished steps not accounted for in the replacement:\n  - "
+            + "\n  - ".join(violations)
+            + "\nEvery unfinished step must either appear in the new plan's "
+              "steps (auto-carry by title similarity) or be listed in the "
+              "new JSON's top-level \"dispositions\": [{\"old_title\": ..., "
+              "\"action\": \"done|dropped|merged|carried\", \"reason\": ...}]."
+              " There is no force flag by design.")
+    archive_plan(old_row, memory_dir, event="replace")
+
     normalised["refined_at"] = datetime.now().isoformat(timespec="seconds")
     # Pick an initial active_step from the structured form
     active_step_id = 0

@@ -758,10 +758,27 @@ def cmd_plan_set(args):
 
 
 def cmd_plan_clear(args):
+    from core.plan import archive_plan, unfinished_steps
     db, pid, memory_dir = _plan_db(args.project)
-    if not db.get_plan_active(pid):
+    row = db.get_plan_active(pid)
+    if not row:
         print("No active plan to clear.")
         return
+    # R610 carryover gate (clear face): dropping a plan that still has
+    # unfinished steps without a recorded reason is the silent-sink
+    # failure mode. Mandatory --reason; archived append-only either way.
+    pending = unfinished_steps(row.get("structured") or {})
+    reason = (getattr(args, "reason", "") or "").strip()
+    if pending and not reason:
+        print(f"[FAIL] carryover gate: the active plan still has "
+              f"{len(pending)} unfinished step(s):")
+        for s in pending:
+            print(f"    - #{s.get('id')} {s.get('title')}")
+        print("  Clearing would silently sink them. Re-run with "
+              "--reason \"<why these steps are being dropped>\" -- the "
+              "reason is recorded in memory/.plan_history/.")
+        sys.exit(1)
+    archive_plan(row, memory_dir, event="clear", reason=reason)
     db.clear_plan_active(pid)
     plan_md = memory_dir / "PLAN.md"
     if plan_md.exists():
@@ -769,7 +786,7 @@ def cmd_plan_clear(args):
     raw_md = memory_dir / ".plan_raw.md"
     if raw_md.exists():
         raw_md.unlink()
-    print("[OK] Active plan cleared.")
+    print("[OK] Active plan cleared (archived to memory/.plan_history/).")
 
 
 def cmd_plan_replan(args):
@@ -1012,7 +1029,13 @@ def make_parser():
     pps.add_argument("--from-refiner", action="store_true",
                      help="Read structured JSON plan from stdin (refiner output)")
 
-    sub.add_parser("plan-clear", help="Drop the active plan + delete PLAN.md")
+    ppc = sub.add_parser(
+        "plan-clear",
+        help="Drop the active plan + delete PLAN.md (archived; unfinished "
+             "steps require --reason — R610 carryover gate)")
+    ppc.add_argument("--reason", default="",
+                     help="Required when the plan has unfinished steps: why "
+                          "they are being dropped (recorded in .plan_history)")
     sub.add_parser("plan-replan", help="Re-arm needs_refine on the current raw")
     sub.add_parser("plan-check",
                    help="Reset guardian counters + emit subagent invocation hint")
