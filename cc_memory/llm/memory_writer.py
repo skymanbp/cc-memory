@@ -18,7 +18,7 @@ Decision tree for a new memory M about topic T:
         → INSERT NEW (independent fact).
 
 This is the OPPOSITE of "always append + dedup later". It prevents the
-patch-style stacking the user flagged (cf. docs/MEMORY_RULES.md).
+patch-style stacking the user flagged (cf. docs/CONTRACTS.md#anti-patch-contract).
 
 After every successful upsert, `regenerate_memory_index(project_id, memory_dir)`
 is called so memory/MEMORY.md is always fresh (anti the 50-day-stale failure
@@ -279,6 +279,6 @@ def regenerate_memory_index(db: MemoryDB, project_id: int, memory_dir: Path) -> 
         "---",
         "*Query:        `python -m cc_memory.cli.mem --project <path> stats`*",
         "*Consolidate:  `python -m cc_memory.cli.mem --project <path> consolidate`*",
-        "*Anti-patch contract:  see `docs/MEMORY_RULES.md`*",
+        "*Anti-patch contract:  see `docs/CONTRACTS.md#anti-patch-contract`*",
     ]
     (memory_dir / "MEMORY.md").write_text("\n".join(lines), encoding="utf-8")

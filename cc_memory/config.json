@@ -1,5 +1,5 @@
 {
-  "version": "2.4.2",
+  "version": "2.4.3",
   "description": "cc-memory — Claude Code persistent memory plugin",
   "extraction": {
     "max_sentences_per_category": 10,
@@ -14,7 +14,7 @@
     "mid_similarity_threshold": 0.5,
     "min_content_length": 10,
     "max_candidates_to_scan": 50,
-    "notes": "Tuned for anti-patch upsert. See docs/MEMORY_RULES.md."
+    "notes": "Tuned for anti-patch upsert. See docs/CONTRACTS.md#anti-patch-contract."
   },
   "injection": {
     "total_budget_tokens": 4000,
@@ -80,7 +80,7 @@
     "importance_scale": "1=noise, 2=low, 3=normal, 4=important, 5=critical(never forget)",
     "categories": "decision, result, config, bug, task, arch, note",
     "storage": "<project>/memory/memory.db (SQLite, project-local)",
-    "handoff_spec": "docs/HANDOFF_PROTOCOL.md",
-    "anti_patch_contract": "docs/MEMORY_RULES.md"
+    "handoff_spec": "docs/CONTRACTS.md#handoff-contract",
+    "anti_patch_contract": "docs/CONTRACTS.md#anti-patch-contract"
   }
 }

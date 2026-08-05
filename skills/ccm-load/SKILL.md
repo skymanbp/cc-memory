@@ -11,17 +11,28 @@ Idempotent — safe to re-run.
 
 ### What this skill does
 
+This skill covers **activation and project bootstrap** — the things no other
+entry point does. Ongoing diagnostics belong to `/cc-mem status`; the two are
+deliberately disjoint (see the table at the end of this file).
+
 1. **Verify global plugin activation** — check `~/.claude/settings.json` for
    `enabledPlugins["cc-memory@cc-memory"]=true` and a matching
    `extraKnownMarketplaces.cc-memory` entry. If missing, print the exact
-   `/plugin install` commands the user needs to run.
-2. **Auto-initialize this project's `memory/`** — if `memory/memory.db` is
+   `/plugin install` commands the user needs to run. **This check exists
+   nowhere else** — not in `/cc-mem status`, not in the hooks.
+2. **Resolve the installed package tree** across both layouts (nested
+   marketplace/dev checkout, flat standalone install) and fail loudly with
+   actionable instructions if neither resolves.
+3. **Auto-initialize this project's `memory/`** — if `memory/memory.db` is
    absent, create the directory tree + DB + `.gitignore`. (This also happens
    on first UserPromptSubmit; this skill makes it explicit.)
-3. **Seed PROGRESS.md** — write a current snapshot from the (possibly empty)
+4. **Seed PROGRESS.md** — write a current snapshot from the (possibly empty)
    `progress` row so the file exists from day one.
-4. **Run the health check** (`mem.py status`).
-5. **Report status** to the user in 1-2 sentences.
+5. **Print quick DB counts** (memories / sessions / topics / observations).
+   This is **not** the `/cc-mem status` health check — install-layout
+   inspection, hook-registration verdicts, API-key resolution and last-save
+   staleness all live there and are NOT run by this skill.
+6. **Report status** to the user in 1-2 sentences.
 
 ### Step 1 — Run this script
 
@@ -89,25 +100,38 @@ if not db_path.exists():
 # machine. Try CLAUDE_PLUGIN_ROOT first (set by Claude Code when invoked
 # from a plugin context), then settings.json marketplace path, then the
 # v2.0-style standalone install location under ~/.claude/hooks/.
-def _find_plugin_root():
-    env_root = os.environ.get('CLAUDE_PLUGIN_ROOT')
-    if env_root and (Path(env_root) / 'cc_memory' / 'core' / 'db.py').exists():
-        return Path(env_root)
-    if marketplace_path:
-        p = Path(marketplace_path)
-        if (p / 'cc_memory' / 'core' / 'db.py').exists():
-            return p
-    standalone = Path.home() / '.claude' / 'hooks' / 'cc-memory'
-    if (standalone / 'cc_memory' / 'core' / 'db.py').exists():
-        return standalone
+# TWO layouts exist and both must be probed, otherwise a standalone install
+# is invisible: ui/installer.py copies each subpackage to TARGET_DIR/<subdir>/
+# directly, so it has NO cc_memory/ segment.
+#   nested - marketplace / dev checkout:  <root>/cc_memory/core/db.py
+#   flat   - standalone installer output: <root>/core/db.py
+# Returns the directory to put on sys.path (the package parent), not the root.
+def _pkg_dir(root):
+    if not root:
+        return None
+    p = Path(root)
+    if (p / 'cc_memory' / 'core' / 'db.py').exists():
+        return p / 'cc_memory'
+    if (p / 'core' / 'db.py').exists():
+        return p
     return None
 
-plugin_root = _find_plugin_root()
-if plugin_root is None:
-    print('[error] cannot locate cc-memory plugin tree.')
+def _find_pkg_dir():
+    for cand in (os.environ.get('CLAUDE_PLUGIN_ROOT'),
+                 marketplace_path,
+                 str(Path.home() / '.claude' / 'hooks' / 'cc-memory')):
+        d = _pkg_dir(cand)
+        if d:
+            return d
+    return None
+
+pkg_dir = _find_pkg_dir()
+if pkg_dir is None:
+    print('[error] cannot locate cc-memory package tree.')
     print('  Set CLAUDE_PLUGIN_ROOT, or re-run /plugin install cc-memory.')
     sys.exit(0)
-sys.path.insert(0, str((plugin_root / 'cc_memory').resolve()))
+plugin_root = pkg_dir.parent if pkg_dir.name == 'cc_memory' else pkg_dir
+sys.path.insert(0, str(pkg_dir.resolve()))
 
 from core.db import MemoryDB
 from core.progress import write_progress_md, migrate_legacy_handoff
@@ -159,12 +183,16 @@ Summarize to the user in 1-2 sentences:
 
 ### Relation to other cc-memory entry points
 
-| Entry point | Scope |
-|-------------|-------|
-| `/ccm-load` (this) | One-shot end-to-end activation + init + status |
-| `/cc-mem status` | Just the health check (subset of ccm-load step 4) |
-| `/cc-mem dashboard` | Launch the Tkinter GUI for the current project |
-| `/save-memories` | Manual memory save through the anti-patch writer |
+These entry points are deliberately **orthogonal** — each owns something the
+others cannot do. Nothing here is a subset of anything else.
 
-`/ccm-load` is the recommended single entry point for new projects.
-Day-to-day inspection uses `/cc-mem <subcommand>`.
+| Entry point | Owns |
+|-------------|------|
+| `/ccm-load` (this) | **Activation + bootstrap**: global plugin-enablement check, package-tree resolution, project `memory/` creation, PROGRESS.md seeding. Run once per new project |
+| `/cc-mem status` | **Ongoing diagnostics**: install-layout inspection, hook-registration verdicts, API-key resolution, last-save staleness. None of these are run by `/ccm-load` |
+| `/cc-mem <other>` | **Querying and management**: search, list, topics, progress, consolidate, plan-* |
+| `/cc-mem dashboard` | Tkinter GUI for the current project |
+| `/save-memories` | **Manual write path** through the anti-patch writer. The hooks save automatically; this is the on-demand trigger |
+
+`/ccm-load` is the recommended first command in a new project. Day-to-day
+inspection uses `/cc-mem <subcommand>`; deliberate saves use `/save-memories`.

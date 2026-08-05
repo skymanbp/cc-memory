@@ -9,7 +9,7 @@ Fires on every new session (startup, resume, post-compaction). Three jobs:
 
   2. EMIT A FORCED <system-reminder> directing Claude to Read PROGRESS.md
      and MEMORY.md BEFORE responding. This is the hook-level enforcement
-     of the handoff contract (see docs/HANDOFF_PROTOCOL.md).
+     of the handoff contract (see docs/CONTRACTS.md#handoff-contract).
 
   3. Best-effort RETROACTIVE SAVE — if previous JSONL transcripts were
      never compacted, extract memories from them now via Haiku.
@@ -268,7 +268,7 @@ def _build_forced_reminder(memory_dir):
         "",
         "RESUME PROTOCOL — if the user's first message is exactly one of:",
         # i18n Tier 3: bilingual resume tokens INTENTIONAL — keep in sync with
-        # user_prompt.py resume_signals; do NOT reduce to English-only (docs/I18N.md §1).
+        # user_prompt.py resume_signals; do NOT reduce to English-only (docs/ARCHITECTURE.md#9-documentation-language-convention-i18n §1).
         '    "" (empty)  ·  "继续"  ·  "接着"  ·  "接着做"  ·  "接着干"  ·',
         '    "继续干"  ·  "resume"  ·  "continue"  ·  "go on"  ·  "keep going"',
         "  then DO NOT ask for clarification. Instead:",
@@ -281,7 +281,7 @@ def _build_forced_reminder(memory_dir):
         "",
         "Why: this is the project's handoff contract (single source of truth).",
         "Skipping it risks duplicating work or contradicting prior decisions.",
-        "Spec: `docs/HANDOFF_PROTOCOL.md`.",
+        "Spec: `docs/CONTRACTS.md#handoff-contract`.",
         "</system-reminder>",
         "",
     ]

@@ -45,11 +45,45 @@ automatically. Do not call `db.insert_memory` directly.
 
 ```bash
 python3 -c "
-import sys
+import json, os, sys
 from pathlib import Path
 
-PLUGIN = Path.home() / '.claude' / 'hooks' / 'cc-memory'
-sys.path.insert(0, str(PLUGIN / 'cc_memory'))
+# why: the old hardcoded ~/.claude/hooks/cc-memory/cc_memory path made this
+# skill dead on every install that is not a v2.0-era standalone one -- on a
+# marketplace install that directory holds only logs/. Probe BOTH layouts:
+#   nested - marketplace / dev checkout:  <root>/cc_memory/core/db.py
+#   flat   - standalone installer output: <root>/core/db.py
+# (ui/installer.py copies each subpackage to TARGET_DIR/<subdir>/ directly.)
+def _pkg_dir(root):
+    if root and (Path(root) / 'cc_memory' / 'core' / 'db.py').exists():
+        return Path(root) / 'cc_memory'
+    if root and (Path(root) / 'core' / 'db.py').exists():
+        return Path(root)
+    return None
+
+def _find_pkg_dir():
+    cand = [os.environ.get('CLAUDE_PLUGIN_ROOT')]
+    s = Path.home() / '.claude' / 'settings.json'
+    if s.exists():
+        try:
+            mk = json.loads(s.read_text(encoding='utf-8')).get('extraKnownMarketplaces', {}).get('cc-memory') or {}
+            cand.append((mk.get('source') or {}).get('path'))
+        except (json.JSONDecodeError, OSError):
+            # why: a malformed settings.json must not abort resolution -- the
+            # standalone candidate appended below can still succeed
+            cand.append(None)
+    cand.append(str(Path.home() / '.claude' / 'hooks' / 'cc-memory'))
+    for c in cand:
+        d = _pkg_dir(c)
+        if d:
+            return d
+    return None
+
+PKG = _find_pkg_dir()
+if PKG is None:
+    print('[error] cannot locate the cc-memory package tree; run /ccm-load first.')
+    sys.exit(0)
+sys.path.insert(0, str(PKG.resolve()))
 
 from core.db import MemoryDB
 from llm.memory_writer import upsert_batch
@@ -81,4 +115,4 @@ Tell the user the breakdown:
 
 The merged/superseded counts are *good*: they mean the writer is preventing the
 patch-style stacking the v2.1 anti-patch contract was designed to stop. See
-`docs/MEMORY_RULES.md` for the full contract.
+`docs/CONTRACTS.md#anti-patch-contract` for the full contract.

@@ -34,7 +34,7 @@ v2.3.3: Documentation multilingual version-control. English is the canonical
       first), each tied to a normalized-sha256 of its English source. A pure-
       stdlib checker (tools/i18n_check.py) + a tests/smoke_test.py gate turn red
       the moment an English doc changes without its translation being refreshed.
-      Memory content stays language-agnostic (docs/I18N.md). Docs + version-
+      Memory content stays language-agnostic (docs/ARCHITECTURE.md#9-documentation-language-convention-i18n). Docs + version-
       metadata only — no runtime behavior changed.
 
 v2.3.2: Consolidation moved OFF the blocking compaction path into a sibling
@@ -61,4 +61,4 @@ v2.1: Reorganized into core/hooks/llm/ui/cli/mcp subpackages.
       PROGRESS.md forced-handoff replaces SESSION_HANDOFF.md.
       MEMORY.md auto-regenerates on every write.
 """
-__version__ = "2.4.2"
+__version__ = "2.4.3"

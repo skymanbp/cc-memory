@@ -3,7 +3,7 @@
 i18n_check.py — documentation translation drift checker for cc-memory.
 
 Enforces the "English skeleton + drift-tracked translation" convention documented
-in docs/I18N.md:
+in docs/ARCHITECTURE.md#9-documentation-language-convention-i18n:
 
   * ``NAME.md``    is the canonical English source (the skeleton).
   * ``NAME.zh.md`` is a Chinese sibling. Its FIRST line carries a machine-readable

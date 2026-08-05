@@ -307,7 +307,7 @@ class MemoryHandler(BaseHTTPRequestHandler):
 
         if self.path == "/api/memory":
             # Anti-patch: route through upsert_smart so similar memories
-            # MERGE or SUPERSEDE instead of stacking. See docs/MEMORY_RULES.md.
+            # MERGE or SUPERSEDE instead of stacking. See docs/CONTRACTS.md#anti-patch-contract.
             result = upsert_smart(
                 db, pid, None,
                 category=body.get("category", "note"),

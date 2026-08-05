@@ -1,7 +1,7 @@
 """
 SQLite database layer.
 
-Schema (3NF normalized, see docs/ARCHITECTURE.md §3):
+Schema (3NF normalized, see docs/ARCHITECTURE.md §4 "Database schema"):
   projects          one row per project path
   sessions          one row per compaction event
   memories          extracted facts (category + importance + topic + content_hash + supersedes_id)

@@ -7,6 +7,75 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [2.4.3] — 2026-08-05
+
+Shipped-surface repair + documentation consolidation. A fact-check of every
+documentation file against the code found that three of the plugin's own entry
+points were **dead**, not merely mis-documented.
+
+### Fixed
+
+- **`/cc-mem` was completely non-functional.** `commands/cc-mem.md` passed
+  `$ARGS` to the CLI, but the placeholder Claude Code substitutes is
+  `$ARGUMENTS` (50 uses across installed marketplace commands; `$ARGS` appears
+  nowhere). Unsubstituted, the shell expanded it to nothing, and
+  `cli/mem.py`'s `add_subparsers(..., required=True)` aborted every invocation.
+- **`/save-memories` raised `ModuleNotFoundError` on any non-legacy install.**
+  The skill hardcoded `~/.claude/hooks/cc-memory/cc_memory` on `sys.path`; on a
+  marketplace install that directory contains only `logs/`. It now resolves the
+  package tree the same way `ccm-load` does (env var → marketplace path →
+  standalone), and fails with an actionable message instead of a traceback.
+- **Install-layout probes were inverted repo-wide.** `ui/installer.py`'s
+  `_copy_subpackages` writes each subpackage to `TARGET_DIR/<subdir>/` — a
+  **flat** tree with no `cc_memory/` segment — while `skills/ccm-load`,
+  `commands/cc-mem.md`, `cli/mem.py`'s legacy-install detection and the README
+  install paths all probed for the **nested** `cc_memory/` form. Consequence: an
+  exe-installed machine was invisible to `/ccm-load`, `/cc-mem`, and
+  `/cc-mem status` alike. All four now accept **both** layouts.
+- **`/cc-mem status` under-reported a broken install.** Documented in 2.4.2;
+  the layout fix above is what makes the standalone case actually detectable.
+- **`README` MCP instructions described a no-op.** `mcp.auto_register` is read
+  by no code and nothing writes an MCP client config; the README now says so and
+  documents manual stdio registration instead.
+
+### Changed
+
+- **`docs/` consolidated from 5 files to 2.** `MEMORY_RULES.md`,
+  `HANDOFF_PROTOCOL.md` and `PLAN_PROTOCOL.md` are now chapters of
+  **`docs/CONTRACTS.md`**; `I18N.md` is now §9 of **`docs/ARCHITECTURE.md`**.
+  79 citations across 18 files (code comments, `config.json`, `CLAUDE.md`, both
+  READMEs, runtime-emitted footers in `MEMORY.md`/`PROGRESS.md`) were repointed
+  to the new filenames and anchors. `CHANGELOG.md` deliberately keeps the old
+  names in historical entries.
+- **`docs/ARCHITECTURE.zh.md` added.** The old `I18N.md` carried a language
+  switcher pointing at `I18N.zh.md`, which never existed. The i18n tracked set
+  is now 2 documents instead of 5, so translations are far cheaper to keep green.
+- **The v2.4.0 carryover gate is documented in prose for the first time.** It
+  shipped with no coverage in `docs/`, `CLAUDE.md` or `README.md` — only a
+  commit message. `docs/CONTRACTS.md` now specifies it fully, including what a
+  refusal looks like and how to resolve one.
+- **`/ccm-load` narrowed to what only it can do** — global plugin-activation
+  check, package-tree resolution, project bootstrap, PROGRESS.md seeding. It
+  previously claimed to "run the health check (`mem.py status`)", which it never
+  did (it printed DB counts), and claimed `/cc-mem status` was a *subset* of
+  itself — backwards. The two entry points are now documented as orthogonal, and
+  `/save-memories` was kept separate rather than merged for the same reason.
+
+### Documentation accuracy
+
+Fact-checked against code and corrected: hook registration (a marketplace
+install does **not** write `settings.json`'s `hooks` key — only the standalone
+installer does), the `progress` row's writer count (**four** paths, not three —
+`session_start._refresh_progress_row` was missing), the anti-patch caller list
+(three writers omitted: dashboard init, web viewer, retroactive save), the
+memory tag inventory (`["llm","auto"]` is emitted by **no** code path; the
+PreCompact LLM path stores `[]`), the stdlib rule (read literally it forbade
+`import os`/`import sys`, which every hook uses), the `memory/` artifact
+listings in both READMEs and `ARCHITECTURE.md`, and the standalone install paths
+throughout.
+
+---
+
 ## [2.4.2] — 2026-08-04
 
 Hook-survivability release. On a long-lived project the `PreCompact` sync leg

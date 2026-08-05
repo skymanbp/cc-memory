@@ -2,7 +2,7 @@
 
 ## Project: cc-memory
 
-**Claude Code persistent memory plugin (v2.4.2)** — anti-patch reconcile-on-write
+**Claude Code persistent memory plugin (v2.4.3)** — anti-patch reconcile-on-write
 + LLM-judged semantic de-duplication, forced PROGRESS.md handoff with
 per-session annotation, live PLAN.md anchor with plan-refiner / plan-guardian
 subagents + mandatory carryover gate, bounded transcript reads, injection
@@ -10,9 +10,41 @@ observability, FTS5 search, AI-judged extraction with Haiku (optional local
 Ollama fallback).
 
 - **Language**: Python 3.8+ (pure stdlib, zero pip dependencies at runtime)
-- **Version**: 2.4.2
+- **Version**: 2.4.3
 - **License**: MIT
 - **Platform**: Windows-primary, cross-platform compatible (Tkinter required for GUI)
+
+## What changed in v2.4.3 (over v2.4.2)
+
+**Shipped surfaces were broken, and the docs were lying.** A fact-check of every
+documentation file against the code turned up three dead entry points:
+
+1. **`/cc-mem` did not work at all.** `commands/cc-mem.md` used `$ARGS`; the
+   placeholder Claude Code substitutes is `$ARGUMENTS`. Unsubstituted it expands
+   to empty, and `mem.py`'s subparser is `required=True`, so every invocation
+   aborted.
+2. **`save-memories` was dead on any non-legacy install.** It hardcoded
+   `~/.claude/hooks/cc-memory/cc_memory`, which on a marketplace install holds
+   only `logs/` → `ModuleNotFoundError`.
+3. **Install-layout probes were inverted repo-wide.** `ui/installer.py` copies
+   subpackages to `TARGET_DIR/<subdir>/` — a **flat** tree with no `cc_memory/`
+   segment — but `ccm-load`, `commands/cc-mem.md`, `cli/mem.py`'s legacy
+   detection and the README all probed for the **nested** form. Every standalone
+   install was therefore invisible to all of them. All four now probe both.
+
+**Docs consolidated 5 → 2.** `docs/MEMORY_RULES.md`, `HANDOFF_PROTOCOL.md` and
+`PLAN_PROTOCOL.md` merged into **`docs/CONTRACTS.md`**; `I18N.md` merged into
+**`docs/ARCHITECTURE.md`** as §9. 79 citations across 18 files were repointed to
+the new files + anchors. `docs/ARCHITECTURE.zh.md` is the Chinese translation
+(the old `I18N.md` switcher pointed at a file that never existed).
+
+The v2.4.0 carryover gate is now **documented in prose for the first time** — it
+shipped with zero documentation outside its commit message.
+
+Skills stay **two, and orthogonal**: `/ccm-load` owns activation + bootstrap
+(the global plugin-enablement check exists nowhere else), `/save-memories` owns
+the manual write path. `ccm-load` no longer claims to run the `/cc-mem status`
+health check — it never did; it only printed DB counts.
 
 ## What changed in v2.4.2 (over v2.4.1)
 
@@ -38,8 +70,12 @@ loaded the ENTIRE `.jsonl` before using ~12 KB of it.
 4. **`RuntimeError` added to the extraction `except` tuple** — a total LLM
    outage no longer skips the PROGRESS.md rewrite.
 5. **`memory/.gitignore` migrates existing installs** via
-   `core.progress.ensure_memory_gitignore` (single source for all four
-   generators); previously every new runtime artifact leaked forever.
+   `core.progress.ensure_memory_gitignore`. Three call sites import it
+   (`hooks/pre_compact.py`, `hooks/user_prompt.py`, `ui/dashboard.py`); two
+   more keep DELIBERATE literal copies because they cannot import the package
+   (`ui/installer.py` is a stdlib-only bootstrap, `skills/ccm-load/SKILL.md`
+   is an inline script) — those two must be hand-synced. Previously every new
+   runtime artifact leaked forever.
 6. **`pyproject.toml` BOM stripped** — `tomllib` could not parse it, so no PEP
    517 frontend could build or install the package since v2.4.0.
 
@@ -94,7 +130,7 @@ fields are informational, so a version bump never mass-flags translations.
    NO-MARKER docs and that `README.zh.md`'s marker digest matches the live
    `hash_source(README.md)` — so editing an English doc without refreshing its
    translation turns the suite red.
-3. **`docs/I18N.md`** — the convention (3-tier language model, naming, switcher,
+3. **`docs/ARCHITECTURE.md#9-documentation-language-convention-i18n`** — the convention (3-tier language model, naming, switcher,
    marker + normalization recipe, add/update workflows). Tier 3 = memory content
    is language-agnostic; the bilingual detectors in `extractor.py` /
    `user_prompt.py` / `session_start.py` are intentional and carry `# i18n Tier 3`
@@ -143,7 +179,7 @@ v2.3.2 fixes the root cause:
    (subsets of `/ccm-load` + `/cc-mem status`). `skills/ccm-load` rewritten
    to auto-resolve plugin root instead of the maintainer's hardcoded path.
 
-See `docs/PLAN_PROTOCOL.md` for the full v2.2 contract.
+See `docs/CONTRACTS.md#plan-contract` for the full v2.2 contract.
 
 ## What changed in v2.1 (over v2.0)
 
@@ -151,11 +187,11 @@ See `docs/PLAN_PROTOCOL.md` for the full v2.2 contract.
    `cc_memory/{core,hooks,llm,cli,mcp,ui}/`. No more 22-file flat directory.
 2. **Anti-patch writes.** `llm.memory_writer.upsert_smart` is the single
    entry for any save path. It MERGES / SUPERSEDES / INSERTS based on
-   similarity — no stacking of duplicates. See `docs/MEMORY_RULES.md`.
+   similarity — no stacking of duplicates. See `docs/CONTRACTS.md#anti-patch-contract`.
 3. **Forced handoff.** `memory/PROGRESS.md` (new in v2.1) replaces
    `SESSION_HANDOFF.md`. SessionStart emits a `<system-reminder>` block that
    directs the next Claude to `Read memory/PROGRESS.md` BEFORE responding.
-   See `docs/HANDOFF_PROTOCOL.md`.
+   See `docs/CONTRACTS.md#handoff-contract`.
 4. **Auto-fresh MEMORY.md.** Regenerated after every batch upsert.
 5. **Idle reorg.** Stop hook runs lightweight cleanup every 5 turns (no LLM).
 6. **One installer, one skills location, one version number** across all files.
@@ -210,7 +246,11 @@ cc-memory/
 
 ## Hooks (6)
 
-Registered in `~/.claude/settings.json` and declared in `hooks/hooks.json`.
+Declared in `hooks/hooks.json`. A **marketplace / dev-checkout** install is
+discovered via `enabledPlugins` + `extraKnownMarketplaces` in
+`~/.claude/settings.json` → the plugin manifest → `hooks/hooks.json`; the
+`hooks` key of `settings.json` stays untouched. Only the **standalone**
+installer (`ui/installer.py:_merge_into_settings`) writes hook entries there.
 `PreCompact` fires TWO command hooks (v2.3.2): a blocking sync leg + a
 background `async` leg.
 
@@ -253,7 +293,7 @@ Key columns added in v2.1:
 > Every memory save path routes through `llm.memory_writer.upsert_smart`,
 > which MERGES in place, SUPERSEDES with a chain link, or INSERTS based on
 > trigram-Jaccard similarity. Never call `db.insert_memory` directly from a
-> caller path. See `docs/MEMORY_RULES.md` for the full spec.
+> caller path. See `docs/CONTRACTS.md#anti-patch-contract` for the full spec.
 
 All save paths route through the writer (no remaining direct callers of
 `db.insert_memory` outside the writer itself):
@@ -264,20 +304,30 @@ All save paths route through the writer (no remaining direct callers of
 - `skills/save-memories/SKILL.md` ✓ (calls `upsert_batch`)
 - `ui/dashboard.py` "Add Memory" dialog ✓ (`upsert_smart`)
 - `ui/dashboard.py` "Save Session" ✓ (`upsert_batch`)
+- `ui/dashboard.py` new-project init ✓ (`upsert_batch`)
+- `ui/web_viewer.py` POST /api/memory ✓ (`upsert_smart`)
+- `hooks/session_start.py` retroactive save ✓ (`upsert_batch`)
+
+The single `db.insert_memory` call outside the writer is inside
+`MemoryDB.supersede_memory` (`core/db.py`) — that is the writer's own
+SUPERSEDE implementation, not a caller path.
 
 ## Forced handoff contract
 
 > `memory/PROGRESS.md` is the single source of truth for session handoff.
 > It is ALWAYS full-rewritten from the `progress` SQL row, never appended.
 > SessionStart emits a `<system-reminder>` requiring the next Claude to Read
-> it BEFORE responding. See `docs/HANDOFF_PROTOCOL.md`.
+> it BEFORE responding. See `docs/CONTRACTS.md#handoff-contract`.
 
 The `progress` row has 11 user-facing fields (`current_request`, `status_*`,
 `open_todos`, `plan`, `critical_context`, `files_touched`, `transcript_ptr`,
-`updated_at`, `trigger_type`). It is updated by three paths:
+`updated_at`, `trigger_type`). It is updated by four paths:
 - `PreCompact` does a full overwrite (`upsert_progress`).
 - `Stop` patches `files_touched` per turn (`patch_progress`).
 - `UserPromptSubmit` patches `current_request` on turn 1 (`patch_progress`).
+- `SessionStart` fills ONLY still-empty fields via
+  `_refresh_progress_row` (`patch_progress`, `trigger_type="session_start_refresh"`).
+  Fill-only-empty by contract — it must never overwrite a populated field.
 
 `SESSION_HANDOFF.md` from v2.0 is renamed to `SESSION_HANDOFF.md.v2.bak` on
 first PreCompact under v2.1 (one-shot migration in `core/progress.py`).
@@ -286,7 +336,7 @@ first PreCompact under v2.1 (one-shot migration in `core/progress.py`).
 
 > `memory/PLAN.md` is the single source of truth for the current goal +
 > step status. Distinct from PROGRESS.md (session handoff) — PLAN.md
-> outlives sessions. See `docs/PLAN_PROTOCOL.md` for the full spec.
+> outlives sessions. See `docs/CONTRACTS.md#plan-contract` for the full spec.
 
 The `plan_active` table (one row per project) backs PLAN.md. Lifecycle:
 
@@ -310,9 +360,13 @@ standalone installs.
 
 ## Development guidelines
 
-- **Pure stdlib only at runtime.** Only `sqlite3, json, pathlib, urllib,
-  datetime, subprocess, tkinter, time, hashlib, re, http.server`. No pip
-  dependencies. PyInstaller is build-time only.
+- **Pure stdlib only at runtime.** No pip dependencies of any kind;
+  PyInstaller is build-time only. The rule is *stdlib-only*, not a closed
+  whitelist — beyond the obvious `sqlite3, json, pathlib, urllib, datetime,
+  subprocess, tkinter, time, hashlib, re, http.server`, live hook paths also
+  use `os, sys, tempfile, argparse, collections, typing, threading,
+  traceback, shutil, platform, textwrap, unicodedata, webbrowser,
+  __future__`. All stdlib, all fine.
 - **Hook safety > anything else.** A broken hook can hang or break Claude
   Code itself. `try: ... except Exception: pass` with a `# why: ...` comment
   is appropriate in hook code. Log to file via `core.logger`.
@@ -322,7 +376,7 @@ standalone installs.
   resolution. Never hardcode key reading.
 - **Anti-patch.** Never call `db.insert_memory` directly from a caller path
   — use `llm.memory_writer.upsert_smart` or `upsert_batch`. See
-  `docs/MEMORY_RULES.md`.
+  `docs/CONTRACTS.md#anti-patch-contract`.
 - **Plugin-agnostic.** Don't add project-specific keywords (e.g. ML/astro
   vocab) to `extractor.py` or `consolidate.py`. Those were removed in v2.1
   for a reason.
@@ -333,9 +387,14 @@ standalone installs.
 - Never delete or overwrite `memory.db` or archived sessions without asking.
 - Never fabricate extraction results or memory content.
 - Hooks must never block Claude Code — always exit cleanly (`sys.exit(0)`).
-- Tag memories with their extraction method (`["llm", "auto"]`,
-  `["observer", "realtime"]`, `["manual"]`, `["mcp"]`, `["merged"]`,
-  `["supersedes"]`, etc.) for traceability.
+- Tag memories with their extraction method for traceability. Tags actually
+  emitted today: `["observer","realtime"]` (`hooks/stop.py`), `["mcp"]`
+  (`mcp/server.py`), `["manual"]` (`cli/mem.py`), `["manual","dashboard"]`
+  and `["auto-detected","init"]` (`ui/dashboard.py`), `["web"]`
+  (`ui/web_viewer.py`), `["llm-dedup","merged"]` (`core/consolidate.py`);
+  the writer appends `"merged"` / `"supersedes"` on those paths. NOTE: the
+  PreCompact LLM path sets no `tags` key, so those rows store `[]` — do not
+  document a `["llm","auto"]` tag that no code emits.
 - `memory/PROGRESS.md` and `memory/MEMORY.md` are generated artifacts. Edit
   the SQL source of truth (`progress` table for PROGRESS.md, `memories`/
   `topics`/`keywords` for MEMORY.md) instead.
@@ -415,7 +474,7 @@ way — same package, alternate install path.
 ## See also
 
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — full architecture overview
-- [docs/MEMORY_RULES.md](docs/MEMORY_RULES.md) — anti-patch contract
-- [docs/HANDOFF_PROTOCOL.md](docs/HANDOFF_PROTOCOL.md) — PROGRESS.md spec
-- [docs/PLAN_PROTOCOL.md](docs/PLAN_PROTOCOL.md) — PLAN.md + subagent spec (v2.2)
+- [docs/CONTRACTS.md#anti-patch-contract](docs/CONTRACTS.md#anti-patch-contract) — anti-patch contract
+- [docs/CONTRACTS.md#handoff-contract](docs/CONTRACTS.md#handoff-contract) — PROGRESS.md spec
+- [docs/CONTRACTS.md#plan-contract](docs/CONTRACTS.md#plan-contract) — PLAN.md + subagent spec (v2.2)
 - [CHANGELOG.md](CHANGELOG.md) — version history

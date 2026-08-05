@@ -173,8 +173,12 @@ def _detect_install_layouts():
                 hooks_via="plugin-manifest", enabled=enabled_marketplace,
             ))
 
+    # Accept BOTH standalone shapes. ui/installer.py:_copy_subpackages writes
+    # TARGET_DIR/<subdir>/ directly, i.e. a FLAT tree with no cc_memory/
+    # segment, so probing only for cc_memory/ made every install this installer
+    # produces invisible to `/cc-mem status`.
     legacy = home / "hooks" / "cc-memory"
-    if (legacy / "cc_memory").exists():
+    if (legacy / "cc_memory").exists() or (legacy / "core" / "db.py").exists():
         layouts.append(_inspect_layout(
             "legacy-install", legacy,
             hooks_via="user-settings",
@@ -269,7 +273,7 @@ def cmd_status(args):
     memory_dir, db_path, name = _resolve_db(args.project)
     project = str(Path(args.project).resolve())
 
-    print(f"\n{'='*55}\n  cc-memory v2.4.2 Status Check: {name}\n{'='*55}\n")
+    print(f"\n{'='*55}\n  cc-memory v2.4.3 Status Check: {name}\n{'='*55}\n")
 
     layouts = _detect_install_layouts()
     if not layouts:
@@ -398,7 +402,7 @@ def cmd_stats(args):
     ).fetchone()
     if superseded["n"]:
         print(f"\nSupersede chains: {superseded['n']} update events recorded "
-              f"(anti-patch in action — see docs/MEMORY_RULES.md)")
+              f"(anti-patch in action — see docs/CONTRACTS.md#anti-patch-contract)")
 
     kw = conn.execute(
         "SELECT keyword, frequency FROM keywords ORDER BY frequency DESC LIMIT 10"
@@ -977,7 +981,7 @@ def cmd_encoding_check(args):
 
 
 def make_parser():
-    p = argparse.ArgumentParser(prog="cc-memory", description="cc-memory CLI v2.4.2",
+    p = argparse.ArgumentParser(prog="cc-memory", description="cc-memory CLI v2.4.3",
         formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--project", required=True, help="Project root path")
     sub = p.add_subparsers(dest="command", required=True)

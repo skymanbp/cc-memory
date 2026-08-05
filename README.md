@@ -2,7 +2,7 @@
 
 # cc-memory
 
-**Claude Code persistent memory plugin (v2.4.2)** — anti-patch reconcile-on-write
+**Claude Code persistent memory plugin (v2.4.3)** — anti-patch reconcile-on-write
 with LLM-judged semantic de-duplication, forced PROGRESS.md handoff, live PLAN.md
 anchor with plan-refiner / plan-guardian subagents and a mandatory carryover
 gate, bounded transcript reads, injection observability, FTS5 search, AI-judged
@@ -56,7 +56,7 @@ hook loaded the *entire* transcript before using ~12 KB of it.
   explicitly dispositioned with a reason; `/cc-mem plan-clear` refuses without
   `--reason`; every outgoing plan is archived to `memory/.plan_history/`.
   **There is no force flag, by design.** See
-  [docs/PLAN_PROTOCOL.md](docs/PLAN_PROTOCOL.md).
+  [docs/CONTRACTS.md#plan-contract](docs/CONTRACTS.md#plan-contract).
 - v2.4.1 fixed a false refusal where a long `notes` field diluted the
   title match and blocked a legitimate in-place plan update.
 
@@ -76,7 +76,7 @@ hook loaded the *entire* transcript before using ~12 KB of it.
   ([tools/i18n_check.py](tools/i18n_check.py)) plus a [tests/smoke_test.py](tests/smoke_test.py)
   gate turn red the moment an English doc changes without its translation being
   refreshed. Memory *content* stays language-agnostic — only docs are tracked.
-  See [docs/I18N.md](docs/I18N.md).
+  See [docs/ARCHITECTURE.md#9-documentation-language-convention-i18n](docs/ARCHITECTURE.md#9-documentation-language-convention-i18n).
 
 This is a docs + version-metadata release — no runtime behavior changed.
 
@@ -118,7 +118,7 @@ See [CHANGELOG.md](CHANGELOG.md).
   (or user-supplied raw plans) into a structured, step-tracked document
   that survives session boundaries. `TodoWrite` syncs step statuses
   mechanically; sensitive Bash calls (`git push`, deploys, ...) flag
-  drift. See [docs/PLAN_PROTOCOL.md](docs/PLAN_PROTOCOL.md).
+  drift. See [docs/CONTRACTS.md#plan-contract](docs/CONTRACTS.md#plan-contract).
 - **Plugin-shipped subagents.** `plan-refiner` normalises raw plans into
   JSON; `plan-guardian` checks alignment when drift counters trip.
   Definitions live in `agents/` and are auto-discovered after install.
@@ -130,11 +130,11 @@ See [CHANGELOG.md](CHANGELOG.md).
 - **Anti-patch writes.** Every save goes through `llm.memory_writer.upsert_smart`,
   which MERGES (overwrites a similar memory in place), SUPERSEDES (archives the
   old, links the new via `supersedes_id`), or INSERTS — chosen by trigram-Jaccard
-  similarity. No more stacked duplicates. See [docs/MEMORY_RULES.md](docs/MEMORY_RULES.md).
+  similarity. No more stacked duplicates. See [docs/CONTRACTS.md#anti-patch-contract](docs/CONTRACTS.md#anti-patch-contract).
 - **Forced handoff via PROGRESS.md.** `memory/PROGRESS.md` is the single source
   of truth for session handoff, always full-rewritten from a SQL row, never
   appended. SessionStart emits a `<system-reminder>` block that requires the
-  next Claude to Read it before responding. See [docs/HANDOFF_PROTOCOL.md](docs/HANDOFF_PROTOCOL.md).
+  next Claude to Read it before responding. See [docs/CONTRACTS.md#handoff-contract](docs/CONTRACTS.md#handoff-contract).
 - **Auto-fresh MEMORY.md.** Regenerated after every write — no more 50-day-stale
   index files.
 - **Idle reorg.** Stop hook runs lightweight cleanup every 5 turns (no LLM).
@@ -184,7 +184,7 @@ Per-project initialization is **automatic** — the first user message creates
 ## Architecture at a glance
 
 ```
-Hooks (registered in ~/.claude/settings.json):
+Hooks (declared in hooks/hooks.json; discovered via the plugin manifest):
 
   UserPromptSubmit ─► turn count + first-prompt seeding of PROGRESS.md
                       auto-init memory/ on first contact
@@ -197,7 +197,7 @@ Hooks (registered in ~/.claude/settings.json):
 
   PreCompact      ─► fires TWO hooks:
                      • sync  (pre_compact.py, 120s): Haiku extracts memories from
-                       the full transcript → memory_writer.upsert_smart →
+                       a bounded head+tail transcript window (40 records + 32 MiB) → memory_writer.upsert_smart →
                        FULL-REWRITE memory/PROGRESS.md → archive → regen MEMORY.md
                      • async (consolidate_async.py, 300s, off the blocking path):
                        every-Nth-session LLM consolidation under a time budget
@@ -219,7 +219,12 @@ memory/
 ├── .last_save.json          status from last PreCompact
 ├── .last_inject.json        what SessionStart injected (observability)
 ├── .last_consolidation.json interval marker for the async consolidation leg
-├── .gitignore               excludes DB + sessions
+├── .consolidation.lock      prevents overlapping async workers
+├── .pre_compact_attempt.json start marker; survives => last run was killed
+├── .plan_raw.md             last raw ExitPlanMode capture
+├── .plan_history/           append-only archive of replaced/cleared plans
+├── .gitignore               excludes the DB, sessions, and all generated
+│                            state above (migrates on every compaction)
 ├── sessions/YYYY/MM/        per-session archives
 └── topics/                  reserved for future per-topic exports
 ```
@@ -241,7 +246,7 @@ Importance scale: `1`=noise, `2`=low, `3`=normal, `4`=important, `5`=critical (n
 Memory **content** is language-agnostic — the extractor and resume-signal
 detectors recognise both English and Chinese by design, and stored memories may be
 in any language. Only the project's own docs follow the English-skeleton +
-translation convention. See [docs/I18N.md](docs/I18N.md).
+translation convention. See [docs/ARCHITECTURE.md#9-documentation-language-convention-i18n](docs/ARCHITECTURE.md#9-documentation-language-convention-i18n).
 
 ## CLI
 
@@ -278,7 +283,7 @@ translation convention. See [docs/I18N.md](docs/I18N.md).
 marketplace install):
 
 ```bash
-M="python ~/.claude/hooks/cc-memory/cc_memory/cli/mem.py --project ."
+M="python ~/.claude/hooks/cc-memory/cli/mem.py --project ."
 $M status
 $M search "auth flow"
 # ... same subcommands as above
@@ -299,8 +304,12 @@ $M search "auth flow"
 | `progress_get` | Read PROGRESS.md state (structured fields) |
 | `progress_regenerate` | Force-rewrite memory/PROGRESS.md from SQL state |
 
-Enable via `~/.claude/mcp.json` (set `cc_memory.mcp.auto_register=true` in
-`cc_memory/config.json` and re-install).
+The server speaks JSON-RPC 2.0 over stdio. Register it with your MCP client by
+pointing it at `python <plugin-root>/cc_memory/mcp/server.py`.
+
+> **Note:** the `mcp.auto_register` key in `config.json` is currently **inert** —
+> no code reads it and nothing writes an MCP client config. Registration is
+> manual until that is implemented.
 
 ## Visual Dashboard
 
@@ -329,7 +338,7 @@ cc-memory-dashboard.exe
 Task planning system using the same SQLite DB:
 
 ```bash
-P="python ~/.claude/hooks/cc-memory/cc_memory/cli/plan.py --project ."
+P="python ~/.claude/hooks/cc-memory/cli/plan.py --project ."
 
 $P add "Task A" "Task B" "Task C"
 $P list
@@ -345,7 +354,9 @@ Status flow: `draft` → `evaluating` → `ready` → `executing` → `done`/`fa
 
 ## Configuration
 
-Edit `~/.claude/hooks/cc-memory/cc_memory/config.json`:
+Edit `config.json` in your install root — standalone (flat layout):
+`~/.claude/hooks/cc-memory/config.json`; marketplace / dev checkout:
+`<plugin-root>/cc_memory/config.json`:
 
 - `extraction.*` — extraction caps (sentences, metrics, todos, file changes)
 - `writer.*` — anti-patch thresholds (`high_similarity_threshold`,
@@ -408,10 +419,10 @@ python build_exe.py
 ## Documentation
 
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — full architecture overview
-- [docs/MEMORY_RULES.md](docs/MEMORY_RULES.md) — anti-patch write contract
-- [docs/HANDOFF_PROTOCOL.md](docs/HANDOFF_PROTOCOL.md) — PROGRESS.md spec
-- [docs/PLAN_PROTOCOL.md](docs/PLAN_PROTOCOL.md) — PLAN.md + subagent spec
-- [docs/I18N.md](docs/I18N.md) — documentation multilingual (English / 中文) version-control
+- [docs/CONTRACTS.md#anti-patch-contract](docs/CONTRACTS.md#anti-patch-contract) — anti-patch write contract
+- [docs/CONTRACTS.md#handoff-contract](docs/CONTRACTS.md#handoff-contract) — PROGRESS.md spec
+- [docs/CONTRACTS.md#plan-contract](docs/CONTRACTS.md#plan-contract) — PLAN.md + subagent spec
+- [docs/ARCHITECTURE.md#9-documentation-language-convention-i18n](docs/ARCHITECTURE.md#9-documentation-language-convention-i18n) — documentation multilingual (English / 中文) version-control
 - [CHANGELOG.md](CHANGELOG.md) — version history
 
 ## License

@@ -51,15 +51,22 @@ Resolve the CLI path against the plugin root (works for both marketplace
 and standalone-exe installs), then run the subcommand:
 
 ```bash
-# Resolve plugin root: env var (marketplace/plugin context) → standalone install
-if [ -n "${CLAUDE_PLUGIN_ROOT}" ] && [ -f "${CLAUDE_PLUGIN_ROOT}/cc_memory/cli/mem.py" ]; then
-    CCMEM="${CLAUDE_PLUGIN_ROOT}/cc_memory/cli/mem.py"
-elif [ -f "$HOME/.claude/hooks/cc-memory/cc_memory/cli/mem.py" ]; then
-    CCMEM="$HOME/.claude/hooks/cc-memory/cc_memory/cli/mem.py"
-else
+# Resolve plugin root. TWO layouts exist and both must be probed:
+#   nested — marketplace / dev checkout:  <root>/cc_memory/cli/mem.py
+#   flat   — standalone installer output: <root>/cli/mem.py
+# (ui/installer.py copies each subpackage to TARGET_DIR/<subdir>/ directly,
+#  so a standalone install has NO cc_memory/ segment.)
+CCMEM=""
+for R in "${CLAUDE_PLUGIN_ROOT}" "$HOME/.claude/hooks/cc-memory"; do
+    [ -n "$R" ] || continue
+    if   [ -f "$R/cc_memory/cli/mem.py" ]; then CCMEM="$R/cc_memory/cli/mem.py"; break
+    elif [ -f "$R/cli/mem.py" ];           then CCMEM="$R/cli/mem.py";           break
+    fi
+done
+if [ -z "$CCMEM" ]; then
     echo "cc-memory plugin not found"; exit 1
 fi
-python3 "$CCMEM" --project . $ARGS
+python3 "$CCMEM" --project . $ARGUMENTS
 ```
 
 Then summarize the output to the user. For `progress` and `stats`, give a 1-2
@@ -72,4 +79,4 @@ launch and stop — the GUI/web viewer lives in its own window/browser tab.
 When adding a memory via `/cc-mem add <category> "<content>"`, the CLI routes
 through `llm.memory_writer.upsert_smart` automatically — so it will merge or
 supersede if a similar memory exists rather than stacking. See
-`docs/MEMORY_RULES.md` for the contract.
+`docs/CONTRACTS.md#anti-patch-contract` for the contract.

@@ -131,7 +131,7 @@ def call_llm(system, user, api_key="", max_tokens=2000, timeout=30,
     a single call can take at most `timeout` per Anthropic candidate (bounded
     at 2 candidates) + `fallback_timeout` (Ollama, when enabled). That bound is
     what lets a BudgetGate GUARANTEE completion before its deadline — see
-    core.consolidate._worst_call_cost. See docs/MEMORY_RULES.md.
+    core.consolidate._worst_call_cost. See docs/CONTRACTS.md#anti-patch-contract.
     """
     if fallback_timeout is None:
         fallback_timeout = min(timeout * 3, 120)

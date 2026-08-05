@@ -3,7 +3,7 @@
 Runs the anti-patch writer + PROGRESS.md generator + legacy migration in a
 throwaway temp directory. Verifies the v3 migrations applied and the
 INSERT / MERGE / SUPERSEDE / SKIP decisions match the contract in
-docs/MEMORY_RULES.md.
+docs/CONTRACTS.md#anti-patch-contract.
 
 Usage:  python tests/smoke_test.py
 """
@@ -878,7 +878,7 @@ def main():
     # === i18n: documentation multilingual drift gate =========================
     # Import the dev checker (lives in tools/, outside the package) and assert no
     # tracked English doc changed without its translation being refreshed. See
-    # docs/I18N.md. STALE/ORPHAN/NO-MARKER are hard failures; MISSING-TRANSLATION
+    # docs/ARCHITECTURE.md#9-documentation-language-convention-i18n. STALE/ORPHAN/NO-MARKER are hard failures; MISSING-TRANSLATION
     # is a soft warning (translations are produced on demand) and does not gate.
     sys.path.insert(0, str(_REPO / "tools"))
     import i18n_check

@@ -23,7 +23,7 @@ Schema (see core.db, table `progress`):
   trigger_type      what caused the last write (precompact, stop, manual)
 
 The forced-handoff system-reminder injected at SessionStart points to this
-file. See docs/HANDOFF_PROTOCOL.md for the full handoff spec.
+file. See docs/CONTRACTS.md#handoff-contract for the full handoff spec.
 """
 import json
 import sys
@@ -360,7 +360,7 @@ def write_progress_md(db: MemoryDB, project_id: int, memory_dir: Path) -> Path:
     lines += [
         "---",
         "*This file is the handoff contract for the next session. Read it FIRST.*",
-        "*Spec: `docs/HANDOFF_PROTOCOL.md` · Anti-patch contract: `docs/MEMORY_RULES.md`*",
+        "*Spec: `docs/CONTRACTS.md#handoff-contract` · Anti-patch contract: `docs/CONTRACTS.md#anti-patch-contract`*",
     ]
 
     out = memory_dir / "PROGRESS.md"

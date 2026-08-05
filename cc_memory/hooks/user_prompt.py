@@ -122,7 +122,7 @@ def main():
                     # Tagging trigger_type here makes the intent auditable.
                     normalized = prompt.strip().lower()
                     # i18n Tier 3: bilingual resume tokens are intentional — do NOT
-                    # reduce to English-only (see docs/I18N.md §1). Keep in sync with
+                    # reduce to English-only (see docs/ARCHITECTURE.md#9-documentation-language-convention-i18n §1). Keep in sync with
                     # session_start.py RESUME PROTOCOL.
                     resume_signals = {
                         "", "继续", "接着", "接着做", "接着干", "继续干",

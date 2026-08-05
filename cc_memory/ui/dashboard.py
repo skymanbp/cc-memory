@@ -945,7 +945,7 @@ Memories:
             if not content:
                 return
             # Anti-patch: route through upsert_smart so MERGE/SUPERSEDE/INSERT
-            # is decided by similarity, not by the caller. See docs/MEMORY_RULES.md.
+            # is decided by similarity, not by the caller. See docs/CONTRACTS.md#anti-patch-contract.
             result = upsert_smart(
                 self.db, self.project_id, None,
                 category=cat_var.get(),
@@ -1383,7 +1383,7 @@ Output ONLY valid JSON array."""
             # upsert_smart per item (MERGE/SUPERSEDE/INSERT by similarity)
             # and regenerates MEMORY.md once at the end. The manual dedup
             # set is no longer needed — the writer handles it via hash +
-            # similarity. See docs/MEMORY_RULES.md.
+            # similarity. See docs/CONTRACTS.md#anti-patch-contract.
 
             # Try LLM extraction first, fallback to regex
             memories = None

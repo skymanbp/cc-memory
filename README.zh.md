@@ -1,9 +1,9 @@
-<!-- i18n-source: README.md | sha256: adc346be68c74df0 | version: 2.4.2 | translated: 2026-08-04 -->
+<!-- i18n-source: README.md | sha256: ca012608a7a5c05d | version: 2.4.3 | translated: 2026-08-04 -->
 > [English](README.md) · **简体中文**
 
 # cc-memory
 
-**Claude Code 持久化记忆插件（v2.4.2）**——反补丁式的写入即归并（reconcile-on-write）、
+**Claude Code 持久化记忆插件（v2.4.3）**——反补丁式的写入即归并（reconcile-on-write）、
 LLM 判定的语义去重、强制 PROGRESS.md 交接、带 plan-refiner / plan-guardian 子代理与
 强制结转闸门的实时 PLAN.md 锚点、有界 transcript 读取、注入可观测性、FTS5 搜索，
 以及以 Haiku 为主（本地 Ollama 兜底可选）的 AI 判定式抽取。
@@ -46,7 +46,7 @@ cc-memory 在每一个对话边界捕获结构化记忆，并且**强制下一�
   步骤沉掉。现在替换要求每一个未完成步骤要么被自动结转（按标题相似度），要么带理由被显式
   处置；`/cc-mem plan-clear` 没有 `--reason` 就拒绝执行；每一份被换下的计划都会归档到
   `memory/.plan_history/`。**按设计，没有强制跳过的开关。** 参见
-  [docs/PLAN_PROTOCOL.md](docs/PLAN_PROTOCOL.md)。
+  [docs/CONTRACTS.md#plan-contract](docs/CONTRACTS.md#plan-contract)。
 - v2.4.1 修复了一个误拒：过长的 `notes` 字段稀释了标题匹配度，导致合法的原地更新被挡下。
 
 ## v2.3.4 有什么新变化
@@ -63,7 +63,7 @@ cc-memory 在每一个对话边界捕获结构化记忆，并且**强制下一�
   归一化 sha256。一个纯标准库的检查器（[tools/i18n_check.py](tools/i18n_check.py)）
   加上 [tests/smoke_test.py](tests/smoke_test.py) 门禁，会在英文文档改动而对应译文未
   刷新的那一刻立即变红。记忆*内容*保持与语言无关——只有文档被跟踪。参见
-  [docs/I18N.md](docs/I18N.md)。
+  [docs/ARCHITECTURE.md#9-documentation-language-convention-i18n](docs/ARCHITECTURE.md#9-documentation-language-convention-i18n)。
 
 这是一次文档 + 版本元数据的发布——运行时行为没有任何改变。
 
@@ -99,7 +99,7 @@ PreCompact 的超时从 45 秒提高到 120 秒，但在大型数据库上这只
 - **实时计划锚点（`memory/PLAN.md`）。** 把 `ExitPlanMode` 的输出（或用户提供的
   原始计划）捕获为一份结构化、按步骤跟踪、可跨会话存续的文档。`TodoWrite` 会机械地
   同步各步骤状态；敏感的 Bash 调用（`git push`、部署等）会标记漂移。参见
-  [docs/PLAN_PROTOCOL.md](docs/PLAN_PROTOCOL.md)。
+  [docs/CONTRACTS.md#plan-contract](docs/CONTRACTS.md#plan-contract)。
 - **插件自带子代理。** `plan-refiner` 把原始计划规范化为 JSON；`plan-guardian` 在
   漂移计数触发时检查一致性。定义位于 `agents/`，安装后自动被发现。
 - **`/cc-mem dashboard`** 子命令：无需知道插件安装路径即可启动 Tkinter GUI。
@@ -109,11 +109,11 @@ PreCompact 的超时从 45 秒提高到 120 秒，但在大型数据库上这只
 - **反补丁写入。** 每一次保存都经由 `llm.memory_writer.upsert_smart`，它会按三元组
   Jaccard 相似度选择 MERGE（就地覆盖相似记忆）、SUPERSEDE（归档旧记忆并用
   `supersedes_id` 链接新记忆）或 INSERT。不再有堆叠的重复项。参见
-  [docs/MEMORY_RULES.md](docs/MEMORY_RULES.md)。
+  [docs/CONTRACTS.md#anti-patch-contract](docs/CONTRACTS.md#anti-patch-contract)。
 - **经由 PROGRESS.md 的强制交接。** `memory/PROGRESS.md` 是会话交接的唯一真相来源，
   始终从一条 SQL 记录整篇重写，绝不追加。SessionStart 会发出一个 `<system-reminder>`
   块，要求下一个 Claude 在回应之前先读它。参见
-  [docs/HANDOFF_PROTOCOL.md](docs/HANDOFF_PROTOCOL.md)。
+  [docs/CONTRACTS.md#handoff-contract](docs/CONTRACTS.md#handoff-contract)。
 - **自动保鲜的 MEMORY.md。** 每次写入后重新生成——不再有陈旧 50 天的索引文件。
 - **空闲整理。** Stop 钩子每 5 个回合运行一次轻量清理（不调用 LLM）。
 - **清爽的子包布局。** `cc_memory/{core,hooks,llm,cli,mcp,ui}/`。
@@ -162,7 +162,7 @@ python cc-memory/cc_memory/ui/installer.py --cli  # 命令行
 ## 架构速览
 
 ```
-钩子（注册在 ~/.claude/settings.json）：
+钩子（声明于 hooks/hooks.json；经插件清单被发现）：
 
   UserPromptSubmit ─► 回合计数 + 用首条提示为 PROGRESS.md 播种
                       首次接触时自动初始化 memory/
@@ -174,7 +174,8 @@ python cc-memory/cc_memory/ui/installer.py --cli  # 命令行
                      每 5 个回合做一次空闲整理
 
   PreCompact      ─► 触发两个钩子：
-                     • 同步 (pre_compact.py, 120s)：Haiku 从完整 transcript 抽取记忆
+                     • 同步 (pre_compact.py, 120s)：Haiku 从有界的 head+tail transcript
+                       窗口（40 条记录 + 32 MiB）抽取记忆
                        → memory_writer.upsert_smart → 整篇重写 memory/PROGRESS.md
                        → 归档 → 重新生成 MEMORY.md
                      • 异步 (consolidate_async.py, 300s，脱离阻塞路径)：
@@ -197,7 +198,12 @@ memory/
 ├── .last_save.json          上一次 PreCompact 的状态
 ├── .last_inject.json        SessionStart 注入了什么（可观测性）
 ├── .last_consolidation.json 异步整理支路的间隔标记
-├── .gitignore               排除 DB + 会话
+├── .consolidation.lock      防止异步工作者重叠运行
+├── .pre_compact_attempt.json 起始标记；残留即表示上次运行被杀
+├── .plan_raw.md             最近一次 ExitPlanMode 的原始捕获
+├── .plan_history/           被替换/清除计划的追加式归档
+├── .gitignore               排除 DB、会话，以及上面所有生成状态
+│                            （每次压缩时迁移补全）
 ├── sessions/YYYY/MM/        按会话归档
 └── topics/                  预留给未来的按主题导出
 ```
@@ -218,7 +224,7 @@ memory/
 
 记忆**内容**是语言无关的——抽取器和恢复信号检测器在设计上同时识别英文和中文，
 存储的记忆可以是任意语言。只有项目自身的文档遵循“英文骨架 + 翻译”的约定。参见
-[docs/I18N.md](docs/I18N.md)。
+[docs/ARCHITECTURE.md#9-documentation-language-convention-i18n](docs/ARCHITECTURE.md#9-documentation-language-convention-i18n)。
 
 ## 命令行（CLI）
 
@@ -254,7 +260,7 @@ memory/
 **在 Claude Code 外部**（shell，下面展示的是独立安装路径——市场安装请自行调整）：
 
 ```bash
-M="python ~/.claude/hooks/cc-memory/cc_memory/cli/mem.py --project ."
+M="python ~/.claude/hooks/cc-memory/cli/mem.py --project ."
 $M status
 $M search "auth flow"
 # ... 子命令与上面相同
@@ -275,8 +281,11 @@ $M search "auth flow"
 | `progress_get` | 读取 PROGRESS.md 状态（结构化字段） |
 | `progress_regenerate` | 从 SQL 状态强制重写 memory/PROGRESS.md |
 
-在 `~/.claude/mcp.json` 中启用（在 `cc_memory/config.json` 中设置
-`cc_memory.mcp.auto_register=true` 后重新安装）。
+该服务器通过 stdio 使用 JSON-RPC 2.0 通信。在你的 MCP 客户端里指向
+`python <plugin-root>/cc_memory/mcp/server.py` 即可注册。
+
+> **注意：** `config.json` 里的 `mcp.auto_register` 键目前是**惰性的**——没有任何
+> 代码读它，也没有任何代码去写 MCP 客户端配置。在实现之前，注册需要手动完成。
 
 ## 可视化仪表盘
 
@@ -305,7 +314,7 @@ cc-memory-dashboard.exe
 使用同一 SQLite 数据库的任务规划系统：
 
 ```bash
-P="python ~/.claude/hooks/cc-memory/cc_memory/cli/plan.py --project ."
+P="python ~/.claude/hooks/cc-memory/cli/plan.py --project ."
 
 $P add "Task A" "Task B" "Task C"
 $P list
@@ -321,7 +330,9 @@ $P clear              # 丢弃 done/failed/skipped
 
 ## 配置
 
-编辑 `~/.claude/hooks/cc-memory/cc_memory/config.json`：
+编辑安装根目录下的 `config.json` —— 独立安装（扁平布局）：
+`~/.claude/hooks/cc-memory/config.json`；市场安装 / 开发检出：
+`<plugin-root>/cc_memory/config.json`：
 
 - `extraction.*` — 抽取上限（句子数、指标数、待办数、文件变更数）
 - `writer.*` — 反补丁阈值（`high_similarity_threshold`、
@@ -382,10 +393,10 @@ python build_exe.py
 ## 文档
 
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — 完整架构概览
-- [docs/MEMORY_RULES.md](docs/MEMORY_RULES.md) — 反补丁写入契约
-- [docs/HANDOFF_PROTOCOL.md](docs/HANDOFF_PROTOCOL.md) — PROGRESS.md 规格
-- [docs/PLAN_PROTOCOL.md](docs/PLAN_PROTOCOL.md) — PLAN.md + 子代理规格
-- [docs/I18N.md](docs/I18N.md) — 文档多语言（英文 / 中文）版本控制
+- [docs/CONTRACTS.md#anti-patch-contract](docs/CONTRACTS.md#anti-patch-contract) — 反补丁写入契约
+- [docs/CONTRACTS.md#handoff-contract](docs/CONTRACTS.md#handoff-contract) — PROGRESS.md 规格
+- [docs/CONTRACTS.md#plan-contract](docs/CONTRACTS.md#plan-contract) — PLAN.md + 子代理规格
+- [docs/ARCHITECTURE.md#9-documentation-language-convention-i18n](docs/ARCHITECTURE.md#9-documentation-language-convention-i18n) — 文档多语言（英文 / 中文）版本控制
 - [CHANGELOG.md](CHANGELOG.md) — 版本历史
 
 ## 许可证
