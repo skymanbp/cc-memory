@@ -2,16 +2,62 @@
 
 ## Project: cc-memory
 
-**Claude Code persistent memory plugin (v2.3.4)** — anti-patch reconcile-on-write
+**Claude Code persistent memory plugin (v2.4.2)** — anti-patch reconcile-on-write
 + LLM-judged semantic de-duplication, forced PROGRESS.md handoff with
 per-session annotation, live PLAN.md anchor with plan-refiner / plan-guardian
-subagents, injection observability, FTS5 search, AI-judged extraction with
-Haiku + local Ollama fallback.
+subagents + mandatory carryover gate, bounded transcript reads, injection
+observability, FTS5 search, AI-judged extraction with Haiku (optional local
+Ollama fallback).
 
 - **Language**: Python 3.8+ (pure stdlib, zero pip dependencies at runtime)
-- **Version**: 2.3.3
+- **Version**: 2.4.2
 - **License**: MIT
 - **Platform**: Windows-primary, cross-platform compatible (Tkinter required for GUI)
+
+## What changed in v2.4.2 (over v2.4.1)
+
+**Hook survivability. Transcript reads are now bounded.** The `PreCompact` sync
+leg was being killed mid-write on long-lived projects, and its LLM extraction
+had been reading the wrong end of the transcript. Same root cause: the hook
+loaded the ENTIRE `.jsonl` before using ~12 KB of it.
+
+1. **`core.extractor.load_transcript_window`** — bounded head+tail read (40
+   records + 32 MiB). A 2.11 GiB transcript parsed at ~25 MiB/s = ~88s of a
+   120s budget before any work; now 1.66s, full hook 14.33s. `msg_count` stays
+   exact via a raw record scan (~1 GiB/s). The old unbounded `load_transcript`
+   survives for `ui/dashboard.py` only — **never call it from a hook.**
+2. **Summaries fill from the NEWEST record backwards.** Filling from the oldest
+   exhausted the 12k budget after 329 of ~585,000 records, pinning extraction
+   to a session's opening hours. Fixed in both `pre_compact` and
+   `session_start._summarize_transcript`.
+3. **Killed runs are visible.** `memory/.pre_compact_attempt.json` is written
+   at entry and removed only on completion, so a surviving marker proves the
+   last attempt died (a timeout kill runs no `except` block, which is why the
+   failure used to leave no trace at all). `.last_save.json` gained `trigger`,
+   making AUTO compactions distinguishable from "never ran".
+4. **`RuntimeError` added to the extraction `except` tuple** — a total LLM
+   outage no longer skips the PROGRESS.md rewrite.
+5. **`memory/.gitignore` migrates existing installs** via
+   `core.progress.ensure_memory_gitignore` (single source for all four
+   generators); previously every new runtime artifact leaked forever.
+6. **`pyproject.toml` BOM stripped** — `tomllib` could not parse it, so no PEP
+   517 frontend could build or install the package since v2.4.0.
+
+## What changed in v2.4.1 (over v2.4.0)
+
+Carryover auto-carry matches **bare titles** too. A step whose title was
+unchanged but whose `notes` grew long fell below the trigram-Jaccard threshold,
+so the v2.4.0 gate refused a legitimate in-place plan update.
+
+## What changed in v2.4.0 (over v2.3.4)
+
+**Mandatory plan carryover gate.** `plan_active` is a single-row slot, so every
+`plan-set --from-refiner` replaced the plan wholesale and unfinished steps
+vanished unaccounted. Replacement now requires each unfinished step to be
+auto-carried (trigram-Jaccard ≥ 0.5) or explicitly dispositioned
+(`{old_title, action, reason}`); `plan-clear` refuses without `--reason`; every
+outgoing plan is archived to `memory/.plan_history/`. **No force flag, by
+design.** See `tests/test_plan_carryover.py`.
 
 ## What changed in v2.3.4 (over v2.3.3)
 
@@ -119,9 +165,9 @@ See `docs/PLAN_PROTOCOL.md` for the full v2.2 contract.
 ```
 cc-memory/
 ├── .claude-plugin/
-│   ├── plugin.json              ← Plugin manifest (v2.2.0)
+│   ├── plugin.json              ← Plugin manifest (v2.4.2)
 │   └── marketplace.json         ← /plugin marketplace add entry
-├── hooks/hooks.json             ← 5 hook declarations
+├── hooks/hooks.json             ← 6 hook commands across 5 events
 ├── skills/                      ← THE canonical skills location
 │   ├── ccm-load/SKILL.md        (one-shot end-to-end activation + init + status)
 │   └── save-memories/SKILL.md   (routes through memory_writer)
@@ -133,9 +179,12 @@ cc-memory/
 │   ├── ARCHITECTURE.md
 │   ├── MEMORY_RULES.md          ← Anti-patch contract
 │   ├── HANDOFF_PROTOCOL.md      ← PROGRESS.md spec
-│   └── PLAN_PROTOCOL.md         ← PLAN.md spec (live plan anchor, v2.2)
+│   ├── PLAN_PROTOCOL.md         ← PLAN.md spec (live plan anchor, v2.2)
+│   └── I18N.md                  ← docs multilingual + drift contract (v2.3.3)
+├── README.zh.md                 ← drift-tracked Chinese translation
+├── tools/i18n_check.py          ← translation drift checker (dev/CI only)
 ├── cc_memory/
-│   ├── __init__.py              (version 2.2.0)
+│   ├── __init__.py              (version 2.4.2)
 │   ├── config.json
 │   ├── core/                    db, extractor, consolidate, idle, progress,
 │   │                            plan, privacy, modes, auth, logger,
@@ -147,9 +196,10 @@ cc-memory/
 │   ├── mcp/                     server
 │   └── ui/                      installer, dashboard, web_viewer
 ├── tests/
-│   └── smoke_test.py            end-to-end anti-patch + PROGRESS.md +
-│                                tier-3 transcript + layout-inspector +
-│                                live-plan tests
+│   ├── smoke_test.py            end-to-end anti-patch + PROGRESS.md +
+│   │                            tier-3 transcript + layout-inspector +
+│   │                            live-plan + i18n gate + bounded-window tests
+│   └── test_plan_carryover.py   carryover gate (v2.4.0+), 14 checks
 ├── build_exe.py
 ├── pyproject.toml
 ├── README.md
@@ -292,23 +342,31 @@ standalone installs.
 
 ## Tests
 
-`tests/smoke_test.py` is the canonical end-to-end check. It exercises the
-v2.1 + v2.2 contracts in a throwaway temp project: v3 migrations,
-`upsert_smart` decisions (INSERT/MERGE/SUPERSEDE/SKIP), the `progress`
-row + `PROGRESS.md` full-rewrite, the fill-only-empty refresh contract,
-last-wins TodoWrite extraction, the tier-3 transcript fallback, the
-legacy `SESSION_HANDOFF.md` migration, and the layout inspector.
+**Two suites. BOTH are release gates — run both.**
+
+`tests/smoke_test.py` is the canonical end-to-end check. In a throwaway temp
+project it exercises: v3/v6 migrations, `upsert_smart` decisions
+(INSERT/MERGE/SUPERSEDE/SKIP), the `progress` row + `PROGRESS.md`
+full-rewrite, the fill-only-empty refresh contract, last-wins TodoWrite
+extraction, the tier-3 transcript fallback, the legacy `SESSION_HANDOFF.md`
+migration, the layout inspector, the v2.3.2 async consolidation lock/marker,
+the v2.3.3 i18n drift gate, and the v2.4.2 bounded-window / summary-direction
+/ killed-run-visibility contracts.
+
+`tests/test_plan_carryover.py` covers the v2.4.0 carryover gate (14 checks) —
+the only coverage of that feature.
 
 ```bash
 python tests/smoke_test.py
-# expect: a series of [OK] lines ending with "===== ALL SMOKE TESTS PASSED ====="
+# expect: [OK] lines ending with "===== ALL SMOKE TESTS PASSED ====="
+python tests/test_plan_carryover.py
+# expect: "RESULT: 14 passed, 0 failed"
 ```
 
-No pytest / pip dependencies — the file is a stdlib script and reflects
-the runtime contract (pure stdlib, see Development guidelines below).
-When you add a behavior to `memory_writer`, `progress`, or
-`session_start._refresh_progress_row`, add a corresponding assertion block
-here.
+No pytest / pip dependencies — both are stdlib scripts and reflect the runtime
+contract (pure stdlib, see Development guidelines below). When you add a
+behavior to `memory_writer`, `progress`, `extractor.load_transcript_window`, or
+`session_start._refresh_progress_row`, add a corresponding assertion block.
 
 ## Interpreter requirement
 

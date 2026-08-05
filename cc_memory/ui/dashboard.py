@@ -1557,13 +1557,8 @@ Output ONLY valid JSON array."""
             (memory_dir / "topics").mkdir(exist_ok=True)
 
             # .gitignore
-            gitignore = memory_dir / ".gitignore"
-            if not gitignore.exists():
-                gitignore.write_text(
-                    "# cc-memory: exclude database from git\n"
-                    "memory.db\nmemory.db-wal\nmemory.db-shm\nsessions/\n",
-                    encoding="utf-8"
-                )
+            from core.progress import ensure_memory_gitignore
+            ensure_memory_gitignore(memory_dir)
 
             # Initialize DB and save confirmed memories
             db = MemoryDB(memory_dir / "memory.db")

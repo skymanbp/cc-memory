@@ -113,7 +113,7 @@ bypassing `upsert_smart`:
 | `/save-memories` skill | `upsert_batch(db, pid, None, memories, memory_dir=Path('./memory'))` (the skill body shows the exact invocation) |
 | `mem.py add` CLI | `upsert_smart(...)` + `regenerate_memory_index(...)` |
 | `mcp/server.py handle_memory_add` | `upsert_smart(...)` + `regenerate_memory_index(...)` |
-| Dashboard UI Add Memory | TODO — currently still calls `db.insert_memory` directly. Pre-existing v2.0 path slated for v2.2. |
+| Dashboard UI Add Memory | `upsert_smart(...)` — routed since v2.2. `ui/dashboard.py` contains no `db.insert_memory` call. |
 
 ## Consolidation backstop exception (v2.3)
 

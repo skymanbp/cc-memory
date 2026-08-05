@@ -2,10 +2,11 @@
 
 # cc-memory
 
-**Claude Code persistent memory plugin (v2.3.3)** — anti-patch reconcile-on-write
+**Claude Code persistent memory plugin (v2.4.2)** — anti-patch reconcile-on-write
 with LLM-judged semantic de-duplication, forced PROGRESS.md handoff, live PLAN.md
-anchor with plan-refiner / plan-guardian subagents, injection observability, FTS5
-search, AI-judged extraction with Haiku + local Ollama fallback.
+anchor with plan-refiner / plan-guardian subagents and a mandatory carryover
+gate, bounded transcript reads, injection observability, FTS5 search, AI-judged
+extraction with Haiku (optional local Ollama fallback).
 
 ## What it solves
 
@@ -15,6 +16,56 @@ disappear. Conversations that end normally (terminal closed) also lose context.
 
 cc-memory captures structured memories at every conversation boundary AND
 **forces the next session to read a handoff document** before it starts work.
+
+## What's new in v2.4.2
+
+Hook survivability. On a long-lived project the `PreCompact` hook was being
+**killed mid-write** — losing that compaction's memories — and its extraction
+had quietly been reading the wrong end of the transcript. One root cause: the
+hook loaded the *entire* transcript before using ~12 KB of it.
+
+- **Bounded transcript reads.** `extractor.load_transcript_window` reads a
+  head + tail window (40 records + 32 MiB) instead of the whole file. Measured
+  on a real **2.11 GiB** transcript: loading went **88s → 1.66s**, and a full
+  hook run finishes in **14.33s** against its 120s budget. `msg_count` stays
+  exact via a raw record scan (~40× cheaper than parsing).
+- **Extraction now reads the *recent* end.** The LLM summary filled its 12,000
+  character budget starting from the oldest record — on that transcript it was
+  exhausted after **329 of ~585,000 records**, so every extraction saw only the
+  session's opening hours. It now fills from the newest backwards.
+- **Killed runs are no longer invisible.** A timeout kill runs no `except`
+  block, so a failed compaction used to leave `.last_save.json` describing the
+  *previous* success. `PreCompact` now writes a start marker it clears only on
+  completion, and SessionStart reports a survivor.
+- **Automatic compactions are now visible.** `.last_save.json` records whether
+  the trigger was `auto` or `manual` — Claude Code only surfaces hook execution
+  in its UI for manual `/compact`, which made auto runs look like they never
+  happened. (They always did.)
+- **`memory/.gitignore` migrates existing installs** instead of only being
+  created once, so generated state — including verbatim plan prose in
+  `.plan_history/` — stops leaking into user repos.
+- **Fixed: the package could not be built or installed.** A UTF-8 BOM in
+  `pyproject.toml` (since v2.4.0) made `tomllib` fail, breaking every PEP 517
+  frontend.
+
+## What's new in v2.4.0 / v2.4.1
+
+- **Mandatory plan carryover gate.** `plan_active` is a single-row slot, so
+  replacing a plan used to silently sink unfinished steps. Replacement now
+  requires every unfinished step to be auto-carried (by title similarity) or
+  explicitly dispositioned with a reason; `/cc-mem plan-clear` refuses without
+  `--reason`; every outgoing plan is archived to `memory/.plan_history/`.
+  **There is no force flag, by design.** See
+  [docs/PLAN_PROTOCOL.md](docs/PLAN_PROTOCOL.md).
+- v2.4.1 fixed a false refusal where a long `notes` field diluted the
+  title match and blocked a legitimate in-place plan update.
+
+## What's new in v2.3.4
+
+- **Anthropic auth fall-through.** A dead `ANTHROPIC_API_KEY` no longer
+  blackholes a healthy Claude subscription — candidates are tried in order with
+  the correct wire format each (`x-api-key` vs OAuth `Bearer`).
+- **Local Ollama fallback is now opt-in** (`ccl.enabled`, default `false`).
 
 ## What's new in v2.3.3
 

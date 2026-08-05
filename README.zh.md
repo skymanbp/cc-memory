@@ -1,12 +1,12 @@
-<!-- i18n-source: README.md | sha256: 3478fc4f1e83526b | version: 2.3.3 | translated: 2026-07-11 -->
+<!-- i18n-source: README.md | sha256: adc346be68c74df0 | version: 2.4.2 | translated: 2026-08-04 -->
 > [English](README.md) · **简体中文**
 
 # cc-memory
 
-**Claude Code 持久化记忆插件（v2.3.3）**——反补丁式的写入即归并（reconcile-on-write）、
-LLM 判定的语义去重、强制 PROGRESS.md 交接、带 plan-refiner / plan-guardian 子代理的
-实时 PLAN.md 锚点、注入可观测性、FTS5 搜索，以及以 Haiku + 本地 Ollama 兜底的
-AI 判定式抽取。
+**Claude Code 持久化记忆插件（v2.4.2）**——反补丁式的写入即归并（reconcile-on-write）、
+LLM 判定的语义去重、强制 PROGRESS.md 交接、带 plan-refiner / plan-guardian 子代理与
+强制结转闸门的实时 PLAN.md 锚点、有界 transcript 读取、注入可观测性、FTS5 搜索，
+以及以 Haiku 为主（本地 Ollama 兜底可选）的 AI 判定式抽取。
 
 ## 它解决什么问题
 
@@ -15,6 +15,46 @@ AI 判定式抽取。
 
 cc-memory 在每一个对话边界捕获结构化记忆，并且**强制下一次会话在开始工作之前先阅读
 一份交接文档**。
+
+## v2.4.2 有什么新变化
+
+钩子存活性。在长期运行的项目里，`PreCompact` 钩子会被**中途杀死**——那一次压缩的记忆
+全部丢失；而且它的抽取一直在悄悄地读 transcript 的错误一端。根因只有一个：钩子把
+**整个** transcript 读进内存，却只用了其中约 12 KB。
+
+- **有界 transcript 读取。** `extractor.load_transcript_window` 改为只读 head + tail
+  窗口（40 条记录 + 32 MiB），不再读整个文件。在真实的 **2.11 GiB** transcript 上实测：
+  加载从 **88 秒降到 1.66 秒**，完整钩子运行 **14.33 秒**（预算 120 秒）。`msg_count`
+  通过裸记录扫描保持**精确**（比解析便宜约 40 倍）。
+- **抽取现在读的是最近的一端。** LLM 摘要此前从最旧的记录开始填满 12,000 字符预算——在
+  那个 transcript 上，预算在 **约 585,000 条记录中的第 329 条**就耗尽了，因此每次抽取
+  只看得到会话最开头的几个小时。现在改为从最新往回填。
+- **被杀的运行不再无声无息。** 超时杀进程不会执行 `except` 块，所以失败的压缩过去只会
+  留下描述**上一次成功**的 `.last_save.json`。现在 `PreCompact` 在入口写一个标记，只有
+  完整跑完才删除；SessionStart 会报告残留的标记。
+- **自动压缩现在看得见了。** `.last_save.json` 记录触发方式是 `auto` 还是 `manual`——
+  Claude Code 只在手动 `/compact` 时在界面上显示钩子执行，这让自动运行看起来像从未发生。
+  （它一直都在发生。）
+- **`memory/.gitignore` 会迁移已有安装**，而不再是只创建一次，因此生成的状态——包括
+  `.plan_history/` 里逐字保存的计划原文——不会再泄漏进用户的仓库。
+- **修复：这个包此前根本无法构建或安装。** `pyproject.toml` 里的 UTF-8 BOM（自 v2.4.0
+  起）让 `tomllib` 解析失败，破坏了所有 PEP 517 前端。
+
+## v2.4.0 / v2.4.1 有什么新变化
+
+- **强制的计划结转闸门。** `plan_active` 是单行槽位，因此替换计划过去会悄悄地把未完成的
+  步骤沉掉。现在替换要求每一个未完成步骤要么被自动结转（按标题相似度），要么带理由被显式
+  处置；`/cc-mem plan-clear` 没有 `--reason` 就拒绝执行；每一份被换下的计划都会归档到
+  `memory/.plan_history/`。**按设计，没有强制跳过的开关。** 参见
+  [docs/PLAN_PROTOCOL.md](docs/PLAN_PROTOCOL.md)。
+- v2.4.1 修复了一个误拒：过长的 `notes` 字段稀释了标题匹配度，导致合法的原地更新被挡下。
+
+## v2.3.4 有什么新变化
+
+- **Anthropic 认证逐级回退。** 失效的 `ANTHROPIC_API_KEY` 不再把健康的 Claude 订阅
+  一起黑洞掉——候选凭据按顺序尝试，且各自使用正确的传输格式（`x-api-key` 对
+  OAuth `Bearer`）。
+- **本地 Ollama 兜底改为按需开启**（`ccl.enabled`，默认 `false`）。
 
 ## v2.3.3 有什么新变化
 

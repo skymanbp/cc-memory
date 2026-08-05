@@ -27,6 +27,7 @@ Output:
   Always exits 0 — must never block compaction.
 """
 import json
+import os
 import sys
 import urllib.error
 from datetime import datetime
@@ -41,9 +42,11 @@ from core.encoding_setup import enable_utf8_io
 enable_utf8_io()
 
 from core.db import MemoryDB
-from core.extractor import build_extraction, load_transcript, group_sentences, CATEGORY_ORDER, CATEGORY_LABELS
+from core.extractor import (build_extraction, load_transcript_window, group_sentences,
+                            CATEGORY_ORDER, CATEGORY_LABELS)
 from core.logger import get_logger
-from core.progress import write_progress_md, write_session_archive, collect_progress_state, migrate_legacy_handoff
+from core.progress import (write_progress_md, write_session_archive, collect_progress_state,
+                           migrate_legacy_handoff, ensure_memory_gitignore)
 from llm.memory_writer import upsert_batch, regenerate_memory_index
 
 _log = get_logger("pre_compact")
@@ -71,9 +74,25 @@ Rules:
 Output ONLY a valid JSON array, no markdown, no explanation."""
 
 
-def _build_transcript_summary(messages, max_chars=12000):
-    parts, total = [], 0
-    for msg in messages:
+def _build_transcript_summary(messages, max_chars=12000, total_records=None):
+    """Render the most RECENT slice of the conversation, up to max_chars.
+
+    Fills from the NEWEST message BACKWARDS, then restores chronological order.
+    The previous version filled from the oldest message and broke at the budget,
+    so on a long-lived session the LLM only ever saw the session's opening
+    minutes: measured on a real 2.1 GiB transcript, the 12k budget was exhausted
+    after 329 of ~585,000 records, pinning every extraction to content 70 days
+    stale while all recent work went unseen. A handoff needs the recent end.
+
+    ``total_records`` is the transcript's REAL record count. Without it the
+    "earlier messages omitted" figure is window-relative and badly understates
+    reality — on that same transcript it would claim ~10,000 omitted when
+    ~575,000 were, which actively misleads the extracting model about how much
+    context it is missing.
+    """
+    parts, total, scanned = [], 0, 0
+    for msg in reversed(messages):
+        scanned += 1
         message = msg.get("message", {})
         if not isinstance(message, dict):
             continue
@@ -110,14 +129,19 @@ def _build_transcript_summary(messages, max_chars=12000):
             text = text[:400] + "\n...[truncated]...\n" + text[-400:]
         line = f"[{role}] {text}\n"
         if total + len(line) > max_chars:
-            parts.append(f"\n[...truncated, {len(messages) - len(parts)} more messages...]")
+            scanned -= 1  # this one didn't make it in
             break
         parts.append(line)
         total += len(line)
+    parts.reverse()  # newest-first accumulation → chronological for the LLM
+    universe = len(messages) if total_records is None else max(total_records, len(messages))
+    omitted = universe - scanned
+    if omitted > 0:
+        parts.insert(0, f"[...{omitted} earlier messages omitted, showing most recent...]\n")
     return "\n".join(parts)
 
 
-def _extract_via_llm(messages, observations=None):
+def _extract_via_llm(messages, observations=None, total_records=None):
     from core.auth import get_api_key
     api_key, source = get_api_key()
     if not api_key:
@@ -125,7 +149,7 @@ def _extract_via_llm(messages, observations=None):
         _log.info(f"{reason}, skipping LLM extraction")
         return None
 
-    transcript_text = _build_transcript_summary(messages)
+    transcript_text = _build_transcript_summary(messages, total_records=total_records)
     if len(transcript_text) < 100:
         return None
 
@@ -171,7 +195,12 @@ def _extract_via_llm(messages, observations=None):
         return valid if valid else None
 
     except (urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError,
-            TimeoutError, OSError, KeyError, ValueError) as e:
+            TimeoutError, OSError, KeyError, ValueError, RuntimeError) as e:
+        # RuntimeError: llm.ccl_backend.call_llm raises it when EVERY backend
+        # candidate fails. Without it here that escapes to main()'s handler and
+        # aborts the whole hook — skipping the PROGRESS.md rewrite — so a
+        # transient API outage would silently cost a session handoff. Extraction
+        # is optional; the handoff is not.
         _log.error(f"LLM extraction failed: {e}")
         return None
 
@@ -222,18 +251,73 @@ def _fmt_archive(ext, timestamp, trigger, project_name):
     return "\n".join(lines)
 
 
-def _first_user_request(messages):
-    for msg in messages[:5]:
+def _first_user_request(messages, max_scan=200):
+    """Return the session's opening user request.
+
+    Scans further than the first handful of records on purpose: a transcript
+    opens with meta rows (`queue-operation`, `attachment`, …) that carry no
+    role, and empty-content user rows also appear. Measured on a real
+    transcript the first genuine user message sat at index 5, so the previous
+    `messages[:5]` slice returned "" and PROGRESS.md's current_request came up
+    empty. Empty candidates are skipped rather than returned.
+    """
+    for msg in messages[:max_scan]:
         message = msg.get("message", {})
-        if isinstance(message, dict) and message.get("role") == "user":
-            content_field = message.get("content", "")
-            if isinstance(content_field, str):
+        if not isinstance(message, dict) or message.get("role") != "user":
+            continue
+        content_field = message.get("content", "")
+        if isinstance(content_field, str):
+            if content_field.strip():
                 return content_field[:500]
-            if isinstance(content_field, list):
-                for block in content_field:
-                    if isinstance(block, dict) and block.get("type") == "text":
-                        return block.get("text", "")[:500]
+        elif isinstance(content_field, list):
+            for block in content_field:
+                if isinstance(block, dict) and block.get("type") == "text":
+                    text = block.get("text", "")
+                    if text.strip():
+                        return text[:500]
     return ""
+
+
+_ATTEMPT_FILE = ".pre_compact_attempt.json"
+
+
+def _write_attempt(memory_dir, trigger, claude_sid, transcript_bytes):
+    """Record that a PreCompact run STARTED, before any slow work.
+
+    A hook killed by the host's timeout dies on TerminateProcess, which runs no
+    `except` block and no `finally` — so a crashed run leaves .last_save.json
+    untouched and the next SessionStart happily reports the PREVIOUS success.
+    This marker is the only trace such a run can leave: it is written at entry
+    and removed only on a completed run, so "marker still present" == "the last
+    attempt did not finish".
+    """
+    try:
+        payload = {
+            "started_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "trigger": trigger,
+            "session_id": claude_sid,
+            "pid": os.getpid(),
+            "transcript_bytes": transcript_bytes,
+        }
+        # PID-suffixed temp name: a fixed one is shared by any concurrent run,
+        # and two interleaved truncating writes would leave a mangled marker
+        # that the reader has to defend against.
+        tmp = memory_dir / f"{_ATTEMPT_FILE}.{os.getpid()}.tmp"
+        tmp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        os.replace(str(tmp), str(memory_dir / _ATTEMPT_FILE))
+    except OSError as e:
+        # why: the marker is diagnostic only; failing to write it must never
+        # stop the compaction work it is meant to observe
+        _log.error(f"attempt marker write failed: {e}")
+
+
+def _clear_attempt(memory_dir):
+    try:
+        (memory_dir / _ATTEMPT_FILE).unlink()
+    except OSError:
+        # why: absent or locked marker is harmless — a stale marker only ever
+        # causes an advisory "previous run did not finish" line at SessionStart
+        pass
 
 
 def main():
@@ -261,17 +345,56 @@ def main():
         # Migrate old SESSION_HANDOFF.md aside (one-shot)
         migrate_legacy_handoff(memory_dir)
 
+        # Ensure memory/.gitignore covers everything we generate — including the
+        # attempt marker written a few lines below. This runs on EVERY compaction
+        # rather than only at project creation: user_prompt's initializer returns
+        # early once memory.db exists, so an install created before an artifact
+        # was introduced would otherwise never learn to ignore it.
+        ensure_memory_gitignore(memory_dir)
+
         db = MemoryDB(memory_dir / "memory.db")
         project_id = db.upsert_project(cwd)
         project_name = Path(cwd).name
 
-        messages = load_transcript(transcript_path)
+        # Marker FIRST — before the transcript load. A kill during the load is
+        # precisely the failure this marker exists to make visible, so writing
+        # it afterwards would leave the original symptom untraceable.
+        try:
+            _tp_bytes = os.path.getsize(transcript_path)
+        except OSError:
+            # why: size is diagnostic decoration on the marker; an unreadable
+            # transcript is handled by the loader's own degradation path below
+            _tp_bytes = 0
+        _write_attempt(memory_dir, trigger, claude_sid, _tp_bytes)
+
+        # Bounded head+tail read. An unbounded load here is what killed this
+        # hook on large projects: a 2.1 GiB transcript parses at ~25 MiB/s
+        # (~88s) and the sync leg only has 120s total, of which the LLM leg can
+        # claim 2 × _API_TIMEOUT. See core.extractor.load_transcript_window.
+        window = load_transcript_window(transcript_path)
+        messages = window.messages
         if not messages:
             _log.info("empty transcript, skipping")
+            _clear_attempt(memory_dir)  # nothing was lost; don't report a kill
             sys.exit(0)
+        if window.truncated:
+            _log.info(
+                f"transcript windowed: {window.total_bytes/1024**2:.0f} MiB / "
+                f"{window.total_records} records -> {len(messages)} read "
+                f"(head {len(window.head)} + tail {len(window.tail)})"
+            )
+            if not window.tail:
+                # One record larger than the tail budget. The window degrades to
+                # head-only, i.e. the stale-content bug this release fixes — so
+                # say so rather than shipping it silently.
+                _log.warn(
+                    "transcript tail window decoded EMPTY (a single record "
+                    "exceeds the tail budget); extraction sees the head only"
+                )
 
         project_kw = db.get_top_keywords(project_id, 40)
-        ext = build_extraction(messages, project_kw)
+        ext = build_extraction(messages, project_kw,
+                               total_records=window.total_records)
 
         now = datetime.now()
         timestamp = now.strftime("%Y-%m-%d %H:%M:%S")
@@ -305,7 +428,8 @@ def main():
         observations = db.get_observations_since(project_id, last_ts) if last_ts else []
 
         # LLM extraction → upsert through memory_writer (anti-patch path)
-        extracted = _extract_via_llm(messages, observations) or []
+        extracted = _extract_via_llm(messages, observations,
+                                     total_records=window.total_records) or []
         method = "llm" if extracted else "none"
 
         counts = upsert_batch(db, project_id, session_id, extracted, memory_dir=memory_dir)
@@ -327,7 +451,9 @@ def main():
             o["tool_input"] for o in observations
             if o["tool_name"] in ("Edit", "Write", "MultiEdit") and o["tool_input"]
         ))
-        first_user_msg = _first_user_request(messages)
+        # HEAD slice, not `messages`: the session's opening request lives in the
+        # first records. A tail-only window would lose it entirely.
+        first_user_msg = _first_user_request(window.head)
         task_mems = [m["content"] for m in extracted if m.get("category") == "task"]
         # Pull the CURRENT todo snapshot from the transcript (last TodoWrite
         # tool_use). This is the live state — much more reliable than LLM-
@@ -385,6 +511,7 @@ def main():
         # Save status (consumed by SessionStart for the footer warning)
         status = {
             "timestamp": timestamp,
+            "trigger": trigger,
             "method": method,
             "n_inserted": n_inserted,
             "n_merged": n_merged,
@@ -403,6 +530,10 @@ def main():
             # why: status file is purely cosmetic for the next SessionStart;
             # disk failure here must not propagate into the compact path
             _log.error(f".last_save.json write failed: {e}")
+
+        # Run completed — retire the start marker so SessionStart doesn't
+        # report this (successful) attempt as abandoned.
+        _clear_attempt(memory_dir)
 
         # Consolidation runs in the sibling async hook (consolidate_async.py),
         # NOT here — see module docstring. This sync leg is done.
@@ -425,11 +556,19 @@ def main():
             (memory_dir / ".last_save.json").write_text(
                 json.dumps({
                     "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "trigger": trigger,
                     "success": False,
                     "error": "see logs",
                 }, ensure_ascii=False),
                 encoding="utf-8",
             )
+            # This run FAILED but it did not get killed — it reached its own
+            # handler and recorded success:false above. Leaving the start marker
+            # behind would make SessionStart report "killed before save" on
+            # every start until the next fully successful compaction, i.e. a
+            # confidently wrong cause. Retire it; .last_save.json carries the
+            # real story.
+            _clear_attempt(memory_dir)
         except OSError:
             # why: status write also failing means disk is unavailable; we
             # can't surface anything further without breaking the hook contract

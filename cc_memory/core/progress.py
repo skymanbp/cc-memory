@@ -31,6 +31,54 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional
 
+
+# ── memory/.gitignore — canonical ignore set ───────────────────────────────
+# Runtime artifacts the plugin writes into a project's memory/ directory. They
+# are machine state, not content: several embed verbatim conversation or plan
+# prose, so leaking them into a user's repo is a privacy problem, not just
+# noise. Keep in sync with the two standalone copies that cannot import this
+# module: cc_memory/ui/installer.py (stdlib-only bootstrap) and
+# skills/ccm-load/SKILL.md (inline script).
+MEMORY_GITIGNORE_LINES = [
+    "# cc-memory: generated state, not content",
+    "memory.db",
+    "memory.db-wal",
+    "memory.db-shm",
+    "sessions/",
+    ".last_save.json",
+    ".last_inject.json",
+    ".last_consolidation.json",
+    ".consolidation.lock",
+    ".pre_compact_attempt.json",
+    ".plan_raw.md",
+    ".plan_history/",
+    "*.tmp",
+]
+
+
+def ensure_memory_gitignore(memory_dir: Path) -> None:
+    """Create memory/.gitignore, or ADD any lines a older install is missing.
+
+    Every previous generator was guarded by ``if not gi.exists()``, so each time
+    the plugin started writing a new artifact, every existing install kept the
+    stale ignore list forever and silently began leaking it. Appending only the
+    missing lines migrates those installs while preserving anything the user
+    added themselves.
+    """
+    gi = memory_dir / ".gitignore"
+    try:
+        existing = gi.read_text(encoding="utf-8") if gi.exists() else ""
+        have = {ln.strip() for ln in existing.splitlines()}
+        missing = [ln for ln in MEMORY_GITIGNORE_LINES if ln not in have]
+        if not missing:
+            return
+        prefix = existing if existing.endswith("\n") or not existing else existing + "\n"
+        gi.write_text(prefix + "\n".join(missing) + "\n", encoding="utf-8")
+    except OSError:
+        # why: .gitignore is a courtesy to the user's VCS; a read-only or
+        # missing memory dir must never break the hook that called us
+        pass
+
 _PKG_ROOT = Path(__file__).resolve().parent.parent
 if str(_PKG_ROOT) not in sys.path:
     sys.path.insert(0, str(_PKG_ROOT))

@@ -71,9 +71,18 @@ if not db_path.exists():
     mem_dir.mkdir(exist_ok=True)
     (mem_dir / 'sessions').mkdir(exist_ok=True)
     (mem_dir / 'topics').mkdir(exist_ok=True)
+    # Literal copy (inline script, no package import). Keep in sync with
+    # core.progress.MEMORY_GITIGNORE_LINES.
     gi = mem_dir / '.gitignore'
-    if not gi.exists():
-        gi.write_text('memory.db\nmemory.db-wal\nmemory.db-shm\nsessions/\n.last_save.json\n', encoding='utf-8')
+    _ign = ['# cc-memory: generated state, not content', 'memory.db', 'memory.db-wal',
+            'memory.db-shm', 'sessions/', '.last_save.json', '.last_inject.json',
+            '.last_consolidation.json', '.consolidation.lock',
+            '.pre_compact_attempt.json', '.plan_raw.md', '.plan_history/', '*.tmp']
+    _have = {l.strip() for l in gi.read_text(encoding='utf-8').splitlines()} if gi.exists() else set()
+    _miss = [l for l in _ign if l not in _have]
+    if _miss:
+        with open(gi, 'a', encoding='utf-8') as _f:
+            _f.write('\n'.join(_miss) + '\n')
 
 # ── (3) Resolve plugin root (env > marketplace > standard install) ─────
 # why: hardcoding the maintainer's path breaks the skill on every other

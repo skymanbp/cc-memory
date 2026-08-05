@@ -22,8 +22,9 @@ hard-coded an astrophysics/ML vocabulary; that was a contamination of
 a generic plugin and has been removed in v2.1.
 """
 import json
+import os
 import re
-from collections import Counter
+from collections import Counter, namedtuple
 from typing import Any, Dict, List, Optional, Tuple
 
 
@@ -84,6 +85,17 @@ _STOP_ACRONYMS = {
 
 # ── Transcript loading ──────────────────────────────────────────────────────
 def load_transcript(transcript_path: str) -> List[Dict]:
+    """Load an ENTIRE transcript into memory. UNBOUNDED — cost grows with the
+    file, which for a long-lived session can reach multiple GiB.
+
+    Do NOT call this from a hook. Hooks run under a wall-clock timeout and a
+    multi-GiB transcript blows it (measured: ~25 MiB/s json.loads throughput,
+    i.e. ~88s for 2.1 GiB, against a 120s PreCompact budget) — the hook is then
+    killed mid-write. Hooks must use load_transcript_window() below.
+
+    Kept unbounded for interactive callers (ui/dashboard.py) that genuinely
+    render full session history and are not on a timeout.
+    """
     messages: List[Dict] = []
     try:
         with open(transcript_path, encoding="utf-8") as fh:
@@ -102,6 +114,167 @@ def load_transcript(transcript_path: str) -> List[Dict]:
         # (file may not exist yet for a freshly compacted session). Return empty.
         return []
     return messages
+
+
+# ── Bounded transcript loading (hook-safe) ─────────────────────────────────
+# A transcript is append-only and unbounded in size, but the information a
+# compaction actually needs is concentrated at BOTH ends: the first records
+# carry the session's opening request, the last records carry current state
+# (live todo list, recent edits, latest assistant response). Reading the
+# middle of a multi-GiB file costs minutes and contributes nothing.
+
+_DEFAULT_HEAD_RECORDS = 40      # enough for _first_user_request to clear the
+                                # leading meta rows (queue-operation/attachment)
+_DEFAULT_TAIL_BYTES = 32 << 20  # 32 MiB ≈ 10k records of recent history
+_READ_CHUNK = 8 << 20
+_MAX_RECORD_BYTES = 8 << 20     # per-record read cap; see the head loop below
+
+TranscriptWindow = namedtuple(
+    "TranscriptWindow",
+    ["messages", "head", "tail", "total_records", "total_bytes", "truncated"],
+)
+
+
+def _decode_records(raw_lines) -> List[Dict]:
+    out: List[Dict] = []
+    for line in raw_lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            # json.loads accepts bytes (UTF-8 autodetect), so we never decode a
+            # slice that might straddle a multi-byte character.
+            out.append(json.loads(line))
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            # why: a malformed or partially-written final line must not drop the
+            # whole window; JSONL is line-delimited so the next line recovers
+            continue
+    return out
+
+
+def _count_records(fh, size: int) -> int:
+    """Count JSONL records with a raw binary scan.
+
+    ~1 GiB/s versus ~25 MiB/s for a full json.loads pass (both measured on a
+    2.1 GiB transcript), so msg_count keeps its historical meaning — the number
+    of records in the transcript — without paying the parse cost.
+
+    Counts NON-BLANK lines, matching _decode_records' own skip rule, and counts
+    a final line that has no trailing newline. A naive newline count gets both
+    of those wrong (it undercounts a file with no trailing newline by one, and
+    double-counts blank-line-separated records). Lines that are non-blank but
+    malformed JSON are still counted here while _decode_records drops them —
+    this is a count of RECORDS PRESENT, not of records successfully parsed.
+    """
+    fh.seek(0)
+    n, remaining, carry = 0, size, b""
+    while remaining > 0:
+        chunk = fh.read(min(_READ_CHUNK, remaining))
+        if not chunk:
+            break
+        remaining -= len(chunk)
+        parts = (carry + chunk).split(b"\n")
+        carry = parts.pop()  # trailing fragment: no newline seen yet
+        n += sum(1 for p in parts if p.strip())
+    if carry.strip():
+        n += 1  # final record without a trailing newline
+    return n
+
+
+def load_transcript_window(
+    transcript_path: str,
+    head_records: int = _DEFAULT_HEAD_RECORDS,
+    tail_bytes: int = _DEFAULT_TAIL_BYTES,
+) -> TranscriptWindow:
+    """Load a bounded head+tail window of a transcript. Hook-safe.
+
+    Returns a TranscriptWindow where ``messages == head + tail`` in BOTH
+    branches — the list every extractor consumer takes. When the file fits
+    inside ``tail_bytes`` the decoded records are identical to the old
+    full-read behaviour (``truncated=False``), so normal projects are
+    unaffected; ``head``/``tail`` are then simply a partition of it.
+
+    Correctness notes (every one of these is a real trap on an append-only
+    file, and each is covered by a regression assertion in tests/smoke_test.py):
+      * the file size is captured ONCE at entry and never read past, so an
+        actively-appending writer cannot extend the read, and the tail read
+        length can never go negative;
+      * the tail never starts before the head ended, so no record can be
+        double-counted into ``messages`` — duplicates would silently inflate
+        keyword frequencies, which persist cumulatively in the DB;
+      * reads are binary and resynchronise on b"\\n", so a tail offset landing
+        mid-record — or mid multi-byte character — is discarded rather than
+        mis-parsed. A seek that lands exactly ON a record boundary keeps that
+        record instead of discarding it;
+      * the head is bounded in BYTES as well as records: a single fat opening
+        record (a pasted file, a large tool result) must not re-materialise the
+        multi-hundred-MiB read this whole function exists to prevent.
+
+    Caveats, both observable by the caller rather than silently absorbed:
+      * a tail this size holds ~10k records; a session whose final
+        ``tail_bytes`` contain no TodoWrite at all would lose the live todo
+        list. Widen ``tail_bytes`` if that ever shows up in practice.
+      * a single record larger than ``tail_bytes`` leaves nothing decodable in
+        the tail window. That state is exactly ``truncated and not tail``, and
+        callers log it (see hooks/pre_compact.py) instead of silently shipping
+        a head-only window — which would reintroduce the staleness bug this
+        function exists to fix.
+    """
+    try:
+        with open(transcript_path, "rb") as fh:
+            size = os.fstat(fh.fileno()).st_size
+
+            if size <= tail_bytes:
+                # Small enough to read whole — same records as load_transcript().
+                msgs = _decode_records(fh.read(size).splitlines())
+                # Partition (not overlap) so messages == head + tail holds here too.
+                return TranscriptWindow(
+                    messages=msgs, head=msgs[:head_records],
+                    tail=msgs[head_records:],
+                    total_records=len(msgs), total_bytes=size, truncated=False,
+                )
+
+            head_raw: List[bytes] = []
+            for _ in range(head_records):
+                # Bounded readline: head_records caps the record COUNT, this caps
+                # the BYTES. An over-long record arrives truncated, fails
+                # json.loads, and _decode_records drops it — the right degradation.
+                line = fh.readline(_MAX_RECORD_BYTES)
+                if not line:
+                    break
+                head_raw.append(line)
+            head = _decode_records(head_raw)
+            head_end = fh.tell()
+
+            # Never seek back into the head: overlapping ranges would put the
+            # same records in both slices.
+            tail_start = max(head_end, size - tail_bytes)
+            if tail_start > 0:
+                # Only discard a record we landed INSIDE. Probing the preceding
+                # byte distinguishes "mid-record" from "exactly on a boundary",
+                # where the following record is complete and must be kept.
+                fh.seek(tail_start - 1)
+                landed_on_boundary = fh.read(1) == b"\n"
+                if not landed_on_boundary:
+                    fh.readline(_MAX_RECORD_BYTES)
+            else:
+                fh.seek(0)
+            tail_blob = fh.read(max(0, size - fh.tell()))
+            tail = _decode_records(tail_blob.splitlines())
+
+            total = _count_records(fh, size)
+            return TranscriptWindow(
+                messages=head + tail, head=head, tail=tail,
+                total_records=total, total_bytes=size, truncated=True,
+            )
+    except (FileNotFoundError, PermissionError, OSError, ValueError):
+        # why: missing / unreadable transcript is a normal early-call state
+        # (file may not exist yet for a freshly compacted session), and a hook
+        # must degrade to "no memories this round" rather than raise.
+        return TranscriptWindow(
+            messages=[], head=[], tail=[], total_records=0,
+            total_bytes=0, truncated=False,
+        )
 
 
 def _text_from_content(content: Any) -> str:
@@ -356,7 +529,15 @@ def detect_keywords(text: str) -> Dict[str, int]:
 
 
 def build_extraction(messages: List[Dict],
-                     project_keywords: Optional[List[str]] = None) -> Dict[str, Any]:
+                     project_keywords: Optional[List[str]] = None,
+                     total_records: Optional[int] = None) -> Dict[str, Any]:
+    """Build the extraction bundle from a message list.
+
+    ``total_records`` lets a bounded caller (load_transcript_window) report the
+    transcript's REAL record count while only holding a head+tail window in
+    memory; without it msg_count would silently degrade from "records in this
+    session" to "records we happened to read".
+    """
     all_texts: List[str] = []
     for msg in messages:
         t = _text_from_content(msg.get("message", {}).get("content", ""))
@@ -381,7 +562,7 @@ def build_extraction(messages: List[Dict],
         "metrics":         metrics,
         "keywords":        keywords,
         "assistant_texts": assistant_texts,
-        "msg_count":       len(messages),
+        "msg_count":       len(messages) if total_records is None else total_records,
     }
 
 

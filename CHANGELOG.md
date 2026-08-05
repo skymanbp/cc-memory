@@ -7,6 +7,180 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [2.4.2] — 2026-08-04
+
+Hook-survivability release. On a long-lived project the `PreCompact` sync leg
+was being **killed mid-write**, losing that compaction's memories entirely, and
+— more quietly — its LLM extraction had been reading the wrong end of the
+transcript for weeks. Both trace to the same root cause: the hook loaded the
+ENTIRE transcript into memory before using ~12 KB of it.
+
+### Fixed
+
+- **Unbounded transcript read (the `Hook cancelled` root cause).**
+  `core.extractor.load_transcript` read every line of the `.jsonl` into a list
+  with no cap. Measured on a real 2.11 GiB transcript: `json.loads` throughput
+  ~25 MiB/s, i.e. **~88s of a 120s budget consumed before any useful work**,
+  with `build_extraction` and an LLM leg (up to 2 × `_API_TIMEOUT`) still to
+  come. The host terminated the hook on timeout — and because
+  `TerminateProcess` runs no `except` block, the run left a session row and an
+  archive on disk but no `.last_save.json`, so the failure was invisible.
+  New `core.extractor.load_transcript_window` reads a bounded **head + tail**
+  window (40 records + 32 MiB) instead. **Measured: 88s → 1.66s to load, 2.63s
+  through extraction, and a full real-transcript hook run in 14.33s, exit 0.**
+  `msg_count` keeps its exact meaning via a raw binary record scan (~1 GiB/s,
+  40× cheaper than parsing). `load_transcript` itself is retained, unbounded and
+  documented as such, for the interactive dashboard.
+- **LLM extraction was reading the OLDEST end of the transcript.**
+  `_build_transcript_summary` filled its 12,000-character budget starting from
+  the first record and stopped. On the same transcript the budget was exhausted
+  after **329 of ~585,000 records**, so every extraction for that project saw
+  only content from the session's opening hours and none of the recent work.
+  It now fills from the newest record backwards and restores chronological
+  order, and reports omissions against the transcript's real record count
+  rather than the window's. The identical bug in
+  `hooks.session_start._summarize_transcript` (retroactive extraction) is fixed
+  the same way.
+- **`PROGRESS.md`'s "Current Request" was always empty.** `_first_user_request`
+  scanned only `messages[:5]`, but a transcript opens with `queue-operation` /
+  `attachment` meta rows — the first real user message sat at index 5. It now
+  scans past leading meta rows and skips empty-content records.
+- **A total LLM outage silently cost the session handoff.** `call_llm` raises
+  `RuntimeError` when every backend candidate fails, but `_extract_via_llm`'s
+  `except` tuple did not include it, so the error escaped to the hook's outer
+  handler and skipped the `PROGRESS.md` rewrite along with extraction. Adding
+  `RuntimeError` is what finally makes `docs/ARCHITECTURE.md`'s "hooks degrade
+  gracefully — extraction is skipped, but archives/handoff still save" true.
+- **`SessionStart` read the same unbounded transcripts under a 15s budget** (an
+  eighth of PreCompact's). Both call sites now use the bounded window.
+- **`pyproject.toml` had a UTF-8 BOM** (introduced in v2.4.0), so
+  `tomllib.load()` failed with `Invalid statement (at line 1, column 1)` and
+  **no PEP 517 frontend could build or install the package at all**. Stripped
+  from `pyproject.toml` and `cc_memory/__init__.py`.
+- **`/cc-mem status` gave a partial install a clean bill of health.**
+  `_REQUIRED_PLUGIN_FILES` omitted `core/extractor.py` — the module both hooks
+  import at load time — plus `core/auth.py`, `core/consolidate.py`,
+  `core/idle.py`, `llm/ccl_backend.py`, `config.json` and `__init__.py`. The
+  list now covers the hooks' import closure.
+
+### Added
+
+- **Killed-run visibility.** `PreCompact` writes
+  `memory/.pre_compact_attempt.json` before it starts and removes it only on a
+  completed run, so a surviving marker is proof the last attempt died;
+  `SessionStart` reports it (after a 10-minute grace window, so a run still in
+  flight is never mislabelled). Its error path clears the marker too — an
+  *errored* run must not be reported as a *killed* one.
+- **`trigger` recorded in `.last_save.json`** and shown in the SessionStart
+  footer. Claude Code only surfaces hook execution in its UI for a **manual**
+  `/compact`, which made automatic compactions indistinguishable from "the hook
+  never ran". They are distinguishable now — the DB shows they were always
+  firing (352 `auto` sessions on the affected project).
+
+### Changed
+
+- **`memory/.gitignore` now migrates instead of only being created.** Every
+  generator was guarded by `if not exists()`, so each new runtime artifact
+  leaked into existing installs forever. `core.progress.ensure_memory_gitignore`
+  appends only missing lines (preserving user entries) and is the single source
+  for all four generators. Newly covered: `.pre_compact_attempt.json`,
+  `.last_inject.json`, `.last_consolidation.json`, `.consolidation.lock`,
+  `.plan_raw.md`, `.plan_history/`, `*.tmp` — several of which embed verbatim
+  conversation or plan prose, making this a privacy leak rather than noise.
+- Version strings resynchronised across all six canonical declarations (they
+  had drifted to three different values: 2.4.1 / 2.3.4 / 2.3.3) plus the stale
+  `v2.1` / `v2.3` banners in the CLI, MCP server, and build script.
+
+---
+
+## [2.4.1] — 2026-07-29
+
+Patch release. Fixes a false refusal in the v2.4.0 carryover gate, caught on
+the gate's second real-world replacement: updating a plan **in place** (status
+and progress notes only, identical step titles) was REFUSED.
+
+### Fixed
+
+- **Long `notes` no longer dilute an identical-title auto-carry.**
+  `check_carryover` built its match candidates as `title + " " + notes` only,
+  so a step carrying a long progress note dropped the character-trigram Jaccard
+  against the outgoing bare title below the 0.5 threshold — an *identical*
+  title failed to auto-carry and the gate refused a legitimate
+  self-replacement. Each incoming step now contributes **two** candidates, the
+  bare `title` AND `title + notes` (the combined form is kept, and skipped when
+  it equals the bare title, so a step folded into another step's notes still
+  carries).
+- Regression pinned as `tests/test_plan_carryover.py` §4b — a step whose title
+  is unchanged but whose `notes` field is 321 characters must auto-carry, and
+  the notes must survive the replacement. Suite is now 14 checks.
+
+---
+
+## [2.4.0] — 2026-07-28
+
+Plan-integrity release. `plan_active` is a SINGLE-row slot, so every
+`plan-set --from-refiner` replaced the current plan wholesale — unfinished
+steps vanished with no accounting that they ever existed. v2.4.0 closes that
+hole with a mandatory carryover gate at the one replacement door, a matching
+gate on `plan-clear`, and an append-only archive of every outgoing plan. There
+is deliberately **no force flag**: a drop with no recorded reason is exactly
+the failure mode the gate exists to kill.
+
+### Added
+
+- **Mandatory carryover gate on plan replacement** (`core.plan.check_carryover`).
+  Every step of the outgoing plan whose status is `pending` / `in_progress` /
+  `blocked` must be accounted for in the incoming JSON, either (a) **auto-carried**
+  — some step in the new plan matches its title with trigram-Jaccard ≥ 0.5
+  (`CARRYOVER_MATCH_THRESHOLD`) — or (b) **explicitly dispositioned** via a new
+  top-level `"dispositions": [{"old_title": …, "action":
+  "done|dropped|merged|carried", "reason": …}]` array. A disposition with an
+  unknown `action`, or with an empty `reason`, is itself a violation.
+- **Enforcement at the only replacement door.** `core.plan.apply_refined_plan`
+  runs the gate before it writes and raises `ValueError` listing every
+  unaccounted step by id and title; `cli/mem.py` surfaces it as
+  `[FAIL] refined plan rejected: …` and exits 1, leaving the old plan intact.
+  The gate reads dispositions from the **raw** refiner dict (normalisation runs
+  on a copy), so the schema stays additive for older refiner outputs.
+- **Append-only plan archive** (`core.plan.archive_plan`). Every outgoing plan —
+  replaced or cleared, cleanly dispositioned or not — is written to
+  `memory/.plan_history/plan_<timestamp>_<replace|clear>.json` with the
+  archived-at time, the event, the reason, and the full `structured` / `raw` /
+  `active_step` payload. An archive-write `OSError` warns and proceeds rather
+  than blocking planning — the dispositions, not the archive, are the primary
+  anti-loss guarantee.
+- **Dispositions are retained for audit.** `normalize_structured` keeps the
+  `dispositions` array in the stored plan, so `plan_active.structured` records
+  what happened to the previous plan's unfinished steps and why.
+- **`agents/plan-refiner.md` rule 8.** The refiner must read the current plan
+  (`plan-show`, or `memory/PLAN.md`) before emitting JSON, and either carry each
+  unfinished step into `steps` or disposition it. If the raw document does not
+  say what happened to a step, it must be marked `carried` and re-added —
+  never an invented `done` / `dropped`.
+- **`tests/test_plan_carryover.py`** — new suite, 13 checks over six sections:
+  bootstrap replacement with no old plan, refusal that names BOTH lost steps,
+  old plan untouched after a refusal, auto-carry by similar title, explicit
+  dispositions stored for audit, reasonless disposition refused, and the CLI
+  `plan-clear` gate end-to-end including archive contents.
+
+### Changed
+
+- **`/cc-mem plan-clear` now refuses to sink work.** With unfinished steps in
+  the active plan it prints the gate message plus every pending step and exits
+  1 unless a new `--reason "<why these steps are being dropped>"` is supplied;
+  the reason is recorded in the archive. The plan is archived before clearing
+  in either case, and the success line is now
+  `[OK] Active plan cleared (archived to memory/.plan_history/).`
+
+No schema migration: `dispositions` rides inside the existing
+`plan_active.structured` JSON blob, and the archive is a plain directory under
+`memory/`. The raw-capture path (`ExitPlanMode` → `plan_active.raw`,
+`plan-set --raw`) is unaffected — it only arms `needs_refine`, it never
+replaces the structured plan, so the gate stays at the single door that can
+actually lose steps.
+
+---
+
 ## [2.3.4] — 2026-07-14
 
 Auth + local-fallback behavior release. Root-caused why every LLM call was

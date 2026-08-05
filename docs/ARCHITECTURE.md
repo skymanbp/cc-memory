@@ -1,4 +1,4 @@
-# cc-memory — Architecture (v2.1)
+# cc-memory — Architecture (v2.4.2)
 
 ## TL;DR
 
@@ -72,11 +72,13 @@ cc-memory/
 
 ## Lifecycle hooks
 
-5 Claude Code hooks are registered (`hooks/hooks.json`):
+6 hook commands across 5 Claude Code events are registered (`hooks/hooks.json`)
+— `PreCompact` declares two, a blocking sync leg and a background `async` leg:
 
 | Hook | Entry | Timeout | Job |
 |------|-------|---------|-----|
-| `PreCompact` | [`cc_memory/hooks/pre_compact.py`](../cc_memory/hooks/pre_compact.py) | 45s | LLM extract memories via Haiku; route through `memory_writer.upsert_batch`; FULL-REWRITE `memory/PROGRESS.md`; archive session; maybe trigger LLM consolidation. |
+| `PreCompact` (sync) | [`cc_memory/hooks/pre_compact.py`](../cc_memory/hooks/pre_compact.py) | 120s | Read a BOUNDED head+tail transcript window (`extractor.load_transcript_window`); LLM extract memories via Haiku; route through `memory_writer.upsert_batch`; FULL-REWRITE `memory/PROGRESS.md`; archive session. Writes a start marker so a killed run is detectable. |
+| `PreCompact` (async) | [`cc_memory/hooks/consolidate_async.py`](../cc_memory/hooks/consolidate_async.py) | 300s, `async: true` | Every-Nth-session LLM consolidation, moved OFF the blocking compaction path in v2.3.2 (interval marker + lock, budget-gated). |
 | `SessionStart` | [`cc_memory/hooks/session_start.py`](../cc_memory/hooks/session_start.py) | 15s | Inject layered context (topics / critical / timeline / PROGRESS preview); emit the FORCED `<system-reminder>` to Read `PROGRESS.md`+`MEMORY.md`; retroactive save of unsaved JSONLs. |
 | `Stop` | [`cc_memory/hooks/stop.py`](../cc_memory/hooks/stop.py) | 22s | Observer: extract from last turn's observations via Haiku; per-turn `patch_progress(files_touched, ...)`; every 5 turns run `idle.maybe_run_idle` (cleanup + MEMORY.md regen). |
 | `PostToolUse` | [`cc_memory/hooks/post_tool_use.py`](../cc_memory/hooks/post_tool_use.py) | 8s | Insert one row into `observations` per tool call (no LLM). |
@@ -192,8 +194,15 @@ Per-project state lives at `<project>/memory/`:
 ├── memory.db                    SQLite (WAL mode, all tables)
 ├── MEMORY.md                    auto-generated, refreshed every write
 ├── PROGRESS.md                  full-rewrite from `progress` row, every Stop+PreCompact
-├── .last_save.json              status from last PreCompact
-├── .gitignore                   excludes DB + sessions
+├── PLAN.md                      full-rewrite from `plan_active` row (v2.2)
+├── .last_save.json              status from last PreCompact (incl. auto/manual trigger)
+├── .last_inject.json            what SessionStart actually injected (v2.3)
+├── .last_consolidation.json     session count at last consolidation (v2.3.2)
+├── .consolidation.lock          prevents overlapping async workers (v2.3.2)
+├── .pre_compact_attempt.json    start marker; survives ⇒ last run was killed (v2.4.2)
+├── .plan_raw.md                 last raw ExitPlanMode capture (v2.2)
+├── .plan_history/               append-only archive of replaced/cleared plans (v2.4.0)
+├── .gitignore                   excludes DB, sessions, and all generated state above
 ├── sessions/YYYY/MM/            archived per-session summaries
 └── topics/                      reserved for future per-topic md exports
 ```

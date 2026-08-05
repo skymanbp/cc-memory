@@ -60,7 +60,7 @@ def _check_files():
 
 def build_installer():
     print("=" * 50)
-    print("  Building cc-memory-installer.exe (v2.3)")
+    print("  Building cc-memory-installer.exe (v2.4.2)")
     print("=" * 50)
 
     _check_files()
@@ -98,7 +98,7 @@ def build_installer():
 
 def build_dashboard():
     print("=" * 50)
-    print("  Building cc-memory-dashboard.exe (v2.3)")
+    print("  Building cc-memory-dashboard.exe (v2.4.2)")
     print("=" * 50)
 
     _check_files()

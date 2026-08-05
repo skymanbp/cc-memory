@@ -20,7 +20,7 @@ from the `progress` SQL row. Schema (`cc_memory/core/db.py:_MIGRATIONS:v3_progre
 | Column | Type | Primary source · Fallbacks |
 |--------|------|---------------------------|
 | `project_id` | INTEGER PK | upsert_project |
-| `current_request` | TEXT | UserPromptSubmit turn 1 → PreCompact `_first_user_request(messages)` |
+| `current_request` | TEXT | UserPromptSubmit turn 1 → PreCompact `_first_user_request(window.head)` — scans past the leading `queue-operation` / `attachment` meta rows (v2.4.2) |
 | `status_done` | TEXT | `session_summaries.completed` (PreCompact) |
 | `status_in_flight` | TEXT | `session_summaries.learned` |
 | `status_blocked` | TEXT | Explicit `patch_progress(status_blocked=...)` |

@@ -1,4 +1,4 @@
-# PLAN protocol (v2.2)
+# PLAN protocol (v2.2; mandatory carryover gate since v2.4.0)
 
 cc-memory's **live plan anchor**: a single `memory/PLAN.md` per project that
 stays in sync with what's actually being worked on, so the AI doesn't
@@ -161,7 +161,10 @@ Both default to the `haiku` model — they're focused, low-context tasks.
 /cc-mem plan-set --from-refiner  # store structured JSON from stdin
 /cc-mem plan-check               # reset counters + print guardian invocation hint
 /cc-mem plan-replan              # re-arm needs_refine on stored raw
-/cc-mem plan-clear               # drop the plan + delete PLAN.md
+/cc-mem plan-clear               # drop the plan + delete PLAN.md.
+                                 # Archives to memory/.plan_history/ first, and
+                                 # REFUSES (exit 1) when unfinished steps exist
+                                 # unless --reason "<why>" is given (v2.4.0).
 ```
 
 ## Sensitive-tool list

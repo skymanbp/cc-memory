@@ -46,13 +46,8 @@ def _init_project_if_needed(cwd):
         from core.db import MemoryDB
         db = MemoryDB(db_path)
         db.upsert_project(cwd)
-        gi = memory_dir / ".gitignore"
-        if not gi.exists():
-            gi.write_text(
-                "memory.db\nmemory.db-wal\nmemory.db-shm\n"
-                "sessions/\n.last_save.json\n",
-                encoding="utf-8"
-            )
+        from core.progress import ensure_memory_gitignore
+        ensure_memory_gitignore(memory_dir)
         from core.logger import get_logger
         get_logger("user_prompt").info(f"auto-initialized memory for {Path(cwd).name}")
         return True

@@ -36,7 +36,7 @@ from core.encoding_setup import enable_utf8_io
 enable_utf8_io()
 
 from core.db import MemoryDB
-from core.extractor import load_transcript
+from core.extractor import load_transcript_window
 from core.logger import get_logger
 from core.progress import write_progress_md
 from llm.memory_writer import upsert_batch
@@ -158,19 +158,57 @@ def _build_footer(db, project_id, memory_dir):
         try:
             info = json.loads(last_save.read_text(encoding="utf-8"))
             ts = info.get("timestamp", "?")
+            # trigger makes AUTO compactions visible. Claude Code only surfaces
+            # hook execution in its UI for MANUAL /compact, so an automatic
+            # compaction was previously indistinguishable from "never ran".
+            trig = info.get("trigger", "")
+            trig_s = f" ({trig})" if trig else ""
             if info.get("success"):
                 method = info.get("method", "?")
                 ni = info.get("n_inserted", 0)
                 nm = info.get("n_merged", 0)
                 ns = info.get("n_superseded", 0)
                 lines.append(
-                    f"[Last save: {ts} | +{ni}/~{nm}/↻{ns} via {method}]"
+                    f"[Last save: {ts}{trig_s} | +{ni}/~{nm}/↻{ns} via {method}]"
                 )
             else:
-                lines.append(f"[Last save FAILED at {ts}]")
+                lines.append(f"[Last save FAILED at {ts}{trig_s}]")
         except (json.JSONDecodeError, OSError):
             # why: malformed status file shouldn't block injection;
             # the next PreCompact will overwrite it
+            pass
+
+    # A PreCompact killed by the host timeout dies on TerminateProcess: no
+    # except block, no finally, so .last_save.json above still describes the
+    # PREVIOUS successful run and the failure is invisible. pre_compact.py
+    # writes a start marker it removes only on completion — a surviving marker
+    # is therefore proof the last attempt died. Report it, but only once it is
+    # old enough that it cannot be a run still in flight.
+    attempt = memory_dir / ".pre_compact_attempt.json"
+    if attempt.exists():
+        try:
+            a = json.loads(attempt.read_text(encoding="utf-8"))
+            if not isinstance(a, dict):
+                # A JSON list/int/string parses fine but has no .get(); the
+                # AttributeError would escape _build_footer and take the ENTIRE
+                # context injection with it (no memories, no PROGRESS preview,
+                # no forced reminder). Normalise to the handled path instead.
+                raise ValueError("marker is not a JSON object")
+            started = datetime.strptime(a.get("started_at", ""), "%Y-%m-%d %H:%M:%S")
+            age_min = (datetime.now() - started).total_seconds() / 60.0
+            if age_min >= 10:
+                mib = float(a.get("transcript_bytes") or 0) / 1024 ** 2
+                lines.append(
+                    f"[WARNING: PreCompact at {a.get('started_at')} "
+                    f"({a.get('trigger', '?')}) DID NOT FINISH — killed before "
+                    f"save (transcript {mib:.0f} MiB). Memories from that "
+                    f"compaction were lost.]"
+                )
+        except (json.JSONDecodeError, OSError, ValueError, TypeError, AttributeError):
+            # why: an unreadable/garbled marker is purely advisory. This tuple is
+            # deliberately wide — a corrupt marker escaping here would abort
+            # build_context() and silently drop the whole injection payload,
+            # trading a missing diagnostic line for total memory loss.
             pass
     try:
         from core.auth import get_api_key
@@ -391,9 +429,17 @@ def _get_saved_session_ids(db, project_id):
     return {r["claude_session_id"] for r in rows if r["claude_session_id"]}
 
 
-def _summarize_transcript(messages, max_chars=12000):
-    parts, total = [], 0
-    for msg in messages:
+def _summarize_transcript(messages, max_chars=12000, total_records=None):
+    """Render the most RECENT slice of a transcript, up to max_chars.
+
+    Same contract as pre_compact._build_transcript_summary, and fixed for the
+    same reason: filling the budget from the OLDEST record pinned retroactive
+    extraction to a session's opening minutes and never showed it the work that
+    actually happened. Fills newest-first, then restores chronological order.
+    """
+    parts, total, scanned = [], 0, 0
+    for msg in reversed(messages):
+        scanned += 1
         message = msg.get("message", {})
         if not isinstance(message, dict):
             continue
@@ -425,19 +471,26 @@ def _summarize_transcript(messages, max_chars=12000):
             text = text[:400] + "\n...\n" + text[-400:]
         line = f"[{role}] {text}\n"
         if total + len(line) > max_chars:
-            parts.append(f"\n[...truncated, {len(messages) - len(parts)} more messages...]")
+            scanned -= 1  # this one didn't make it in
             break
         parts.append(line)
         total += len(line)
+    parts.reverse()  # newest-first accumulation → chronological
+    # `messages` may be a bounded window, so its length understates the
+    # transcript; total_records is the real count when the caller has it.
+    universe = len(messages) if total_records is None else max(total_records, len(messages))
+    omitted = universe - scanned
+    if omitted > 0:
+        parts.insert(0, f"[...{omitted} earlier messages omitted, showing most recent...]\n")
     return "\n".join(parts)
 
 
-def _retroactive_extract(messages):
+def _retroactive_extract(messages, total_records=None):
     from core.auth import get_api_key
     api_key, _ = get_api_key()
     if not api_key:
         return None
-    transcript_text = _summarize_transcript(messages)
+    transcript_text = _summarize_transcript(messages, total_records=total_records)
     if len(transcript_text) < 100:
         return None
     try:
@@ -571,7 +624,7 @@ def _refresh_progress_row(db, project_id, memory_dir, current_session_id=None):
     if needs_todos or needs_files or needs_ptr:
         try:
             from core.extractor import (
-                find_latest_transcript, load_transcript,
+                find_latest_transcript, load_transcript_window,
                 extract_latest_todo_state, extract_file_changes,
             )
             prior_jsonl = find_latest_transcript(cwd, exclude_session_id=current_session_id)
@@ -579,7 +632,11 @@ def _refresh_progress_row(db, project_id, memory_dir, current_session_id=None):
                 if needs_ptr:
                     patch["transcript_ptr"] = str(prior_jsonl.resolve())
                 if needs_todos or needs_files:
-                    prior_msgs = load_transcript(str(prior_jsonl))
+                    # Bounded: SessionStart has a 15s budget — an EIGHTH of what
+                    # PreCompact gets — and a long-lived project's transcript can
+                    # reach GiB. Both consumers below want the RECENT end anyway
+                    # (last TodoWrite snapshot, files touched most recently).
+                    prior_msgs = load_transcript_window(str(prior_jsonl)).messages
                     if prior_msgs:
                         if needs_todos:
                             mined = extract_latest_todo_state(prior_msgs)
@@ -645,10 +702,12 @@ def retroactive_save(cwd, db, project_id, current_session_id=""):
         if jsonl.stat().st_size < 1024:
             continue
         try:
-            messages = load_transcript(str(jsonl))
+            window = load_transcript_window(str(jsonl))
+            messages = window.messages
             if not messages or len(messages) < 5:
                 continue
-            memories = _retroactive_extract(messages)
+            memories = _retroactive_extract(messages,
+                                            total_records=window.total_records)
             if not memories:
                 continue
 
@@ -656,7 +715,7 @@ def retroactive_save(cwd, db, project_id, current_session_id=""):
                 project_id=project_id,
                 claude_session_id=session_uuid,
                 trigger_type="retroactive_llm",
-                msg_count=len(messages),
+                msg_count=window.total_records,
                 archive_path="",
                 brief_summary=f"Retroactive save at {datetime.now().strftime('%Y-%m-%d %H:%M')}",
             )

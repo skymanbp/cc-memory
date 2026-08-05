@@ -894,6 +894,157 @@ def main():
         "README.zh.md marker hash != current README.md (stale translation)"
     print("[OK] i18n: README.zh.md in-sync with README.md; no drift across tracked docs")
 
+    # === v2.4.2: bounded transcript window (hook-safe) =======================
+    # An unbounded transcript read is what killed PreCompact on large projects:
+    # a 2.11 GiB transcript parses at ~25 MiB/s (~88s) against a 120s budget, so
+    # the hook was killed mid-write. load_transcript_window reads a head+tail
+    # slice instead. Contract: identical to the unbounded loader for normal
+    # files, exact record count when truncated, never admits a partial record.
+    import json as _json3
+    import importlib.util as _ilu
+    from datetime import datetime as _dt2, timedelta as _td2
+    from core.extractor import (load_transcript as _lt,
+                                load_transcript_window as _ltw)
+    _tr_dir = tmp / "transcripts"
+    _tr_dir.mkdir(exist_ok=True)
+
+    _small = _tr_dir / "small.jsonl"
+    _recs = [{"type": "user", "message": {"role": "user", "content": f"msg {i}"}}
+             for i in range(50)]
+    _small.write_text("\n".join(_json3.dumps(r) for r in _recs) + "\n", encoding="utf-8")
+    _w = _ltw(str(_small))
+    assert _w.truncated is False, "small transcript must not be truncated"
+    assert _w.messages == _lt(str(_small)), "bounded read diverged from unbounded on a small file"
+    assert _w.total_records == 50, _w.total_records
+
+    # Force truncation with a tiny tail budget: head+tail must both be present,
+    # total_records must stay EXACT (it is counted, not inferred from the window).
+    _w2 = _ltw(str(_small), head_records=3, tail_bytes=512)
+    assert _w2.truncated is True, "tail_bytes=512 should have truncated"
+    assert _w2.total_records == 50, f"record count degraded to {_w2.total_records}"
+    assert len(_w2.messages) < 50, "truncated window should hold fewer records"
+    assert _w2.head[0]["message"]["content"] == "msg 0", "head lost the FIRST record"
+    assert _w2.tail[-1]["message"]["content"] == "msg 49", "tail lost the LAST record"
+    assert all(isinstance(m, dict) for m in _w2.messages), "partial record leaked through"
+    assert _ltw(str(_tr_dir / "nope.jsonl")).messages == [], "missing file must degrade to empty"
+    print("[OK] v2.4.2 bounded window: small-file parity, exact count, head+tail intact")
+
+    # --- window edge cases (each one was a real defect found in review) ------
+    # (a) head and tail ranges must never overlap: duplicated records inflate
+    #     keyword frequencies, and db.upsert_keywords ACCUMULATES, so a dupe
+    #     permanently poisons the project vocabulary.
+    _sz = _small.stat().st_size
+    _rl = _sz // 50
+    _wo = _ltw(str(_small), head_records=5, tail_bytes=_sz - 3 * _rl)
+    assert len(_wo.messages) <= _wo.total_records, \
+        f"records double-counted: {len(_wo.messages)} > {_wo.total_records}"
+    assert _wo.messages == _wo.head + _wo.tail, "messages != head + tail"
+    _contents = [m["message"]["content"] for m in _wo.messages]
+    assert len(_contents) == len(set(_contents)), f"duplicate records: {_contents}"
+    # (b) messages == head + tail must hold in the NON-truncated branch too
+    assert _w.messages == _w.head + _w.tail, "non-truncated branch breaks the invariant"
+    # (c) count must survive a missing trailing newline and blank separators
+    _nt = _tr_dir / "notrail.jsonl"
+    _nt.write_bytes(b"\n".join(_json3.dumps(r).encode() for r in _recs))  # no trailing \n
+    assert _ltw(str(_nt), tail_bytes=1).total_records == 50, \
+        f"no-trailing-newline undercount: {_ltw(str(_nt), tail_bytes=1).total_records}"
+    _bl = _tr_dir / "blank.jsonl"
+    _bl.write_bytes(b"\n\n".join(_json3.dumps(r).encode() for r in _recs) + b"\n")
+    assert _ltw(str(_bl), tail_bytes=1).total_records == 50, \
+        f"blank lines double-counted: {_ltw(str(_bl), tail_bytes=1).total_records}"
+    # (d) a fat opening record must not re-materialise an unbounded read
+    _fat = _tr_dir / "fat.jsonl"
+    _fat.write_bytes(b"\n".join(
+        [_json3.dumps({"type": "user", "message": {"role": "user", "content": "X" * (9 << 20)}}).encode()]
+        + [_json3.dumps(r).encode() for r in _recs]) + b"\n")
+    _wf = _ltw(str(_fat), head_records=40, tail_bytes=1 << 20)
+    assert sum(len(_json3.dumps(m)) for m in _wf.head) < (9 << 20), \
+        "oversized head record was materialised; head is not byte-bounded"
+    # (e) a seek landing exactly on a record boundary must KEEP that record
+    _uni = _tr_dir / "uniform.jsonl"
+    _urecs = [('{"i":%02d,"pad":"%s"}' % (i, "y" * 40)).encode() for i in range(20)]
+    _uni.write_bytes(b"\n".join(_urecs) + b"\n")
+    _urlen = len(_urecs[0]) + 1
+    assert [m["i"] for m in _ltw(str(_uni), head_records=3, tail_bytes=5 * _urlen).tail] \
+        == [15, 16, 17, 18, 19], "boundary-aligned seek dropped a whole record"
+    print("[OK] v2.4.2 window edges: no overlap, byte-bounded head, exact count, boundary-safe")
+
+    # === v2.4.2: LLM summary reads the RECENT end, not the oldest ============
+    # Regression guard for the silent 70-day staleness bug: the summary filled
+    # its 12k budget from the OLDEST record and broke, so on a long session the
+    # extractor only ever saw the session's opening minutes.
+    _pc_spec = _ilu.spec_from_file_location(
+        "_pc_sm", _REPO / "cc_memory" / "hooks" / "pre_compact.py")
+    _pc = _ilu.module_from_spec(_pc_spec)
+    _pc_spec.loader.exec_module(_pc)
+    _long = [{"type": "user", "message": {"role": "user", "content": f"line {i} " + "x" * 200}}
+             for i in range(400)]
+    _summary = _pc._build_transcript_summary(_long, max_chars=2000)
+    assert "line 399" in _summary, "summary dropped the MOST RECENT message"
+    assert "line 0 " not in _summary, "summary still anchored to the oldest message"
+    assert "earlier messages omitted" in _summary, "omission notice missing"
+    # _first_user_request must see past leading meta rows (queue-operation etc.)
+    _meta = [{"type": "attachment", "message": {"content": ""}} for _ in range(5)]
+    _meta.append({"type": "user", "message": {"role": "user", "content": "the real request"}})
+    assert _pc._first_user_request(_meta) == "the real request", \
+        "_first_user_request still blind past the first 5 meta records"
+    print("[OK] v2.4.2 summary anchored to recent end + first-request survives meta rows")
+
+    # === v2.4.2: killed-run visibility ======================================
+    # A hook killed by the host timeout dies on TerminateProcess: no except, no
+    # finally, so .last_save.json kept describing the PREVIOUS success and the
+    # failure was invisible. A start marker that outlives the run proves a kill.
+    _ss_spec = _ilu.spec_from_file_location(
+        "_ss_sm", _REPO / "cc_memory" / "hooks" / "session_start.py")
+    _ss = _ilu.module_from_spec(_ss_spec)
+    _ss_spec.loader.exec_module(_ss)
+    (mem_dir / ".last_save.json").write_text(_json3.dumps({
+        "timestamp": "2026-08-04 18:28:59", "trigger": "auto", "method": "llm",
+        "n_inserted": 9, "n_merged": 0, "n_superseded": 1, "success": True,
+    }), encoding="utf-8")
+    _foot = _ss._build_footer(db, pid, mem_dir)
+    assert "(auto)" in _foot, "auto-trigger not surfaced — auto compaction stays invisible"
+    _old_ts = (_dt2.now() - _td2(minutes=45)).strftime("%Y-%m-%d %H:%M:%S")
+    _pc._write_attempt(mem_dir, "manual", "sid-x", 2262308959)
+    assert (mem_dir / ".pre_compact_attempt.json").exists(), "start marker not written"
+    (mem_dir / ".pre_compact_attempt.json").write_text(_json3.dumps({
+        "started_at": _old_ts, "trigger": "manual", "session_id": "sid-x",
+        "pid": 999999, "transcript_bytes": 2262308959}), encoding="utf-8")
+    assert "DID NOT FINISH" in _ss._build_footer(db, pid, mem_dir), \
+        "killed PreCompact not reported"
+    # ...but a run still in flight must not be flagged
+    (mem_dir / ".pre_compact_attempt.json").write_text(_json3.dumps({
+        "started_at": _dt2.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "trigger": "manual", "pid": 1, "transcript_bytes": 10}), encoding="utf-8")
+    assert "DID NOT FINISH" not in _ss._build_footer(db, pid, mem_dir), \
+        "false positive on an in-flight PreCompact"
+    _pc._clear_attempt(mem_dir)
+    assert not (mem_dir / ".pre_compact_attempt.json").exists(), "marker not cleared"
+    # A GARBLED marker must never escape _build_footer: an AttributeError there
+    # aborts build_context() and silently drops the ENTIRE injection payload
+    # (no memories, no PROGRESS preview, no forced reminder).
+    for _bad in ('[1,2,3]', '42', '"a string"',
+                 '{"started_at":"2020-01-01 00:00:00","transcript_bytes":"big"}',
+                 '{"started_at":"2020-01-01 00:00:00","transcript_bytes":null}',
+                 '{"started_at":"not-a-date"}', '{not json'):
+        (mem_dir / ".pre_compact_attempt.json").write_text(_bad, encoding="utf-8")
+        _ss._build_footer(db, pid, mem_dir)  # must not raise
+    _pc._clear_attempt(mem_dir)
+    # The summary's omitted count must be transcript-relative, not window-relative
+    _msgs = [{"type": "user", "message": {"role": "user", "content": f"line {i} " + "x" * 200}}
+             for i in range(400)]
+    import re as _re2
+    _grab = lambda s: int(_re2.search(r"\[\.\.\.(\d+) earlier messages omitted", s).group(1))
+    _win_rel = _grab(_pc._build_transcript_summary(_msgs, max_chars=2000))
+    _abs_rel = _grab(_pc._build_transcript_summary(_msgs, max_chars=2000, total_records=100000))
+    assert _win_rel < len(_msgs), f"window-relative count out of range: {_win_rel}"
+    assert _abs_rel == 100000 - (len(_msgs) - _win_rel), \
+        f"omitted count ignored total_records: got {_abs_rel}, window-relative was {_win_rel}"
+    assert _abs_rel > _win_rel * 100, \
+        "omitted count is still window-relative — it understates by the whole omitted middle"
+    print("[OK] v2.4.2 robustness: garbled marker survivable, omitted count transcript-relative")
+    print("[OK] v2.4.2 visibility: auto trigger shown, kill detected, no in-flight false positive")
+
     print("\n===== ALL SMOKE TESTS PASSED =====")
     print(f"Test project preserved at: {tmp}")
     print("\nProduced files:")

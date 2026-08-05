@@ -1,5 +1,5 @@
 {
-  "version": "2.3.4",
+  "version": "2.4.2",
   "description": "cc-memory — Claude Code persistent memory plugin",
   "extraction": {
     "max_sentences_per_category": 10,

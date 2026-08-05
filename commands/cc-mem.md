@@ -32,7 +32,7 @@ Run cc-memory CLI commands against the current project. The wrapper resolves
 | `plan-set --from-refiner` | Read structured JSON from stdin (refiner output) |
 | `plan-check` | Reset guardian counters + emit plan-guardian invocation hint |
 | `plan-replan` | Re-arm `needs_refine` on the current raw |
-| `plan-clear` | Drop the active plan + delete PLAN.md |
+| `plan-clear` | Drop the active plan + delete PLAN.md. Archived to `memory/.plan_history/` first; **`--reason "<why>"` is required when unfinished steps exist** (refuses and exits 1 otherwise — v2.4.0 carryover gate) |
 | `inject-show` | Show exactly what the last SessionStart injected (ground truth) |
 | `inject-usage` | Deterministic signals: did Claude actually Read PROGRESS.md/MEMORY.md |
 | `encoding-check [--apply]` | Scan for U+FFFD corruption (read-only; `--apply` quarantines) |

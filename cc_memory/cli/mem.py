@@ -67,7 +67,16 @@ def _table(headers, rows):
         print(fmt.format(*t))
 
 
+# Every module a hook imports at load time. If one is missing the hook dies at
+# import, which Claude Code surfaces as nothing at all — so this list is the
+# only warning the user gets. It must therefore cover the IMPORT CLOSURE of the
+# hooks, not a hand-picked subset: extractor / auth / ccl_backend / consolidate
+# / idle and config.json were all absent, so a partial install missing
+# core/extractor.py (imported by pre_compact.py and session_start.py) reported
+# a clean bill of health while every hook silently failed.
 _REQUIRED_PLUGIN_FILES = [
+    "cc_memory/__init__.py",
+    "cc_memory/config.json",
     "cc_memory/core/db.py",
     "cc_memory/core/logger.py",
     "cc_memory/core/privacy.py",
@@ -75,6 +84,10 @@ _REQUIRED_PLUGIN_FILES = [
     "cc_memory/core/progress.py",
     "cc_memory/core/plan.py",
     "cc_memory/core/encoding_setup.py",
+    "cc_memory/core/extractor.py",
+    "cc_memory/core/auth.py",
+    "cc_memory/core/consolidate.py",
+    "cc_memory/core/idle.py",
     "cc_memory/hooks/pre_compact.py",
     "cc_memory/hooks/consolidate_async.py",
     "cc_memory/hooks/session_start.py",
@@ -82,6 +95,7 @@ _REQUIRED_PLUGIN_FILES = [
     "cc_memory/hooks/post_tool_use.py",
     "cc_memory/hooks/user_prompt.py",
     "cc_memory/llm/memory_writer.py",
+    "cc_memory/llm/ccl_backend.py",
     "hooks/hooks.json",
 ]
 
@@ -255,7 +269,7 @@ def cmd_status(args):
     memory_dir, db_path, name = _resolve_db(args.project)
     project = str(Path(args.project).resolve())
 
-    print(f"\n{'='*55}\n  cc-memory v2.1 Status Check: {name}\n{'='*55}\n")
+    print(f"\n{'='*55}\n  cc-memory v2.4.2 Status Check: {name}\n{'='*55}\n")
 
     layouts = _detect_install_layouts()
     if not layouts:
@@ -963,7 +977,7 @@ def cmd_encoding_check(args):
 
 
 def make_parser():
-    p = argparse.ArgumentParser(prog="cc-memory", description="cc-memory CLI v2.1",
+    p = argparse.ArgumentParser(prog="cc-memory", description="cc-memory CLI v2.4.2",
         formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--project", required=True, help="Project root path")
     sub = p.add_subparsers(dest="command", required=True)

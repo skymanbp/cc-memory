@@ -207,13 +207,29 @@ def _init_project(project_path, log_fn=print):
     db.upsert_project(str(project))
     log_fn(f"[OK] DB initialized at {memory_dir / 'memory.db'}")
 
+    # Literal copy: this installer is a stdlib-only bootstrap that runs before
+    # the package is importable. Keep in sync with
+    # core.progress.MEMORY_GITIGNORE_LINES.
     gi = memory_dir / ".gitignore"
-    if not gi.exists():
-        gi.write_text(
-            "memory.db\nmemory.db-wal\nmemory.db-shm\nsessions/\n.last_save.json\n",
-            encoding="utf-8",
-        )
-        log_fn(f"[OK] .gitignore written")
+    _ignore = (
+        "# cc-memory: generated state, not content\n"
+        "memory.db\nmemory.db-wal\nmemory.db-shm\nsessions/\n"
+        ".last_save.json\n.last_inject.json\n.last_consolidation.json\n"
+        ".consolidation.lock\n.pre_compact_attempt.json\n"
+        ".plan_raw.md\n.plan_history/\n*.tmp\n"
+    )
+    try:
+        _have = {ln.strip() for ln in gi.read_text(encoding="utf-8").splitlines()} \
+            if gi.exists() else set()
+        _missing = [ln for ln in _ignore.splitlines() if ln not in _have]
+        if _missing:
+            with open(gi, "a", encoding="utf-8") as _fh:
+                _fh.write("\n".join(_missing) + "\n")
+            log_fn(f"[OK] .gitignore written ({len(_missing)} lines)")
+    except OSError as _e:
+        # why: .gitignore is a courtesy to the user's VCS; failing to write it
+        # must not abort an otherwise successful install
+        log_fn(f"[WARN] .gitignore not written: {_e}")
 
 
 # ── GUI ─────────────────────────────────────────────────────────────────────

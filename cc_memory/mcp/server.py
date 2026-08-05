@@ -271,7 +271,7 @@ def _handle_request(req):
                "result": {
                    "protocolVersion": "2024-11-05",
                    "capabilities": {"tools": {}},
-                   "serverInfo": {"name": "cc-memory", "version": "2.3.4"},
+                   "serverInfo": {"name": "cc-memory", "version": "2.4.2"},
                }})
     elif method == "notifications/initialized":
         return
@@ -313,7 +313,7 @@ def _parent_heartbeat(interval=30):
 
 
 def main():
-    _log.info("MCP server starting (v2.1)")
+    _log.info("MCP server starting (v2.4.2)")
     sys.stdout = open(os.devnull, "w")
     t = threading.Thread(target=_parent_heartbeat, daemon=True)
     t.start()
