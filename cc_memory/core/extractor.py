@@ -387,13 +387,33 @@ def extract_latest_todo_state(messages: List[Dict]) -> List[Dict]:
     return latest if found_any else []
 
 
+def mangle_project_path(path: str) -> str:
+    """Map an absolute filesystem path to Claude Code's `~/.claude/projects/`
+    slug directory name. Single source of truth for that convention.
+
+    Claude Code replaces EVERY character outside ``[A-Za-z0-9]`` with '-', not
+    only ':' '\\' '/'. Evidence: of the 179 slug directories on the reference
+    machine, 0 contain '_' and 0 contain '.', although plenty of the source
+    paths did — e.g. ``C:\\Users\\skyma\\.claude\\projects`` is stored as
+    ``C--Users-skyma--claude-projects`` (the '.' became a '-').
+
+    The narrower three-character replace this replaces therefore produced a
+    non-existent slug for every project path containing '_' or '.', which then
+    fell through to a fuzzy substring search over ALL slug directories — the
+    cross-project contamination defect fixed in v2.5. Callers must treat a
+    miss here as "no transcript", never as a licence to guess.
+    """
+    return re.sub(r"[^A-Za-z0-9]", "-", path)
+
+
 def find_latest_transcript(cwd: str,
                            exclude_session_id: Optional[str] = None) -> Optional["Path"]:
     """Locate the newest .jsonl transcript for this project (by mtime).
 
-    Resolves `~/.claude/projects/<dir-hash>/` using the same convention as
-    session_start.py:_find_transcript_dir (Windows uses '-' in place of
-    drive ':' and path separators).
+    Resolves `~/.claude/projects/<slug>/` via mangle_project_path() above —
+    the same convention as session_start.py:_find_transcript_dir, which shares
+    that helper. Exact match, then ONE case-insensitive pass, then None; there
+    is deliberately no fuzzy fallback.
 
     Pass `exclude_session_id` (the current Claude session UUID) to avoid
     picking the freshly-opened transcript for the current session — we want
@@ -405,7 +425,7 @@ def find_latest_transcript(cwd: str,
     if not claude_projects.exists():
         return None
     path_str = str(Path(cwd).resolve())
-    hash_candidate = path_str.replace(":", "-").replace("\\", "-").replace("/", "-")
+    hash_candidate = mangle_project_path(path_str)
     transcript_dir = claude_projects / hash_candidate
     if not transcript_dir.exists():
         hash_lower = hash_candidate.lower()

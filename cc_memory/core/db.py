@@ -166,6 +166,17 @@ _MIGRATIONS = [
     # Supersede chain: when memory_writer.upsert_smart replaces an older memory,
     # the new row references the old via supersedes_id (and old is archived).
     # This preserves the update history instead of stacking N copies.
+    #
+    # NOTE — supersedes_id deliberately declares NO FOREIGN KEY, and that is not
+    # an oversight to "fix later". PRAGMA foreign_keys IS ON (see _connect), but
+    # SQLite cannot add a REFERENCES clause to an existing column: retrofitting
+    # one means a full table rebuild (create-new / copy / drop / rename) on every
+    # install in the field, which is out of scope for a point release. The
+    # consequence is that a HARD DELETE of a superseded row leaves a dangling
+    # supersedes_id that nothing catches — so every delete path must archive
+    # (is_active = 0) via archive_memory / bulk_archive / archive_obsolete
+    # instead of DELETE. delete_memories() is the one exception and is for
+    # user-driven purges only.
     ("v3_supersedes",
      "ALTER TABLE memories ADD COLUMN supersedes_id INTEGER"),
     ("v3_supersedes_idx",
@@ -529,11 +540,27 @@ class MemoryDB:
 
     def get_recent_memories(self, project_id, sessions_back=3,
                             categories=None, min_importance=1, limit=30):
+        """Memories from the last N sessions PLUS every session-less memory.
+
+        `session_id IS NULL` is not an edge case — it is what ALL FOUR manual
+        save paths produce (cli/mem.py add, mcp/server.py memory_add,
+        ui/dashboard.py, ui/web_viewer.py POST /api/memory, plus the
+        save-memories skill), because a `sessions` row only exists after a
+        compaction. The pre-v2.5 filter was a bare `AND session_id IN (...)`,
+        which NULL can never satisfy, so everything the user saved by hand was
+        invisible to every consumer of this method: SessionStart injection
+        (hooks/session_start.py), the web viewer, and MCP memory_recent.
+        """
         session_ids = self.get_recent_session_ids(project_id, sessions_back)
-        if not session_ids:
-            return []
-        ph = ",".join("?" * len(session_ids))
-        params = [project_id, min_importance] + session_ids
+        params = [project_id, min_importance]
+        if session_ids:
+            ph = ",".join("?" * len(session_ids))
+            session_clause = f"AND (session_id IN ({ph}) OR session_id IS NULL)"
+            params += session_ids
+        else:
+            # why: a project that has never compacted still has manual saves,
+            # and "IN ()" is a syntax error in SQLite — drop the IN arm
+            session_clause = "AND session_id IS NULL"
         cat_clause = ""
         if categories:
             cat_ph = ",".join("?" * len(categories))
@@ -545,7 +572,7 @@ class MemoryDB:
                 f"""SELECT * FROM memories
                     WHERE project_id = ? AND is_active = 1
                       AND importance >= ?
-                      AND session_id IN ({ph})
+                      {session_clause}
                       {cat_clause}
                     ORDER BY importance DESC, created_at DESC
                     LIMIT ?""",
@@ -778,9 +805,24 @@ class MemoryDB:
             return [dict(r) for r in rows]
 
     def cleanup_observations(self, project_id, before_ts):
+        """Delete this project's observations at or before `before_ts`.
+
+        INCLUSIVE ('<=', not '<') on purpose. Rows carry `_now()` =
+        `isoformat(timespec="seconds")`, and hooks/pre_compact.py passes an
+        instant in exactly that shape, captured BEFORE it reads the rows it is
+        about to consume. Under a strict '<', every row written in the same
+        wall-clock second as that instant survived the compaction that had
+        already extracted it and was re-fed to the next one. At second
+        resolution such collisions are ordinary, not rare.
+
+        Nothing unconsumed is at risk: observations are written only by
+        PostToolUse, which fires while Claude is running a tool, and PreCompact
+        runs with the agent paused for compaction — so no observation can be
+        created after the caller's read yet still inside the caller's second.
+        """
         with self._connect() as conn:
             cur = conn.execute(
-                "DELETE FROM observations WHERE project_id = ? AND timestamp < ?",
+                "DELETE FROM observations WHERE project_id = ? AND timestamp <= ?",
                 (project_id, before_ts)
             )
             return cur.rowcount
@@ -1103,29 +1145,81 @@ class MemoryDB:
 
     # ── FTS5 search ─────────────────────────────────────────────────────────
 
+    # Hard ceiling on any search LIMIT. A caller-supplied limit is a hint, not a
+    # licence to materialise the table: search_fts(pid, q, limit=10**6) used to
+    # fetch every active row (measured 400/400 on a 400-row project, driven from
+    # the MCP tool argument). SQLite also reads a NEGATIVE limit as "no limit",
+    # so the floor is as load-bearing as the ceiling.
+    _MAX_SEARCH_LIMIT = 1000
+
+    @staticmethod
+    def _like_escape(text):
+        """Neutralise LIKE metacharacters, for use with ESCAPE '\\'.
+
+        Order matters: the backslash is doubled FIRST, else the backslashes
+        introduced for % and _ get escaped a second time. Unescaped, a query of
+        "%" matched every row and a query of "_" matched every row with at least
+        one character — a full table dump from a one-character search.
+        """
+        return (text.replace("\\", "\\\\")
+                    .replace("%", "\\%")
+                    .replace("_", "\\_"))
+
+    def _match_fts(self, conn, project_id, query, limit):
+        """Run the MATCH query. Returns rows, or None if FTS could not answer.
+
+        A malformed MATCH expression is a property of the USER'S QUERY, not
+        evidence of a broken index: `"`, `AND`, `a OR`, `NEAR/`, `x*"y` and `%`
+        every one raise sqlite3.OperationalError out of the fts5 parser
+        ('unterminated string', 'fts5: syntax error near ...'). Answering that
+        by rebuilding the whole index (measured: 6/6 such queries triggered a
+        rebuild) turns a read-only search into an unbounded WRITE on
+        caller-chosen input — ~52 ms at 20k rows, and it fixes nothing, because
+        the query is still malformed on the retry.
+
+        So a parse failure is retried ONCE as a quoted phrase, which is always
+        syntactically valid fts5 and searches for the user's text literally.
+        Only when THAT fails too is the index itself the suspect, and only then
+        do we rebuild (once) and let the caller fall through to LIKE.
+        """
+        sql = """SELECT m.* FROM memories m
+                 JOIN memories_fts f ON m.id = f.rowid
+                 WHERE memories_fts MATCH ?
+                   AND m.project_id = ? AND m.is_active = 1
+                 ORDER BY rank
+                 LIMIT ?"""
+        for expr in (query, '"' + query.replace('"', '""') + '"'):
+            try:
+                rows = conn.execute(sql, (expr, project_id, limit)).fetchall()
+                return [dict(r) for r in rows]
+            except sqlite3.OperationalError:
+                # why: fts5 rejected this expression. The next iteration retries
+                # the always-valid quoted-phrase form; if that fails as well we
+                # leave the loop and treat the INDEX, not the query, as broken.
+                continue
+        self._rebuild_fts5()
+        return None
+
     def search_fts(self, project_id, query, limit=30):
+        query = query if isinstance(query, str) else str(query or "")
+        try:
+            limit = min(max(1, int(limit)), self._MAX_SEARCH_LIMIT)
+        except (TypeError, ValueError):
+            # why: a non-numeric limit is a caller bug, not a reason to fail a
+            # read — use the documented default instead of raising.
+            limit = 30
         with self._connect() as conn:
             if self._fts5_available:
-                try:
-                    rows = conn.execute(
-                        """SELECT m.* FROM memories m
-                           JOIN memories_fts f ON m.id = f.rowid
-                           WHERE memories_fts MATCH ?
-                             AND m.project_id = ? AND m.is_active = 1
-                           ORDER BY rank
-                           LIMIT ?""",
-                        (query, project_id, limit)
-                    ).fetchall()
-                    return [dict(r) for r in rows]
-                except sqlite3.OperationalError:
-                    # why: query parse error or corrupted FTS index — try
-                    # rebuild once, then fall through to LIKE search
-                    self._rebuild_fts5()
-            pat = "%" + query + "%"
+                rows = self._match_fts(conn, project_id, query, limit)
+                if rows is not None:
+                    return rows
+            pat = "%" + self._like_escape(query) + "%"
             rows = conn.execute(
                 """SELECT * FROM memories
                    WHERE project_id = ? AND is_active = 1
-                     AND (content LIKE ? OR tags LIKE ? OR COALESCE(topic, '') LIKE ?)
+                     AND (content LIKE ? ESCAPE '\\'
+                          OR tags LIKE ? ESCAPE '\\'
+                          OR COALESCE(topic, '') LIKE ? ESCAPE '\\')
                    ORDER BY importance DESC, created_at DESC
                    LIMIT ?""",
                 (project_id, pat, pat, pat, limit)
@@ -1252,20 +1346,48 @@ class MemoryDB:
         return self.get_plans(project_id,
                               statuses=["draft", "evaluating", "ready", "executing"])
 
-    def update_plan_status(self, plan_id, status, notes=None, field="feasibility"):
+    def update_plan_status(self, plan_id, status, notes=None, field="feasibility",
+                           project_id=None):
+        """Set a plan's status (and optionally one notes column).
+
+        Returns cur.rowcount: 0 means the UPDATE matched nothing. Callers MUST
+        surface that — `cli/plan.py done 9999 ghost` used to print
+        "Plan #9999 -> done: ghost" and exit 0 because this method discarded
+        the rowcount.
+
+        Pass `project_id` to scope the UPDATE. `plans.id` is global to the DB
+        FILE, not to a project, and one memory.db can hold several projects
+        (ui/dashboard.py switches between them via get_all_projects), so an
+        unscoped call rewrites whatever row owns that id — including another
+        project's status and result columns. With the predicate a foreign or
+        typo'd id simply matches nothing, and the 0 rowcount callers already
+        check reads as a clean "not found" instead of a silent cross-project
+        write. The argument defaults to None only so the pre-v2.5 signature
+        stays callable; every caller that knows its project SHOULD pass it.
+
+        `field` names a column and so cannot be a bound parameter; it is
+        whitelisted rather than interpolated blind. `project_id` is a bound
+        parameter — only the presence of the clause is decided in Python.
+        """
+        if field not in ("feasibility", "result"):
+            field = "feasibility"
         now = self._now()
+        scope = " AND project_id = ?" if project_id is not None else ""
+        ident = [plan_id] + ([project_id] if project_id is not None else [])
         with self._connect() as conn:
             if notes is not None:
-                conn.execute(
+                cur = conn.execute(
                     f"UPDATE plans SET status = ?, {field} = ?, updated_at = ? "
-                    f"WHERE id = ?",
-                    (status, notes, now, plan_id)
+                    f"WHERE id = ?{scope}",
+                    [status, notes, now] + ident
                 )
             else:
-                conn.execute(
-                    "UPDATE plans SET status = ?, updated_at = ? WHERE id = ?",
-                    (status, now, plan_id)
+                cur = conn.execute(
+                    f"UPDATE plans SET status = ?, updated_at = ? "
+                    f"WHERE id = ?{scope}",
+                    [status, now] + ident
                 )
+            return cur.rowcount
 
     def get_next_plan(self, project_id):
         with self._connect() as conn:
@@ -1285,27 +1407,55 @@ class MemoryDB:
             )
             return cur.rowcount
 
-    def delete_plan(self, plan_id):
-        with self._connect() as conn:
-            conn.execute("DELETE FROM plans WHERE id = ?", (plan_id,))
+    def delete_plan(self, plan_id, project_id=None):
+        """Delete one plan row. Returns cur.rowcount (0 = matched nothing).
 
-    def update_plan_content(self, plan_id, content):
-        now = self._now()
+        `project_id` scopes the DELETE, for the same reason as
+        `update_plan_status`: `plans.id` is global to the DB FILE, not to a
+        project, and one memory.db can hold several projects (ui/dashboard.py
+        switches between them via get_all_projects). Unscoped, a stale or
+        typo'd id deletes whatever row owns it — including another project's.
+        """
+        sql = "DELETE FROM plans WHERE id = ?"
+        params = [plan_id]
+        if project_id is not None:
+            sql += " AND project_id = ?"
+            params.append(project_id)
         with self._connect() as conn:
-            conn.execute(
-                "UPDATE plans SET content = ?, updated_at = ? WHERE id = ?",
-                (content, now, plan_id)
-            )
+            return conn.execute(sql, params).rowcount
+
+    def update_plan_content(self, plan_id, content, project_id=None):
+        """Rewrite one plan's content. Returns cur.rowcount (0 = no match).
+
+        `project_id` scopes the UPDATE — see `delete_plan` for why.
+        """
+        sql = "UPDATE plans SET content = ?, updated_at = ? WHERE id = ?"
+        params = [content, self._now(), plan_id]
+        if project_id is not None:
+            sql += " AND project_id = ?"
+            params.append(project_id)
+        with self._connect() as conn:
+            return conn.execute(sql, params).rowcount
 
     def reorder_plans(self, project_id, plan_ids):
+        """Renumber exec_order to match the given id sequence.
+
+        Returns the number of rows actually updated. Callers compare it against
+        len(plan_ids) to detect ids that do not belong to this project —
+        `cli/plan.py reorder 9999 8888` used to print "Reordered Plans" and
+        exit 0 while changing nothing, because this method discarded rowcount.
+        """
         now = self._now()
+        updated = 0
         with self._connect() as conn:
             for order, pid in enumerate(plan_ids, 1):
-                conn.execute(
+                cur = conn.execute(
                     "UPDATE plans SET exec_order = ?, updated_at = ? "
                     "WHERE id = ? AND project_id = ?",
                     (order, now, pid, project_id)
                 )
+                updated += cur.rowcount
+        return updated
 
     # ── analytics / stats ────────────────────────────────────────────────────
 

@@ -14,6 +14,7 @@ anti-patch reconcile contract is honored from the CLI too.
 """
 import argparse
 import json
+import re
 import sqlite3
 import sys
 import textwrap
@@ -31,15 +32,67 @@ enable_utf8_io()
 from core.db import MemoryDB
 
 
+def _resolve_version() -> str:
+    """Single-source the version string. Never a hardcoded literal — v2.4.3
+    shipped two stale ones in this file (`mem.py:276`, `:984`).
+
+    `core.version` is THE canonical runtime source and resolves under BOTH
+    install layouts, because every entry point puts the PACKAGE directory on
+    sys.path and then imports flat (`from core.db import MemoryDB`): a
+    standalone install is FLAT (ui/installer.py writes TARGET_DIR/core/…, with
+    no cc_memory/ segment), so `import cc_memory` raises there. The on-disk
+    fallbacks below only matter for a pre-2.5 flat install laid down before
+    core/version.py existed.
+    """
+    try:
+        from core.version import __version__ as v
+        if v:
+            return str(v)
+    except ImportError:
+        # why: a flat install laid down before core/version.py existed —
+        # the on-disk probes below are authoritative there.
+        pass
+    for probe in (_PKG_ROOT / "core" / "version.py", _PKG_ROOT / "__init__.py"):
+        try:
+            m = re.search(r'__version__\s*=\s*["\']([^"\']+)["\']',
+                          probe.read_text(encoding="utf-8"))
+            if m:
+                return m.group(1)
+        except OSError:
+            # why: an absent/unreadable probe is not fatal for a version banner
+            continue
+    try:
+        return str(json.loads(
+            (_PKG_ROOT / "config.json").read_text(encoding="utf-8")
+        ).get("version") or "unknown")
+    except (OSError, json.JSONDecodeError, AttributeError):
+        # why: same — a missing version must degrade, never abort the CLI
+        return "unknown"
+
+
+__version__ = _resolve_version()
+
+
 def _resolve_db(project):
     p = Path(project).resolve()
     return p / "memory", p / "memory" / "memory.db", p.name
 
 
-def _require_db(db_path):
+def _require_db_path(db_path):
+    """Refuse a pure READ against a project that has no database.
+
+    Six read-only commands used to create a 140 KB database as a side effect of
+    asking a question (search / topics / summary / supersedes / observations /
+    mode), while every other command refused. One policy now: a question never
+    creates state.
+    """
     if not db_path.exists():
         print(f"Error: no memory database at {db_path}")
         sys.exit(1)
+
+
+def _require_db(db_path):
+    _require_db_path(db_path)
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
@@ -74,11 +127,15 @@ def _table(headers, rows):
 # / idle and config.json were all absent, so a partial install missing
 # core/extractor.py (imported by pre_compact.py and session_start.py) reported
 # a clean bill of health while every hook silently failed.
+#
+# The `cc_memory/` prefix names the PACKAGE root, not a literal directory: a
+# standalone install is FLAT (see _inspect_layout).
 _REQUIRED_PLUGIN_FILES = [
     "cc_memory/__init__.py",
     "cc_memory/config.json",
     "cc_memory/core/db.py",
     "cc_memory/core/logger.py",
+    "cc_memory/core/version.py",
     "cc_memory/core/privacy.py",
     "cc_memory/core/modes.py",
     "cc_memory/core/progress.py",
@@ -111,7 +168,7 @@ def _detect_install_layouts():
       - marketplace-directory: extraKnownMarketplaces["cc-memory"].source.type
                                == "directory"; root = source.path (dev checkout)
       - marketplace-cache:     installed_plugins.json[cc-memory@cc-memory][0].installPath
-      - legacy-install:        ~/.claude/hooks/cc-memory/cc_memory/ exists
+      - legacy-install:        ~/.claude/hooks/cc-memory/ (nested OR flat)
     """
     layouts = []
     home = Path.home() / ".claude"
@@ -126,6 +183,8 @@ def _detect_install_layouts():
             # state — we still want to report on the OTHER layouts (legacy,
             # cache) so the user can see they're broken too; default to {}
             settings = {}
+    if not isinstance(settings, dict):
+        settings = {}
 
     enabled_marketplace = bool(
         settings.get("enabledPlugins", {}).get("cc-memory@cc-memory", False)
@@ -159,6 +218,7 @@ def _detect_install_layouts():
                 layouts.append({
                     "layout": "marketplace-cache",
                     "root": root,
+                    "pkg_dir": None,
                     "hooks_via": "plugin-manifest",
                     "enabled": enabled_marketplace,
                     "plugin_files_ok": False,
@@ -191,8 +251,38 @@ def _detect_install_layouts():
 def _inspect_layout(layout_name, root: Path,
                     hooks_via: str, enabled: bool,
                     settings_dict=None):
-    """Check plugin file presence + hook registration for one install root."""
-    missing = [rel for rel in _REQUIRED_PLUGIN_FILES if not (root / rel).exists()]
+    """Check plugin file presence + hook registration for one install root.
+
+    Two on-disk shapes exist and BOTH are healthy:
+
+      nested (marketplace / dev checkout)   root/cc_memory/core/db.py
+      flat   (ui/installer.py standalone)   root/core/db.py
+
+    v2.4.3 taught _detect_install_layouts about the flat shape but left this
+    function resolving `root / rel` with rel carrying a literal `cc_memory/`
+    prefix — so every standalone install reported 22 of 22 files missing and
+    `/cc-mem status` then SKIPPED the API-key check for want of a "functional"
+    layout. Resolve the package dir once and strip the prefix accordingly.
+
+    `hooks/hooks.json` is a REPO-level file, not a package file: the standalone
+    installer never copies it and it is meaningless when the hooks come from
+    ~/.claude/settings.json, so it is only required for plugin-manifest installs.
+
+    Returns the verdict dict, including the resolved `pkg_dir` so callers can
+    put the right directory on sys.path.
+    """
+    pkg_dir = root / "cc_memory" if (root / "cc_memory").is_dir() else root
+
+    missing = []
+    for rel in _REQUIRED_PLUGIN_FILES:
+        if rel.startswith("cc_memory/"):
+            probe = pkg_dir / rel[len("cc_memory/"):]
+        elif hooks_via == "plugin-manifest":
+            probe = root / rel
+        else:
+            continue  # repo-level file, not part of a settings.json install
+        if not probe.exists():
+            missing.append(rel)
     plugin_files_ok = not missing
 
     hooks_registered = []
@@ -210,12 +300,19 @@ def _inspect_layout(layout_name, root: Path,
                 hooks_registered = []
     elif hooks_via == "user-settings" and settings_dict is not None:
         hooks_block = settings_dict.get("hooks", {})
+        if not isinstance(hooks_block, dict):
+            hooks_block = {}
         for ev in ("PreCompact", "SessionStart", "Stop",
                    "PostToolUse", "UserPromptSubmit"):
-            for mg in hooks_block.get(ev, []):
+            entries = hooks_block.get(ev, [])
+            if not isinstance(entries, list):
+                continue
+            for mg in entries:
                 if not isinstance(mg, dict):
                     continue
                 for h in mg.get("hooks", []):
+                    if not isinstance(h, dict):
+                        continue
                     if "cc-memory" in (h.get("command") or ""):
                         hooks_registered.append(ev)
                         break
@@ -225,6 +322,7 @@ def _inspect_layout(layout_name, root: Path,
     return {
         "layout": layout_name,
         "root": root,
+        "pkg_dir": pkg_dir,
         "hooks_via": hooks_via,
         "enabled": enabled,
         "plugin_files_ok": plugin_files_ok,
@@ -246,7 +344,8 @@ def _print_layout_report(layout: dict) -> bool:
     enabled_tag = "" if layout["hooks_via"] != "plugin-manifest" else (
         " · enabled" if layout["enabled"] else " · NOT enabled in settings.json"
     )
-    print(f"  [{files_tag}] {name} at {root}{enabled_tag}")
+    shape = "flat" if layout.get("pkg_dir") == root else "nested"
+    print(f"  [{files_tag}] {name} at {root} ({shape}){enabled_tag}")
     if layout["missing_files"]:
         print(f"         missing: {', '.join(layout['missing_files'][:5])}"
               + (" ..." if len(layout["missing_files"]) > 5 else ""))
@@ -273,7 +372,7 @@ def cmd_status(args):
     memory_dir, db_path, name = _resolve_db(args.project)
     project = str(Path(args.project).resolve())
 
-    print(f"\n{'='*55}\n  cc-memory v2.4.3 Status Check: {name}\n{'='*55}\n")
+    print(f"\n{'='*55}\n  cc-memory v{__version__} Status Check: {name}\n{'='*55}\n")
 
     layouts = _detect_install_layouts()
     if not layouts:
@@ -347,7 +446,10 @@ def cmd_status(args):
         print(f"  [INFO] No progress recorded yet")
 
     if active_layout:
-        sys.path.insert(0, str(active_layout["root"] / "cc_memory"))
+        # Use the RESOLVED package dir — hardcoding root/"cc_memory" broke the
+        # moment _inspect_layout learned about flat standalone installs.
+        pkg_dir = active_layout.get("pkg_dir") or (active_layout["root"] / "cc_memory")
+        sys.path.insert(0, str(pkg_dir))
         try:
             from core.auth import get_api_key
             key, source = get_api_key()
@@ -419,27 +521,36 @@ def cmd_list(args):
     recent = [r[0] for r in conn.execute(
         "SELECT id FROM sessions ORDER BY compacted_at DESC LIMIT ?", (args.sessions,)
     ).fetchall()]
-    if not recent:
-        print("No sessions found.")
-        return
-    ph = ",".join("?" * len(recent))
-    params = list(recent)
+
+    # Session-less memories (session_id IS NULL) are what EVERY manual save path
+    # writes — `mem add`, MCP memory_add, the Tk dashboard, the web viewer,
+    # skills/save-memories. An INNER JOIN on sessions plus `session_id IN (...)`
+    # made all of them permanently invisible to `list`, at every importance.
+    params = []
+    if recent:
+        ph = ",".join("?" * len(recent))
+        sess_sql = f"(m.session_id IN ({ph}) OR m.session_id IS NULL)"
+        params += recent
+    else:
+        sess_sql = "m.session_id IS NULL"
     cat_sql = ""
     if cat and cat != "all":
-        cat_sql = "AND category = ?"
+        cat_sql = "AND m.category = ?"
         params.append(cat)
     params.append(args.limit)
 
     rows = conn.execute(
         f"""SELECT m.id, m.category, m.importance, m.content, m.topic, s.compacted_at
-            FROM memories m JOIN sessions s ON m.session_id=s.id
-            WHERE m.is_active=1 AND m.session_id IN ({ph}) {cat_sql}
+            FROM memories m LEFT JOIN sessions s ON m.session_id=s.id
+            WHERE m.is_active=1 AND {sess_sql} {cat_sql}
             ORDER BY m.importance DESC, m.created_at DESC LIMIT ?""", params
     ).fetchall()
 
     print(f"\nMemories for {name}" + (f" [{cat}]" if cat and cat != "all" else "") + ":\n")
+    if not rows:
+        print("  (none)")
     for r in rows:
-        d = r["compacted_at"][:10] if r["compacted_at"] else "?"
+        d = r["compacted_at"][:10] if r["compacted_at"] else "-"
         stars = "*" * r["importance"] + "." * (5 - r["importance"])
         topic = f"[{r['topic']}]" if r["topic"] else ""
         print(f"  [{r['id']:4d}] {stars}  {r['category']:<10}  {topic:<12}  {d}  "
@@ -449,6 +560,7 @@ def cmd_list(args):
 
 def cmd_search(args):
     _, db_path, name = _resolve_db(args.project)
+    _require_db_path(db_path)
     db = MemoryDB(db_path)
     pid = db.upsert_project(args.project)
     rows = db.search_fts(pid, args.query, limit=30)
@@ -488,25 +600,75 @@ def cmd_sessions(args):
     conn.close()
 
 
+# ── `sql` is a READ-ONLY query tool ─────────────────────────────────────────
+# cmd_sql never commits, and sqlite3 opens an implicit transaction for DML
+# only. So `UPDATE ...` was silently rolled back at close() (reported success,
+# changed nothing) while `DROP TABLE topics` ran in autocommit and destroyed
+# data permanently — MemoryDB then re-created the empty table so nothing even
+# looked wrong. Refuse anything that is not a single read statement.
+_SQL_COMMENT_RE = re.compile(r"--[^\n]*|/\*.*?\*/", re.S)
+_SQL_WRITE_RE = re.compile(
+    r"\b(insert|update|delete|replace|drop|alter|create|attach|detach|"
+    r"vacuum|reindex|begin|commit|rollback|savepoint|release)\b", re.I)
+_SQL_READ_HEADS = ("select", "pragma", "explain", "with", "values")
+
+
+def _read_only_sql_error(query):
+    """Return a human-readable reason the query is rejected, or None if it is a
+    single read-only statement."""
+    q = _SQL_COMMENT_RE.sub(" ", query or "").strip()
+    if not q:
+        return "the query is empty"
+    q = q.rstrip(";").strip()
+    if not q:
+        return "the query is empty"
+    if ";" in q:
+        return ("only ONE statement at a time (found a ';' separator; a ';' "
+                "inside a string literal trips this too — by design)")
+    head = q.split(None, 1)[0].lower()
+    if head not in _SQL_READ_HEADS:
+        return f"'{head.upper()}' is not a read-only statement"
+    if head == "pragma" and "=" in q:
+        return "an assigning PRAGMA (contains '=') writes to the database"
+    if head in ("with", "explain", "values") and _SQL_WRITE_RE.search(q):
+        return "the statement contains a data- or schema-modifying keyword"
+    return None
+
+
 def cmd_sql(args):
     _, db_path, _ = _resolve_db(args.project)
+    err = _read_only_sql_error(args.query)
+    if err:
+        print(f"\nRefused: {err}.")
+        print("  `sql` is a READ-ONLY query tool "
+              "(SELECT / PRAGMA / EXPLAIN / WITH ... SELECT).")
+        print("  To change memory use `/cc-mem add`, `/cc-mem cleanup`, "
+              "`/cc-mem consolidate` or `/cc-mem encoding-check --apply`.")
+        sys.exit(1)
     conn = _require_db(db_path)
     print(f"\nSQL: {args.query}\n")
     try:
         rows = conn.execute(args.query).fetchall()
-        if not rows:
-            print("(no rows)")
-            return
-        _table(list(rows[0].keys()), [list(r) for r in rows])
-        print(f"\n({len(rows)} rows)")
     except sqlite3.Error as e:
         print(f"SQL Error: {e}")
+        conn.rollback()
+        conn.close()
+        sys.exit(1)
+    if not rows:
+        print("(no rows)")
+    else:
+        _table(list(rows[0].keys()), [list(r) for r in rows])
+        print(f"\n({len(rows)} rows)")
+    # Belt and braces: nothing above may write, but never let an implicit
+    # transaction survive to close() where its fate depends on the statement.
+    conn.rollback()
     conn.close()
 
 
 def cmd_add(args):
     """Add memory via the anti-patch writer (NOT direct insert)."""
-    from llm.memory_writer import upsert_smart, regenerate_memory_index
+    from llm.memory_writer import (upsert_smart, regenerate_memory_index,
+                                   MIN_CONTENT_LEN)
     memory_dir, db_path, _ = _resolve_db(args.project)
     memory_dir.mkdir(parents=True, exist_ok=True)
     db = MemoryDB(db_path)
@@ -521,12 +683,30 @@ def cmd_add(args):
         tags=tags,
         topic=topic,
     )
-    regenerate_memory_index(db, pid, memory_dir)
-    action = result["action"]
+    action = result.get("action", "?")
     mid = result.get("id")
-    sim = result.get("similarity", 0.0)
-    print(f"[{action}] #{mid}  sim={sim:.2f}  {'*'*args.importance} "
-          f"[{args.category}] {args.content}")
+    reason = result.get("reason")
+    sim = result.get("similarity")
+
+    # `similarity` is ABSENT (not 0.0) when no comparison was made. Printing a
+    # fabricated `sim=0.00` made a too_short drop — which saved nothing —
+    # indistinguishable from a hash_match skip, which found a real row.
+    head = f"[{action}]"
+    if mid is not None:
+        head += f" #{mid}"
+    if reason:
+        head += f" ({reason})"
+    if sim is not None:
+        head += f" sim={sim:.2f}"
+
+    if action == "skipped" and reason == "too_short":
+        print(f"{head}  NOTHING SAVED — content must be at least "
+              f"{MIN_CONTENT_LEN} characters after cleaning; got "
+              f"{len((args.content or '').strip())}.")
+        sys.exit(1)
+
+    regenerate_memory_index(db, pid, memory_dir)
+    print(f"{head}  {'*'*args.importance} [{args.category}] {args.content}")
 
 
 def cmd_keywords(args):
@@ -543,6 +723,7 @@ def cmd_keywords(args):
 
 def cmd_topics(args):
     _, db_path, name = _resolve_db(args.project)
+    _require_db_path(db_path)
     db = MemoryDB(db_path)
     pid = db.upsert_project(args.project)
     topics = db.get_topics(pid)
@@ -561,10 +742,23 @@ def cmd_topics(args):
 
 
 def cmd_consolidate(args):
+    from core import consolidate as consolidate_mod
     from core.consolidate import run_consolidation
+    _, db_path, _ = _resolve_db(args.project)
+    if not db_path.exists():
+        print(f"Error: no memory database at {db_path} — nothing to consolidate.")
+        sys.exit(1)
+    # `verbose=True` only ever reached core.logger's FILE sink, so the CLI ran
+    # a multi-stage LLM pipeline in total silence. Setting `_cli_echo` routes
+    # those two narration points to stdout for THIS process only; hooks never
+    # set it, so the async PreCompact leg's stdout stays empty (hook contract).
+    consolidate_mod._cli_echo = print
     print(f"\n{'='*50}\n  Consolidating memory for {args.project}\n{'='*50}\n")
     use_llm = not args.no_llm
     results = run_consolidation(args.project, use_llm=use_llm, verbose=True)
+    if not results:
+        print("\n[FAIL] consolidation returned no results.")
+        sys.exit(1)
     print(f"\n{'='*50}\n  Results:")
     for k, v in results.items():
         print(f"    {k}: {v}")
@@ -604,6 +798,7 @@ def cmd_schema(args):
 
 def cmd_observations(args):
     _, db_path, name = _resolve_db(args.project)
+    _require_db_path(db_path)
     db = MemoryDB(db_path)
     pid = db.upsert_project(args.project)
     obs = db.get_recent_observations(pid, limit=args.limit)
@@ -619,13 +814,15 @@ def cmd_observations(args):
 
 def cmd_mode(args):
     _, db_path, _ = _resolve_db(args.project)
+    _require_db_path(db_path)
     db = MemoryDB(db_path)
     pid = db.upsert_project(args.project)
     if args.mode_name:
         from core.modes import VALID_MODES
         if args.mode_name not in VALID_MODES:
-            print(f"Invalid mode. Choose from: {', '.join(sorted(VALID_MODES))}")
-            return
+            print(f"Invalid mode '{args.mode_name}'. "
+                  f"Choose from: {', '.join(sorted(VALID_MODES))}")
+            sys.exit(1)
         db.set_project_mode(pid, args.mode_name)
         print(f"Mode set to: {args.mode_name}")
     else:
@@ -641,8 +838,8 @@ def cmd_progress(args):
     from core.progress import write_progress_md
     memory_dir, db_path, name = _resolve_db(args.project)
     if not db_path.exists():
-        print(f"No database at {db_path}")
-        return
+        print(f"Error: no memory database at {db_path}")
+        sys.exit(1)
     db = MemoryDB(db_path)
     pid = db.upsert_project(args.project)
     progress_path = write_progress_md(db, pid, memory_dir)
@@ -653,11 +850,12 @@ def cmd_progress(args):
 def cmd_supersedes(args):
     """Show the supersede chain for a memory ID."""
     _, db_path, _ = _resolve_db(args.project)
+    _require_db_path(db_path)
     db = MemoryDB(db_path)
     chain = db.get_supersede_chain(args.memory_id)
     if not chain:
         print(f"No memory with id {args.memory_id}")
-        return
+        sys.exit(1)
     print(f"\nSupersede chain for #{args.memory_id} ({len(chain)} versions, newest first):\n")
     for i, m in enumerate(chain):
         active = "ACTIVE" if m["is_active"] else "archived"
@@ -668,6 +866,7 @@ def cmd_supersedes(args):
 
 def cmd_summary(args):
     _, db_path, name = _resolve_db(args.project)
+    _require_db_path(db_path)
     db = MemoryDB(db_path)
     pid = db.upsert_project(args.project)
     s = db.get_latest_summary(pid)
@@ -684,18 +883,26 @@ def cmd_summary(args):
 def cmd_serve(args):
     from ui.web_viewer import main as web_main
     sys.argv = ["web_viewer.py", "--project", args.project, "--port", str(args.port)]
+    # web_viewer.main() defines --no-open and honors it; not forwarding it meant
+    # every `/cc-mem serve` force-opened a browser tab, including when Claude
+    # Code ran the command itself.
+    if getattr(args, "no_open", False):
+        sys.argv.append("--no-open")
     web_main()
 
 
 # ── /cc-mem plan-* subcommands (v2.2) ──────────────────────────────────────
 
 def _plan_db(project):
-    """Open the project DB + ensure memory/ exists. Returns (db, pid, memory_dir)."""
+    """Open the project DB. Returns (db, pid, memory_dir).
+
+    No mkdir: db_path.exists() implies memory/ exists, so the old
+    `memory_dir.mkdir(...)` after the sys.exit(1) was dead code.
+    """
     memory_dir, db_path, _ = _resolve_db(project)
     if not db_path.exists():
         print(f"Error: no memory database at {db_path}")
         sys.exit(1)
-    memory_dir.mkdir(parents=True, exist_ok=True)
     db = MemoryDB(db_path)
     pid = db.upsert_project(str(Path(project).resolve()))
     return db, pid, memory_dir
@@ -709,6 +916,14 @@ def cmd_plan_show(args):
     print(path.read_text(encoding="utf-8"))
 
 
+def _print_raw_plan(raw, max_lines=20):
+    lines = raw.splitlines() or ["(empty)"]
+    for line in lines[:max_lines]:
+        print(f"    | {line}")
+    if len(lines) > max_lines:
+        print(f"    | ... ({len(lines) - max_lines} more line(s))")
+
+
 def cmd_plan_status(args):
     """One-screen summary of the live plan: counters, active step, freshness."""
     from core.plan import is_valid_structured
@@ -719,13 +934,35 @@ def cmd_plan_status(args):
               "`/cc-mem plan-set --raw '<text>'`.")
         return
     structured = row.get("structured") or {}
-    if not is_valid_structured(structured):
-        raw_len = len(row.get("raw") or "")
-        print(f"Raw plan captured ({raw_len} chars) — NOT yet refined.")
+    raw = (row.get("raw") or "").strip()
+    refined_ok = is_valid_structured(structured)
+
+    # FRESHNESS FIRST. `needs_refine` is set by capture_exit_plan_mode (the
+    # PostToolUse ExitPlanMode path AND `plan-set --raw`) and cleared ONLY by
+    # apply_refined_plan. Testing is_valid_structured() first meant a brand-new
+    # raw plan laid over a refined one printed the OLD goal and the new text was
+    # invisible in plan-status, plan-show and PLAN.md alike.
+    if row.get("needs_refine"):
+        if refined_ok:
+            print("[!] PENDING REFINEMENT — a NEWER raw plan is stored. "
+                  "The structured plan below is the PREVIOUS, now-stale one.")
+        else:
+            print("[!] PENDING REFINEMENT — raw plan captured, not yet refined.")
+        print(f"  Raw plan ({len(raw)} chars), last update {row.get('updated_at')}:")
+        _print_raw_plan(raw)
+        print("  Next step: invoke the @plan-refiner subagent, then "
+              "`/cc-mem plan-set --from-refiner` with its JSON output.")
+        if not refined_ok:
+            return
+        print()
+        print("  --- previous (stale) structured plan ---")
+    elif not refined_ok:
+        print(f"Raw plan captured ({len(raw)} chars) — NOT yet refined.")
         print(f"  Last update: {row.get('updated_at')}")
-        print("  Next step: invoke @plan-refiner subagent, then "
+        print("  Next step: invoke the @plan-refiner subagent, then "
               "`/cc-mem plan-set --from-refiner` with its JSON output.")
         return
+
     steps = structured.get("steps", [])
     n_done = sum(1 for s in steps if s.get("status") == "done")
     print(f"Goal: {structured.get('goal')}")
@@ -738,7 +975,7 @@ def cmd_plan_status(args):
 
 
 def cmd_plan_set(args):
-    """Three modes:
+    """Three mutually exclusive modes:
       --from-refiner   : read JSON structured plan from stdin, store it
       --raw '<text>'   : capture a raw plan, mark needs_refine=1
       --raw-file FILE  : same, but read raw from a file
@@ -749,13 +986,17 @@ def cmd_plan_set(args):
     if args.from_refiner:
         try:
             structured = json.loads(sys.stdin.read())
-        except json.JSONDecodeError as e:
+        except (json.JSONDecodeError, UnicodeDecodeError) as e:
             print(f"[FAIL] stdin is not valid JSON: {e}")
             sys.exit(1)
         try:
-            result = plan_mod.apply_refined_plan(db, pid, structured, memory_dir=memory_dir)
-        except ValueError as e:
-            print(f"[FAIL] refined plan rejected: {e}")
+            result = plan_mod.apply_refined_plan(db, pid, structured,
+                                                 memory_dir=memory_dir)
+        except (ValueError, TypeError, AttributeError, KeyError, IndexError) as e:
+            # why: a refiner subagent is an LLM. A top-level JSON array, a
+            # missing key or a wrong-typed field is a realistic failure mode and
+            # must surface as a CLI error, not a raw traceback.
+            print(f"[FAIL] refined plan rejected: {type(e).__name__}: {e}")
             sys.exit(1)
         print(f"[OK] Plan stored — goal: {result['goal']!r}")
         print(f"     {len(result['steps'])} steps · PLAN.md regenerated at "
@@ -763,13 +1004,29 @@ def cmd_plan_set(args):
         return
 
     if args.raw_file:
-        raw = Path(args.raw_file).read_text(encoding="utf-8")
-    elif args.raw:
+        try:
+            raw = Path(args.raw_file).read_text(encoding="utf-8")
+        except OSError as e:
+            print(f"[FAIL] cannot read --raw-file {args.raw_file}: {e}")
+            sys.exit(1)
+    elif args.raw is not None:
         raw = args.raw
     else:
         print("[FAIL] need one of: --from-refiner, --raw '<text>', --raw-file PATH")
         sys.exit(1)
-    plan_mod.capture_exit_plan_mode(db, pid, raw, memory_dir=memory_dir)
+
+    # Report what is actually STORED. core.plan.capture_exit_plan_mode strips
+    # and drops whitespace-only text, so `--raw "   "` used to print
+    # "[OK] Raw plan captured (3 chars)" with nothing stored, and a trailing
+    # newline made the count disagree with plan-status by one.
+    raw = raw.strip()
+    if not raw:
+        print("[FAIL] the plan text is empty (whitespace only) — nothing stored.")
+        sys.exit(1)
+    stored = plan_mod.capture_exit_plan_mode(db, pid, raw, memory_dir=memory_dir)
+    if stored is not None and not stored:
+        print("[FAIL] core.plan refused the plan text — nothing stored.")
+        sys.exit(1)
     print(f"[OK] Raw plan captured ({len(raw)} chars) at memory/.plan_raw.md.")
     print("     Next: invoke @plan-refiner subagent, then "
           "`/cc-mem plan-set --from-refiner < <its-json-output>`.")
@@ -860,8 +1117,24 @@ def cmd_dashboard(args):
         print(f"[FAIL] dashboard.py not found at expected location: {dashboard_py}")
         sys.exit(1)
     cmd = [sys.executable, str(dashboard_py), "--project", args.project]
-    # why: detach so the CLI returns immediately; the GUI lives in its own window
-    subprocess.Popen(cmd)
+    # Detach properly. Popen(cmd) alone lets the GUI child INHERIT this
+    # process's stdout/stderr pipes, so any caller that captures output —
+    # which is exactly how Claude Code runs the CLI — blocks until the user
+    # closes the window, long after mem.py itself has exited.
+    kwargs = {
+        "stdin": subprocess.DEVNULL,
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+        "close_fds": True,
+    }
+    if sys.platform == "win32":
+        kwargs["creationflags"] = (
+            getattr(subprocess, "DETACHED_PROCESS", 0x00000008)
+            | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
+        )
+    else:
+        kwargs["start_new_session"] = True
+    subprocess.Popen(cmd, **kwargs)
     print(f"[OK] Launched dashboard for project: {args.project}")
 
 
@@ -900,9 +1173,7 @@ def cmd_inject_usage(args):
     (No per-memory #id guessing — ids are never shown to Claude, so that
     would be a coincidence detector, not real usage.)"""
     memory_dir, db_path, _ = _resolve_db(args.project)
-    if not db_path.exists():
-        print(f"Error: no memory database at {db_path}")
-        sys.exit(1)
+    _require_db_path(db_path)
     db = MemoryDB(db_path)
     pid = db.upsert_project(str(Path(args.project).resolve()))
     obs = db.get_recent_observations(pid, limit=200)
@@ -924,64 +1195,101 @@ def cmd_inject_usage(args):
               f"at {d.get('ts','?')} (see `/cc-mem inject-show`)")
 
 
+# Tables scanned by encoding-check, with the text columns that matter. The
+# table names come from THIS literal dict, never from user input, so they are
+# safe to interpolate; every value stays parameterized.
+_ENCODING_SCAN = {
+    "memories": ["content", "topic"],
+    "topics": ["name", "content"],
+    "progress": ["current_request", "plan", "status_done", "status_in_flight"],
+    "observations": ["tool_input", "tool_output"],
+}
+# `memories` is the only table encoding-check can act on, and --apply
+# quarantines by flipping is_active=0. Scanning archived rows too meant a
+# quarantined row was re-reported forever and "Re-run with --apply" never
+# stopped being printed — the command could not converge.
+_ENCODING_SCAN_PREDICATE = {"memories": " WHERE is_active = 1"}
+
+
+def _count_fffd(row, cols):
+    n = 0
+    for c in cols:
+        try:
+            v = row[c] or ""
+        except (IndexError, KeyError):
+            # why: the column list is per-table but schemas migrate; a missing
+            # column must not abort the scan of the columns that do exist
+            continue
+        n += v.count("�")
+    return n
+
+
 def cmd_encoding_check(args):
     """Read-only scan for genuine U+FFFD corruption across text tables.
 
     On a healthy DB this finds 0 in memories/topics/progress (CJK/unicode is
     NOT corruption). Any FFFD in observations is transient (cleaned after
     extraction) and harmless. With --apply, quarantines (is_active=0) ONLY
-    corrupted memory rows — never guesses a repair."""
+    corrupted ACTIVE memory rows — never guesses a repair."""
     _, db_path, _ = _resolve_db(args.project)
-    if not db_path.exists():
-        print(f"Error: no memory database at {db_path}")
-        sys.exit(1)
+    _require_db_path(db_path)
     db = MemoryDB(db_path)
     pid = db.upsert_project(str(Path(args.project).resolve()))
-    scan = {
-        "memories": ["content", "topic"],
-        "topics": ["name", "content"],
-        "progress": ["current_request", "plan", "status_done", "status_in_flight"],
-        "observations": ["tool_input", "tool_output"],
-    }
     corrupt_memory_ids = []
+    quarantined_ids = []
     with db._connect() as conn:
-        for table, cols in scan.items():
+        for table, cols in _ENCODING_SCAN.items():
+            q = f"SELECT * FROM {table}" + _ENCODING_SCAN_PREDICATE.get(table, "")
             try:
-                rows = conn.execute(f"SELECT * FROM {table}").fetchall()
-            except Exception:
+                rows = conn.execute(q).fetchall()
+            except sqlite3.Error:
+                # why: a table absent on an older schema version is not a
+                # failure of the scan — report the tables that do exist
                 continue
             total = 0
             hit_rows = 0
             for r in rows:
-                row_has = False
-                for c in cols:
-                    try:
-                        v = r[c] or ""
-                    except (IndexError, KeyError):
-                        continue
-                    cnt = v.count("�")
-                    total += cnt
-                    if cnt:
-                        row_has = True
-                if row_has:
+                cnt = _count_fffd(r, cols)
+                total += cnt
+                if cnt:
                     hit_rows += 1
                     if table == "memories":
                         corrupt_memory_ids.append(r["id"])
-            print(f"  {table:14s} rows={len(rows):4d}  U+FFFD chars={total}  rows_with_fffd={hit_rows}")
+            scope = " (active only)" if table in _ENCODING_SCAN_PREDICATE else ""
+            print(f"  {table:14s}{scope} rows={len(rows):4d}  "
+                  f"U+FFFD chars={total}  rows_with_fffd={hit_rows}")
+
+        try:
+            for r in conn.execute(
+                "SELECT * FROM memories WHERE is_active = 0"
+            ).fetchall():
+                if _count_fffd(r, _ENCODING_SCAN["memories"]):
+                    quarantined_ids.append(r["id"])
+        except sqlite3.Error:
+            # why: same as above — an old schema without is_active just means
+            # there is nothing already-quarantined to report
+            pass
+
+    if quarantined_ids:
+        print(f"\nAlready quarantined (is_active=0) corrupted rows: "
+              f"{quarantined_ids} — no action needed, recoverable.")
     if corrupt_memory_ids:
-        print(f"\nCorrupted MEMORY rows: {corrupt_memory_ids}")
+        print(f"\nCorrupted ACTIVE memory rows: {corrupt_memory_ids}")
         if args.apply:
             n = db.archive_obsolete(corrupt_memory_ids)
-            print(f"[applied] quarantined {n} corrupted memory rows (is_active=0, recoverable)")
+            print(f"[applied] quarantined {n} corrupted memory rows "
+                  f"(is_active=0, recoverable). Re-running encoding-check "
+                  f"now reports 0 active corrupted rows.")
         else:
             print("Re-run with --apply to quarantine them (is_active=0, recoverable).")
     else:
-        print("\nNo corrupted memory/topic/progress rows. "
+        print("\nNo corrupted ACTIVE memory/topic/progress rows. "
               "Any observation FFFD is transient + harmless.")
 
 
 def make_parser():
-    p = argparse.ArgumentParser(prog="cc-memory", description="cc-memory CLI v2.4.3",
+    p = argparse.ArgumentParser(prog="cc-memory",
+        description=f"cc-memory CLI v{__version__}",
         formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--project", required=True, help="Project root path")
     sub = p.add_subparsers(dest="command", required=True)
@@ -1000,7 +1308,8 @@ def make_parser():
 
     sub.add_parser("sessions", help="List sessions")
 
-    pq = sub.add_parser("sql", help="Raw SQL query")
+    pq = sub.add_parser("sql", help="Raw SQL query (READ-ONLY: SELECT/PRAGMA/"
+                                    "EXPLAIN/WITH...SELECT)")
     pq.add_argument("query")
 
     pa = sub.add_parser("add", help="Add memory (anti-patch upsert)")
@@ -1034,6 +1343,8 @@ def make_parser():
 
     pv = sub.add_parser("serve", help="Launch web dashboard")
     pv.add_argument("--port", type=int, default=9377)
+    pv.add_argument("--no-open", action="store_true",
+                    help="Don't open a browser tab (forwarded to web_viewer)")
 
     sub.add_parser("dashboard", help="Launch the Tkinter GUI dashboard")
 
@@ -1042,10 +1353,13 @@ def make_parser():
     sub.add_parser("plan-status", help="Show plan counters / freshness summary")
 
     pps = sub.add_parser("plan-set", help="Set a raw or refined plan")
-    pps.add_argument("--raw", help="Raw plan markdown/text (verbatim)")
-    pps.add_argument("--raw-file", help="Read raw plan from a file")
-    pps.add_argument("--from-refiner", action="store_true",
-                     help="Read structured JSON plan from stdin (refiner output)")
+    # Mutually exclusive: --from-refiner used to silently win over --raw, so a
+    # caller passing both got neither an error nor the plan it supplied.
+    pps_mode = pps.add_mutually_exclusive_group()
+    pps_mode.add_argument("--raw", help="Raw plan markdown/text (verbatim)")
+    pps_mode.add_argument("--raw-file", help="Read raw plan from a file")
+    pps_mode.add_argument("--from-refiner", action="store_true",
+                          help="Read structured JSON plan from stdin (refiner output)")
 
     ppc = sub.add_parser(
         "plan-clear",

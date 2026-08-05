@@ -1,19 +1,26 @@
+> **English** · [简体中文](CONTRACTS.zh.md)
+
 # cc-memory — Contracts
 
 Three invariants the plugin enforces **in code**, not by convention. Each one
-has a single choke-point function, a single generated artifact, and assertions
-in `tests/smoke_test.py`. Violating one is a bug, not a style choice: the
-mechanisms exist because the corresponding failure mode was observed in
-production (stacked duplicate memories in v2.0, unread handoffs in v2.0,
-silently sunk plan steps before v2.4.0). One caveat on the test claim — the
-R610 carryover gate is the only mechanism below with no smoke-test assertion
-yet (`grep -n "carryover\|dispositions" tests/smoke_test.py` returns nothing);
-the rest of the plan lifecycle (v4 migration → capture → refine → TodoWrite
-sync → PLAN.md) is covered.
+has a single choke-point function, a single generated artifact, and automated
+assertions. Violating one is a bug, not a style choice: the mechanisms exist
+because the corresponding failure mode was observed in production (stacked
+duplicate memories in v2.0, unread handoffs in v2.0, silently sunk plan steps
+before v2.4.0).
 
-This document supersedes the pre-2.4.2 trio `docs/MEMORY_RULES.md`,
-`docs/HANDOFF_PROTOCOL.md` and `docs/PLAN_PROTOCOL.md`. All line references are
-against the v2.4.2 tree (`cc_memory/__init__.py:64`).
+Where the assertions live: `tests/smoke_test.py` covers the anti-patch decisions,
+the PROGRESS.md full-rewrite + fill-only-empty refresh, and the plan lifecycle
+(v4 migration → capture → refine → TodoWrite sync → PLAN.md). The **R610
+carryover gate** is covered by its own suite, `tests/test_plan_carryover.py`
+(14 checks) — `grep -n "carryover\|dispositions" tests/smoke_test.py` still
+returns nothing, so run both. `tests/test_surfaces.py` (v2.5) covers the
+shipped surfaces these contracts are reached through.
+
+This document supersedes the pre-2.4.3 trio `docs/MEMORY_RULES.md`,
+`docs/HANDOFF_PROTOCOL.md` and `docs/PLAN_PROTOCOL.md`. Line references are
+against the current tree; the canonical version string is
+`cc_memory/core/version.py`.
 
 ## Contents
 
@@ -25,7 +32,6 @@ against the v2.4.2 tree (`cc_memory/__init__.py:64`).
 3. [Plan contract](#plan-contract) — `memory/PLAN.md` is the live task anchor,
    and replacing or clearing it cannot silently drop unfinished steps
    (`core/plan.py`, `cli/mem.py`).
-4. [Appendix — spec pointers still embedded in code](#appendix--spec-pointers-still-embedded-in-code)
 
 Architecture overview, module layout and the i18n convention live in
 [ARCHITECTURE.md](ARCHITECTURE.md).
@@ -433,7 +439,7 @@ RESUME PROTOCOL — if the user's first message is exactly one of:
 
 Why: this is the project's handoff contract (single source of truth).
 Skipping it risks duplicating work or contradicting prior decisions.
-Spec: `docs/HANDOFF_PROTOCOL.md`.
+Spec: `docs/CONTRACTS.md#handoff-contract`.
 </system-reminder>
 ```
 
@@ -920,22 +926,3 @@ edit bump, is a no-op when there is no active plan row
 (`hooks/post_tool_use.py:140`).
 
 Extend the list in `cc_memory/core/plan.py:is_sensitive_tool_call` as needed.
-
----
-
-## Appendix — spec pointers still embedded in code
-
-Several runtime strings, config values and shipped markdown surfaces name the
-pre-consolidation document filenames. They are cosmetic (nothing loads these
-paths), but they should be retargeted at `docs/CONTRACTS.md` when convenient:
-
-| Location | Emitted string |
-|----------|----------------|
-| `cc_memory/hooks/session_start.py:284` | ``Spec: `docs/HANDOFF_PROTOCOL.md`.`` (inside the forced `<system-reminder>`) |
-| `cc_memory/core/progress.py:363` | ``*Spec: `docs/HANDOFF_PROTOCOL.md` · Anti-patch contract: `docs/MEMORY_RULES.md`*`` (PROGRESS.md footer) |
-| `cc_memory/llm/memory_writer.py:282` | ``*Anti-patch contract:  see `docs/MEMORY_RULES.md`*`` (MEMORY.md footer) |
-| `cc_memory/cli/mem.py:405` | `(anti-patch in action — see docs/MEMORY_RULES.md)` (`/cc-mem stats`) |
-| `cc_memory/core/plan.py:257-260` | PLAN.md banner (names the SQL table + the CLI entries, not a doc) |
-| `cc_memory/config.json:17`, `:83-84` | `"notes": "Tuned for anti-patch upsert. See docs/MEMORY_RULES.md."`, `"handoff_spec": "docs/HANDOFF_PROTOCOL.md"`, `"anti_patch_contract": "docs/MEMORY_RULES.md"` |
-| Source comments | `core/progress.py:26`, `hooks/session_start.py:12`, `llm/ccl_backend.py:134`, `llm/memory_writer.py:21`, `ui/dashboard.py:948,1386`, `ui/web_viewer.py:310` |
-| Shipped markdown | `commands/cc-mem.md:82`, `skills/save-memories/SKILL.md:118`, plus the doc lists in `README.md:411-413`, `README.zh.md:385-387` and `CLAUDE.md:418-420` |

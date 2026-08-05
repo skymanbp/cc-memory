@@ -21,9 +21,14 @@ import json
 import os
 import sys
 import tempfile
-import urllib.error
+import time
 from datetime import datetime
 from pathlib import Path
+
+# Captured as early as possible: this is the reference instant for the hook's
+# wall-clock budget (see _RETRO_DEADLINE_S). Taken before the package imports
+# below so their cost is charged against the budget, not hidden from it.
+_HOOK_T0 = time.monotonic()
 
 _HERE = Path(__file__).resolve().parent
 _PKG_ROOT = _HERE.parent
@@ -36,7 +41,7 @@ from core.encoding_setup import enable_utf8_io
 enable_utf8_io()
 
 from core.db import MemoryDB
-from core.extractor import load_transcript_window
+from core.extractor import load_transcript_window, mangle_project_path
 from core.logger import get_logger
 from core.progress import write_progress_md
 from llm.memory_writer import upsert_batch
@@ -379,7 +384,32 @@ def build_context(memory_dir, db, project_id, project_name, current_session_id="
 
 
 # ── Retroactive save from prior session JSONL ──────────────────────────────
-_API_TIMEOUT = 20
+# ── LLM wall-clock envelope (v2.5.0) ───────────────────────────────────────
+# hooks/hooks.json gives SessionStart 15s. The injection is this hook's entire
+# product; it is printed and FLUSHED before any of this runs (see main()), so a
+# kill here can no longer lose it — but a killed process still surfaces as a
+# failed-hook notice and throws away the extraction it was in the middle of.
+#
+# Two bounds, because one alone is not enough:
+#
+#   _RETRO_DEADLINE_S  an absolute instant (from _HOOK_T0) by which ALL
+#                      retroactive work must be FINISHED. Passed down to
+#                      call_llm, which clamps every leg's socket timeout to the
+#                      time actually remaining and skips a leg with <1s left.
+#                      This is the bound that actually holds: it is independent
+#                      of how many credential candidates exist.
+#   _API_TIMEOUT       the per-leg ceiling for the COMMON case, when there is
+#                      plenty of budget left.
+#
+# The pre-v2.5 code had only a "don't start another FILE" check, which cannot
+# interrupt a leg already in flight: worst case was 2 candidates × 20s = 40s
+# against a 15s host timeout — over budget with the SHIPPED default config, no
+# opt-in required (and 100s with ccl.enabled=true).
+#
+# 13s of 15s leaves ~2s for the DB commit and interpreter teardown.
+_API_TIMEOUT = 10
+_FALLBACK_TIMEOUT = 5
+_RETRO_DEADLINE_S = 13.0
 
 _RETROACTIVE_PROMPT = """\
 You are a memory extraction system. Given a Claude Code conversation transcript, \
@@ -396,11 +426,29 @@ Output ONLY valid JSON array."""
 
 
 def _find_transcript_dir(project_path):
+    """Resolve `~/.claude/projects/<slug>/` for this project, or None.
+
+    EXACT slug match, then ONE case-insensitive pass, then None. There is
+    deliberately NO fuzzy/substring fallback and there must never be one again:
+    the transcripts found here are LLM-extracted, persisted, and re-injected at
+    every future SessionStart, so a wrong directory permanently contaminates
+    this project's memory with another project's content.
+
+    The removed fallback accepted any slug directory whose name merely
+    *contained* the project's basename. Measured on the reference machine
+    (179 slug dirs): basename 'core' matched 131 of them, 'app' 141, 'proj' 33;
+    a fixture seeded with 5 memories finished with 32 after a 278,700-record
+    transcript from an unrelated project was ingested. Guessing which project a
+    transcript belongs to is never safe here — returning None is.
+
+    Slug construction lives in core.extractor.mangle_project_path (which also
+    normalises '_' and '.', the omission that used to push most projects into
+    the fuzzy branch in the first place).
+    """
     claude_projects = Path.home() / ".claude" / "projects"
     if not claude_projects.exists():
         return None
-    path_str = str(Path(project_path).resolve())
-    hash_candidate = path_str.replace(":", "-").replace("\\", "-").replace("/", "-")
+    hash_candidate = mangle_project_path(str(Path(project_path).resolve()))
     candidate = claude_projects / hash_candidate
     if candidate.exists():
         return candidate
@@ -408,16 +456,73 @@ def _find_transcript_dir(project_path):
     for d in claude_projects.iterdir():
         if d.is_dir() and d.name.lower() == hash_lower:
             return d
-    proj_name = Path(project_path).name.lower()
-    best, best_mtime = None, 0
-    for d in claude_projects.iterdir():
-        if d.is_dir() and proj_name in d.name.lower():
-            jsonls = list(d.glob("*.jsonl"))
-            if jsonls:
-                mtime = max(f.stat().st_mtime for f in jsonls)
-                if mtime > best_mtime:
-                    best, best_mtime = d, mtime
-    return best
+    return None
+
+
+def _transcript_cwd(messages):
+    """First `cwd` value recorded in a transcript window, or "" if absent.
+
+    Claude Code stamps `cwd` on transcript records (verified: record index 2 of
+    a live transcript carries {'cwd': 'd:\\\\Projects\\\\cc-memory', ...}), well
+    inside the 40-record head of a bounded window.
+    """
+    for rec in messages:
+        if not isinstance(rec, dict):
+            continue
+        c = rec.get("cwd")
+        if isinstance(c, str) and c.strip():
+            return c
+    return ""
+
+
+def _transcript_belongs_to(messages, project_path):
+    """POSITIVE ownership check: does this transcript name THIS project?
+
+    Defence in depth behind _find_transcript_dir's exact match. Fail-closed —
+    a transcript that records no `cwd` at all is treated as not ours, because
+    the cost of a false positive (foreign memories persisted and re-injected
+    forever) hugely outweighs the cost of a false negative (one prior session
+    not retroactively saved).
+    """
+    tcwd = _transcript_cwd(messages)
+    if not tcwd:
+        return False
+    try:
+        return Path(tcwd).resolve() == Path(project_path).resolve()
+    except (OSError, ValueError):
+        # why: an unresolvable path recorded inside a foreign transcript must
+        # count as "not mine"; never let a resolution failure read as a match
+        return False
+
+
+def _transcript_is_foreign(messages, project_path):
+    """Does this transcript positively name a DIFFERENT project?
+
+    The tier-3 counterpart to _transcript_belongs_to — and deliberately NOT the
+    same polarity, which is why it is a separate function rather than a `not`.
+
+    retroactive_save persists LLM-extracted memories that are re-injected at
+    every future SessionStart, so it demands positive proof of ownership and
+    treats an unstamped transcript as foreign. Tier-3 mining only fills
+    still-empty PROGRESS.md fields for one session, and its input set includes
+    transcripts carrying no `cwd` at all (the fixture shape used by
+    tests/smoke_test.py), so requiring positive proof there would disable the
+    whole tier rather than harden it.
+
+    So gate on DISAGREEMENT: absent cwd -> allow, present-and-equal -> allow,
+    present-and-different -> refuse. Every transcript Claude Code actually
+    writes stamps `cwd` (verified on a live transcript, record index 2), so the
+    contamination path is fully closed while cwd-less inputs keep working.
+    """
+    tcwd = _transcript_cwd(messages)
+    if not tcwd:
+        return False
+    try:
+        return Path(tcwd).resolve() != Path(project_path).resolve()
+    except (OSError, ValueError):
+        # why: a cwd the transcript DID record but that will not resolve cannot
+        # be shown to name this project — refuse rather than trust it
+        return True
 
 
 def _get_saved_session_ids(db, project_id):
@@ -485,7 +590,7 @@ def _summarize_transcript(messages, max_chars=12000, total_records=None):
     return "\n".join(parts)
 
 
-def _retroactive_extract(messages, total_records=None):
+def _retroactive_extract(messages, total_records=None, deadline=None):
     from core.auth import get_api_key
     api_key, _ = get_api_key()
     if not api_key:
@@ -497,7 +602,9 @@ def _retroactive_extract(messages, total_records=None):
         from llm.ccl_backend import call_llm
         text = call_llm(_RETROACTIVE_PROMPT,
                         f"Extract memories:\n\n{transcript_text}",
-                        api_key, max_tokens=2000, timeout=_API_TIMEOUT)
+                        api_key, max_tokens=2000, timeout=_API_TIMEOUT,
+                        fallback_timeout=_FALLBACK_TIMEOUT,
+                        deadline=deadline)
         text = text.strip()
         if text.startswith("```"):
             text = "\n".join(l for l in text.split("\n") if not l.strip().startswith("```"))
@@ -629,34 +736,48 @@ def _refresh_progress_row(db, project_id, memory_dir, current_session_id=None):
             )
             prior_jsonl = find_latest_transcript(cwd, exclude_session_id=current_session_id)
             if prior_jsonl and prior_jsonl.stat().st_size > 200:
-                if needs_ptr:
-                    patch["transcript_ptr"] = str(prior_jsonl.resolve())
-                if needs_todos or needs_files:
-                    # Bounded: SessionStart has a 15s budget — an EIGHTH of what
-                    # PreCompact gets — and a long-lived project's transcript can
-                    # reach GiB. Both consumers below want the RECENT end anyway
-                    # (last TodoWrite snapshot, files touched most recently).
-                    prior_msgs = load_transcript_window(str(prior_jsonl)).messages
-                    if prior_msgs:
-                        if needs_todos:
-                            mined = extract_latest_todo_state(prior_msgs)
-                            pending = [t for t in mined
-                                       if t.get("status") != "completed"]
-                            if pending:
-                                todos_from_transcript = [
-                                    {"content": t["content"][:300],
-                                     "priority": t.get("priority", "medium"),
-                                     "status": t.get("status", "pending")}
-                                    for t in pending[:10]
-                                ]
-                                patch["open_todos"] = todos_from_transcript
-                        if needs_files:
-                            mined_files = extract_file_changes(prior_msgs)[:15]
-                            if mined_files:
-                                patch["files_touched"] = [
-                                    {"path": p, "action": "edit"}
-                                    for p in mined_files
-                                ]
+                # Bounded: SessionStart has a 15s budget — an EIGHTH of what
+                # PreCompact gets — and a long-lived project's transcript can
+                # reach GiB. Both consumers below want the RECENT end anyway
+                # (last TodoWrite snapshot, files touched most recently).
+                #
+                # The window is now loaded even when transcript_ptr is the only
+                # empty field, because the ownership check below needs the
+                # records to decide — and a pointer to ANOTHER project's
+                # transcript, written into PROGRESS.md and read by the next
+                # session, is contamination in its own right. The read is the
+                # bounded head+tail one, so the cost is capped, not unbounded.
+                prior_msgs = load_transcript_window(str(prior_jsonl)).messages
+                if _transcript_is_foreign(prior_msgs, cwd):
+                    # find_latest_transcript is exact-slug-match only, so this
+                    # should be unreachable; it is the defence-in-depth layer
+                    # retroactive_save already has (_transcript_belongs_to).
+                    _log.error(
+                        f"tier-3 mine REFUSED {prior_jsonl.name}: transcript cwd "
+                        f"{_transcript_cwd(prior_msgs)!r} != project {cwd!r}"
+                    )
+                elif prior_msgs:
+                    if needs_ptr:
+                        patch["transcript_ptr"] = str(prior_jsonl.resolve())
+                    if needs_todos:
+                        mined = extract_latest_todo_state(prior_msgs)
+                        pending = [t for t in mined
+                                   if t.get("status") != "completed"]
+                        if pending:
+                            todos_from_transcript = [
+                                {"content": t["content"][:300],
+                                 "priority": t.get("priority", "medium"),
+                                 "status": t.get("status", "pending")}
+                                for t in pending[:10]
+                            ]
+                            patch["open_todos"] = todos_from_transcript
+                    if needs_files:
+                        mined_files = extract_file_changes(prior_msgs)[:15]
+                        if mined_files:
+                            patch["files_touched"] = [
+                                {"path": p, "action": "edit"}
+                                for p in mined_files
+                            ]
         except Exception as e:
             _log.error(f"tier-3 transcript mine failed: {e}")
 
@@ -683,9 +804,24 @@ def _refresh_progress_row(db, project_id, memory_dir, current_session_id=None):
         _log.info(f"refreshed empty progress fields: {sorted(k for k in patch if k != 'trigger_type')}")
 
 
-def retroactive_save(cwd, db, project_id, current_session_id=""):
+def retroactive_save(cwd, db, project_id, current_session_id="", deadline=None):
+    """Best-effort: LLM-extract memories from prior, never-compacted transcripts.
+
+    TWO independent ownership gates, because a wrong transcript here is not a
+    cosmetic bug — its memories are stored and re-injected at every future
+    SessionStart of the WRONG project:
+
+      1. `_find_transcript_dir` is exact-match only (no fuzzy fallback).
+      2. Every candidate .jsonl must additionally NAME this project in its own
+         `cwd` field (`_transcript_belongs_to`, fail-closed).
+
+    `deadline` is a `time.monotonic()` instant after which no NEW transcript is
+    started. Each file is committed as it completes, so hitting the deadline
+    keeps everything already saved; only the remaining files are skipped.
+    """
     transcript_dir = _find_transcript_dir(cwd)
     if not transcript_dir:
+        _log.info(f"retroactive save: no exact transcript dir for {cwd} — skipped")
         return
     saved_ids = _get_saved_session_ids(db, project_id)
     jsonls = sorted(transcript_dir.glob("*.jsonl"),
@@ -694,6 +830,10 @@ def retroactive_save(cwd, db, project_id, current_session_id=""):
     memory_dir = Path(cwd) / "memory"
     n_retroactive = 0
     for jsonl in jsonls[:3]:
+        if deadline is not None and time.monotonic() >= deadline:
+            _log.info(f"retroactive save: wall-clock budget spent, stopping "
+                      f"after {n_retroactive} session(s)")
+            break
         session_uuid = jsonl.stem
         if session_uuid == current_session_id:
             continue
@@ -706,8 +846,15 @@ def retroactive_save(cwd, db, project_id, current_session_id=""):
             messages = window.messages
             if not messages or len(messages) < 5:
                 continue
+            if not _transcript_belongs_to(messages, cwd):
+                _log.error(
+                    f"retroactive save REFUSED {jsonl.name}: transcript cwd "
+                    f"{_transcript_cwd(messages)!r} != project {cwd!r}"
+                )
+                continue
             memories = _retroactive_extract(messages,
-                                            total_records=window.total_records)
+                                            total_records=window.total_records,
+                                            deadline=deadline)
             if not memories:
                 continue
 
@@ -729,11 +876,43 @@ def retroactive_save(cwd, db, project_id, current_session_id=""):
             _log.error(f"retroactive save error: {e}")
 
 
+def _flush_stdout():
+    """Force the injection out of the stdout buffer, now.
+
+    A SessionStart killed by the host timeout dies on TerminateProcess: no
+    atexit, no interpreter shutdown, no implicit flush. stdout on a pipe is
+    block-buffered, so every completed print() is still sitting in userspace
+    when the process is torn down. Measured: 5069 B of already-printed
+    injection arrived as 0 B; with this flush, 5071 B.
+
+    This does NOT depend on how core.encoding_setup configures the stream. If
+    that module also enables line buffering the two are redundant, which is
+    the intent — stdout IS this hook's entire product and there is no second
+    chance at it, so the guarantee is made here explicitly rather than
+    inherited from a stream-configuration detail elsewhere.
+    """
+    try:
+        sys.stdout.flush()
+    except (ValueError, OSError):
+        # why: detached or closed pipe — the bytes are already written or
+        # already unrecoverable; never abort the hook over a flush
+        pass
+
+
 def main():
     try:
         data = json.loads(sys.stdin.buffer.read().decode("utf-8"))
     except Exception as e:
         _log.error(f"session_start stdin error: {e}")
+        sys.exit(0)
+
+    # json.loads succeeds for well-formed but NON-OBJECT payloads (null, 42,
+    # "s", [1,2], true). .get() on those raises outside the try above, so the
+    # hook would exit 1 with a traceback on stderr — a hook-contract violation
+    # that Claude Code renders as error UI.
+    if not isinstance(data, dict):
+        _log.error(f"session_start: non-object stdin payload "
+                   f"({type(data).__name__}) — nothing to do")
         sys.exit(0)
 
     cwd = data.get("cwd", "")
@@ -764,6 +943,9 @@ def main():
         print(f"\n[cc-memory] Session start — loading memory for '{Path(cwd).name}'...")
         print(build_context(memory_dir, db, project_id, Path(cwd).name,
                             current_session_id=session_id))
+        # The injection is complete and irreplaceable — get it out of the
+        # buffer before any further work can run us into the 15s timeout.
+        _flush_stdout()
         stats = db.get_stats(project_id)
         # v2.3 observability: user-visible one-liner of WHAT was injected, read
         # from the manifest build_context just wrote (ground truth, not a guess).
@@ -781,10 +963,14 @@ def main():
                 f"[cc-memory OK] Context loaded: "
                 f"{stats['n_memories']} memories, {stats.get('n_topics', 0)} topics"
             )
+        _flush_stdout()
         _log.info(f"injected context for {Path(cwd).name}")
 
         try:
-            retroactive_save(cwd, db, project_id, session_id)
+            # Budgeted: retroactive save runs LLM legs and must never be the
+            # reason the 15s hook dies. Everything above is already flushed.
+            retroactive_save(cwd, db, project_id, session_id,
+                             deadline=_HOOK_T0 + _RETRO_DEADLINE_S)
         except Exception as e:
             _log.error(f"retroactive save failed: {e}")
 

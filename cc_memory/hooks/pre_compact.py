@@ -29,9 +29,16 @@ Output:
 import json
 import os
 import sys
+import time
 import urllib.error
 from datetime import datetime
 from pathlib import Path
+
+# Captured as early as possible: the reference instant for this hook's
+# wall-clock budget (see _LLM_DEADLINE_S below). Taken BEFORE the package
+# imports so their cost is charged against the budget instead of hidden from
+# it. Same idiom as hooks/session_start.py:31.
+_HOOK_T0 = time.monotonic()
 
 _HERE = Path(__file__).resolve().parent
 _PKG_ROOT = _HERE.parent  # cc_memory/
@@ -51,7 +58,41 @@ from llm.memory_writer import upsert_batch, regenerate_memory_index
 
 _log = get_logger("pre_compact")
 
+# ── LLM wall-clock envelope (v2.5.0) ───────────────────────────────────────
+# hooks/hooks.json gives this sync leg 120s. TWO bounds, because per-leg
+# timeouts alone are NOT one:
+#
+#   _API_TIMEOUT /     the per-leg ceilings for the COMMON case. call_llm
+#   _FALLBACK_TIMEOUT  bounds the Anthropic legs at 2 candidates, so ONE
+#                      call's NOMINAL cost is 2*25 + 30 = 80s (the Ollama leg
+#                      runs only when config `ccl.enabled` is true).
+#   _LLM_DEADLINE_S    an ABSOLUTE instant (from _HOOK_T0) by which extraction
+#                      must be FINISHED. call_llm clamps every leg's socket
+#                      timeout to the time actually remaining and skips a leg
+#                      with <1s left. Because it is measured from _HOOK_T0, the
+#                      transcript window read + build_extraction that run
+#                      BEFORE the call are charged against it automatically.
+#
+# Why the nominal arithmetic is not enough: `urlopen(req, timeout=t)` sets a
+# PER-SOCKET-OPERATION timeout — it covers neither DNS resolution nor the TLS
+# handshake, so a leg overruns t (an adversarial verifier measured a SUCCESSFUL
+# leg at 1.48x its nominal timeout). Reproduced here with both credential
+# candidates live, ccl.enabled=true and every leg stalling at 1.48x: 3 legs =
+# 37.0 + 37.0 + 44.4 = 118.4s, hook total 118.79s on a 1.6 MiB transcript whose
+# non-LLM work is only 0.4s. Add the 25.6s of non-LLM work measured on a real
+# 2.1 GiB / 585,007-record transcript and that run is ~144s — a kill, which is
+# TerminateProcess: no `except`, no `finally` (the v2.4.2 failure class).
+#
+# 75s reserves 45s of the 120s: up to 0.48*25 = 12s for the final leg's
+# in-flight overrun, and 33s for post-LLM work (upsert_batch, session summary,
+# PROGRESS.md full rewrite, observation cleanup, MEMORY.md regen) + teardown.
+# That reserve stays honest even against the pessimal assumption that ALL 25.6s
+# of the measured non-LLM work lands AFTER the call: 75 + 12 + 25.6 = 112.6s.
+# The common single-candidate path is untouched — after ~3s of transcript work
+# a 25s leg has 72s of room.
 _API_TIMEOUT = 25
+_FALLBACK_TIMEOUT = 30
+_LLM_DEADLINE_S = 75.0
 
 _EXTRACTION_PROMPT = """\
 You are a memory extraction system. Given a Claude Code conversation transcript, \
@@ -164,7 +205,9 @@ def _extract_via_llm(messages, observations=None, total_records=None):
     try:
         from llm.ccl_backend import call_llm
         text = call_llm(_EXTRACTION_PROMPT, user_content, api_key,
-                        max_tokens=2500, timeout=_API_TIMEOUT)
+                        max_tokens=2500, timeout=_API_TIMEOUT,
+                        fallback_timeout=_FALLBACK_TIMEOUT,
+                        deadline=_HOOK_T0 + _LLM_DEADLINE_S)
         text = text.strip()
         if text.startswith("```"):
             text = "\n".join(
@@ -278,6 +321,51 @@ def _first_user_request(messages, max_scan=200):
     return ""
 
 
+# ── Project opt-out (config.json `excluded_projects`) ──────────────────────
+# DELIBERATE literal copy: hooks/user_prompt.py carries the same function, and
+# those two hooks are the ONLY paths that create memory/ — so the check has to
+# exist in both. They are kept import-independent of each other on purpose: a
+# cross-hook import would make PreCompact die whenever UserPromptSubmit does,
+# and hook safety outranks DRY here (see CLAUDE.md, "Hook safety > anything
+# else"). Change one, change the other; there is no third copy.
+def _is_excluded(cwd):
+    """True when `cwd` is opted out of cc-memory via config.json.
+
+    Matching is on the RESOLVED absolute path, so symlinks, ".." and relative
+    entries all normalise to one form, and through ``os.path.normcase`` so
+    Windows compares case- and separator-insensitively while POSIX stays
+    case-sensitive.
+
+    A listed directory also excludes everything BENEATH it. Claude Code's cwd
+    is routinely a subdirectory of the project a user meant to exclude, and an
+    exact-match-only test would happily create memory/ there — the control
+    failing at the one job it has.
+    """
+    try:
+        with open(_PKG_ROOT / "config.json", encoding="utf-8") as f:
+            entries = json.load(f).get("excluded_projects") or []
+        if not isinstance(entries, list):
+            return False
+        target = os.path.normcase(str(Path(cwd).expanduser().resolve()))
+        for entry in entries:
+            if not isinstance(entry, str) or not entry.strip():
+                continue
+            try:
+                listed = os.path.normcase(str(Path(entry).expanduser().resolve()))
+            except (OSError, ValueError):
+                # why: one malformed entry must not disable the rest of the
+                # opt-out list — skip it and keep checking the others
+                continue
+            if target == listed or target.startswith(listed + os.sep):
+                return True
+    except Exception:
+        # why: an absent / malformed / unreadable config must never break the
+        # hook. "not excluded" is the behaviour that shipped before this
+        # control existed, so a broken config degrades to exactly that.
+        return False
+    return False
+
+
 _ATTEMPT_FILE = ".pre_compact_attempt.json"
 
 
@@ -327,6 +415,14 @@ def main():
         _log.error(f"stdin parse error: {exc}")
         sys.exit(0)
 
+    # json.loads SUCCEEDS on well-formed non-object payloads (`null`, `42`,
+    # `"s"`, `[1,2]`, `true`). The `.get()` calls below sit outside the try, so
+    # without this guard those raise AttributeError, print a traceback to
+    # stderr and exit 1 — two hook-contract violations at once.
+    if not isinstance(data, dict):
+        _log.warn(f"stdin payload is {type(data).__name__}, not an object")
+        sys.exit(0)
+
     cwd = data.get("cwd", "")
     transcript_path = data.get("transcript_path", "")
     trigger = data.get("trigger", "auto")
@@ -334,6 +430,17 @@ def main():
 
     if not cwd or not transcript_path:
         _log.warn("missing cwd or transcript_path")
+        sys.exit(0)
+
+    # Project opt-out — MUST precede the try block below, whose first act is to
+    # mkdir memory/ + sessions/ + topics/ in cwd. Placed after the empty-cwd
+    # guard so `Path("").resolve()` can never widen the match to the
+    # interpreter's own working directory. Logged (unlike UserPromptSubmit,
+    # which fires every message) because PreCompact is rare and a skipped
+    # handoff is worth being able to explain afterwards. No stdout: an excluded
+    # project must produce no artifact at all, including a status line.
+    if _is_excluded(cwd):
+        _log.info(f"skipped: {cwd} is in config.json excluded_projects")
         sys.exit(0)
 
     try:
@@ -425,7 +532,20 @@ def main():
                 ).fetchone()
                 if row:
                     last_ts = row["compacted_at"]
-        observations = db.get_observations_since(project_id, last_ts) if last_ts else []
+        if last_ts:
+            observations = db.get_observations_since(project_id, last_ts)
+        else:
+            # FIRST compaction of a project: insert_session above already ran,
+            # so last_session_ids has exactly ONE entry (this session) and there
+            # is no previous compacted_at to bound by. The old `else []` threw
+            # away every observation the session had accumulated, blanking
+            # PROGRESS.md §6 ("*(no files touched)*") and the session summary's
+            # files_read/files_modified on the one compaction a fresh project
+            # gets. Fall back to the recent-N window — the same tier-2C fallback
+            # session_start.py uses. Returned newest-first; reversed so the
+            # downstream ordering (LLM context, files_read/modified) stays
+            # chronological like get_observations_since.
+            observations = list(reversed(db.get_recent_observations(project_id, 40)))
 
         # LLM extraction → upsert through memory_writer (anti-patch path)
         extracted = _extract_via_llm(messages, observations,
@@ -500,9 +620,16 @@ def main():
         db.upsert_progress(project_id, **progress_state)
         progress_path = write_progress_md(db, project_id, memory_dir)
 
-        # Clean up observations consumed by this extraction
+        # Clean up observations consumed by this extraction.
+        # NOTE the format: observations.timestamp is written by db._now() as
+        # `datetime.now().isoformat(timespec="seconds")` — "2026-08-05T14:03:11"
+        # — and db.cleanup_observations compares it as a STRING. `timestamp`
+        # above is space-separated ("2026-08-05 14:03:11") and ord(' ')=32 <
+        # ord('T')=84, so every row from the SAME DAY sorted ABOVE the bound and
+        # survived: the rows this extraction just consumed were exactly the ones
+        # never cleaned. Pass the same ISO shape the rows are stored in.
         if observations:
-            db.cleanup_observations(project_id, timestamp)
+            db.cleanup_observations(project_id, now.isoformat(timespec="seconds"))
 
         # MEMORY.md was already regenerated by upsert_batch. Touch again
         # to make sure it reflects any non-batch state changes.

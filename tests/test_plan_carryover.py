@@ -28,6 +28,15 @@ sys.path.insert(0, str(REPO / "cc_memory"))
 
 from core.db import MemoryDB          # noqa: E402  -- why: imports must follow the sys.path bootstrap above; repo tests run as plain scripts
 from core import plan as plan_mod     # noqa: E402  -- why: same bootstrap ordering
+from core.encoding_setup import enable_utf8_io  # noqa: E402  -- why: same bootstrap ordering
+
+# Every section header below contains non-ASCII (§, →, 换计划不许丢步骤). Under
+# the host's default console codec — gbk on this machine — Python encodes them
+# to locale bytes, which any UTF-8 reader (terminal, log file, CI capture)
+# renders as mojibake: "§1 ... → ..." arrived as "??1 ... ?? ...". This is the
+# project's own fix for exactly that, and it must run BEFORE the first print().
+# tests/smoke_test.py asserts that ordering so the garbling cannot come back.
+enable_utf8_io()
 
 PASS = 0
 FAIL = 0

@@ -63,6 +63,22 @@ def get_mode(mode_name: str) -> Dict:
 
 
 def should_observe(mode_name: str, tool_name: str) -> bool:
+    """Should this tool call become an `observations` row?
+
+    SCOPE — this gate decides ONE thing: whether a tool call is worth
+    *remembering*. It must never gate control-plane work.
+
+    In particular `TodoWrite` is in every mode's ``skip_tools`` and
+    `ExitPlanMode` is in no mode's non-empty ``observe_tools`` allow-list, so
+    this returns False for both plan-control tools in all three modes — by
+    design, because neither is interesting as an observation. Between v2.2 and
+    v2.4.3 `hooks/post_tool_use.py` early-exited on this result BEFORE its
+    live-plan block, which silently killed the whole v2.2 plan anchor and made
+    the guardian drift counters mode-dependent. The plan block now runs above
+    the gate; do not move it back, and do not "fix" that by adding
+    ExitPlanMode / TodoWrite here — that would only start storing junk
+    observation rows.
+    """
     mode = get_mode(mode_name)
     if tool_name in mode["skip_tools"]:
         return False

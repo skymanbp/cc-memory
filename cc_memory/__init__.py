@@ -1,6 +1,30 @@
 """
 cc-memory — Claude Code persistent memory plugin.
 
+v2.5.0: A readiness audit of every shipped surface, and the repair of what it
+      found. Three surfaces did not work at all: the MCP server could not
+      survive a non-ASCII character under a locale codec, the web viewer
+      answered zero requests because one idle TCP pre-connect wedged it, and
+      the standalone installer shipped NO user-facing surfaces — no /cc-mem,
+      no skills, no subagents — so the v2.2 live-plan feature could never work
+      on that layout. Meanwhile `_find_transcript_dir` matched on a *substring*
+      of the project basename (131 of 179 real directories matched `core`), so
+      one project's transcripts were being LLM-extracted into another project's
+      database and re-injected forever after; a fixture seeded with 5 memories
+      finished with 32. The v2.2 plan anchor had also never fired through its
+      own hook, because PostToolUse exited on the observation gate before
+      reaching the plan block.
+      Also: the privacy filter failed OPEN above 100 tags (now a linear,
+      uncapped, fail-closed scan); hooks with hard host timeouts now bound
+      their LLM wall-clock with an absolute deadline, not just per-leg socket
+      timeouts (`urlopen(timeout=)` covers neither DNS nor the TLS handshake —
+      a *successful* leg was measured at 1.48x its nominal timeout); and the
+      version string is single-sourced from `core/version.py`, which is
+      importable under BOTH the nested and the flat install layouts.
+      New: `tests/test_surfaces.py`, the first automated coverage for the MCP
+      server, the web viewer and the installer's settings.json shape matrix —
+      all three previously had none, which is why these defects shipped.
+
 v2.4.2: Bounded transcript reads. An unbounded full-file load in the PreCompact
       hook killed compaction on long-lived projects — a 2.1 GiB transcript
       parses at ~25 MiB/s (~88s) against a 120s budget, so the hook was
@@ -61,4 +85,6 @@ v2.1: Reorganized into core/hooks/llm/ui/cli/mcp subpackages.
       PROGRESS.md forced-handoff replaces SESSION_HANDOFF.md.
       MEMORY.md auto-regenerates on every write.
 """
-__version__ = "2.4.3"
+from .core.version import __version__  # single source: cc_memory/core/version.py
+
+__all__ = ["__version__"]

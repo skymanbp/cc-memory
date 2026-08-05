@@ -12,6 +12,7 @@ also seed `progress.current_request` so PROGRESS.md captures the goal
 right away (don't wait for PreCompact).
 """
 import json
+import os
 import sys
 import tempfile
 from pathlib import Path
@@ -27,6 +28,51 @@ enable_utf8_io()
 
 _TURN_FILE_PREFIX = "cc_mem_turns_"
 _PROMPT_FILE_PREFIX = "cc_mem_prompt_"
+
+
+# ── Project opt-out (config.json `excluded_projects`) ──────────────────────
+# DELIBERATE literal copy: hooks/pre_compact.py carries the same function, and
+# those two hooks are the ONLY paths that create memory/ — so the check has to
+# exist in both. They are kept import-independent of each other on purpose: a
+# cross-hook import would make PreCompact die whenever UserPromptSubmit does,
+# and hook safety outranks DRY here (see CLAUDE.md, "Hook safety > anything
+# else"). Change one, change the other; there is no third copy.
+def _is_excluded(cwd):
+    """True when `cwd` is opted out of cc-memory via config.json.
+
+    Matching is on the RESOLVED absolute path, so symlinks, ".." and relative
+    entries all normalise to one form, and through ``os.path.normcase`` so
+    Windows compares case- and separator-insensitively while POSIX stays
+    case-sensitive.
+
+    A listed directory also excludes everything BENEATH it. Claude Code's cwd
+    is routinely a subdirectory of the project a user meant to exclude, and an
+    exact-match-only test would happily create memory/ there — the control
+    failing at the one job it has.
+    """
+    try:
+        with open(_PKG_ROOT / "config.json", encoding="utf-8") as f:
+            entries = json.load(f).get("excluded_projects") or []
+        if not isinstance(entries, list):
+            return False
+        target = os.path.normcase(str(Path(cwd).expanduser().resolve()))
+        for entry in entries:
+            if not isinstance(entry, str) or not entry.strip():
+                continue
+            try:
+                listed = os.path.normcase(str(Path(entry).expanduser().resolve()))
+            except (OSError, ValueError):
+                # why: one malformed entry must not disable the rest of the
+                # opt-out list — skip it and keep checking the others
+                continue
+            if target == listed or target.startswith(listed + os.sep):
+                return True
+    except Exception:
+        # why: an absent / malformed / unreadable config must never break the
+        # hook. "not excluded" is the behaviour that shipped before this
+        # control existed, so a broken config degrades to exactly that.
+        return False
+    return False
 
 
 def _safe_id(session_id):
@@ -63,12 +109,30 @@ def main():
     except Exception:
         sys.exit(0)
 
+    # json.loads SUCCEEDS on well-formed non-object payloads (`null`, `42`,
+    # `"s"`, `[1,2]`, `true`). The `.get()` calls below sit outside the try, so
+    # without this guard those raise AttributeError, print a traceback to
+    # stderr and exit 1 — two hook-contract violations at once.
+    if not isinstance(data, dict):
+        sys.exit(0)
+
     cwd = data.get("cwd", "")
     session_id = data.get("session_id", "")
     if not cwd or not session_id:
         sys.exit(0)
 
-    created = _init_project_if_needed(cwd)
+    # Project opt-out — MUST precede _init_project_if_needed, which is the call
+    # that mkdir's memory/ in whatever cwd we were handed. Placed after the
+    # empty-cwd guard so `Path("").resolve()` can never widen the match to the
+    # interpreter's own working directory. Deliberately silent: this hook fires
+    # on every user message, so logging here would write a line per turn.
+    if _is_excluded(cwd):
+        sys.exit(0)
+
+    # Zero-config bootstrap. The return value is deliberately NOT consulted:
+    # gating the turn-1 PROGRESS seeding on it is exactly what made that seeding
+    # unreachable for a project's first session (see below).
+    _init_project_if_needed(cwd)
     if not (Path(cwd) / "memory" / "memory.db").exists():
         sys.exit(0)
 
@@ -103,8 +167,16 @@ def main():
                 # why: prompt context for observer is enrichment, not required
                 pass
 
-            # First turn of a session: also seed PROGRESS.md current_request
-            if turn_count == 1 and not created:
+            # First turn of a session: also seed PROGRESS.md current_request.
+            # `and not created` used to guard this and made the branch
+            # UNREACHABLE for a project's very first session: on turn 1 of a new
+            # project _init_project_if_needed had just created the DB so
+            # `created` was True, and on turn 2+ `turn_count != 1`. A brand-new
+            # project therefore got no progress row and no PROGRESS.md until its
+            # first compaction. db.patch_progress bootstraps the row itself
+            # (core/db.py: `if not self.get_progress(...): self.upsert_progress(...)`),
+            # so running on a just-created DB is safe.
+            if turn_count == 1:
                 try:
                     from core.db import MemoryDB
                     from core.progress import write_progress_md

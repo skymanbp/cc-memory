@@ -17,9 +17,16 @@ the work; spamming Claude with "remember to call /save-memories" was noise.
 import json
 import sys
 import tempfile
+import time
 import urllib.error
 from datetime import datetime
 from pathlib import Path
+
+# Captured as early as possible: the reference instant for this hook's
+# wall-clock budget (see _LLM_DEADLINE_S below). Taken BEFORE the package
+# imports so their cost is charged against the budget instead of hidden from
+# it. Same idiom as hooks/session_start.py:31.
+_HOOK_T0 = time.monotonic()
 
 _HERE = Path(__file__).resolve().parent
 _PKG_ROOT = _HERE.parent
@@ -43,8 +50,46 @@ _MIN_OBS_FOR_EVAL = 3
 _TURN_FILE_PREFIX = "cc_mem_turns_"
 _PROMPT_FILE_PREFIX = "cc_mem_prompt_"
 _LAST_EVAL_PREFIX = "cc_mem_eval_"
+_REFINE_NUDGE_PREFIX = "cc_mem_refine_"
 
-_API_TIMEOUT = 8  # within Stop hook budget
+# The plan-refiner nudge is advisory. `needs_refine` is cleared ONLY by
+# plan.apply_refined_plan, so a user who ignores the suggestion (or refines
+# via a path that fails) used to get the same line printed on EVERY Stop
+# forever — measured 5 consecutive Stops -> 5 identical nudges. Rate-limit it
+# instead: never clear needs_refine here, only the refiner may do that.
+_REFINE_NUDGE_COOLDOWN_TURNS = 5
+
+# ── LLM wall-clock envelope (v2.5.0) ───────────────────────────────────────
+# hooks/hooks.json gives Stop 22s. TWO bounds, because per-leg timeouts alone
+# are NOT one:
+#
+#   _API_TIMEOUT /     the per-leg ceilings for the COMMON case, when there is
+#   _FALLBACK_TIMEOUT  plenty of budget left. call_llm bounds the Anthropic
+#                      legs at 2 candidates, so ONE call's NOMINAL cost is
+#                      2*7 + 3 = 17s (the Ollama leg runs only when config
+#                      `ccl.enabled` is true).
+#   _LLM_DEADLINE_S    an ABSOLUTE instant (from _HOOK_T0) by which the
+#                      observer's LLM call must be FINISHED. call_llm clamps
+#                      every leg's socket timeout to the time actually
+#                      remaining and skips a leg with <1s left, so the bound
+#                      holds no matter how many credential candidates exist.
+#
+# Why the nominal arithmetic is not enough: `urlopen(req, timeout=t)` sets a
+# PER-SOCKET-OPERATION timeout — it covers neither DNS resolution nor the TLS
+# handshake, so a leg overruns t. An adversarial verifier measured a
+# SUCCESSFUL leg at 11.81s against a nominal timeout=8 (1.48x) in ~5% of legs.
+# Reproduced here with both credential candidates live, ccl.enabled=true and
+# every leg stalling at 1.48x: 3 legs = 10.36 + 10.36 + 4.44 = 25.16s, hook
+# total 25.45s — OVER the 22s budget. A timeout kill is TerminateProcess: no
+# `except`, no `finally`, i.e. the v2.3.2 / v2.4.2 "killed mid-write" class.
+#
+# Worst case WITH the deadline = _LLM_DEADLINE_S + the final (clamped) leg's
+# overrun = 14 + 0.48*7 = 17.4s, leaving ~4.6s for the idle reorg, the
+# PROGRESS.md patch and interpreter teardown (measured non-LLM cost: 0.24s on
+# a small project). Same stall run, measured after: 16.05s total.
+_API_TIMEOUT = 7
+_FALLBACK_TIMEOUT = 3
+_LLM_DEADLINE_S = 14.0
 
 _OBSERVER_PROMPT = """\
 You are a memory observer. Given a user's request and a batch of tool observations \
@@ -80,6 +125,39 @@ def _read_turn_count(session_id):
         # why: corrupted turn counter file — treat as 0 (best-effort; the
         # next UserPromptSubmit will overwrite it correctly)
         return 0
+
+
+def _claim_refine_nudge(session_id, turn_count):
+    """Return True at most once per _REFINE_NUDGE_COOLDOWN_TURNS turns.
+
+    Uses the same per-session temp-marker idiom as the turn / prompt / eval
+    markers rather than a file under memory/, because anything written there
+    also has to be added to core.progress.MEMORY_GITIGNORE_LINES or it leaks
+    into the user's repo forever (the v2.4.2 lesson).
+
+    `turn_count` is 0 when no UserPromptSubmit has run this session; the
+    marker still records it, so a burst of Stops with no intervening user
+    prompt yields exactly one nudge.
+    """
+    f = Path(tempfile.gettempdir()) / f"{_REFINE_NUDGE_PREFIX}{_safe_id(session_id)}"
+    if f.exists():
+        try:
+            last = int(f.read_text(encoding="utf-8").strip())
+            if turn_count - last < _REFINE_NUDGE_COOLDOWN_TURNS:
+                return False
+        except (ValueError, OSError):
+            # why: corrupt/unreadable marker — fall through and nudge once,
+            # rewriting the marker below (degrades to "nudge now", never to
+            # "nudge every turn")
+            pass
+    try:
+        f.write_text(str(turn_count), encoding="utf-8")
+    except OSError:
+        # why: cannot persist the cooldown marker (read-only temp). Degrading
+        # to the old every-turn nudge is noisy but harmless; suppressing the
+        # nudge entirely would hide a captured-but-unrefined plan.
+        pass
+    return True
 
 
 def _observer_evaluate(cwd, session_id, memory_dir):
@@ -139,7 +217,9 @@ def _observer_evaluate(cwd, session_id, memory_dir):
     try:
         from llm.ccl_backend import call_llm
         text = call_llm(_OBSERVER_PROMPT, user_msg, api_key,
-                        max_tokens=1000, timeout=_API_TIMEOUT)
+                        max_tokens=1000, timeout=_API_TIMEOUT,
+                        fallback_timeout=_FALLBACK_TIMEOUT,
+                        deadline=_HOOK_T0 + _LLM_DEADLINE_S)
         text = text.strip()
         if text.startswith("```"):
             text = "\n".join(l for l in text.split("\n") if not l.strip().startswith("```"))
@@ -221,6 +301,13 @@ def main():
     except Exception:
         sys.exit(0)
 
+    # json.loads SUCCEEDS on well-formed non-object payloads (`null`, `42`,
+    # `"s"`, `[1,2]`, `true`). The `.get()` calls below sit outside the try, so
+    # without this guard those raise AttributeError, print a traceback to
+    # stderr and exit 1 — two hook-contract violations at once.
+    if not isinstance(data, dict):
+        sys.exit(0)
+
     cwd = data.get("cwd", "")
     session_id = data.get("session_id", "")
     if not cwd or not session_id:
@@ -277,11 +364,14 @@ def main():
             plan_row = db.get_plan_active(project_id)  # re-read post-bump
 
             if plan_row.get("needs_refine") and (plan_row.get("raw") or "").strip():
-                print(
-                    "[cc-memory.plan] NEW PLAN captured (memory/.plan_raw.md). "
-                    "Invoke @plan-refiner subagent to normalise it, then "
-                    "`/cc-mem plan-set --from-refiner` with the JSON."
-                )
+                # Rate-limited: see _claim_refine_nudge. needs_refine stays 1 —
+                # only plan.apply_refined_plan may clear it.
+                if _claim_refine_nudge(session_id, turn_count):
+                    print(
+                        "[cc-memory.plan] NEW PLAN captured (memory/.plan_raw.md). "
+                        "Invoke @plan-refiner subagent to normalise it, then "
+                        "`/cc-mem plan-set --from-refiner` with the JSON."
+                    )
             else:
                 should_nudge, reason = plan_mod.should_nudge_guardian(plan_row)
                 if should_nudge:

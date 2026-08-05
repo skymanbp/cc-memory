@@ -1045,6 +1045,557 @@ def main():
     print("[OK] v2.4.2 robustness: garbled marker survivable, omitted count transcript-relative")
     print("[OK] v2.4.2 visibility: auto trigger shown, kill detected, no in-flight false positive")
 
+    # ========================================================================
+    # v2.5.0 regression coverage. Every block below pins a defect that SHIPPED
+    # in v2.4.3 and was closed this release; each one fails against that tree.
+    # ========================================================================
+
+    # === v2.5.0 (1): privacy filtering fails CLOSED ==========================
+    # Pre-v2.5 `strip_private` was `re.sub(r"<private>.*?</private>", "", t)`
+    # behind a `t.count("<private>") > 100` ReDoS guard that RETURNED THE TEXT
+    # UNCHANGED — the filter leaked exactly when the payload looked adversarial,
+    # on BOTH guarded paths (core/extractor.py's LLM prompt and
+    # llm/memory_writer.py's storage write). The cap was also calibrated on the
+    # wrong signal: well-formed tags are cheap for the regex engine, an
+    # UNTERMINATED one is the quadratic case (measured 16000 tags = 9517 ms).
+    from core.privacy import (strip_private as _v5_strip,
+                              strip_context_tags as _v5_strip_ctx,
+                              clean_for_storage as _v5_clean,
+                              has_private as _v5_has_priv)
+    _v5_leak = "".join("keep%d <private>SECRET%d</private> " % (i, i)
+                       for i in range(101))
+    assert _v5_leak.count("<private>") == 101, "fixture must exceed the old cap"
+    assert _v5_has_priv(_v5_leak) is True
+    assert "SECRET" not in _v5_strip(_v5_leak), \
+        "101 <private> tags came back verbatim — the tag cap still fails OPEN"
+    assert "SECRET" not in _v5_clean(_v5_leak), \
+        "clean_for_storage (the storage + LLM-prompt gate) leaked above the cap"
+    assert "keep100" in _v5_strip(_v5_leak), "non-private text must survive"
+    # ...and the same must hold for the anti-recursion tag at 101 spans
+    _v5_ctx_leak = "".join("ok%d <cc-memory-context>BLOB</cc-memory-context> " % i
+                           for i in range(101))
+    assert "BLOB" not in _v5_clean(_v5_ctx_leak), \
+        "cc-memory-context spans leaked above the cap (recursive re-storage)"
+    # fail CLOSED: a dangling open tag drops the remainder rather than emit it
+    assert _v5_strip("public prefix <private>everything here is secret") \
+        == "public prefix", "unterminated <private> emitted its remainder"
+    assert _v5_strip_ctx("kept <cc-memory-context>injected blob") == "kept"
+    assert _v5_clean("a <private>x</private> b <private>dangling") == "a  b"
+    # text with no open tag is returned byte-identical (no gratuitous .strip())
+    assert _v5_strip("  no tags at all  ") == "  no tags at all  "
+    # linear, not quadratic: this exact input was 5744 ms pre-v2.5
+    _v5_bomb = "<private>x" * 16000
+    _v5_t0 = _time.perf_counter()
+    _v5_bomb_out = _v5_clean(_v5_bomb)
+    _v5_ms = (_time.perf_counter() - _v5_t0) * 1000.0
+    assert _v5_bomb_out == "", "unterminated-tag bomb was not dropped"
+    assert _v5_ms < 1000.0, \
+        f"16000 unterminated <private> tags took {_v5_ms:.0f} ms — quadratic again"
+    print(f"[OK] v2.5.0 privacy fails CLOSED: 101 tags stripped, dangling tag "
+          f"drops remainder, 16000-tag bomb in {_v5_ms:.2f} ms")
+
+    # === v2.5.0 (2): session-less memories are visible =======================
+    # `sessions` rows only exist after a compaction, so ALL FOUR manual save
+    # paths (cli/mem.py add, mcp/server.py memory_add, ui/dashboard.py,
+    # ui/web_viewer.py) write session_id NULL. The pre-v2.5 filter was a bare
+    # `AND session_id IN (...)`, which NULL can never satisfy — everything the
+    # user saved by hand was invisible to SessionStart injection, the web viewer
+    # and MCP memory_recent.
+    _v5_np = Path(tempfile.mkdtemp(prefix="cc-mem-nullsid-"))
+    (_v5_np / "memory").mkdir(parents=True, exist_ok=True)
+    _v5_db = MemoryDB(_v5_np / "memory" / "memory.db")
+    _v5_pid = _v5_db.upsert_project(str(_v5_np))
+    _v5_r = upsert_smart(_v5_db, _v5_pid, None, "decision",
+                         "Manual save made before this project ever compacted",
+                         4, topic="manual")
+    assert _v5_r["action"] == "inserted", _v5_r
+    _v5_recent = _v5_db.get_recent_memories(_v5_pid)
+    assert len(_v5_recent) == 1 and _v5_recent[0]["session_id"] is None, \
+        f"a project with NO sessions row hid its manual save: {_v5_recent}"
+    # ...and it stays visible once real sessions DO exist (the IN-clause branch)
+    _v5_sid = _v5_db.insert_session(_v5_pid, "sid-real", "auto", 5, "", "")
+    _v5_db.insert_memory(_v5_pid, _v5_sid, "note",
+                         "Memory extracted by a real compaction", importance=3)
+    _v5_recent2 = _v5_db.get_recent_memories(_v5_pid)
+    assert {m["session_id"] for m in _v5_recent2} == {None, _v5_sid}, \
+        f"session-less row dropped once a sessions row existed: {_v5_recent2}"
+    print("[OK] v2.5.0 get_recent_memories returns session_id NULL rows "
+          "(both the no-session and the IN-clause branch)")
+
+    # === v2.5.0 (3): hook LLM budget arithmetic ==============================
+    # `urlopen(timeout=)` is a PER-SOCKET-OPERATION timeout: it covers neither
+    # DNS nor the TLS handshake, so per-leg timeouts alone never bounded a hook.
+    # Each LLM-calling hook now captures _HOOK_T0 BEFORE its package imports and
+    # passes an ABSOLUTE deadline into call_llm. This block is what makes
+    # raising a timeout constant without raising the matching hooks/hooks.json
+    # budget (or vice versa) turn the suite red.
+    _v5_budget = {}
+    for _v5_ev, _v5_groups in hj["hooks"].items():
+        for _v5_g in _v5_groups:
+            for _v5_h in _v5_g["hooks"]:
+                _v5_m = _re2.search(r"hooks/(\w+)\.py", _v5_h["command"])
+                if _v5_m and not _v5_h.get("async"):
+                    _v5_budget[_v5_m.group(1)] = _v5_h["timeout"]
+    assert {"stop", "pre_compact", "session_start"} <= set(_v5_budget), _v5_budget
+    # hook -> (deadline constant, headroom the deadline must leave for the
+    #          hook's non-LLM work, how the NOMINAL per-leg sum is bounded)
+    #
+    # "nominal_fits": 2*_API_TIMEOUT + _FALLBACK_TIMEOUT (2 Anthropic credential
+    #   candidates + the opt-in Ollama leg) also fits inside the host budget.
+    # "deadline_binds": it deliberately does NOT, and the deadline is the only
+    #   bound — SessionStart's budget is 15s while a healthy Haiku extraction
+    #   wants ~10s, so shrinking the per-leg timeout to satisfy the arithmetic
+    #   would leave a value that cannot complete (see llm/ccl_backend.call_llm
+    #   docstring). Safe here ONLY because the injection — this hook's entire
+    #   product — is printed and flushed before retroactive_save runs, so a kill
+    #   costs the extraction and nothing else.
+    _v5_llm_spec = {
+        "stop":          ("_LLM_DEADLINE_S",   4.0, "nominal_fits"),
+        "pre_compact":   ("_LLM_DEADLINE_S",  20.0, "nominal_fits"),
+        "session_start": ("_RETRO_DEADLINE_S", 2.0, "deadline_binds"),
+    }
+    _v5_llm_report = []
+    for _v5_name, (_v5_dl_c, _v5_head, _v5_rule) in _v5_llm_spec.items():
+        _v5_src = (_REPO / "cc_memory" / "hooks" / f"{_v5_name}.py").read_text(
+            encoding="utf-8")
+        assert _re2.search(r"^_HOOK_T0 = time\.monotonic\(\)", _v5_src, _re2.M), \
+            f"{_v5_name}.py must capture _HOOK_T0 at import time"
+        assert _v5_src.index("_HOOK_T0 = time.monotonic()") \
+            < _v5_src.index("sys.path.insert"), \
+            f"{_v5_name}.py: _HOOK_T0 must be taken BEFORE the package imports"
+        assert f"deadline=_HOOK_T0 + {_v5_dl_c}" in _v5_src, \
+            f"{_v5_name}.py must pass an absolute deadline to call_llm"
+        _v5_c = {}
+        for _v5_const in ("_API_TIMEOUT", "_FALLBACK_TIMEOUT", _v5_dl_c):
+            _v5_mm = _re2.search(rf"^{_v5_const} = ([\d.]+)$", _v5_src, _re2.M)
+            assert _v5_mm, f"{_v5_name}.py missing {_v5_const}"
+            _v5_c[_v5_const] = float(_v5_mm.group(1))
+        _v5_api = _v5_c["_API_TIMEOUT"]
+        _v5_dl = _v5_c[_v5_dl_c]
+        _v5_nominal = 2 * _v5_api + _v5_c["_FALLBACK_TIMEOUT"]
+        _v5_host = float(_v5_budget[_v5_name])
+        assert _v5_api < _v5_dl, \
+            f"{_v5_name}.py: one leg ({_v5_api}s) cannot finish inside " \
+            f"{_v5_dl_c}={_v5_dl}s — the common case is dead on arrival"
+        assert _v5_dl + _v5_head <= _v5_host, \
+            f"{_v5_name}.py: {_v5_dl_c}={_v5_dl}s leaves under {_v5_head}s of " \
+            f"the {_v5_host}s hooks.json budget for this hook's non-LLM work"
+        if _v5_rule == "nominal_fits":
+            assert _v5_nominal <= _v5_host, \
+                f"{_v5_name}.py: 2*{_v5_api} + {_v5_c['_FALLBACK_TIMEOUT']} = " \
+                f"{_v5_nominal}s exceeds the {_v5_host}s hooks.json budget"
+        else:
+            assert _v5_dl < _v5_nominal, \
+                f"{_v5_name}.py is marked deadline-bound but its nominal sum " \
+                f"({_v5_nominal}s) already fits under {_v5_dl_c}={_v5_dl}s — " \
+                f"retag it 'nominal_fits' so the tighter check applies"
+        _v5_llm_report.append(f"{_v5_name} {_v5_dl}/{_v5_nominal} in {_v5_host:.0f}s")
+    print("[OK] v2.5.0 hook LLM budgets fit hooks.json (deadline/nominal in "
+          "budget): " + ", ".join(_v5_llm_report))
+
+    # === v2.5.0 (3b): call_llm honours an absolute deadline ==================
+    # A deadline already in the past must skip EVERY leg — no socket is opened,
+    # so the caller cannot overrun its host timeout on a stalled DNS/TLS phase.
+    import llm.ccl_backend as _v5_ccl
+    import core.auth as _v5_auth
+    assert "deadline" in _inspect.signature(_v5_ccl.call_llm).parameters, \
+        "call_llm must accept an absolute `deadline`"
+
+    def _v5_no_network(*_a, **_kw):
+        raise AssertionError("a network leg started AFTER the deadline passed")
+
+    # fixture credentials: obviously-fake placeholders. Stubbing
+    # get_api_candidates keeps this hermetic — no ANTHROPIC_API_KEY and no
+    # ~/.claude/.credentials.json is ever read, so the real machine's
+    # credentials are neither required nor touched.
+    _v5_fake_keys = ("sk-ant-api03-EXAMPLE-caller-placeholder",
+                     "sk-ant-api03-EXAMPLE-second-placeholder")
+    _v5_saved_llm = (_v5_auth.get_api_candidates,
+                     _v5_ccl._call_haiku, _v5_ccl._call_ollama)
+    try:
+        _v5_auth.get_api_candidates = lambda: [(_v5_fake_keys[1], "env",
+                                                "api_key")]
+        _v5_ccl._call_haiku = _v5_no_network
+        _v5_ccl._call_ollama = _v5_no_network
+        _v5_llm_err = None
+        try:
+            _v5_ccl.call_llm("sys", "user", api_key=_v5_fake_keys[0],
+                             timeout=30, fallback_timeout=30,
+                             deadline=_time.monotonic() - 5.0)
+        except RuntimeError as _v5_e:
+            _v5_llm_err = str(_v5_e)
+        assert _v5_llm_err is not None, \
+            "call_llm ran a leg past its deadline instead of raising"
+        assert _v5_llm_err.count("skipped (deadline reached)") == 2, \
+            f"both Anthropic candidates must be skipped: {_v5_llm_err}"
+    finally:
+        (_v5_auth.get_api_candidates,
+         _v5_ccl._call_haiku, _v5_ccl._call_ollama) = _v5_saved_llm
+    print("[OK] v2.5.0 call_llm: `deadline` kwarg accepted, a past deadline "
+          "skips every leg without opening a socket")
+
+    # === v2.5.0 (4): version single-source ===================================
+    # core/version.py is THE runtime version; four manifests cannot import it
+    # and must be bumped in lockstep. This is the check that catches a partial
+    # bump (and it is why core/version.py exists at all — see its docstring).
+    from core.version import __version__ as _v5_ver
+    _v5_init_src = (_REPO / "cc_memory" / "__init__.py").read_text(encoding="utf-8")
+    assert "from .core.version import __version__" in _v5_init_src, \
+        "cc_memory/__init__.py must RE-EXPORT core/version.py, not restate it"
+    assert not _re2.search(r'^__version__\s*=\s*["\']', _v5_init_src, _re2.M), \
+        "cc_memory/__init__.py hardcodes a second version literal"
+    _v5_pyproj_bytes = (_REPO / "pyproject.toml").read_bytes()
+    assert not _v5_pyproj_bytes.startswith(b"\xef\xbb\xbf"), \
+        "pyproject.toml has a UTF-8 BOM again — tomllib cannot parse it, so no " \
+        "PEP 517 frontend can build or install the package"
+    try:
+        import tomllib as _v5_toml
+        _v5_pyproj_ver = _v5_toml.loads(
+            _v5_pyproj_bytes.decode("utf-8"))["project"]["version"]
+    except ImportError:
+        # why: tomllib is 3.11+; this project supports 3.8+, so on an older
+        # interpreter read the literal directly rather than skip the check
+        _v5_pm = _re2.search(r'^version\s*=\s*"([^"]+)"',
+                             _v5_pyproj_bytes.decode("utf-8"), _re2.M)
+        assert _v5_pm, "pyproject.toml [project] version not found"
+        _v5_pyproj_ver = _v5_pm.group(1)
+    _v5_manifests = {
+        "cc_memory/config.json": _json2.loads(
+            (_REPO / "cc_memory" / "config.json").read_text(
+                encoding="utf-8"))["version"],
+        ".claude-plugin/plugin.json": _json2.loads(
+            (_REPO / ".claude-plugin" / "plugin.json").read_text(
+                encoding="utf-8"))["version"],
+        ".claude-plugin/marketplace.json": _json2.loads(
+            (_REPO / ".claude-plugin" / "marketplace.json").read_text(
+                encoding="utf-8"))["plugins"][0]["version"],
+        "pyproject.toml": _v5_pyproj_ver,
+    }
+    _v5_drifted = {k: v for k, v in _v5_manifests.items() if v != _v5_ver}
+    assert not _v5_drifted, \
+        f"version drift: core/version.py says {_v5_ver}, but {_v5_drifted}"
+    print(f"[OK] v2.5.0 version single-source: core/version.py {_v5_ver} == all "
+          f"{len(_v5_manifests)} manifests")
+
+    # === v2.5.0 (5): FLAT standalone install inspects clean ==================
+    # ui/installer.py copies subpackages to TARGET_DIR/<subdir>/ — a FLAT tree
+    # with NO cc_memory/ segment — while _inspect_layout resolved `root / rel`
+    # with rel carrying a literal `cc_memory/` prefix. Every standalone install
+    # therefore reported "22 of 22 files missing" and /cc-mem status skipped the
+    # API-key check for want of a functional layout. The old fixture built a
+    # NESTED tree and only ever passed hooks_via="plugin-manifest", so neither
+    # half of the real standalone shape was ever exercised.
+    import shutil as _v5_sh
+    _v5_flat = Path(tempfile.mkdtemp(prefix="cc-memory-flatplugin-"))
+    for _v5_sub, _v5_files in _inst.SUBPACKAGE_FILES.items():
+        _v5_d = _v5_flat / _v5_sub if _v5_sub else _v5_flat
+        _v5_d.mkdir(parents=True, exist_ok=True)
+        for _v5_f in _v5_files:
+            (_v5_d / _v5_f).write_text("# stub\n", encoding="utf-8")
+    assert not (_v5_flat / "cc_memory").exists(), "fixture must be FLAT"
+    _v5_settings = {"hooks": _inst._make_hooks_config(_v5_flat)}
+    _v5_flat_verdict = _inspect_layout("legacy-install", _v5_flat,
+                                       hooks_via="user-settings", enabled=True,
+                                       settings_dict=_v5_settings)
+    assert _v5_flat_verdict["plugin_files_ok"] is True, \
+        f"a healthy FLAT standalone install still inspects broken, missing: " \
+        f"{_v5_flat_verdict['missing_files']}"
+    assert _v5_flat_verdict["pkg_dir"] == _v5_flat, \
+        "pkg_dir must resolve to the root itself for a flat install"
+    assert set(_v5_flat_verdict["hooks_registered"]) == {
+        "PreCompact", "SessionStart", "Stop", "PostToolUse", "UserPromptSubmit"
+    }, f"settings.json[hooks] not read: {_v5_flat_verdict['hooks_registered']}"
+    assert _print_layout_report(_v5_flat_verdict) is True, \
+        "flat + user-settings install must report FUNCTIONAL"
+    # hooks/hooks.json is a REPO-level file the standalone installer never
+    # copies; requiring it would re-break every settings.json install
+    assert "hooks/hooks.json" not in _v5_flat_verdict["missing_files"]
+    _v5_sh.rmtree(_v5_flat, ignore_errors=True)
+    print("[OK] v2.5.0 layout inspector: FLAT standalone install + "
+          "user-settings hooks reports healthy (5/5)")
+
+    # === v2.5.0 (5b): the installer ships every runtime module + surface =====
+    # core/version.py was ADDED without being registered in either manifest;
+    # a standalone install would have shipped a package that cannot import.
+    _v5_shipped = {f"{_s}/{_f}" if _s else _f
+                   for _s, _fs in _inst.SUBPACKAGE_FILES.items() for _f in _fs}
+    _v5_on_disk = {p.relative_to(_REPO / "cc_memory").as_posix()
+                   for p in (_REPO / "cc_memory").rglob("*.py")
+                   if "__pycache__" not in p.parts}
+    assert _v5_on_disk <= _v5_shipped, \
+        f"runtime modules the standalone installer never copies: " \
+        f"{sorted(_v5_on_disk - _v5_shipped)}"
+    for _v5_sub, _v5_files in _inst.SUBPACKAGE_FILES.items():
+        for _v5_f in _v5_files:
+            _v5_p = ((_REPO / "cc_memory" / _v5_sub / _v5_f) if _v5_sub
+                     else (_REPO / "cc_memory" / _v5_f))
+            assert _v5_p.is_file(), f"SUBPACKAGE_FILES lists a missing file: {_v5_p}"
+    assert set(_inst.SURFACE_FILES) == {
+        "commands/cc-mem.md", "agents/plan-refiner.md", "agents/plan-guardian.md",
+        "skills/ccm-load/SKILL.md", "skills/save-memories/SKILL.md",
+    }, f"surface copy set changed: {_inst.SURFACE_FILES}"
+    for _v5_rel in _inst.SURFACE_FILES:
+        assert (_REPO / _v5_rel).is_file(), f"shipped surface missing: {_v5_rel}"
+
+    # build_exe.py restates both manifests; they must be byte-identical, not
+    # merely equivalent — a reviewer diffing the two files must see nothing.
+    def _v5_manifest_block(text, head, tail):
+        _i = text.index(head)
+        return text[_i:text.index(tail, _i) + len(tail)]
+
+    _v5_inst_src = (_REPO / "cc_memory" / "ui" / "installer.py").read_text(
+        encoding="utf-8")
+    _v5_bx_src = (_REPO / "build_exe.py").read_text(encoding="utf-8")
+    for _v5_head, _v5_tail in (("SUBPACKAGE_FILES = {", "\n}\n"),
+                               ("SURFACE_FILES = [", "\n]\n")):
+        assert _v5_manifest_block(_v5_inst_src, _v5_head, _v5_tail) == \
+            _v5_manifest_block(_v5_bx_src, _v5_head, _v5_tail), \
+            f"ui/installer.py and build_exe.py {_v5_head.split()[0]} have drifted"
+    sys.path.append(str(_REPO))
+    import build_exe as _v5_bx
+    assert _inst.SUBPACKAGE_FILES == _v5_bx.SUBPACKAGE_FILES
+    assert _inst.SURFACE_FILES == _v5_bx.SURFACE_FILES
+    print(f"[OK] v2.5.0 installer manifest: ships all {len(_v5_on_disk)} runtime "
+          f"modules + 5 surfaces; build_exe.py copy is byte-identical")
+
+    # === v2.5.0 (6): installer hook timeouts in lockstep with hooks.json =====
+    # hooks/hooks.json is the source of truth; HOOK_SCRIPTS / ASYNC_HOOK are the
+    # fallback for a frozen/flat install where that file is absent. Both must
+    # carry the SAME numbers, or a standalone install silently runs with
+    # different budgets than the ones asserted in block (3) above.
+    _v5_cfg = _inst._make_hooks_config(Path("X:/cc-mem-timeout-probe"))
+    for _v5_ev, _v5_groups in hj["hooks"].items():
+        for _v5_entry in _v5_groups[0]["hooks"]:
+            _v5_got = [c["timeout"] for c in _v5_cfg[_v5_ev][0]["hooks"]
+                       if bool(c.get("async")) == bool(_v5_entry.get("async"))]
+            assert _v5_got and _v5_got[0] == _v5_entry["timeout"], \
+                f"{_v5_ev} ({'async' if _v5_entry.get('async') else 'sync'}): " \
+                f"hooks.json says {_v5_entry['timeout']}, installer emits {_v5_got}"
+    for _v5_ev, (_v5_script, _v5_t) in _inst.HOOK_SCRIPTS.items():
+        _v5_sync = [e["timeout"] for e in hj["hooks"][_v5_ev][0]["hooks"]
+                    if not e.get("async")]
+        assert _v5_t == _v5_sync[0], \
+            f"{_v5_ev}: HOOK_SCRIPTS fallback {_v5_t} != hooks.json {_v5_sync[0]}"
+    assert _inst.ASYNC_HOOK == ("PreCompact", "hooks/consolidate_async.py", 300)
+    print("[OK] v2.5.0 installer hook timeouts == hooks.json (live read AND "
+          "frozen-install fallback table)")
+
+    # === v2.5.0 (7): an unrefined raw plan wins over the stale structured one =
+    # plan_active is a single slot holding BOTH forms. capture_exit_plan_mode
+    # (the primary auto-capture path) and `/cc-mem plan-set --raw` stored a
+    # brand-new raw plan with needs_refine=1 while every renderer kept printing
+    # the PREVIOUS refined plan's goal and steps — the newest plan was invisible.
+    _v5_pp = Path(tempfile.mkdtemp(prefix="cc-mem-planprec-"))
+    _v5_mem_pp = _v5_pp / "memory"; _v5_mem_pp.mkdir(parents=True, exist_ok=True)
+    _v5_db_pp = MemoryDB(_v5_mem_pp / "memory.db")
+    _v5_pid_pp = _v5_db_pp.upsert_project(str(_v5_pp))
+    _v5_structured = {
+        "goal": "SUPERSEDED STRUCTURED GOAL",
+        "success_criteria": ["the old criterion"],
+        "steps": [{"id": 1, "title": "old step one", "status": "pending",
+                   "notes": ""}],
+        "context": "",
+    }
+    plan_mod.apply_refined_plan(_v5_db_pp, _v5_pid_pp, _v5_structured,
+                                memory_dir=_v5_mem_pp)
+    _v5_md0 = (_v5_mem_pp / "PLAN.md").read_text(encoding="utf-8")
+    assert "SUPERSEDED STRUCTURED GOAL" in _v5_md0 \
+        and "Pending refinement" not in _v5_md0, \
+        "a freshly refined plan must render as the structured form"
+    assert plan_mod.capture_exit_plan_mode(
+        _v5_db_pp, _v5_pid_pp, "BRAND NEW RAW PLAN: rewrite the exporter",
+        memory_dir=_v5_mem_pp) is True
+    assert _v5_db_pp.get_plan_active(_v5_pid_pp)["needs_refine"] == 1
+    _v5_md1 = (_v5_mem_pp / "PLAN.md").read_text(encoding="utf-8")
+    assert "BRAND NEW RAW PLAN" in _v5_md1, \
+        "PLAN.md still renders the stale structured plan after a raw capture"
+    assert "STALE, superseded by the raw text above" in _v5_md1, \
+        "the superseded structured plan must be labelled STALE, not just dropped"
+    assert _v5_md1.index("BRAND NEW RAW PLAN") \
+        < _v5_md1.index("SUPERSEDED STRUCTURED GOAL"), \
+        "the current raw plan must come BEFORE the superseded structured one"
+    # the predicate itself, and the unchanged pre-v2.5 behaviour when a caller
+    # passes no meta at all
+    assert plan_mod.raw_pending_refinement(
+        {"raw": "r", "structured": _v5_structured, "needs_refine": 1,
+         "last_refined_at": "2026-01-01T00:00:00"}) is True
+    assert plan_mod.raw_pending_refinement(
+        {"raw": "r", "structured": _v5_structured, "needs_refine": 0,
+         "last_refined_at": "2026-01-01T00:00:00"}) is False
+    assert "Pending refinement" in plan_mod.render_plan_md(
+        _v5_structured, active_step_id=1, meta={"raw": "r", "needs_refine": 1})
+    assert "Pending refinement" not in plan_mod.render_plan_md(
+        _v5_structured, active_step_id=1), "meta-less render must be unchanged"
+    print("[OK] v2.5.0 plan precedence: an unrefined raw plan is what PLAN.md "
+          "renders; the structured one is labelled STALE")
+
+    # === v2.5.0 (8): PostToolUse classifies privacy on the RAW response ======
+    # Both _truncate_* helpers are lossy — a Read body collapses to
+    # "(file content)" — so classifying on their OUTPUT made <private>
+    # unobservable exactly where it mattered: a Read of a file the user marked
+    # private stored is_private=0, which is what keeps a row OUT of the Stop
+    # observer and the PreCompact extraction prompt. A false 0 ships that path
+    # to the Anthropic API and into progress.files_touched.
+    import io as _io
+    _v5_ptu_spec = _ilu.spec_from_file_location(
+        "_ptu_sm", _REPO / "cc_memory" / "hooks" / "post_tool_use.py")
+    _v5_ptu = _ilu.module_from_spec(_v5_ptu_spec)
+    _v5_ptu_spec.loader.exec_module(_v5_ptu)
+    _v5_body = "KEY=<private>hunter2</private> trailing"
+    assert _v5_ptu._truncate_output("Read", _v5_body) == "(file content)"
+    assert _v5_has_priv(_v5_ptu._truncate_output("Read", _v5_body)) is False, \
+        "fixture invalid: the truncated form must have LOST the marker"
+    _v5_op = Path(tempfile.mkdtemp(prefix="cc-mem-ptu-"))
+    (_v5_op / "memory").mkdir(parents=True, exist_ok=True)
+    _v5_db_o = MemoryDB(_v5_op / "memory" / "memory.db")
+    _v5_pid_o = _v5_db_o.upsert_project(str(_v5_op))
+
+    class _V5FakeStdin:
+        """Minimal stand-in: the hook only ever touches sys.stdin.buffer."""
+
+        def __init__(self, payload):
+            self.buffer = _io.BytesIO(payload)
+
+    def _v5_run_ptu(payload):
+        _saved_stdin = sys.stdin
+        sys.stdin = _V5FakeStdin(_json3.dumps(payload).encode("utf-8"))
+        try:
+            _v5_ptu.main()
+        except SystemExit:
+            # why: the hook contract ends EVERY run with sys.exit(0); an
+            # in-process invocation must absorb that, not tear down the suite
+            pass
+        finally:
+            sys.stdin = _saved_stdin
+
+    _v5_run_ptu({"cwd": str(_v5_op), "tool_name": "Read", "session_id": "s1",
+                 "tool_input": {"file_path": "notes.md"},
+                 "tool_response": "an entirely harmless body"})
+    _v5_run_ptu({"cwd": str(_v5_op), "tool_name": "Read", "session_id": "s1",
+                 "tool_input": {"file_path": "secrets.env"},
+                 "tool_response": _v5_body})
+    with _v5_db_o._connect() as _v5_conn:
+        _v5_obs = [dict(r) for r in _v5_conn.execute(
+            "SELECT tool_input, tool_output, is_private FROM observations "
+            "ORDER BY id")]
+    assert len(_v5_obs) == 2, f"expected 2 observation rows, got {_v5_obs}"
+    assert _v5_obs[0]["is_private"] == 0 and _v5_obs[1]["is_private"] == 1, \
+        f"is_private computed AFTER truncation (marker already gone): {_v5_obs}"
+    assert all(o["tool_output"] == "(file content)" for o in _v5_obs), \
+        "fixture invalid: the stored body must be the truncated placeholder"
+    assert [o["tool_input"] for o in _v5_db_o.get_recent_observations(_v5_pid_o)] \
+        == ["notes.md"], "the private row reached the observer/extraction feed"
+    print("[OK] v2.5.0 PostToolUse: is_private classified on the RAW response, "
+          "so a private Read stays out of the extraction feed")
+
+    # === v2.5.0 (9): LIKE metacharacters escaped + LIMIT clamped both ends ===
+    # Unescaped, a search for "%" matched every row and "_" matched every row
+    # with at least one character — a full table dump from a one-character
+    # query. And SQLite reads a NEGATIVE limit as "no limit", so the FLOOR is as
+    # load-bearing as the ceiling (search_fts(pid, q, limit=10**6) used to fetch
+    # every active row, driven straight from an MCP tool argument).
+    assert MemoryDB._like_escape("100%") == "100\\%"
+    assert MemoryDB._like_escape("a_b") == "a\\_b"
+    assert MemoryDB._like_escape("a\\b") == "a\\\\b", \
+        "the backslash must be doubled FIRST or the % / _ escapes get re-escaped"
+    assert MemoryDB._like_escape("a\\%b") == "a\\\\\\%b"
+    _v5_sp = Path(tempfile.mkdtemp(prefix="cc-mem-search-"))
+    (_v5_sp / "memory").mkdir(parents=True, exist_ok=True)
+    _v5_db_s = MemoryDB(_v5_sp / "memory" / "memory.db")
+    _v5_pid_s = _v5_db_s.upsert_project(str(_v5_sp))
+    for _v5_i in range(6):
+        _v5_db_s.insert_memory(_v5_pid_s, None, "note",
+                               f"widget number {_v5_i} does a thing",
+                               importance=3)
+    assert len(_v5_db_s.search_fts(_v5_pid_s, "widget")) == 6, "fixture check"
+    # force the LIKE branch (an FTS5-less sqlite build takes it unconditionally)
+    _v5_db_s._fts5_available = False
+    assert _v5_db_s.search_fts(_v5_pid_s, "%") == [], \
+        "a bare '%' still dumps the table — LIKE metacharacters unescaped"
+    assert _v5_db_s.search_fts(_v5_pid_s, "_") == [], \
+        "a bare '_' still matches every non-empty row"
+    assert len(_v5_db_s.search_fts(_v5_pid_s, "widget")) == 6, \
+        "escaping broke ordinary queries"
+    for _v5_bad_limit in (-1, 0, -10 ** 6):
+        assert len(_v5_db_s.search_fts(_v5_pid_s, "widget",
+                                       limit=_v5_bad_limit)) == 1, \
+            f"limit={_v5_bad_limit} was not clamped up to 1 (SQLite reads a " \
+            f"negative LIMIT as UNLIMITED)"
+    assert len(_v5_db_s.search_fts(_v5_pid_s, "widget", limit="abc")) == 6, \
+        "a non-numeric limit must fall back to the documented default, not raise"
+    assert MemoryDB._MAX_SEARCH_LIMIT == 1000
+    _v5_db_s._MAX_SEARCH_LIMIT = 2  # instance-level, so 6 rows are enough
+    assert len(_v5_db_s.search_fts(_v5_pid_s, "widget", limit=10 ** 6)) == 2, \
+        "a caller-supplied limit is a hint, not a licence to materialise the table"
+    del _v5_db_s._MAX_SEARCH_LIMIT
+    print("[OK] v2.5.0 db search: LIKE metacharacters escaped, LIMIT clamped at "
+          "both ends (floor 1, ceiling _MAX_SEARCH_LIMIT)")
+
+    # === v2.5.0 (10): encoding_setup covers stdin and line-buffers stdout ====
+    # stdin: the MCP server reads JSON-RPC frames from it; under the locale
+    # codec a non-ASCII request raised UnicodeDecodeError INSIDE the line
+    # iterator, outside the per-request try, killing the process silently.
+    # line_buffering: without it reconfigure leaves stdout BLOCK-buffered on a
+    # pipe (what every hook writes to), so a SessionStart killed at its 15s
+    # timeout lost 100% of a 5069 B injection although every print() had run.
+    class _V5RecStream:
+        def __init__(self, boom=False):
+            self.calls = []
+            self._boom = boom
+
+        def reconfigure(self, **kw):
+            self.calls.append(kw)
+            if self._boom:
+                raise ValueError("underlying buffer already detached")
+
+    _v5_rec = {n: _V5RecStream() for n in ("stdout", "stderr", "stdin")}
+    _v5_saved_std = {n: getattr(sys, n) for n in _v5_rec}
+    try:
+        for _v5_n, _v5_s in _v5_rec.items():
+            setattr(sys, _v5_n, _v5_s)
+        enable_utf8_io()
+    finally:
+        for _v5_n, _v5_s in _v5_saved_std.items():
+            setattr(sys, _v5_n, _v5_s)
+    for _v5_n in ("stdout", "stderr"):
+        assert _v5_rec[_v5_n].calls == [{"encoding": "utf-8",
+                                         "errors": "replace",
+                                         "line_buffering": True}], \
+            f"sys.{_v5_n} must be UTF-8 AND line-buffered: {_v5_rec[_v5_n].calls}"
+    assert _v5_rec["stdin"].calls == [{"encoding": "utf-8", "errors": "replace"}], \
+        f"sys.stdin must be reconfigured, without line_buffering (a read " \
+        f"stream rejects it): {_v5_rec['stdin'].calls}"
+    # a stream that refuses to reconfigure must never take a hook down
+    _v5_boom = {n: _V5RecStream(boom=True) for n in ("stdout", "stderr", "stdin")}
+    _v5_saved_std = {n: getattr(sys, n) for n in _v5_boom}
+    try:
+        for _v5_n, _v5_s in _v5_boom.items():
+            setattr(sys, _v5_n, _v5_s)
+        enable_utf8_io()
+    finally:
+        for _v5_n, _v5_s in _v5_saved_std.items():
+            setattr(sys, _v5_n, _v5_s)
+    # ...and the sibling suite must actually CALL it before its first print, or
+    # its section headers ship as locale-codec bytes (gbk on this host) and read
+    # as mojibake in every UTF-8 terminal, log and CI capture.
+    # Compare CODE lines only. A naive src.index("print(") also matches the word
+    # "print()" inside the comment that explains this very ordering, which sits
+    # above the call and made the assertion fail on a correct file.
+    _v5_carry_lines = (_REPO / "tests" / "test_plan_carryover.py").read_text(
+        encoding="utf-8").splitlines()
+    _v5_call_at = next((i for i, ln in enumerate(_v5_carry_lines)
+                        if ln.split("#", 1)[0].strip() == "enable_utf8_io()"), None)
+    _v5_print_at = next((i for i, ln in enumerate(_v5_carry_lines)
+                         if "print(" in ln.split("#", 1)[0]), None)
+    assert _v5_call_at is not None, \
+        "tests/test_plan_carryover.py must CALL enable_utf8_io() — its section " \
+        "headers contain non-ASCII and ship as locale bytes without it"
+    assert _v5_print_at is None or _v5_call_at < _v5_print_at, \
+        (f"tests/test_plan_carryover.py calls enable_utf8_io() at line "
+         f"{_v5_call_at + 1}, after its first print() at line {_v5_print_at + 1}")
+    print("[OK] v2.5.0 encoding_setup: stdin covered, stdout/stderr "
+          "line-buffered, reconfigure failure survivable")
+
     print("\n===== ALL SMOKE TESTS PASSED =====")
     print(f"Test project preserved at: {tmp}")
     print("\nProduced files:")

@@ -7,6 +7,253 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [2.5.0] — 2026-08-05
+
+**A readiness audit of every shipped surface, and the repair of everything it
+found.** Twelve agents exercised the six user-facing surfaces by *running* them
+rather than reading them; four more then attacked the resulting fixes. Every
+number below was measured, not estimated.
+
+The headline is uncomfortable: three surfaces did not work at all. The MCP
+server could not survive a non-ASCII character on this machine's default
+codec. The web viewer answered zero requests because a browser's speculative
+pre-connect wedged it. The standalone installer shipped no user-facing surfaces
+whatsoever — no `/cc-mem`, no skills, no subagents — so the v2.2 live-plan
+feature could never work there at all. And a transcript-directory lookup that
+matched on a *substring* had been quietly importing other projects' memories.
+
+### Fixed — data integrity
+
+- **Cross-project contamination: one project's memories were being written into
+  another's database, then re-injected at every SessionStart.**
+  `_find_transcript_dir` fell back to a bare substring test on the project's
+  basename. Measured on the reference machine (179 transcript directories):
+  basename `core` matched **131** of them, `app` **141**, `proj` **33**. A
+  fixture seeded with 5 memories finished with **32** after a **278,700-record**
+  transcript from an unrelated project was ingested — a real Haiku bill for
+  data that poisoned the target project permanently. A second audit proved a
+  Vault secret path crossing into an unrelated project's DB.
+  The fallback is deleted (exact → case-insensitive → `None`, matching the
+  already-correct `extractor.find_latest_transcript`), the slug mangling now
+  normalises `_` and `.` as Claude Code does — **0 of 179** real directories
+  contain either, so any project path with one necessarily fell into the
+  substring branch — and `retroactive_save` additionally requires each
+  transcript's own `cwd` record to resolve-equal the project. The same fuzzy
+  branch was duplicated verbatim in the dashboard's Save Session and is gone
+  there too (a project named `data` had matched a Temp directory holding 47
+  transcripts).
+- **`POST /api/memory` rewrote a different project's `MEMORY.md`.** The handler
+  resolved its target from `os.getcwd()` while `main()` parsed `--project` and
+  discarded it. Measured: the served project was untouched and a bystander
+  project's index was rewritten with the served project's content.
+- **The privacy filter failed OPEN.** `strip_private` returned the text
+  **unchanged** above 100 tags — so `<private>` content reached both the
+  Anthropic API call and the memories table exactly when the payload looked
+  adversarial. The cap was also calibrated on the wrong signal: well-formed tags
+  are cheap for the regex engine (20,000 tags ≈ 6 ms) while an *unterminated*
+  tag is the quadratic case (16,000 ≈ 9,517 ms). Replaced with a single linear
+  `str.find` scan — no cap, no backtracking, sub-millisecond on the pathological
+  input — that fails **closed**: a dangling `<private>` drops the remainder.
+- **A file the user marked private had its path sent to the API anyway.**
+  `PostToolUse` computed `is_private` *after* `_truncate_output` had replaced a
+  `Read` response with the literal `"(file content)"`, destroying the marker.
+  `is_private` is the sole filter feeding the Stop observer and the PreCompact
+  extraction prompt, so the miss propagated into `progress.files_touched` too.
+  The flag is now computed from the raw payload.
+- **`/cc-mem sql` silently discarded DML but permanently committed DDL.**
+  `DROP TABLE topics` reported `(no rows returned)`, exited 0, and destroyed the
+  rows for good — `MemoryDB` then recreated the empty table so nothing looked
+  wrong. `sql` is now read-only by contract and refuses anything else.
+- **The dashboard SQL console committed destructive statements with no
+  confirmation.** Measured: 5 memories → 0, reported as `(no rows returned)`.
+  Non-SELECT statements now require explicit confirmation and report `rowcount`.
+- **Tidy hard-deleted rows**, truncating the supersede chain and leaving
+  dangling `supersedes_id` references; it now archives.
+
+### Fixed — hooks
+
+- **The v2.2 live-plan anchor had never worked through its hook.**
+  `PostToolUse` exited on the observation gate *before* reaching the plan block,
+  and `ExitPlanMode`/`TodoWrite` are excluded from every mode's observe list —
+  so `plan_active` stayed empty, `PLAN.md` was never written, and TodoWrite
+  never synced a step. Worse, the whole block inherited the gate, so drift
+  detection varied silently by mode (3 edits registered as 3 in `code`, **0** in
+  `research`; `git push` scored 23, 20 and 3 across the three modes). The plan
+  block now runs above the gate; only the observation INSERT is gated.
+- **Hooks with hard host timeouts did not bound their LLM wall-clock.**
+  `llm.ccl_backend.call_llm`'s own docstring requires a time-budgeted caller to
+  pass `fallback_timeout`; of the four call sites with a budget, only
+  `core/consolidate.py` did. Worst case per call is
+  `2 × timeout + fallback_timeout`, so `session_start` could spend **40 s**
+  against its 15 s budget **with the shipped default config** — no opt-in
+  required — and a live reproduction killed the Stop hook at **24.96 s** against
+  22 s. A timeout kill is `TerminateProcess`: no `except`, no `finally`, i.e.
+  the v2.3.2 / v2.4.2 "killed mid-write" class.
+  `call_llm` gains an absolute `deadline` parameter that clamps every leg's
+  socket timeout to the time actually remaining and skips a leg with under a
+  second left; all three budgeted hooks pass one. This is strictly stronger than
+  the arithmetic, because `urlopen(timeout=…)` is a *per-socket-operation*
+  timeout covering neither DNS nor the TLS handshake — a **successful** leg was
+  measured at **11.81 s against a nominal 8 s** (1.48×, in ~5 % of legs). Under
+  a simulated 1.48× stall on every leg the Stop hook went from **25.45 s → 16.05 s**
+  and PreCompact from **118.79 s → within budget**.
+- **All six hooks exited 1 with a traceback on well-formed non-object stdin**
+  (`null`, `42`, `"s"`, `[1,2]`, `true`) — 30 of 30 cells, two hook-contract
+  violations at once. Guarded.
+- **`cleanup_observations` never deleted same-day rows.** Observations store ISO
+  timestamps with `T`; the cleanup argument used a space separator and the
+  comparison is a string compare (`ord('T') > ord(' ')`). The rows extraction had
+  just consumed were exactly the ones never cleaned — confirmed live, the count
+  stayed at 6 across two compactions.
+- **The first PreCompact of a project blanked PROGRESS.md §6**, and
+  `progress.current_request` was never seeded during a project's first session.
+- **The plan-refiner nudge repeated on every Stop forever** (5 of 5 measured);
+  it is now rate-limited without ever clearing `needs_refine`.
+
+### Fixed — MCP server
+
+- **stdio was never UTF-8, breaking non-ASCII in both directions.** With this
+  box's default `gbk` codec, writes stored mojibake or failed outright and a
+  strict codec killed the process with no response; on the read side a single
+  emoji replaced an entire result batch with an error — and `↻` is a glyph
+  cc-memory emits itself, so a project could poison its own MCP reads.
+- **`tools/call` with `params: null` hung the client forever.** `params` is
+  optional in JSON-RPC 2.0 and many clients serialise omission as `null`; the id
+  was consumed and never answered. Same for `[]` and `"str"`.
+- **A single frame could kill the server.** The parse guard caught only
+  `json.JSONDecodeError`, but `json.loads` also raises `ValueError` (CPython's
+  4300-digit integer limit) and `RecursionError` (deep nesting) — reachable
+  through an advertised tool argument, before validation. Measured: 4,301 digits
+  or 3,125 levels of nesting → `rc=1`, traceback on stderr, every pending id
+  orphaned. Frames are now length-capped and nothing escapes `main()`.
+- **A read-only tool performed an unbounded index write.** Any FTS-invalid query
+  triggered a full `memories_fts` rebuild (52.4 ms at 20,000 rows, 6 of 6
+  malformed queries); LIKE wildcards were unescaped so `query='%'` dumped the
+  whole table; `limit` had no maximum.
+- Superseded rows were served by `memory_get_details`; `isError` was never set
+  on the missing-DB path; declared `required`/`enum`/type constraints were
+  enforced nowhere (`importance=99` silently clamped, bogus categories silently
+  coerced); `NaN`/`Infinity` were emitted on the wire.
+- **MCP is now reachable**: `.claude-plugin/plugin.json` declares an
+  `mcpServers` entry. Previously nothing did, and `config.json`'s
+  `mcp.auto_register` was read by no code.
+
+### Fixed — web viewer
+
+- **One idle TCP connection wedged the server forever.** Plain `HTTPServer` with
+  a `None` handler timeout blocks in `handle_one_request()` on a socket that
+  sends nothing — and browsers speculatively pre-connect, so `/cc-mem serve`
+  printed its banner and then answered **zero** requests. Now
+  `ThreadingHTTPServer` with daemon threads and a handler timeout.
+- **Any web page could read and write the memory database.**
+  `Access-Control-Allow-Origin: *` with no `Content-Type` check, and written
+  memories are injected at the next SessionStart — a prompt-injection channel.
+  Origin and Content-Type are now enforced and the header is gone. A missing
+  `Host` check additionally allowed DNS-rebinding *reads* (including
+  `archive_path` filesystem paths); loopback-only Host is now required.
+- **Four routes returned no HTTP response at all** (`importance=abc`,
+  `limit=abc`, a malformed JSON body, `body=[]`) — the connection simply dropped.
+- **A slow-drip request body held a worker thread indefinitely** — measured
+  40.0 s for a request that had *already been rejected*, and ~2.6 h at one byte
+  per 9 s. Both body paths now run under a wall-clock deadline (52.09 s → 3.02 s;
+  thread growth under a 10-connection attack: +10 → +0).
+- Session-less memories (every manual save path writes `session_id = NULL`) were
+  invisible in the browse view, including the ones the viewer itself wrote; the
+  `category` and `importance` filters were dropped whenever a search term was
+  present; and the documented Add-Memory form did not exist. All fixed.
+
+### Fixed — standalone install
+
+- **The installer shipped zero user-facing surfaces.** `~/.claude/{commands,
+  agents,skills}` were never created; `grep -a` on the built exe found **zero**
+  occurrences of `plan-refiner`, `ccm-load`, or `argument-hint` — they were not
+  in the binary at all. So an exe-installed user got hooks but no `/cc-mem`, no
+  `/ccm-load`, no `/save-memories`, and no subagents, which means `PLAN.md`
+  could never be populated: the entire v2.2 feature was dead on that layout,
+  while the plugin nagged for tools it had not installed. Five surface files are
+  now copied, recorded to a manifest, and removed by name on uninstall.
+- **The installer crashed and then hung forever on a settings.json it could not
+  parse.** Six of nine realistic shapes crashed install and four crashed
+  uninstall — including JSONC comments, a trailing comma, and an empty file from
+  an interrupted write. Because the exe was built `--windowed`, the traceback
+  became a modal dialog with no console behind it: a 120 s timeout with no
+  output. In every crashing case the 33 files were **already copied**, leaving
+  the machine half-installed with no hooks registered. Settings are now parsed
+  and type-checked *before* anything is written, and the installer builds as a
+  console application.
+- **Uninstall deleted the marketplace install's `logs/`** while leaving the
+  plugin fully enabled.
+- **The installer deleted the user's own hooks** whenever their command merely
+  *mentioned* the string `cc-memory` — including a path. (This repository's own
+  directory is named `cc-memory`.)
+- **A UTF-8 BOM in settings.json locked the user out entirely** — and PowerShell's
+  `>` and `Out-File` write one by default on Windows.
+- Installer timeouts drifted from `hooks/hooks.json` despite a "keep in lockstep"
+  comment (Stop 33 vs 22, PostToolUse and UserPromptSubmit 12 vs 8, and 80/10 on
+  non-Windows). The multiplier is deleted; the installer now reads
+  `hooks/hooks.json` when present, with a fallback table carrying final values.
+- The post-install messages printed paths containing a `cc_memory/` segment the
+  flat layout does not have — the one instruction a standalone user was handed
+  could not work.
+
+### Fixed — CLI
+
+- **`/cc-mem status` reported every healthy standalone install as broken** —
+  `[FAIL] … 22 of 22 missing` — because the required-file list carried a
+  `cc_memory/` prefix the flat tree lacks. It also skipped the API-key check as
+  a consequence.
+- **`cc-memory-plan` could not run at all**: `pyproject.toml` declared
+  `cc_memory.cli.plan:main` and `plan.py` had no `main`.
+- **`/cc-mem dashboard` hung any caller that captured output** — which is how
+  Claude Code invokes it. The GUI child inherited the stdout pipe.
+- **`plan-set --raw` over a refined plan was invisible in every view.** This is
+  the *primary* auto-capture path (`ExitPlanMode` → `capture_exit_plan_mode`),
+  not just the CLI: both renderers checked `is_valid_structured` first and never
+  consulted `needs_refine`.
+- Manually added memories were invisible to `list` at every importance (all four
+  manual save paths write `session_id = NULL`), `encoding-check --apply` never
+  converged, several failure paths exited 0, `add` printed a fabricated
+  `sim=0.00` for skips, `serve` could not suppress the browser, and
+  `plan-set` had three unhandled-input paths.
+
+### Fixed — dashboard
+
+- Selecting an uninitialised project created an un-gitignored `memory.db`;
+  Tidy left `MEMORY.md` permanently stale; a read-only `projects.json` prevented
+  the dashboard from starting at all; a corrupt one was silently replaced;
+  registry entries on an unplugged drive were permanently pruned, and after that
+  fix a ghost entry raised an uncaught `FileNotFoundError` invisible under a
+  windowed build; editable spinboxes crashed their callbacks with no user
+  feedback; the frozen exe stored its project registry in `%TEMP%`, where Disk
+  Cleanup eventually removes it.
+
+### Added
+
+- **`tests/test_surfaces.py`** — the first automated coverage for the MCP
+  server, the web viewer, and the installer's settings.json shape matrix. All
+  three had **zero** test coverage, which is precisely why these defects
+  shipped.
+- **`cc_memory/core/version.py`** — the single source for the version string.
+  Twelve hardcoded literals across five files are gone. It lives under `core/`
+  rather than in `cc_memory/__init__.py` because every entry point bootstraps by
+  putting the *package directory* on `sys.path` and importing flat — under the
+  flat standalone layout `import cc_memory` raises `ModuleNotFoundError`.
+- **A read-only Progress / Plan tab in the dashboard**, which previously
+  surfaced none of the v2.1–v2.4 state it is supposed to manage.
+- **`excluded_projects` now works.** It was declared in `config.json`, defaulted
+  to `[]`, and had zero references repo-wide — a privacy control that did
+  nothing while both `user_prompt` and `pre_compact` created a `memory/`
+  directory in whatever cwd they were handed.
+- Regression assertions tying each hook's declared `hooks.json` timeout to its
+  LLM envelope, and tying every version literal to `core/version.py`, so a
+  partial bump or a raised timeout turns the suite red.
+
+### Changed
+
+- **`config.json` stripped to the keys that are actually read.** Two independent
+  audits measured 35 of 51 leaf keys referenced by no code. An inert tunable is
+  worse than no tunable, because editing it looks like it does something.
+
 ## [2.4.3] — 2026-08-05
 
 Shipped-surface repair + documentation consolidation. A fact-check of every

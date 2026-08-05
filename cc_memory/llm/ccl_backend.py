@@ -22,6 +22,7 @@ Reads ollama_url / local_model / enabled from cc_memory/config.json ``ccl``.
 """
 import json
 import re
+import time
 import urllib.request
 
 _HAIKU_MODEL = "claude-haiku-4-5-20251001"
@@ -113,8 +114,14 @@ def _call_ollama(system, user, max_tokens, timeout, ollama_url, local_model):
     return text
 
 
+# Below this much remaining budget a leg cannot plausibly complete, so it is
+# skipped rather than started and immediately timed out — starting it would
+# burn the remainder for certain failure.
+_MIN_LEG_S = 1.0
+
+
 def call_llm(system, user, api_key="", max_tokens=2000, timeout=30,
-             fallback_timeout=None):
+             fallback_timeout=None, deadline=None):
     """Call LLM: Anthropic candidates in order, Ollama only if enabled.
 
     ``api_key`` keeps its historical meaning (explicit credential from the
@@ -124,17 +131,43 @@ def call_llm(system, user, api_key="", max_tokens=2000, timeout=30,
     Returns text response string. Raises RuntimeError if all enabled
     backends fail.
 
-    `fallback_timeout` bounds the Ollama fallback leg. When None (default), the
-    fallback gets `min(timeout*3, 120)` — generous, for un-timed callers. A
-    TIME-BUDGETED caller (e.g. consolidation under a BudgetGate) MUST pass an
+    Two independent ways to bound wall-clock — a caller running under a hard
+    host timeout should use ``deadline``:
+
+    ``fallback_timeout`` bounds the Ollama fallback leg. When None (default),
+    the fallback gets ``min(timeout*3, 120)`` — generous, for un-timed callers.
+    A TIME-BUDGETED caller (e.g. consolidation under a BudgetGate) MUST pass an
     explicit value so the worst-case in-flight wall-clock is a known quantity:
-    a single call can take at most `timeout` per Anthropic candidate (bounded
-    at 2 candidates) + `fallback_timeout` (Ollama, when enabled). That bound is
-    what lets a BudgetGate GUARANTEE completion before its deadline — see
-    core.consolidate._worst_call_cost. See docs/CONTRACTS.md#anti-patch-contract.
+    a single call can take at most ``timeout`` per Anthropic candidate (bounded
+    at 2 candidates) + ``fallback_timeout`` (Ollama, when enabled). That bound
+    is what lets a BudgetGate GUARANTEE completion before its deadline — see
+    core.consolidate._worst_call_cost.
+
+    ``deadline`` is an absolute ``time.monotonic()`` instant by which this call
+    must be FINISHED. Every leg's effective timeout is clamped to the time
+    actually remaining, and a leg with less than ``_MIN_LEG_S`` left is skipped
+    outright. This is strictly stronger than the arithmetic above — total
+    wall-clock is bounded by ``deadline`` no matter how many candidates exist —
+    and it lets a caller keep a generous per-leg ``timeout`` for the common
+    single-candidate path instead of shrinking it to survive the pathological
+    one. ``hooks/session_start.py`` needs exactly that: its host budget is 15s
+    while a healthy Haiku extraction wants ~10s, so 2×timeout arithmetic alone
+    would have forced the per-leg timeout down to a value that could not
+    complete.
+
+    See docs/CONTRACTS.md#anti-patch-contract.
     """
     if fallback_timeout is None:
         fallback_timeout = min(timeout * 3, 120)
+
+    def _budget(want):
+        """Effective timeout for a leg, or None when there is no time left."""
+        if deadline is None:
+            return want
+        left = deadline - time.monotonic()
+        if left < _MIN_LEG_S:
+            return None
+        return min(want, left)
 
     from core.auth import get_api_candidates, _wire_for
 
@@ -150,8 +183,12 @@ def call_llm(system, user, api_key="", max_tokens=2000, timeout=30,
 
     errors = []
     for key, source, wire in candidates:
+        leg_timeout = _budget(timeout)
+        if leg_timeout is None:
+            errors.append(f"{source}: skipped (deadline reached)")
+            continue
         try:
-            return _call_haiku(system, user, key, max_tokens, timeout,
+            return _call_haiku(system, user, key, max_tokens, leg_timeout,
                                wire=wire)
         except Exception as e:
             # why: explicit fall-through to the NEXT candidate. Failure modes
@@ -161,11 +198,15 @@ def call_llm(system, user, api_key="", max_tokens=2000, timeout=30,
 
     ollama_url, local_model, ollama_enabled = _load_local_config()
     if ollama_enabled:
-        try:
-            return _call_ollama(system, user, max_tokens, fallback_timeout,
-                                ollama_url, local_model)
-        except Exception as ollama_err:
-            errors.append(f"ollama: {type(ollama_err).__name__}: {ollama_err}")
+        leg_timeout = _budget(fallback_timeout)
+        if leg_timeout is None:
+            errors.append("ollama: skipped (deadline reached)")
+        else:
+            try:
+                return _call_ollama(system, user, max_tokens, leg_timeout,
+                                    ollama_url, local_model)
+            except Exception as ollama_err:
+                errors.append(f"ollama: {type(ollama_err).__name__}: {ollama_err}")
     else:
         errors.append("ollama: disabled (config ccl.enabled=false)")
 

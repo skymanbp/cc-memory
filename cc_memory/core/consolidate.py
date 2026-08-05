@@ -845,7 +845,7 @@ def run_consolidation(cwd, use_llm=True, verbose=True, budget=None):
     db_path = memory_dir / "memory.db"
     if not db_path.exists():
         if verbose:
-            _log.info(f"no DB at {db_path}")
+            (globals().get("_cli_echo") or _log.info)(f"no DB at {db_path}")  # cli.mem sets _cli_echo=print so `verbose` reaches the user; hooks leave it unset -> log only
         return {}
 
     db = MemoryDB(db_path)
@@ -882,7 +882,7 @@ def run_consolidation(cwd, use_llm=True, verbose=True, budget=None):
     results["final_active"] = stats["n_memories"]
     results["final_topics"] = stats["n_topics"]
     if verbose:
-        _log.info(
+        (globals().get("_cli_echo") or _log.info)(  # same dual sink as above: CLI echo when set, log-only in hooks
             f"consolidation done: {stats['n_memories']} active memories, "
             f"{stats['n_topics']} topics"
         )

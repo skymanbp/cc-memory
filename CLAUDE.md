@@ -2,7 +2,7 @@
 
 ## Project: cc-memory
 
-**Claude Code persistent memory plugin (v2.4.3)** — anti-patch reconcile-on-write
+**Claude Code persistent memory plugin (v2.5.0)** — anti-patch reconcile-on-write
 + LLM-judged semantic de-duplication, forced PROGRESS.md handoff with
 per-session annotation, live PLAN.md anchor with plan-refiner / plan-guardian
 subagents + mandatory carryover gate, bounded transcript reads, injection
@@ -10,9 +10,163 @@ observability, FTS5 search, AI-judged extraction with Haiku (optional local
 Ollama fallback).
 
 - **Language**: Python 3.8+ (pure stdlib, zero pip dependencies at runtime)
-- **Version**: 2.4.3
+- **Version**: 2.5.0
 - **License**: MIT
 - **Platform**: Windows-primary, cross-platform compatible (Tkinter required for GUI)
+
+## What changed in v2.5.0 (over v2.4.3)
+
+**A correctness release, not a feature release.** ~134 defects closed across 26
+files, then re-attacked by four read-only adversarial verifiers whose findings
+were closed too. Nine things that were silently wrong in shipped code:
+
+1. **Cross-project data contamination — the worst of the set.**
+   `~/.claude/projects/` slugs replace **every** character outside
+   `[A-Za-z0-9]` with `-`; the old mangler replaced three (`:` `\` `/`), so any
+   project path containing `_` or `.` produced a non-existent slug — and the
+   miss fell through to a **fuzzy substring search** across every slug
+   directory (179 on the reference box; substring `core` matched 131, `app` and
+   `data` 141 each). `core.extractor.mangle_project_path` is now the single
+   source of truth for the convention and the fuzzy branch is **deleted** (a
+   miss is "no transcript", never "guess"). `hooks/session_start.py` gained
+   `_transcript_belongs_to` — fail-closed, demands positive `cwd` proof — for
+   `retroactive_save`, and the deliberately weaker `_transcript_is_foreign`
+   (absent `cwd` allowed, different `cwd` refused) for the tier-3 mine, so the
+   cwd-less `smoke_test.py:266-278` fixture still works. `ui/dashboard.py`
+   carried a verbatim copy of the same resolver; that is gone too.
+   Measured: retroactive save 2 LLM legs / `['aaaa-foreign','bbbb-mine']` → 1 leg
+   / `['bbbb-mine']`; tier-3 `open_todos=['FOREIGN TODO leak']` → `[]`.
+
+2. **The v2.2 live plan anchor had never run through its own hook.**
+   `hooks/post_tool_use.py` early-returned on `not should_observe(mode, tool)`
+   and the whole plan block sat below that gate. `TodoWrite` is in every mode's
+   `skip_tools` and `ExitPlanMode` is in no mode's `observe_tools`, so both
+   plan-control tools were `False` in all three modes: `plan_active` was never
+   written, `.plan_raw.md` / `PLAN.md` never appeared, and the drift counters
+   varied by mode. `_apply_plan_integration` (`post_tool_use.py:77`) now runs
+   **above** the gate; the gate wraps only the `insert_observation` block.
+   Plan control is not observation — `core/modes.py`'s `should_observe`
+   docstring now forbids re-inverting this. Per mode: ExitPlanMode → plan rows
+   0/0/0 → 1/1/1; Edit counter 1/0/1 → 1/1/1; `git push` 21/20/1 → 21/21/21.
+   A raw plan awaiting refinement is also no longer invisible:
+   `core.plan.raw_pending_refinement` (`plan.py:262`) makes PLAN.md and
+   `plan-status` lead with a PENDING REFINEMENT banner + the raw text.
+
+3. **`core/privacy.py` failed OPEN.** `strip_private` was a non-greedy `re.sub`
+   behind a `count("<private>") > 100` ReDoS guard that **returned the text
+   unchanged** — 100 tags stripped, 101 leaked, into both the Anthropic call and
+   the `memories` table. The cap was calibrated on the wrong signal too: 20,000
+   well-formed tags cost `re.sub` 6.0 ms, but 16,000 **unterminated** ones
+   (140.6 KiB) cost 9,517.4 ms. Replaced by a single left-to-right `str.find`
+   scan (`_strip_tagged_spans`): no cap, 0.0 ms on that input, and a dangling
+   open tag now fails **CLOSED** (remainder dropped). Equivalence proved on
+   20,000 random inputs — 0 differences on all 13,328 well-formed ones.
+   Relatedly, `hooks/post_tool_use.py` classified `is_private` **after**
+   `_truncate_output`, which turns a `Read` body into the literal
+   `"(file content)"` — so a Read of a file the user marked private stored
+   `is_private=0` and shipped its path to the API. Classification now runs on the
+   raw input/response.
+
+4. **MCP was wrong on the wire and unenforced at the schema.**
+   `mcp/server.py` now forces UTF-8 + LF on stdin **and** stdout before the
+   handles are captured (default gbk: 1/7 non-ASCII payloads round-tripped →
+   7/7; strict gbk: 5 of 7 got no response at all and the server exited 1).
+   Every parsed message carrying an id gets exactly one frame — `params: null`,
+   a non-object `params` and a non-string tool `name` all used to produce
+   **silence**, hanging a client with no timeout. Nothing escapes `main()`
+   (a 4301-digit int → `ValueError`, ~3000-deep nesting → `RecursionError`, both
+   reachable through `memory_search.limit` before validation); frames are
+   length-capped and strict RFC 8259 both ways. `tools/call` arguments are
+   validated against the advertised `inputSchema` and refused with `-32602`
+   instead of coerced — `memory_search` with no `query` used to dump the table
+   and rebuild the FTS index (6 malformed queries → 6 rebuilds, 27.3 ms → 0
+   rebuilds, 6.1 ms). `core/db.py` gained `_MAX_SEARCH_LIMIT = 1000`, clamped at
+   both ends (SQLite reads `LIMIT -1` as no limit), and `LIKE ? ESCAPE '\'`.
+
+5. **`ui/web_viewer.py` was unusable and was a prompt-injection channel.**
+   A single-threaded `HTTPServer` with no handler timeout meant **one** idle TCP
+   connection — exactly what `webbrowser.open` provokes — wedged the server
+   permanently; now `ThreadingHTTPServer` + daemon threads + per-connection
+   timeout (8 idle pre-connects → 200 in 0.02 s). It sent
+   `Access-Control-Allow-Origin: *`, so any page could write into the user's own
+   next session and read `/api/sessions`' `archive_path`; the header is gone and
+   `Origin`, `Host` (DNS rebinding: a rebound page is same-origin and sends no
+   `Origin`) and `Content-Type: application/json` are enforced. POST rewrote the
+   **wrong project's** `MEMORY.md` (`os.getcwd()` instead of the served project).
+   Four routes answered malformed queries with no HTTP response at all, and body
+   reads had no wall-clock deadline (a 1-byte-per-3-s drip held a worker
+   52.09 s → 3.02 s). The Add-Memory form the docs already claimed now exists.
+
+6. **The standalone installer shipped zero user-facing surfaces, and crashed
+   then hung on an unparseable `settings.json`.** `~/.claude` after an install
+   held `hooks/` and `settings.json` only — no `/cc-mem`, no agents, no skills.
+   `SURFACE_FILES` (5 entries) is now copied into `~/.claude/{commands,agents,
+   skills}`, recorded in `installed_surfaces.json`, and removed **by name** on
+   uninstall. `_read_settings` validates at step [0/3] before anything is
+   copied (19 shapes × 6 operations: **18 crashes → 0**), tolerates a BOM
+   (PowerShell's `>`), preserves malformed hook groups verbatim instead of
+   shredding them, and keeps-and-warns about a hook that merely *mentions*
+   cc-memory instead of deleting it. The `× 1.5` Windows timeout multiplier is
+   deleted; `_declared_hook_timeouts()` reads `hooks/hooks.json` when present
+   and the literal table is a numerically identical fallback. `logs/` survives
+   uninstall; stale modules from a previous version are pruned.
+
+7. **Hooks with hard host timeouts now bound their LLM wall-clock.**
+   `llm.ccl_backend.call_llm` gained an absolute `deadline` (clamps each leg to
+   the time remaining, skips a leg that cannot finish). Only `core/consolidate.py`
+   had ever honoured the docstring's requirement to bound the envelope:
+   `session_start` overran its 15 s budget **with the shipped default config**
+   (2 candidates × 20 s = 40 s) and `stop` measured 25.45 s against 22 s with
+   stalled legs. Now `stop.py` `_LLM_DEADLINE_S = 14.0` (25.45 s → 15.99 s),
+   `pre_compact.py` `75.0` (~144 s → 74.39 s of 120 s), `session_start.py`
+   `_RETRO_DEADLINE_S = 13.0` with `_API_TIMEOUT` 20 → 10. Normal-path latency
+   is unchanged (0.29 s → 0.30 s).
+
+8. **One version string.** `cc_memory/core/version.py` is the canonical runtime
+   source — importable under both layouts, unlike `cc_memory/__init__.py`, which
+   now re-exports it. `cli/mem.py`, `mcp/server.py`, `ui/installer.py` and
+   `build_exe.py` all resolve it instead of carrying literals (two of `mem.py`'s
+   were stale). It is in `SUBPACKAGE_FILES["core"]` and
+   `_REQUIRED_PLUGIN_FILES`, so a flat install ships it.
+
+9. **`config.json` no longer lies, and `/cc-mem status` sees flat installs.**
+   Two audits measured 34 of 51 leaf keys with no Python reader; every inert key
+   is deleted (86 → 29 lines) and the survivors cite their reader in-file. The
+   one addition, `excluded_projects`, is a real opt-out honoured by
+   `user_prompt.py` and `pre_compact.py` before either creates `memory/`.
+   Separately, `_inspect_layout` resolved `cc_memory/…`-prefixed paths against
+   the layout root, so a healthy **flat** install reported 22 of 22 files
+   missing and the API-key check was skipped; it now resolves `pkg_dir` once and
+   only requires `hooks/hooks.json` for plugin-manifest installs.
+
+**Also**: `/cc-mem sql` is genuinely read-only (`DROP TABLE topics` used to exit
+0 and drop the table); the dashboard's SQL console requires a confirmation
+naming any non-`SELECT` statement, bulk delete became bulk **archive**, a corrupt
+project registry is backed up before being overwritten, launching with no
+`--project` opens nothing, and a new read-only **Progress / Plan** tab renders
+the `progress` + `plan_active` rows (7 tabs now). `.claude-plugin/plugin.json`
+ships an inline `mcpServers` entry. `cc-memory-plan` (the console script) could
+not be imported at all — `cli/plan.py` now has a `main()`.
+
+**Residual limits, recorded rather than papered over:**
+
+- `core/db.py`'s `delete_plan` / `update_plan_content` still take no
+  `project_id`; `update_plan_status` accepts one but does not require it, so an
+  unscoped raw call still crosses projects. `cli/plan.py` and `ui/dashboard.py`
+  pass it at every call site.
+- `ThreadingHTTPServer` has no worker cap — body reads are deadline-bounded, the
+  thread count is not. Loopback-only. DNS rebinding was verified with forged
+  `Host` headers, not real DNS; the SPA escaping hardening is defence-in-depth
+  (no XSS was executed).
+- MCP still echoes array/object `id`s, and an unparsable/over-length frame is
+  answered with `"id": null` because its id is unknowable. The 1 MiB frame cap
+  is justified by the escape class — `MemoryError` was never reproduced.
+- `mcp/server.py`'s `_MIN_CONTENT_LEN = 10` is a hand-mirrored literal, not an
+  import, to keep server boot lazy.
+- The installer's `--console` switch is asserted from the PyInstaller flag; the
+  exes were not rebuilt, so the PE subsystem is unverified.
+- `excluded_projects` has no coverage in the two pre-existing gates.
+- Searching for a bare `%` or `_` now returns 0 rows instead of the whole table.
 
 ## What changed in v2.4.3 (over v2.4.2)
 
@@ -201,7 +355,7 @@ See `docs/CONTRACTS.md#plan-contract` for the full v2.2 contract.
 ```
 cc-memory/
 ├── .claude-plugin/
-│   ├── plugin.json              ← Plugin manifest (v2.4.2)
+│   ├── plugin.json              ← Plugin manifest (+ inline mcpServers entry)
 │   └── marketplace.json         ← /plugin marketplace add entry
 ├── hooks/hooks.json             ← 6 hook commands across 5 events
 ├── skills/                      ← THE canonical skills location
@@ -211,20 +365,20 @@ cc-memory/
 │   ├── plan-refiner.md          (raw plan → structured JSON, one-shot)
 │   └── plan-guardian.md         (drift check, read-only, ≤150 words)
 ├── commands/cc-mem.md           ← /cc-mem slash command
-├── docs/
-│   ├── ARCHITECTURE.md
-│   ├── MEMORY_RULES.md          ← Anti-patch contract
-│   ├── HANDOFF_PROTOCOL.md      ← PROGRESS.md spec
-│   ├── PLAN_PROTOCOL.md         ← PLAN.md spec (live plan anchor, v2.2)
-│   └── I18N.md                  ← docs multilingual + drift contract (v2.3.3)
-├── README.zh.md                 ← drift-tracked Chinese translation
+├── docs/                        ← TWO English docs since v2.4.3, each with a
+│   │                              drift-tracked .zh.md sibling
+│   ├── ARCHITECTURE.md          ← overview + install layouts + i18n convention (§9)
+│   ├── ARCHITECTURE.zh.md
+│   ├── CONTRACTS.md             ← anti-patch + forced handoff + live plan anchor
+│   └── CONTRACTS.zh.md
+├── README.md / README.zh.md     ← drift-tracked pair
 ├── tools/i18n_check.py          ← translation drift checker (dev/CI only)
 ├── cc_memory/
-│   ├── __init__.py              (version 2.4.2)
+│   ├── __init__.py              (re-exports core/version.py)
 │   ├── config.json
 │   ├── core/                    db, extractor, consolidate, idle, progress,
 │   │                            plan, privacy, modes, auth, logger,
-│   │                            encoding_setup
+│   │                            encoding_setup, version
 │   ├── hooks/                   post_tool_use, pre_compact, consolidate_async,
 │   │                            session_start, stop, user_prompt
 │   ├── llm/                     ccl_backend, memory_writer
@@ -235,7 +389,10 @@ cc-memory/
 │   ├── smoke_test.py            end-to-end anti-patch + PROGRESS.md +
 │   │                            tier-3 transcript + layout-inspector +
 │   │                            live-plan + i18n gate + bounded-window tests
-│   └── test_plan_carryover.py   carryover gate (v2.4.0+), 14 checks
+│   ├── test_plan_carryover.py   carryover gate (v2.4.0+), 14 checks
+│   └── test_surfaces.py         installer surfaces + settings shapes + timeout
+│                                lockstep, MCP stdio, web-viewer guards, hook
+│                                LLM deadline (v2.5.0)
 ├── build_exe.py
 ├── pyproject.toml
 ├── README.md
@@ -260,7 +417,7 @@ background `async` leg.
 | `PreCompact` (async) | `cc_memory/hooks/consolidate_async.py` | 300s, `async:true` | Background consolidation every N sessions (interval marker + lock, budget-gated) — off the blocking path |
 | `SessionStart` | `cc_memory/hooks/session_start.py` | 15s | Inject layered context + FORCED `<system-reminder>` to Read PROGRESS.md |
 | `Stop` | `cc_memory/hooks/stop.py` | 22s | Observer (Haiku) + per-turn PROGRESS.md patch + idle reorg every 5 turns |
-| `PostToolUse` | `cc_memory/hooks/post_tool_use.py` | 8s | Insert observation row (no LLM) |
+| `PostToolUse` | `cc_memory/hooks/post_tool_use.py` | 8s | Live plan anchor in EVERY mode (ExitPlanMode capture / TodoWrite step sync / drift counters), THEN an observation row for observed tools only (no LLM) |
 | `UserPromptSubmit` | `cc_memory/hooks/user_prompt.py` | 8s | Auto-init memory/ + turn count + seed `progress.current_request` on turn 1 |
 
 Hook contract (NEVER violate):
@@ -347,11 +504,27 @@ The `plan_active` table (one row per project) backs PLAN.md. Lifecycle:
   written back via `/cc-mem plan-set --from-refiner`.
 - `PostToolUse` on `TodoWrite` mechanically syncs todos → step statuses
   via trigram-Jaccard match (no LLM). On `Edit`/`Write`/`MultiEdit`, it
-  bumps `edits_since_last_guardian`.
+  bumps `edits_since_last_guardian`; a sensitive Bash call bumps it by 20.
 - `Stop` hook emits a single status line when guardian thresholds are
   crossed (default: 8 turns OR 12 edits). Main Claude responds by
   invoking the **`plan-guardian`** subagent (also in `agents/`), then
-  `/cc-mem plan-check` to reset counters.
+  `/cc-mem plan-check` to reset counters. The refiner nudge is rate-limited
+  to once every 5 turns per session (`hooks/stop.py:_claim_refine_nudge`);
+  only `plan.apply_refined_plan` may clear `needs_refine`.
+
+**All of the `PostToolUse` legs above run in EVERY mode, above the
+`should_observe` gate** (`hooks/post_tool_use.py:163`). They shipped below it
+from v2.2 through v2.4.3, which made the entire anchor dead through its own
+hook — `TodoWrite` is in every mode's `skip_tools` and `ExitPlanMode` is in no
+mode's `observe_tools`. Plan control is not observation: mode selects what is
+worth *remembering*, never whether the plan anchor tracks reality. Do not move
+this block back under the gate, and do not "fix" it by adding those two tools to
+the mode allow-lists.
+
+A raw plan that has not been refined yet is rendered verbatim under a
+**PENDING REFINEMENT** banner by both `PLAN.md` and `/cc-mem plan-status`, with
+any older structured plan labelled stale — `core.plan.raw_pending_refinement` is
+the shared predicate.
 
 Hooks never spawn subagents themselves — they only nudge. The plugin's
 two subagents (`agents/plan-refiner.md`, `agents/plan-guardian.md`) live
@@ -401,7 +574,8 @@ standalone installs.
 
 ## Tests
 
-**Two suites. BOTH are release gates — run both.**
+**Three suites. ALL are release gates — run all three, plus `tools/i18n_check.py`
+and a `tomllib` parse of `pyproject.toml`.**
 
 `tests/smoke_test.py` is the canonical end-to-end check. In a throwaway temp
 project it exercises: v3/v6 migrations, `upsert_smart` decisions
@@ -415,17 +589,35 @@ the v2.3.3 i18n drift gate, and the v2.4.2 bounded-window / summary-direction
 `tests/test_plan_carryover.py` covers the v2.4.0 carryover gate (14 checks) —
 the only coverage of that feature.
 
+`tests/test_surfaces.py` (v2.5.0) covers the surfaces neither of the others
+touched: the standalone installer (surfaces installed and removed by name,
+malformed-`settings.json` shapes, hook-timeout lockstep against
+`hooks/hooks.json`, manifest parity so a new runtime module cannot ship
+unpackaged), the MCP stdio server, the web viewer's request guards, and the
+source-level rule that every LLM-calling hook passes an absolute deadline.
+
 ```bash
 python tests/smoke_test.py
 # expect: [OK] lines ending with "===== ALL SMOKE TESTS PASSED ====="
 python tests/test_plan_carryover.py
 # expect: "RESULT: 14 passed, 0 failed"
+python tests/test_surfaces.py
+python tools/i18n_check.py
+# expect: "3 in-sync", exit 0
 ```
 
-No pytest / pip dependencies — both are stdlib scripts and reflect the runtime
-contract (pure stdlib, see Development guidelines below). When you add a
+No pytest / pip dependencies — all three are stdlib scripts and reflect the
+runtime contract (pure stdlib, see Development guidelines below). When you add a
 behavior to `memory_writer`, `progress`, `extractor.load_transcript_window`, or
 `session_start._refresh_progress_row`, add a corresponding assertion block.
+Tests MUST use `tempfile` directories only; installer work must redirect
+`USERPROFILE`/`HOME` **and** `TMPDIR`/`TEMP`/`TMP`. Every subprocess capture
+needs an explicit `encoding="utf-8"` — the default codec on this box is gbk and
+the CLI emits real UTF-8.
+
+**`excluded_projects` has no coverage in any suite yet.** It is a data-loss-
+adjacent opt-out (a listed directory gets no `memory/` at all); worth porting a
+regression block for.
 
 ## Interpreter requirement
 
@@ -467,9 +659,14 @@ session — no copy step.
 `~/.claude/hooks/cc-memory/` only holds `logs/` now (logger output target).
 
 To deploy to another machine without a git checkout, build
-`cc-memory-installer.exe` (see `build_exe.py`). That installer lays code
-under `~/.claude/hooks/cc-memory/cc_memory/` and registers hooks the v2.0
-way — same package, alternate install path.
+`cc-memory-installer.exe` (see `build_exe.py`). That installer lays the package
+**FLAT** under `~/.claude/hooks/cc-memory/` — `core/`, `hooks/`, `llm/`, `cli/`,
+`mcp/`, `ui/` directly under that directory, with **no `cc_memory/` path
+segment** — copies the 5 surfaces into `~/.claude/{commands,agents,skills}`, and
+registers hooks in `settings.json[hooks]` the v2.0 way. Same package, different
+on-disk shape: any code or doc that probes for an install must accept both the
+nested and the flat form. `~/.claude/hooks/cc-memory/` under a marketplace
+install holds only `logs/`.
 
 ## See also
 

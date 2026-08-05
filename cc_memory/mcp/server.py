@@ -5,34 +5,173 @@ MCP stdio JSON-RPC server.
 Exposes cc-memory search and management tools via Model Context Protocol.
 
 Protocol: JSON-RPC 2.0 over stdio (stdin/stdout).
-stdout is RESERVED for JSON-RPC. All logging goes to file (core.logger).
+stdout is RESERVED for JSON-RPC frames. All logging goes to file (core.logger).
 
-Tools (v2.1):
+Wire contract
+-------------
+* stdin AND stdout are forced to UTF-8 with LF-only newlines BEFORE the handles
+  are captured. Without that the child inherits the OS locale codec (gbk /
+  cp1252 on Windows): non-ASCII is silently mangled on the way IN, and on the
+  way OUT a single un-encodable glyph replaces the ENTIRE result batch with an
+  error. One emoji is enough — and so is the `U+21BB` supersede marker that
+  cc-memory emits itself (see core/encoding_setup.py).
+* Every message that PARSES and carries a non-null `id` gets exactly one
+  response frame — including semantically malformed ones, and including a
+  `notifications/*` method that arrived WITH an id. JSON-RPC 2.0 defines a
+  Notification as a message without an id, so an id makes it a Request no
+  matter what the method is called; a message with no id gets silence.
+  Consuming an id without answering blocks a client that has no timeout,
+  forever. (`"params": null` is legal — params is optional and many clients
+  serialize omission as null.)
+  The one unavoidable gap is a frame that does not parse or is refused for
+  length: its id is unknowable, so the reply carries `"id": null` as JSON-RPC
+  2.0 §5 requires. That is a deliberate trade — guessing an id out of unparsed
+  bytes would let a mis-read answer the WRONG pending call.
+* NOTHING escapes main(). An escaping exception prints a traceback on stderr,
+  which is rendered as error UI, and exits rc=1 — orphaning every in-flight AND
+  future id at once. `json.loads` raises well beyond JSONDecodeError: a
+  4301-digit integer raises plain ValueError (CPython's int-conversion limit)
+  and ~3000 levels of nesting raise RecursionError. Both were reachable through
+  an advertised tool argument (`memory_search.limit`) BEFORE validation ran.
+  Frames are also length-capped, so a multi-megabyte line is drained rather
+  than buffered whole.
+* Frames are strict RFC 8259 in both directions: `allow_nan=False` on the way
+  out, and `NaN` / `Infinity` / out-of-range floats rejected with -32700 on the
+  way in. json's own defaults are lenient both ways, so a client id of `NaN`
+  used to be echoed verbatim into a frame that JS `JSON.parse`, Go and serde
+  all refuse.
+* `tools/call` arguments are validated against the advertised `inputSchema`
+  (required / type / enum / bounds / lengths) and rejected with -32602 instead
+  of being coerced, clamped, or ignored.
+
+Tools:
   memory_search       FTS5 search (compact results)
-  memory_get_details  Batch fetch full details by IDs
+  memory_get_details  Batch fetch full details by IDs (active rows only)
   memory_add          Add a memory via anti-patch upsert (memory_writer)
   memory_stats        Project statistics
   memory_topics       List topic summaries
   memory_recent       Recent memories with filters
   progress_get        Read PROGRESS.md state (forced-handoff support)
   progress_regenerate Force-rewrite memory/PROGRESS.md
+
+Registration is manual (nothing reads config.json's inert `mcp.auto_register`).
+The shipped `mcpServers` entry is `.claude-plugin/plugin.json`, which points at
+`${CLAUDE_PLUGIN_ROOT}/cc_memory/mcp/server.py` (marketplace / dev-checkout
+layout). A standalone install is FLAT — ui/installer.py copies this file to
+`<install>/mcp/server.py` with no `cc_memory/` segment — so a hand-written
+entry for that layout has to point there instead.
 """
 import json
 import os
+import re
 import sys
 import threading
 import time
 from pathlib import Path
 
+_HERE = Path(__file__).resolve().parent
+_PKG_ROOT = _HERE.parent
+if str(_PKG_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PKG_ROOT))
+
+# ── stdio encoding: MUST run before the handles are captured ───────────────
+try:
+    from core.encoding_setup import enable_utf8_io
+    enable_utf8_io()
+except Exception:
+    # why: enable_utf8_io is best-effort belt (it also covers stderr); the
+    # explicit reconfigure loop below is the load-bearing fix and has to run
+    # even if that import fails on a partial install.
+    pass
+
+for _s in (sys.stdin, sys.stdout):
+    _rc = getattr(_s, "reconfigure", None)
+    if _rc is not None:
+        try:
+            _rc(encoding="utf-8", errors="replace", newline="\n")
+        except (ValueError, OSError):
+            pass  # why: stream detached / not a TextIOWrapper
+
 _original_stdout = sys.stdout
 _original_stdin = sys.stdin
 
-_HERE = Path(__file__).resolve().parent
-_PKG_ROOT = _HERE.parent
-sys.path.insert(0, str(_PKG_ROOT))
-
 from core.logger import get_logger
 _log = get_logger("mcp")
+
+
+def _resolve_version() -> str:
+    """Version string, resolvable from BOTH install layouts.
+
+    `core.version` works under the flat standalone layout (TARGET_DIR/core/…)
+    and under the repo/marketplace layout, because every entry point puts the
+    package directory on sys.path. `cc_memory` is only importable when the
+    wheel is installed. The text scan is the last resort for a pre-2.5 flat
+    install that predates core/version.py.
+    """
+    try:
+        from core.version import __version__ as v
+        return v
+    except ImportError:
+        # why: pre-2.5 flat installs have no core/version.py — fall through
+        pass
+    try:
+        from cc_memory import __version__ as v
+        return v
+    except ImportError:
+        # why: the standalone installer lays the tree out FLAT, so there is no
+        # importable `cc_memory` package — fall through to the text scan
+        pass
+    for cand in (_PKG_ROOT / "core" / "version.py", _PKG_ROOT / "__init__.py"):
+        try:
+            text = cand.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        m = re.search(r'^__version__\s*=\s*["\']([^"\']+)["\']', text, re.M)
+        if m:
+            return m.group(1)
+    try:
+        # Last resort: config.json carries the same literal and the standalone
+        # installer always copies it into the package root.
+        cfg = json.loads((_PKG_ROOT / "config.json").read_text(encoding="utf-8"))
+        if isinstance(cfg.get("version"), str):
+            return cfg["version"]
+    except (OSError, ValueError, AttributeError):
+        # why: a missing or garbled config.json must never stop the server booting
+        pass
+    return "unknown"
+
+
+_VERSION = _resolve_version()
+
+# Protocol versions this server actually implements. `initialize` echoes the
+# client's value when it is one of these, else answers with the default —
+# real negotiation instead of parroting one constant at every input.
+_PROTOCOL_DEFAULT = "2024-11-05"
+_PROTOCOL_SUPPORTED = ("2024-11-05", "2025-06-18")
+
+_CATEGORIES = ["decision", "result", "config", "bug", "task", "arch", "note"]
+
+# Devnull sink installed over sys.stdout in main(); module-level so it is never
+# garbage-collected out from under a late writer.
+_devnull = None
+
+
+# Ceilings for the advertised numeric arguments. An argument with a `minimum`
+# and no `maximum` is unbounded by contract: `limit` used to accept 1e6 and the
+# handler passed it straight to SQL. _MAX_IDS keeps the memory_get_details
+# `IN (...)` list under SQLITE_MAX_VARIABLE_NUMBER; _MAX_LIMIT stays well under
+# core.db.MemoryDB._MAX_SEARCH_LIMIT (1000) so the schema is the binding
+# constraint and the DB clamp is only a backstop.
+_MAX_LIMIT = 200
+_MAX_SESSIONS_BACK = 50
+_MAX_IDS = 200
+
+# Mirrors llm.memory_writer.MIN_CONTENT_LEN. NOT imported: the writer pulls in
+# core.db + core.privacy, and this module keeps every handler import lazy so a
+# partial install still boots far enough to answer tools/list. Advertising
+# minLength 1 while the writer dropped anything under 10 meant memory_add
+# could report a successful call for a write that never happened.
+_MIN_CONTENT_LEN = 10
 
 
 TOOLS = [
@@ -43,21 +182,31 @@ TOOLS = [
         "inputSchema": {
             "type": "object",
             "properties": {
-                "query": {"type": "string", "description": "Search query"},
-                "project": {"type": "string", "description": "Project path (default: cwd)"},
-                "limit": {"type": "integer", "description": "Max results (default: 20)"},
+                "query": {"type": "string", "minLength": 1,
+                          "description": "Search query (must be non-empty). "
+                                         "Plain text is matched literally; fts5 "
+                                         "operators (AND / OR / NEAR / \"phrase\") "
+                                         "are honoured when the expression parses."},
+                "project": {"type": "string", "minLength": 1,
+                            "description": "Project path (default: cwd)"},
+                "limit": {"type": "integer", "minimum": 1, "maximum": _MAX_LIMIT,
+                          "default": 20,
+                          "description": f"Max results (default: 20, max: {_MAX_LIMIT})"},
             },
             "required": ["query"],
         },
     },
     {
         "name": "memory_get_details",
-        "description": "Get full details of memories by IDs.",
+        "description": "Get full details of ACTIVE memories by IDs. Superseded / "
+                       "archived rows are never returned; requested ids that did "
+                       "not resolve come back in \"missing\".",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "ids": {"type": "array", "items": {"type": "integer"}},
-                "project": {"type": "string"},
+                "ids": {"type": "array", "items": {"type": "integer"},
+                        "minItems": 1, "maxItems": _MAX_IDS},
+                "project": {"type": "string", "minLength": 1},
             },
             "required": ["ids"],
         },
@@ -69,12 +218,15 @@ TOOLS = [
         "inputSchema": {
             "type": "object",
             "properties": {
-                "category": {"type": "string",
-                             "enum": ["decision", "result", "config", "bug", "task", "arch", "note"]},
-                "content": {"type": "string"},
+                "category": {"type": "string", "enum": list(_CATEGORIES)},
+                "content": {"type": "string", "minLength": _MIN_CONTENT_LEN,
+                            "description": f"Memory text, at least "
+                                           f"{_MIN_CONTENT_LEN} characters after "
+                                           f"trimming (shorter content is dropped "
+                                           f"by the writer, not stored)"},
                 "importance": {"type": "integer", "minimum": 1, "maximum": 5},
                 "topic": {"type": "string"},
-                "project": {"type": "string"},
+                "project": {"type": "string", "minLength": 1},
             },
             "required": ["category", "content", "importance"],
         },
@@ -84,7 +236,7 @@ TOOLS = [
         "description": "Get project memory statistics.",
         "inputSchema": {
             "type": "object",
-            "properties": {"project": {"type": "string"}},
+            "properties": {"project": {"type": "string", "minLength": 1}},
         },
     },
     {
@@ -92,7 +244,7 @@ TOOLS = [
         "description": "List all topic summaries for the project.",
         "inputSchema": {
             "type": "object",
-            "properties": {"project": {"type": "string"}},
+            "properties": {"project": {"type": "string", "minLength": 1}},
         },
     },
     {
@@ -101,11 +253,13 @@ TOOLS = [
         "inputSchema": {
             "type": "object",
             "properties": {
-                "project": {"type": "string"},
-                "sessions_back": {"type": "integer"},
-                "min_importance": {"type": "integer"},
-                "category": {"type": "string"},
-                "limit": {"type": "integer"},
+                "project": {"type": "string", "minLength": 1},
+                "sessions_back": {"type": "integer", "minimum": 1,
+                                  "maximum": _MAX_SESSIONS_BACK, "default": 3},
+                "min_importance": {"type": "integer", "minimum": 1, "maximum": 5, "default": 2},
+                "category": {"type": "string", "enum": list(_CATEGORIES)},
+                "limit": {"type": "integer", "minimum": 1, "maximum": _MAX_LIMIT,
+                          "default": 20},
             },
         },
     },
@@ -114,7 +268,7 @@ TOOLS = [
         "description": "Read the current PROGRESS.md state (structured fields).",
         "inputSchema": {
             "type": "object",
-            "properties": {"project": {"type": "string"}},
+            "properties": {"project": {"type": "string", "minLength": 1}},
         },
     },
     {
@@ -122,22 +276,138 @@ TOOLS = [
         "description": "Force-rewrite memory/PROGRESS.md from the SQL state.",
         "inputSchema": {
             "type": "object",
-            "properties": {"project": {"type": "string"}},
+            "properties": {"project": {"type": "string", "minLength": 1}},
         },
     },
 ]
 
+_TOOLS_BY_NAME = {t["name"]: t for t in TOOLS}
+
+
+# ── argument validation (the advertised schema is now enforced) ────────────
+
+def _type_ok(value, jtype) -> bool:
+    if jtype == "string":
+        return isinstance(value, str)
+    if jtype == "integer":
+        # bool is a subclass of int — `true` is not an integer argument
+        return isinstance(value, int) and not isinstance(value, bool)
+    if jtype == "number":
+        return isinstance(value, (int, float)) and not isinstance(value, bool)
+    if jtype == "array":
+        return isinstance(value, list)
+    if jtype == "object":
+        return isinstance(value, dict)
+    if jtype == "boolean":
+        return isinstance(value, bool)
+    return True
+
+
+def _validate_tool_args(tool_name, args):
+    """Enforce a tool's inputSchema. Returns an error string, or None if valid.
+
+    Explicit JSON nulls count as "not supplied" — required keys still fail,
+    optional ones are dropped by the caller so handler defaults apply.
+    """
+    tool = _TOOLS_BY_NAME.get(tool_name)
+    if tool is None:
+        return f"unknown tool: {tool_name}"
+    if not isinstance(args, dict):
+        return f"'arguments' must be an object, got {type(args).__name__}"
+    schema = tool.get("inputSchema", {})
+    props = schema.get("properties", {})
+
+    for key in schema.get("required", []):
+        if args.get(key) is None:
+            return f"missing required argument: '{key}'"
+
+    for key, value in args.items():
+        spec = props.get(key)
+        if spec is None or value is None:
+            continue  # unknown keys are ignored; nulls mean "absent"
+        jtype = spec.get("type")
+        if jtype and not _type_ok(value, jtype):
+            return f"'{key}' must be of type {jtype}, got {type(value).__name__}"
+        enum = spec.get("enum")
+        if enum is not None and value not in enum:
+            return f"'{key}' must be one of: {', '.join(str(e) for e in enum)}"
+        if jtype == "array":
+            item_type = (spec.get("items") or {}).get("type")
+            if item_type and not all(_type_ok(v, item_type) for v in value):
+                return f"every item of '{key}' must be of type {item_type}"
+            min_items = spec.get("minItems")
+            if min_items is not None and len(value) < min_items:
+                return f"'{key}' must contain at least {min_items} item(s)"
+            max_items = spec.get("maxItems")
+            if max_items is not None and len(value) > max_items:
+                return (f"'{key}' must contain at most {max_items} item(s) "
+                        f"(got {len(value)})")
+        if jtype == "string":
+            min_len = spec.get("minLength")
+            if min_len is not None and len(value.strip()) < min_len:
+                if min_len == 1:
+                    return f"'{key}' must be a non-empty string"
+                # why not the generic message: minLength is 10 on memory_add's
+                # `content`, and "must be non-empty" for a 4-character string
+                # is actively misleading about what would fix it.
+                return (f"'{key}' must be at least {min_len} characters after "
+                        f"trimming (got {len(value.strip())})")
+        if jtype in ("integer", "number"):
+            lo, hi = spec.get("minimum"), spec.get("maximum")
+            if lo is not None and value < lo:
+                return f"'{key}' must be >= {lo} (got {value})"
+            if hi is not None and value > hi:
+                return f"'{key}' must be <= {hi} (got {value})"
+    return None
+
+
+# ── db resolution ──────────────────────────────────────────────────────────
 
 def _get_db(project_path=None):
+    """Open the project DB. Returns (db, project_id, error_message)."""
     from core.db import MemoryDB
-    project = project_path or os.getcwd()
+    if project_path is None:
+        project = os.getcwd()          # absent == "this server's cwd"
+    elif isinstance(project_path, str) and project_path.strip():
+        project = project_path
+    else:
+        # why not `project_path or os.getcwd()`: "" / 0 / [] / false all used to
+        # fall through to cwd and silently answer for a DIFFERENT project.
+        return None, None, (f"invalid 'project' argument {project_path!r}: "
+                            "expected a non-empty path string")
     db_path = Path(project) / "memory" / "memory.db"
     if not db_path.exists():
-        return None, None, "No memory database found for this project"
+        return None, None, f"No memory database found for this project: {project}"
     db = MemoryDB(db_path)
     pid = db.upsert_project(project)
     return db, pid, None
 
+
+def _resolve_session_id(db, pid):
+    """Session id to attribute an MCP write to.
+
+    `db.get_recent_memories` filters on the last N session ids, so a row stored
+    with session_id NULL is invisible to memory_recent and to the SessionStart
+    "Recent" injection layer at importance 1-3. Reuse the project's most recent
+    session; only create a row when the project has none at all (creating one
+    per add would distort every "last session" computation in the hooks).
+    """
+    recent = db.get_recent_session_ids(pid, 1)
+    if recent:
+        return recent[0]
+    try:
+        return db.insert_session(pid, None, "mcp", 0, None, "MCP session")
+    except Exception as e:
+        # why: attribution is a convenience for recall — failing to create the
+        # session row must not lose the memory write itself.
+        _log.error(f"could not create an mcp session row: {e}")
+        return None
+
+
+# ── tool handlers ──────────────────────────────────────────────────────────
+# A handler returns a plain dict. A truthy "error" key marks the call failed
+# (the dispatcher then sets isError: true), so the model is never told that a
+# missing database or a bad argument was a success.
 
 def handle_memory_search(args):
     db, pid, err = _get_db(args.get("project"))
@@ -161,16 +431,27 @@ def handle_memory_get_details(args):
     db, pid, err = _get_db(args.get("project"))
     if err:
         return {"error": err}
-    ids = args.get("ids", [])
+    ids = list(args.get("ids", []))
     if not ids:
-        return {"results": []}
+        return {"results": [], "missing": [], "count": 0}
     with db._connect() as conn:
         ph = ",".join("?" * len(ids))
         rows = conn.execute(
-            f"SELECT * FROM memories WHERE id IN ({ph}) AND project_id = ?",
+            f"SELECT * FROM memories "
+            f"WHERE id IN ({ph}) AND project_id = ? AND is_active = 1",
             ids + [pid]
         ).fetchall()
-    return {"results": [dict(r) for r in rows]}
+    results = []
+    for r in rows:
+        d = dict(r)
+        d.setdefault("supersedes_id", None)
+        results.append(d)
+    found = {d.get("id") for d in results}
+    # Superseded/archived rows are excluded (anti-patch contract at the read
+    # boundary); report the ids that did not resolve so a stale id is visible
+    # instead of silently returning retracted content.
+    missing = [i for i in ids if i not in found]
+    return {"results": results, "missing": missing, "count": len(results)}
 
 
 def handle_memory_add(args):
@@ -179,8 +460,9 @@ def handle_memory_add(args):
     if err:
         return {"error": err}
     from llm.memory_writer import upsert_smart, regenerate_memory_index
+    session_id = _resolve_session_id(db, pid)
     result = upsert_smart(
-        db, pid, None,
+        db, pid, session_id,
         category=args["category"],
         content=args["content"],
         importance=args.get("importance", 3),
@@ -191,6 +473,8 @@ def handle_memory_add(args):
     try:
         regenerate_memory_index(db, pid, Path(project) / "memory")
     except Exception as e:
+        # why: MEMORY.md is a generated convenience artifact; a failure to
+        # rewrite it must not fail (or hide) the write that already succeeded.
         _log.error(f"MEMORY.md regen after MCP add failed: {e}")
     return result
 
@@ -256,54 +540,168 @@ _HANDLERS = {
 }
 
 
+# ── framing ────────────────────────────────────────────────────────────────
+
+# Longest line accepted as one frame. json.loads on a peer-sized line is an
+# unbounded allocation whose failure mode (MemoryError) escapes main() exactly
+# like the parse errors above. readline(cap) bounds the READ, so an over-cap
+# line is drained in cap-sized chunks instead of being materialised whole.
+_MAX_LINE_CHARS = 1 << 20
+
+
+def _dumps(obj):
+    """RFC 8259 serializer. `NaN` / `Infinity` are not JSON — json's default
+    (`allow_nan=True`) emits them anyway, and every strict parser rejects the
+    frame that comes back."""
+    return json.dumps(obj, ensure_ascii=False, allow_nan=False)
+
+
 def _send(obj):
-    _original_stdout.write(json.dumps(obj, ensure_ascii=False) + "\n")
-    _original_stdout.flush()
+    try:
+        text = _dumps(obj)
+    except ValueError as e:
+        # why: a non-finite float reached the response (most plausibly echoed
+        # from a client id). Dropping the frame would orphan the id, so answer
+        # it with -32603 and an id sanitized to something serializable.
+        _log.error(f"non-serializable response frame: {e}")
+        rid = obj.get("id") if isinstance(obj, dict) else None
+        if isinstance(rid, bool) or not isinstance(rid, (str, int)):
+            rid = None
+        text = _dumps({"jsonrpc": "2.0", "id": rid,
+                       "error": {"code": -32603,
+                                 "message": f"Internal error: response not "
+                                            f"serializable as JSON ({e})"}})
+    try:
+        _original_stdout.write(text + "\n")
+        _original_stdout.flush()
+    except (OSError, ValueError) as e:
+        # why: the peer closed the pipe (or stdout got detached). There is no
+        # channel left to report on, and raising here would abort the loop that
+        # still has to drain stdin and exit cleanly.
+        _log.error(f"could not write response frame: {e}")
+
+
+def _error(req_id, code, message):
+    _send({"jsonrpc": "2.0", "id": req_id, "error": {"code": code, "message": message}})
+
+
+def _is_failed_result(result):
+    """True when a handler's dict describes a call that did NOT do its job.
+
+    `{"action": "skipped", "id": null}` is memory_writer reporting a write that
+    never happened (`reason: "too_short"`). Delivered in a bare success frame it
+    reads to the model as a stored memory. A `skipped` WITH an id is the
+    opposite case — `reason: "hash_match"`, the content is already stored under
+    that id — and stays a success.
+    """
+    if not isinstance(result, dict):
+        return False
+    if result.get("error"):
+        return True
+    return result.get("action") == "skipped" and result.get("id") is None
+
+
+def _send_tool_result(req_id, result, is_error=False):
+    try:
+        text = json.dumps(result, ensure_ascii=False, allow_nan=False, default=str)
+    except ValueError as e:
+        # why: a non-finite float inside a tool result would go out as bare NaN.
+        # Report the failure in-band rather than hand the model JSON that its
+        # own client cannot parse.
+        _log.error(f"non-serializable tool result: {e}")
+        text = _dumps({"error": f"result not serializable as JSON: {e}"})
+        is_error = True
+    payload = {"content": [{"type": "text", "text": text}]}
+    if is_error:
+        payload["isError"] = True
+    _send({"jsonrpc": "2.0", "id": req_id, "result": payload})
+
+
+def _negotiate_protocol(requested):
+    if isinstance(requested, str) and requested in _PROTOCOL_SUPPORTED:
+        return requested
+    return _PROTOCOL_DEFAULT
+
+
+def _dispatch_tool_call(req_id, params):
+    tool_name = params.get("name")
+    if not isinstance(tool_name, str) or not tool_name.strip():
+        # A non-string name used to raise TypeError inside dict.get (unhashable
+        # list/dict) and consume the id without any reply.
+        _error(req_id, -32602, "Invalid params: 'name' must be a non-empty string")
+        return
+    handler = _HANDLERS.get(tool_name)
+    if handler is None:
+        _error(req_id, -32601, f"Unknown tool: {tool_name}")
+        return
+    tool_args = params.get("arguments")
+    if tool_args is None:
+        tool_args = {}
+    problem = _validate_tool_args(tool_name, tool_args)
+    if problem:
+        _error(req_id, -32602, f"Invalid params: {problem}")
+        return
+    # Drop explicit nulls so each handler's `.get(key, default)` still applies.
+    tool_args = {k: v for k, v in tool_args.items() if v is not None}
+    try:
+        result = handler(tool_args)
+    except Exception as e:
+        _log.error(f"MCP tool error: {tool_name}: {e}")
+        _send_tool_result(req_id, {"error": str(e)}, is_error=True)
+        return
+    _send_tool_result(req_id, result, is_error=_is_failed_result(result))
 
 
 def _handle_request(req):
     method = req.get("method", "")
     req_id = req.get("id")
-    params = req.get("params", {})
+    params = req.get("params")
+    if params is None:
+        params = {}            # "params": null is legal JSON-RPC 2.0
+    if not isinstance(params, dict):
+        # An id makes this a Request regardless of the method name, so it is
+        # answered; without one it is a Notification and gets silence. Keying
+        # this off the method prefix instead made the reply depend on the TYPE
+        # of a field already rejected: `notifications/cancelled` with
+        # `"params": {}` got -32601 while `"params": []` got nothing at all.
+        if req_id is not None:
+            _error(req_id, -32602,
+                   f"Invalid params: expected an object, got {type(params).__name__}")
+        return
 
     if method == "initialize":
         _send({"jsonrpc": "2.0", "id": req_id,
                "result": {
-                   "protocolVersion": "2024-11-05",
+                   "protocolVersion": _negotiate_protocol(params.get("protocolVersion")),
                    "capabilities": {"tools": {}},
-                   "serverInfo": {"name": "cc-memory", "version": "2.4.3"},
+                   "serverInfo": {"name": "cc-memory", "version": _VERSION},
                }})
     elif method == "notifications/initialized":
-        return
+        # A conforming client never puts an id on a notification. If this one
+        # did, the message is a Request and leaving it unanswered hangs a
+        # client that has no timeout.
+        if req_id is not None:
+            _send({"jsonrpc": "2.0", "id": req_id, "result": {}})
     elif method == "tools/list":
         _send({"jsonrpc": "2.0", "id": req_id, "result": {"tools": TOOLS}})
     elif method == "tools/call":
-        tool_name = params.get("name", "")
-        tool_args = params.get("arguments", {})
-        handler = _HANDLERS.get(tool_name)
-        if not handler:
-            _send({"jsonrpc": "2.0", "id": req_id,
-                   "error": {"code": -32601, "message": f"Unknown tool: {tool_name}"}})
-            return
-        try:
-            result = handler(tool_args)
-            _send({"jsonrpc": "2.0", "id": req_id,
-                   "result": {"content": [{"type": "text",
-                                            "text": json.dumps(result, ensure_ascii=False, default=str)}]}})
-        except Exception as e:
-            _log.error(f"MCP tool error: {tool_name}: {e}")
-            _send({"jsonrpc": "2.0", "id": req_id,
-                   "result": {"content": [{"type": "text", "text": json.dumps({"error": str(e)})}],
-                              "isError": True}})
+        _dispatch_tool_call(req_id, params)
     elif method == "ping":
         _send({"jsonrpc": "2.0", "id": req_id, "result": {}})
     else:
         if req_id is not None:
-            _send({"jsonrpc": "2.0", "id": req_id,
-                   "error": {"code": -32601, "message": f"Method not found: {method}"}})
+            _error(req_id, -32601, f"Method not found: {method}")
 
 
 def _parent_heartbeat(interval=30):
+    """POSIX-only orphan reaper.
+
+    On Windows a child's getppid() keeps returning the dead parent's pid
+    (measured: unchanged 20s after the parent exited), so this can never fire
+    there — main() does not start the thread on nt. stdin EOF reaps the server
+    in well under a second on every platform anyway; this is only a backstop
+    for a POSIX parent that dies while leaving the pipe open.
+    """
     ppid = os.getppid()
     while True:
         time.sleep(interval)
@@ -312,23 +710,131 @@ def _parent_heartbeat(interval=30):
             os._exit(0)
 
 
-def main():
-    _log.info("MCP server starting (v2.4.3)")
-    sys.stdout = open(os.devnull, "w")
-    t = threading.Thread(target=_parent_heartbeat, daemon=True)
-    t.start()
-    for line in _original_stdin:
+def _reject_constant(name):
+    """json.loads' hook for the bare `NaN` / `Infinity` / `-Infinity` tokens.
+
+    They are json-the-python-module extensions, not JSON. Accepting them let a
+    client id of `NaN` through, and it was echoed straight back into a frame no
+    conforming parser will read.
+    """
+    raise ValueError(f"{name} is not valid JSON (RFC 8259)")
+
+
+_INF = float("inf")
+
+
+def _strict_float(text):
+    """parse_float hook: `1e400` overflows to inf without ever passing through
+    _reject_constant (that hook only sees the bare NaN/Infinity TOKENS), so the
+    converted value has to be range-checked as well. NaN cannot arise here —
+    no numeric literal produces it — so ±inf is the whole check."""
+    value = float(text)
+    if value == _INF or value == -_INF:
+        raise ValueError(f"number out of range for JSON: {text}")
+    return value
+
+
+def _read_frame(stream):
+    """Read one capped line. Returns (text, oversized); ("", False) at EOF.
+
+    readline(cap) bounds the ALLOCATION, not just the returned slice, so an
+    over-cap line is drained in cap-sized chunks and never materialised whole.
+    A short chunk with no trailing newline is the last line before EOF — a
+    legitimate frame, not an over-cap one.
+    """
+    chunk = stream.readline(_MAX_LINE_CHARS)
+    if not chunk:
+        return "", False
+    if chunk.endswith("\n") or len(chunk) < _MAX_LINE_CHARS:
+        return chunk, False
+    while True:
+        more = stream.readline(_MAX_LINE_CHARS)
+        if not more or more.endswith("\n"):
+            return chunk, True
+
+
+def _process_line(line):
+    try:
+        req = json.loads(line, parse_constant=_reject_constant,
+                         parse_float=_strict_float)
+    except (ValueError, RecursionError) as e:
+        # why: json.loads raises far more than JSONDecodeError (which is only a
+        # ValueError subclass). A 4301-digit integer raises plain ValueError
+        # from CPython's int-conversion limit and ~3000 levels of nesting raise
+        # RecursionError; both were reachable through the advertised
+        # `memory_search.limit` argument BEFORE validation, and both escaped
+        # main() — rc=1, traceback on stderr, every id orphaned.
+        _log.error(f"unparsable frame ({type(e).__name__}): {line[:100]}")
+        _error(None, -32700, f"Parse error: {e}")
+        return
+    if not isinstance(req, dict):
+        _error(None, -32600,
+               f"Invalid Request: expected a JSON object, got {type(req).__name__}")
+        return
+    try:
+        _handle_request(req)
+    except Exception as e:
+        # why: never consume a request id without answering — a client with
+        # no timeout blocks forever. Log, then reply -32603.
+        _log.error(f"MCP error: {e}")
+        rid = req.get("id")
+        if rid is not None:
+            _error(rid, -32603, f"Internal error: {e}")
+
+
+def _serve():
+    """Read/dispatch loop. One bad frame never ends the session."""
+    while True:
+        try:
+            line, oversized = _read_frame(_original_stdin)
+        except (OSError, ValueError, UnicodeError, MemoryError) as e:
+            # why: the read side itself failed (pipe reset, detached handle,
+            # allocation failure). Nothing is left to read, so stop the loop the
+            # way EOF does instead of unwinding out of main().
+            _log.error(f"stdin read failed ({type(e).__name__}): {e}")
+            return
+        if not line:
+            return                                  # EOF
+        if oversized:
+            _log.error(f"frame over {_MAX_LINE_CHARS} chars refused")
+            _error(None, -32700,
+                   f"Parse error: frame exceeds the {_MAX_LINE_CHARS}-character limit")
+            continue
         line = line.strip()
         if not line:
             continue
         try:
-            req = json.loads(line)
-            _handle_request(req)
-        except json.JSONDecodeError:
-            _log.error(f"invalid JSON: {line[:100]}")
+            _process_line(line)
         except Exception as e:
-            _log.error(f"MCP error: {e}")
-    _log.info("MCP server exiting (stdin closed)")
+            # why: backstop. _process_line answers its own id for everything it
+            # anticipates; this catches what it cannot (e.g. MemoryError while
+            # building a reply) so the NEXT frame is still served.
+            _log.error(f"frame dropped ({type(e).__name__}): {e}")
+
+
+def main():
+    global _devnull
+    _log.info(f"MCP server starting (v{_VERSION})")
+    _devnull = open(os.devnull, "w")
+    sys.stdout = _devnull
+    # why: a stray print() is absorbed by sys.stdout, but anything reaching for
+    # sys.__stdout__ would write straight into the frame stream and corrupt it.
+    sys.__stdout__ = _devnull
+    if os.name != "nt":
+        threading.Thread(target=_parent_heartbeat, daemon=True).start()
+    try:
+        _serve()
+    except (KeyboardInterrupt, SystemExit):
+        _log.info("MCP server interrupted")
+    except BaseException as e:
+        # why: NOTHING may escape main(). An escaping exception prints a
+        # traceback on stderr — rendered as error UI — and exits rc=1, which
+        # orphans every in-flight and future id at once. BaseException rather
+        # than Exception so that even an exotic escape lands here; it is logged
+        # and the process still exits 0, because a server that stops quietly is
+        # recoverable and one that crashes loudly is not.
+        _log.error(f"fatal in serve loop ({type(e).__name__}): {e}")
+    _log.info("MCP server exiting")
 
 
 if __name__ == "__main__":

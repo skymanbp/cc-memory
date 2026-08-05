@@ -89,6 +89,36 @@ from core.logger import get_logger
 _log = get_logger("progress")
 
 
+def _coerce_entries(value, str_key: str) -> List[Dict]:
+    """Normalize a list column that is *supposed* to hold dicts.
+
+    `progress.open_todos` / `critical_context` / `files_touched` are JSON
+    columns written by several paths (PreCompact, Stop, UserPromptSubmit, the
+    MCP `progress_regenerate` tool, and hand edits). A bare list of strings is
+    a realistic input, and it used to raise
+
+        AttributeError: 'str' object has no attribute 'get'
+
+    from write_progress_md — killing the entire handoff-document rewrite over
+    one badly shaped entry. Strings become ``{str_key: s}``; anything that is
+    neither a str nor a dict is skipped rather than crashing the rewrite.
+    """
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [{str_key: value}] if value.strip() else []
+    if not isinstance(value, (list, tuple)):
+        return []
+    out: List[Dict] = []
+    for item in value:
+        if isinstance(item, dict):
+            out.append(item)
+        elif isinstance(item, str):
+            if item.strip():
+                out.append({str_key: item})
+    return out
+
+
 def collect_progress_state(db: MemoryDB, project_id: int,
                            memory_dir: Path,
                            current_request: str = "",
@@ -114,15 +144,14 @@ def collect_progress_state(db: MemoryDB, project_id: int,
 
     # Open todos: filter to non-completed if provided
     open_todos = []
-    if todos:
-        for t in todos:
-            status = t.get("status", "pending")
-            if status != "completed":
-                open_todos.append({
-                    "content": t.get("content", "")[:300],
-                    "priority": t.get("priority", "medium"),
-                    "status": status,
-                })
+    for t in _coerce_entries(todos, "content"):
+        status = t.get("status", "pending")
+        if status != "completed":
+            open_todos.append({
+                "content": str(t.get("content", ""))[:300],
+                "priority": t.get("priority", "medium"),
+                "status": status,
+            })
 
     # Files touched
     files_touched = []
@@ -294,8 +323,10 @@ def write_progress_md(db: MemoryDB, project_id: int, memory_dir: Path) -> Path:
     lines += [""]
 
     # --- Open Todos ----------------------------------------------------------
+    # _coerce_entries: these three JSON columns are shared write surfaces (see
+    # its docstring) — a bare string entry must degrade, never raise.
     lines += ["## 3. Open Todos", ""]
-    todos = prog.get("open_todos") or []
+    todos = _coerce_entries(prog.get("open_todos"), "content")
     if not todos:
         lines.append("*(no open todos)*")
     else:
@@ -314,7 +345,7 @@ def write_progress_md(db: MemoryDB, project_id: int, memory_dir: Path) -> Path:
 
     # --- Critical Context ----------------------------------------------------
     lines += ["## 5. Critical Context (must-know memories)", ""]
-    crit = prog.get("critical_context") or []
+    crit = _coerce_entries(prog.get("critical_context"), "content")
     if not crit:
         lines.append("*(no critical memories)*")
     else:
@@ -329,7 +360,9 @@ def write_progress_md(db: MemoryDB, project_id: int, memory_dir: Path) -> Path:
 
     # --- Files Touched -------------------------------------------------------
     lines += ["## 6. Files Touched This Session", ""]
-    files = prog.get("files_touched") or []
+    # bare strings coerce to {"path": s} here, not {"content": s} — this
+    # column's entries are {path, action}, so the path is the meaningful key
+    files = _coerce_entries(prog.get("files_touched"), "path")
     if not files:
         lines.append("*(no files touched)*")
     else:

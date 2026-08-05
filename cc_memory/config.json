@@ -1,86 +1,29 @@
 {
-  "version": "2.4.3",
-  "description": "cc-memory — Claude Code persistent memory plugin",
-  "extraction": {
-    "max_sentences_per_category": 10,
-    "max_metrics": 10,
-    "max_todos": 15,
-    "max_file_changes": 15,
-    "keyword_min_frequency": 2,
-    "keyword_max_count": 40
-  },
-  "writer": {
-    "high_similarity_threshold": 0.8,
-    "mid_similarity_threshold": 0.5,
-    "min_content_length": 10,
-    "max_candidates_to_scan": 50,
-    "notes": "Tuned for anti-patch upsert. See docs/CONTRACTS.md#anti-patch-contract."
-  },
-  "injection": {
-    "total_budget_tokens": 4000,
-    "layers": {
-      "topics": 0.3,
-      "critical": 0.15,
-      "timeline": 0.2,
-      "progress": 0.25,
-      "footer": 0.1
-    },
-    "max_recent_sessions": 3,
-    "min_importance_for_display": 3,
-    "critical_importance_threshold": 5
-  },
-  "observation": {
-    "max_input_chars": 2000,
-    "max_output_chars": 1000,
-    "skip_tools": [
-      "TodoWrite",
-      "AskUserQuestion",
-      "Skill",
-      "ListMcpResourcesTool"
-    ],
-    "cleanup_after_save": true,
-    "retention_sessions": 2
-  },
-  "idle_reorg": {
-    "interval_turns": 5,
-    "notes": "Light cleanup runs every N user turns in Stop hook (no LLM)."
-  },
+  "version": "2.5.0",
   "consolidation": {
-    "auto_interval_sessions": 5,
-    "min_memories_per_topic": 3,
-    "duplicate_jaccard_threshold": 0.65,
-    "decay_age_days": 30,
-    "keep_per_topic_after_consolidation": 5
-  },
-  "archive": {
-    "session_retention_days": 180,
-    "max_archive_files": 100
-  },
-  "modes": {
-    "default": "code"
+    "auto_interval_sessions": 5
   },
   "ccl": {
     "enabled": false,
     "ollama_url": "http://localhost:11434",
-    "local_model": "ccl-9b",
-    "notes": "v2.3.4: local Ollama fallback is OPT-IN (enabled=false default). Anthropic legs now fall through env-key -> OAuth token with correct wire formats."
-  },
-  "web_viewer": {
-    "port": 9377
-  },
-  "mcp": {
-    "auto_register": false
+    "local_model": "ccl-9b"
   },
   "excluded_projects": [],
-  "logging": {
-    "level": "INFO",
-    "max_log_days": 7
-  },
   "notes": {
+    "scope": "EVERY key in this file is read by code. Keys that no code read were deleted rather than left in place: an inert tunable is worse than no tunable, because editing it looks like it does something. Before adding a key here, add the reader first.",
+    "readers": {
+      "version": "cc_memory/cli/mem.py:64-70 and cc_memory/mcp/server.py:108-116, both as the LAST-RESORT version fallback for a flat standalone install. core/version.py:25 __version__ is canonical; this literal must agree with it.",
+      "consolidation.auto_interval_sessions": "cc_memory/hooks/consolidate_async.py:69-80 (_auto_interval); non-positive or unparseable falls back to 5.",
+      "ccl.enabled / ccl.ollama_url / ccl.local_model": "cc_memory/llm/ccl_backend.py:36-52 (_load_local_config). The local Ollama fallback is OPT-IN: enabled=false means the Anthropic legs (env key -> Claude Code OAuth token, each with its own wire format) are the only backends.",
+      "excluded_projects": "cc_memory/hooks/user_prompt.py:_is_excluded and cc_memory/hooks/pre_compact.py:_is_excluded."
+    },
+    "excluded_projects_usage": "Absolute paths of projects that opt OUT of cc-memory entirely. A listed directory, and anything beneath it, gets no memory/ directory, no memory.db, no extraction and no PROGRESS.md - the two hooks that would create them exit 0 immediately. Matching is on the RESOLVED absolute path and is case-insensitive on Windows, case-sensitive elsewhere. Relative entries and ~ are expanded. Example: [\"D:\\\\Private\\\\client-work\", \"/home/me/secret-project\"]. This is the only opt-out; there is no per-project override file.",
+    "removed_keys": "extraction.*, writer.*, injection.*, observation.*, idle_reorg.*, archive.*, modes.default, web_viewer.port, mcp.auto_register and logging.* were declared here and read by NO code - two independent audits measured 34 of 51 leaf keys with no Python reader. The live values are module constants; change them there, not here: writer thresholds llm/memory_writer.py:44-47, injection budgets hooks/session_start.py:54 and :56-62, idle reorg interval core/idle.py:35, observation skip-list core/modes.py:17-21 (per mode), web viewer port ui/web_viewer.py:668. mcp.auto_register never had an implementation - MCP registration is the mcpServers block in .claude-plugin/plugin.json.",
     "importance_scale": "1=noise, 2=low, 3=normal, 4=important, 5=critical(never forget)",
     "categories": "decision, result, config, bug, task, arch, note",
     "storage": "<project>/memory/memory.db (SQLite, project-local)",
     "handoff_spec": "docs/CONTRACTS.md#handoff-contract",
-    "anti_patch_contract": "docs/CONTRACTS.md#anti-patch-contract"
+    "anti_patch_contract": "docs/CONTRACTS.md#anti-patch-contract",
+    "plan_contract": "docs/CONTRACTS.md#plan-contract"
   }
 }

@@ -17,8 +17,18 @@ Usage:
   python dashboard.py
   python dashboard.py --project D:/Projects/my-project
 """
-import argparse, json, sqlite3, subprocess, sys, os
-import urllib.request, urllib.error
+import argparse, json, re, sqlite3, subprocess, sys, os
+# why: this module never references urllib - it is a PyInstaller anchor, not
+# dead code, and deleting it silently breaks the frozen dashboard. build_exe.py
+# ships core/ and llm/ as --add-data, which PyInstaller never analyses, so the
+# `import urllib.request` in llm/ccl_backend.py:25 is invisible to the build.
+# Measured on two probe builds of this file's exact import set: without this
+# line the Analysis TOC contains no urllib.request, urllib.error, http.client or
+# ssl; with it, all four are collected. Losing them kills Tidy Memories and LLM
+# Save Session at runtime in the exe - silently, because _extract_via_llm
+# swallows the ImportError and falls back to regex. One import is the whole
+# anchor: the other three arrive transitively.
+import urllib.request  # noqa: F401 -- why: see the frozen-build note above
 from datetime import datetime
 from pathlib import Path
 
@@ -31,13 +41,13 @@ if getattr(sys, 'frozen', False):
 else:
     sys.path.insert(0, str(_PKG_ROOT))
 from core.db import MemoryDB
+from core.encoding_setup import enable_utf8_io
 from core.extractor import (
     build_extraction,
     group_sentences,
-    CATEGORY_ORDER,
-    CATEGORY_LABELS,
     load_transcript,
 )
+from core.progress import ensure_memory_gitignore
 from llm.memory_writer import upsert_smart, upsert_batch, regenerate_memory_index
 
 try:
@@ -46,6 +56,105 @@ try:
 except ImportError:
     print("Error: tkinter is not available. Install python3-tk.")
     sys.exit(1)
+
+
+# ---------------------------------------------------------------------------
+# Module helpers
+# ---------------------------------------------------------------------------
+
+def _registry_path() -> Path:
+    """Return the file that stores the dashboard's project registry.
+
+    A frozen (PyInstaller) build must NOT keep it next to the bundle: both
+    ``sys._MEIPASS`` and its parent live under the OS temp directory, so Disk
+    Cleanup silently eats the user's project list. Frozen builds therefore use
+    the per-user config directory, derived at runtime — never a hardcoded home
+    path. Script runs keep the historical location inside the package (it is
+    gitignored and writable for a source checkout).
+    """
+    if getattr(sys, "frozen", False):
+        if sys.platform == "win32":
+            base = os.environ.get("APPDATA") or os.environ.get("LOCALAPPDATA")
+            root = Path(base) if base else Path.home() / "AppData" / "Roaming"
+        else:
+            base = os.environ.get("XDG_CONFIG_HOME")
+            root = Path(base) if base else Path.home() / ".config"
+        cfg = root / "cc-memory"
+        try:
+            cfg.mkdir(parents=True, exist_ok=True)
+            return cfg / "projects.json"
+        except OSError:
+            # why: an unwritable config root must not stop the GUI from
+            # starting; fall back to the bundle dir and let the guarded save
+            # path surface the failure as a status-bar warning instead
+            return _PKG_ROOT / "projects.json"
+    return _PKG_ROOT / "projects.json"
+
+
+_SQL_COMMENT_RE = re.compile(r"--[^\n]*|/\*.*?\*/", re.S)
+_SQL_WRITE_RE = re.compile(
+    r"\b(insert|update|delete|drop|alter|create|replace|truncate|"
+    r"attach|detach|vacuum|reindex|begin|commit|rollback)\b", re.I)
+
+# SQLite accepts BOTH `PRAGMA name = value` and `PRAGMA name(value)` for every
+# settable pragma. Looking only for "=" therefore let `PRAGMA user_version(7)`
+# and `PRAGMA application_id(1234)` through as "read-only": they ran, COMMITTED
+# and printed "(no rows returned)" with no confirmation dialog and no rowcount.
+# The parenthesised form is also how the read-only introspection pragmas take
+# their argument, so those are allow-listed BY NAME rather than by syntax.
+_PRAGMA_READ_WITH_ARG = frozenset((
+    "table_info", "table_xinfo", "table_list", "index_info", "index_list",
+    "index_xinfo", "foreign_key_list", "foreign_key_check", "collation_list",
+    "database_list", "compile_options", "function_list", "module_list",
+    "pragma_list", "integrity_check", "quick_check", "freelist_count",
+    "page_count",
+))
+# ...and these ACT on the file although they take no argument at all
+# (`PRAGMA optimize` created a sqlite_stat1 table in the user's database).
+_PRAGMA_WRITES_BARE = frozenset((
+    "optimize", "wal_checkpoint", "incremental_vacuum", "shrink_memory",
+))
+_PRAGMA_HEAD_RE = re.compile(
+    r"pragma\s+(?:[A-Za-z_]\w*\s*\.\s*)?([A-Za-z_]\w*)\s*(.*)", re.I | re.S)
+
+
+def _pragma_is_read_only(body: str) -> bool:
+    """True only for a PRAGMA that cannot change the file.
+
+    Unrecognised spellings are reported as writes — the caller then asks for
+    confirmation, which is the safe direction.
+    """
+    m = _PRAGMA_HEAD_RE.match(body.strip())
+    if not m:
+        return False
+    name = m.group(1).lower()
+    arg = m.group(2).strip().rstrip(";").strip()
+    if arg:
+        # ANY argument — "= value", "(value)" or a bare value — is a set,
+        # except for the introspection pragmas that report on the schema.
+        return name in _PRAGMA_READ_WITH_ARG
+    return name not in _PRAGMA_WRITES_BARE
+
+
+def _sql_is_read_only(query: str) -> bool:
+    """True only for statements that cannot modify the database.
+
+    Deliberately conservative — anything that is not plainly a SELECT /
+    EXPLAIN / read PRAGMA / CTE-SELECT is reported as a write so the caller
+    asks for confirmation first. A false "write" costs one dialog; a false
+    "read" costs the user's memories (``DELETE FROM memories`` used to run and
+    commit from the SQL console while printing "(no rows returned)").
+    """
+    body = _SQL_COMMENT_RE.sub(" ", query).strip()
+    if not body:
+        return True
+    head = re.match(r"[A-Za-z]+", body)
+    kw = head.group(0).lower() if head else ""
+    if kw not in ("select", "with", "explain", "pragma"):
+        return False
+    if kw == "pragma" and not _pragma_is_read_only(body):
+        return False
+    return _SQL_WRITE_RE.search(body) is None
 
 
 # ---------------------------------------------------------------------------
@@ -62,7 +171,7 @@ class DashboardApp:
         self.project_id = None
         self.project_path = None
         self._manual_api_key = ""  # Set via Settings dialog
-        self._projects_file = _PKG_ROOT / "projects.json"
+        self._projects_file = _registry_path()
 
         self._build_ui()
 
@@ -82,7 +191,10 @@ class DashboardApp:
         self.project_combo = ttk.Combobox(top, textvariable=self.project_var, width=60)
         self.project_combo.pack(side=tk.LEFT, padx=5)
         self.project_combo.bind("<<ComboboxSelected>>", self._on_project_selected)
-        ttk.Button(top, text="Manage...", command=self._manage_projects).pack(side=tk.LEFT)
+        # `Browse...` exposes _browse_project, which was implemented and wired
+        # to no widget at all until now.
+        ttk.Button(top, text="Browse...", command=self._browse_project).pack(side=tk.LEFT)
+        ttk.Button(top, text="Manage...", command=self._manage_projects).pack(side=tk.LEFT, padx=3)
         ttk.Button(top, text="Init New", command=self._init_new_project).pack(side=tk.LEFT, padx=3)
         ttk.Button(top, text="Save Session", command=self._save_current_session).pack(side=tk.LEFT, padx=3)
         ttk.Button(top, text="Tidy Memories", command=self._tidy_memories).pack(side=tk.LEFT, padx=3)
@@ -94,6 +206,7 @@ class DashboardApp:
         self.notebook.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
 
         self._build_memories_tab()
+        self._build_progress_tab()
         self._build_plans_tab()
         self._build_sessions_tab()
         self._build_keywords_tab()
@@ -188,8 +301,12 @@ class DashboardApp:
 
         ttk.Label(filt, text="Min Imp:").pack(side=tk.LEFT, padx=(10,0))
         self.mem_imp_var = tk.StringVar(value="1")
+        # state="readonly": an editable spinbox could be blanked, and
+        # int("") raised inside the Tk callback — invisible in the
+        # --windowed exe, which has no console to print the traceback to.
+        # _load_memories() also parses defensively; both halves are needed.
         imp_spin = ttk.Spinbox(filt, textvariable=self.mem_imp_var, from_=1, to=5,
-                    width=3, command=self._load_memories)
+                    width=3, command=self._load_memories, state="readonly")
         imp_spin.pack(side=tk.LEFT, padx=5)
 
         ttk.Button(filt, text="Search", command=self._load_memories).pack(side=tk.LEFT, padx=5)
@@ -325,25 +442,108 @@ class DashboardApp:
         self.stats_text = scrolledtext.ScrolledText(frame, height=25, font=("Consolas", 11))
         self.stats_text.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
 
+    def _build_progress_tab(self):
+        """Read-only view of the two post-v2.0 SQL anchors.
+
+        `progress` (one row per project) is the source of truth behind
+        memory/PROGRESS.md; `plan_active` (also one row) backs memory/PLAN.md.
+        Both shipped as headline features and neither was visible anywhere in
+        this GUI — the "Plans" tab is the unrelated legacy v2.0 `plans` queue.
+        Read-only by design: PROGRESS.md is owned by the hooks and PLAN.md by
+        `/cc-mem plan-*`, so editing it here would fight the writers.
+        """
+        frame = ttk.Frame(self.notebook)
+        self.notebook.add(frame, text="Progress / Plan")
+
+        bar = ttk.Frame(frame, padding=(5, 5, 5, 0))
+        bar.pack(fill=tk.X)
+        ttk.Label(bar, font=("", 9),
+                  text="Read-only. PROGRESS.md is written by the hooks; "
+                       "PLAN.md by Claude's plan mode / /cc-mem plan-*.").pack(side=tk.LEFT)
+        ttk.Button(bar, text="Refresh",
+                   command=self._load_progress_plan).pack(side=tk.RIGHT)
+
+        self.progress_text = scrolledtext.ScrolledText(
+            frame, height=25, font=("Consolas", 10), wrap=tk.WORD)
+        self.progress_text.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        self.progress_text.config(state=tk.DISABLED)
+
     # ── Project Management ───────────────────────────────────────────────────
 
     # ── Project Registry (persistent JSON) ──────────────────────────────────
 
-    def _load_project_registry(self) -> list:
-        """Load saved project paths from projects.json."""
-        if self._projects_file.exists():
-            try:
-                data = json.loads(self._projects_file.read_text(encoding="utf-8"))
-                return [p for p in data.get("projects", []) if Path(p).exists()]
-            except Exception:
-                pass
-        return []
+    def _load_project_registry(self, existing_only: bool = False) -> list:
+        """Load saved project paths from projects.json.
+
+        Returns EVERY saved path by default. The old version dropped entries
+        whose directory did not currently exist, and the caller wrote that
+        filtered list straight back — so unplugging a drive (or a VPN drop on
+        a network share) permanently deleted the project from the registry.
+        Existence is a *display* concern; pass ``existing_only=True`` where a
+        path is about to be opened.
+
+        SHAPE is validated, not just JSON syntax. A file that parses but is not
+        ``{"projects": [str, ...]}`` is now treated exactly like an unparseable
+        one — backed up, then ignored — because the docstring's promise that a
+        broken registry stays recoverable was false for every wrong shape:
+        ``["D:/a","D:/b"]`` silently returned [] and was overwritten with NO
+        .bak, and ``{"projects": "D:/a"}`` iterated the string CHARACTER by
+        character and persisted 'D', ':', '/', 'a' as four projects (a dict
+        value persisted its keys the same way).
+        """
+        if not self._projects_file.exists():
+            return []
+        try:
+            data = json.loads(self._projects_file.read_text(encoding="utf-8"))
+            if not isinstance(data, dict):
+                raise ValueError(
+                    f"top level is {type(data).__name__}, expected an object")
+            saved = data.get("projects", [])
+            if not isinstance(saved, list):
+                raise ValueError(
+                    f'"projects" is {type(saved).__name__}, expected an array')
+            projects = [p for p in saved if isinstance(p, str) and p.strip()]
+        except (json.JSONDecodeError, UnicodeDecodeError, OSError,
+                ValueError) as e:
+            # A corrupt registry used to be silently replaced by the rescan,
+            # which loses every manually added path outside the scan roots.
+            # Keep a copy so it stays recoverable.
+            self._backup_broken_registry(e)
+            return []
+        if existing_only:
+            projects = [p for p in projects if Path(p).exists()]
+        return projects
+
+    def _backup_broken_registry(self, err):
+        """Preserve an unusable projects.json before anything overwrites it."""
+        try:
+            stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            backup = self._projects_file.with_name(
+                self._projects_file.name + f".corrupt-{stamp}.bak")
+            backup.write_bytes(self._projects_file.read_bytes())
+            note = f"Project registry unreadable ({err}); backed up to {backup.name}"
+        except OSError as copy_err:
+            note = f"Project registry unreadable ({err}); backup failed ({copy_err})"
+        if hasattr(self, "status_var"):
+            self.status_var.set(note)
 
     def _save_project_registry(self, projects: list):
-        """Save project paths to projects.json."""
-        self._projects_file.write_text(
-            json.dumps({"projects": projects}, indent=2, ensure_ascii=False),
-            encoding="utf-8")
+        """Save project paths to projects.json.
+
+        Never raises: this runs from __init__ via _auto_discover_projects, and
+        a read-only config dir used to abort dashboard startup entirely.
+        """
+        try:
+            self._projects_file.parent.mkdir(parents=True, exist_ok=True)
+            self._projects_file.write_text(
+                json.dumps({"projects": projects}, indent=2, ensure_ascii=False),
+                encoding="utf-8")
+        except OSError as e:
+            # why: the registry is a convenience cache; losing it degrades the
+            # combobox to "whatever the scan finds" but must never prevent the
+            # user from opening the dashboard or a project
+            if hasattr(self, "status_var"):
+                self.status_var.set(f"Could not save project list: {e}")
 
     def _add_to_registry(self, project_path: str):
         """Add a project to the persistent registry (dedup)."""
@@ -358,7 +558,8 @@ class DashboardApp:
 
     def _auto_discover_projects(self):
         """Load saved projects + scan common directories for new ones."""
-        # Start with saved registry
+        # Start with the FULL saved registry — including paths that are
+        # currently unreachable, so they survive this write.
         projects = self._load_project_registry()
         known_lower = {p.lower() for p in projects}
 
@@ -379,15 +580,30 @@ class DashboardApp:
                             projects.append(resolved)
                             known_lower.add(resolved.lower())
             except PermissionError:
+                # why: an unreadable scan root (permissions, offline share) is
+                # not an error for discovery — the registry still stands
                 pass
 
-        # Persist any newly discovered projects
+        # Persist the union; the pruning happens for DISPLAY only, below.
         self._save_project_registry(projects)
 
-        self.project_combo["values"] = projects
-        if projects:
-            self.project_combo.set(projects[0])
-            self._load_project(projects[0])
+        available = [p for p in projects if Path(p).exists()]
+        self.project_combo["values"] = available or projects
+        # Launch is READ-ONLY. Opening a project is not a passive act: it
+        # creates memory/ + sessions/ + topics/, writes (and migrates) the
+        # .gitignore and runs the schema migrations inside memory.db.
+        # Auto-loading available[0] did all of that on EVERY launch, to
+        # whichever project happened to sort first — one the user never picked.
+        # Show the list and wait for a choice. `--project` and the combobox
+        # remain the ways to open one, because those are choices.
+        if available:
+            self.status_var.set(
+                f"{len(available)} project(s) known — pick one in the Project "
+                f"box to open it (none is opened automatically)")
+        elif projects:
+            self.status_var.set(
+                f"{len(projects)} saved project(s), none currently reachable — "
+                f"use Browse... or Manage...")
 
     def _browse_project(self):
         path = filedialog.askdirectory(title="Select project directory")
@@ -507,11 +723,13 @@ class DashboardApp:
             # Strip [no DB] prefix
             paths = [item.replace("[no DB] ", "") for item in items]
             self._save_project_registry(paths)
-            # Update combo
+            # Update combo. Editing the LIST must not open a project: the old
+            # `if paths and not self.project_path` branch loaded paths[0] with
+            # the UNFILTERED list, so a stale entry the user had deliberately
+            # kept for reference got created from scratch (memory/, .gitignore,
+            # memory.db) or blew up on an unreachable drive. Opening stays an
+            # explicit choice in the Project box.
             self.project_combo["values"] = paths
-            if paths and not self.project_path:
-                self.project_combo.set(paths[0])
-                self._load_project(paths[0])
             dlg.destroy()
             self.status_var.set(f"Saved {len(paths)} project(s)")
 
@@ -528,33 +746,131 @@ class DashboardApp:
     def _on_project_selected(self, event):
         self._load_project(self.project_var.get())
 
+    def _ensure_memory_dir(self, project) -> Path:
+        """Create memory/ + its subdirs AND the .gitignore.
+
+        Every path that can bring a project into existence funnels through
+        here. Previously only "Init New" wrote the ignore file, so selecting an
+        uninitialised project in the combobox — or a registry auto-load, or
+        Manage.../Save & Close — left memory.db, -wal and -shm sitting
+        un-ignored in the user's repo.
+
+        The PROJECT directory itself is never created. ``mkdir(parents=True)``
+        happily materialised the whole tree for a path that no longer exists,
+        so selecting a deleted-but-remembered registry entry silently
+        RECREATED the project as an empty shell — memory.db, .gitignore,
+        sessions/ and topics/ included — instead of reporting it gone. Raises
+        FileNotFoundError instead; _load_project turns that into a dialog.
+        """
+        project = Path(project)
+        if not project.is_dir():
+            raise FileNotFoundError(f"project directory not found: {project}")
+        memory_dir = project / "memory"
+        memory_dir.mkdir(exist_ok=True)
+        (memory_dir / "sessions").mkdir(exist_ok=True)
+        (memory_dir / "topics").mkdir(exist_ok=True)
+        ensure_memory_gitignore(memory_dir)
+        return memory_dir
+
+    def _set_busy(self, busy: bool, msg: str = ""):
+        """Toggle a wait cursor + status text around a long main-thread job."""
+        try:
+            self.root.config(cursor="watch" if busy else "")
+        except tk.TclError:
+            # why: some window managers reject cursor changes; a missing busy
+            # cursor must never abort the work it was only decorating
+            pass
+        if msg:
+            self.status_var.set(msg)
+        self.root.update()
+
     def _load_project(self, project_path):
-        self.project_path = Path(project_path).resolve()
-        db_path = self.project_path / "memory" / "memory.db"
+        """Open a project. Reports failure in the UI; never raises.
 
-        if not db_path.exists():
-            # Initialize
-            (self.project_path / "memory").mkdir(parents=True, exist_ok=True)
+        This was the one callback with no guard at all. A registry entry on an
+        unavailable drive raises ``FileNotFoundError: [WinError 3] ... 'Q:\\'``
+        out of _ensure_memory_dir, and Tk routes an uncaught callback exception
+        to report_callback_exception → stderr, which a --windowed PyInstaller
+        build does not have: no dialog, no status change, the click simply did
+        nothing, forever. Three routes arrive here with unverified paths — the
+        combobox, Manage.../Save & Close, and --project on the command line.
 
-        self.db = MemoryDB(db_path)
-        self.project_id = self.db.upsert_project(str(self.project_path))
-        self.project_var.set(str(self.project_path))
+        Nothing is assigned until the open succeeds, so a failed load leaves
+        the previously loaded project intact instead of half-swapping to one
+        that could not be opened (project_path used to be overwritten first).
+        """
+        try:
+            resolved = Path(project_path).resolve()
+            memory_dir = self._ensure_memory_dir(resolved)
+            db = MemoryDB(memory_dir / "memory.db")
+            project_id = db.upsert_project(str(resolved))
+        except Exception as e:
+            # why: every failure mode here — missing drive, deleted directory,
+            # permission denied, corrupt or locked memory.db — must reach the
+            # user as a dialog. The alternative is Tk's stderr traceback, which
+            # the frozen GUI build discards. The app keeps its old project.
+            self._report_project_error("open", project_path, e)
+            return
+
+        self.project_path = resolved
+        self.db = db
+        self.project_id = project_id
+        self.project_var.set(str(resolved))
 
         # Persist to registry + update combo
-        projects = self._add_to_registry(str(self.project_path))
+        projects = self._add_to_registry(str(resolved))
         self.project_combo["values"] = projects
 
-        self._refresh()
-        self.status_var.set(f"Loaded: {self.project_path.name}")
+        errors = self._refresh()
+        if errors:
+            self.status_var.set(f"Loaded: {resolved.name} — but {errors[0]}")
+        else:
+            self.status_var.set(f"Loaded: {resolved.name}")
+
+    def _report_project_error(self, verb, project_path, err):
+        """Surface a project-level failure in the status bar AND a dialog."""
+        try:
+            self.status_var.set(f"Could not {verb} {project_path}: {err}")
+        except tk.TclError:
+            # why: a torn-down root must not turn a reported error into a
+            # second, unreported one
+            pass
+        messagebox.showerror(
+            "Project unavailable",
+            f"Could not {verb} this project:\n\n{project_path}\n\n{err}\n\n"
+            "It is still in the project list — an unplugged drive or a "
+            "disconnected share can come back, and cc-memory will not create a "
+            "project directory that does not exist. Use Manage... to drop the "
+            "entry for good.")
 
     def _refresh(self):
+        """Repaint every tab. Returns a list of per-loader failure strings.
+
+        Each loader is isolated. One broken tab used to poison the whole app:
+        a user-confirmed `DROP TABLE memories` in the SQL console made
+        _load_memories raise, which aborted _refresh before the other five
+        loaders ran, left the status bar unset, and made EVERY later refresh
+        raise too for the rest of the session.
+        """
         if not self.db:
-            return
-        self._load_memories()
-        self._load_plans()
-        self._load_sessions()
-        self._load_keywords()
-        self._load_stats()
+            return []
+        errors = []
+        for label, loader in (
+            ("memories", self._load_memories),
+            ("progress/plan", self._load_progress_plan),
+            ("plans", self._load_plans),
+            ("sessions", self._load_sessions),
+            ("keywords", self._load_keywords),
+            ("stats", self._load_stats),
+        ):
+            try:
+                loader()
+            except Exception as e:
+                # why: a refresh only redraws what the user just did; naming
+                # the tab that failed is useful, aborting the remaining five
+                # tabs (and every future refresh) is not
+                errors.append(f"{label} tab failed: {e}")
+        return errors
 
     # ── Data Loading ─────────────────────────────────────────────────────────
 
@@ -566,7 +882,14 @@ class DashboardApp:
 
         search = self.mem_search_var.get().strip()
         cat = self.mem_cat_var.get()
-        min_imp = int(self.mem_imp_var.get())
+        try:
+            min_imp = max(1, min(int(self.mem_imp_var.get()), 5))
+        except (TypeError, ValueError):
+            # why: a blank or hand-edited Min Imp used to raise ValueError
+            # inside the Tk callback, which the --windowed exe shows nowhere
+            # at all — the filter simply stopped responding
+            min_imp = 1
+            self.mem_imp_var.set("1")
 
         with self.db._connect() as conn:
             params = [self.project_id, min_imp]
@@ -695,7 +1018,160 @@ Category Breakdown:
 
         self.stats_text.insert("1.0", text)
 
+    def _load_progress_plan(self):
+        """Render the `progress` row and the `plan_active` row (read-only).
+
+        These are the SQL sources of truth behind memory/PROGRESS.md and
+        memory/PLAN.md. Neither was reachable from this GUI before.
+        """
+        if not hasattr(self, "progress_text"):
+            return
+        self.progress_text.config(state=tk.NORMAL)
+        self.progress_text.delete("1.0", tk.END)
+        if not self.db or self.project_id is None:
+            self.progress_text.insert("1.0", "Load a project first.")
+            self.progress_text.config(state=tk.DISABLED)
+            return
+
+        out = ["=" * 74,
+               "PROGRESS   (SQL source of truth for memory/PROGRESS.md)",
+               "=" * 74, ""]
+        prog = self.db.get_progress(self.project_id)
+        if not prog:
+            out.append("(no progress row yet — PreCompact writes it at the first "
+                       "compaction of this project)")
+        else:
+            out.append(f" 1. current_request  : {prog.get('current_request') or '(empty)'}")
+            out.append(f" 2. status_done      : {prog.get('status_done') or '(none yet)'}")
+            out.append(f" 3. status_in_flight : {prog.get('status_in_flight') or '(none)'}")
+            out.append(f" 4. status_blocked   : {prog.get('status_blocked') or '(none)'}")
+
+            todos = prog.get("open_todos") or []
+            out.append(f" 5. open_todos       : {len(todos)}")
+            for t in todos[:20]:
+                if isinstance(t, dict):
+                    mark = "[ ]" if t.get("status", "pending") == "pending" else "[~]"
+                    out.append(f"        {mark} {str(t.get('priority', 'medium')):<6} "
+                               f"{t.get('content', '')}")
+                else:
+                    # why: no shipped writer emits bare strings today, but the
+                    # MCP progress_regenerate tool is a public surface that can
+                    # — a read-only view must render them, not raise
+                    out.append(f"        [ ] {t}")
+
+            plan_lines = (prog.get("plan") or "").splitlines() or ["(none)"]
+            out.append(f" 6. plan             : {plan_lines[0]}")
+            for ln in plan_lines[1:20]:
+                out.append(f"                       {ln}")
+
+            crit = prog.get("critical_context") or []
+            out.append(f" 7. critical_context : {len(crit)}")
+            for m in crit[:10]:
+                if isinstance(m, dict):
+                    out.append(f"        #{m.get('id', '?')} [{m.get('category', '')}] "
+                               f"{(m.get('content') or '')[:90]}")
+                else:
+                    out.append(f"        {str(m)[:90]}")
+
+            files = prog.get("files_touched") or []
+            out.append(f" 8. files_touched    : {len(files)}")
+            for f in files[:20]:
+                if isinstance(f, dict):
+                    out.append(f"        {str(f.get('action', '?')):<8} {f.get('path', '')}")
+                else:
+                    out.append(f"        {f}")
+
+            out.append(f" 9. transcript_ptr   : {prog.get('transcript_ptr') or '(none)'}")
+            out.append(f"10. updated_at       : {prog.get('updated_at') or '-'}")
+            out.append(f"11. trigger_type     : {prog.get('trigger_type') or '-'}")
+            out.append(f"    session tag      : "
+                       f"{prog.get('current_session_id') or '(untagged)'}"
+                       f"  started {prog.get('session_started_at') or '-'}")
+
+        out += ["", "=" * 74,
+                "PLAN   (SQL source of truth for memory/PLAN.md)",
+                "=" * 74, ""]
+        pa = self.db.get_plan_active(self.project_id)
+        if not pa:
+            out.append("(no live plan — capture one with Claude's plan mode, "
+                       "or `/cc-mem plan-set`)")
+        else:
+            structured = pa.get("structured")
+            if not isinstance(structured, dict):
+                structured = {}
+            steps = structured.get("steps")
+            steps = steps if isinstance(steps, list) else []
+            active = pa.get("active_step") or 0
+
+            if pa.get("needs_refine"):
+                out.append("** PENDING REFINEMENT — this raw plan has not been through")
+                out.append("** @plan-refiner, so the structured view below (and the")
+                out.append("** generated PLAN.md) may still describe the PREVIOUS plan.")
+                out.append("")
+                out.append("Raw capture:")
+                for ln in (pa.get("raw") or "(empty)").splitlines()[:40]:
+                    out.append(f"    {ln}")
+                out.append("")
+
+            if structured.get("goal"):
+                out.append(f"Goal: {structured['goal']}")
+                sc = structured.get("success_criteria")
+                if isinstance(sc, list) and sc:
+                    out.append("Success criteria:")
+                    for c in sc[:10]:
+                        out.append(f"  - {c}")
+                done = sum(1 for s in steps
+                           if isinstance(s, dict) and s.get("status") == "done")
+                out.append("")
+                out.append(f"Steps ({done}/{len(steps)} done):")
+                glyphs = {"done": "[x]", "in_progress": "[~]", "pending": "[ ]",
+                          "blocked": "[!]", "dropped": "[-]", "skipped": "[-]"}
+                for s in steps:
+                    if not isinstance(s, dict):
+                        continue
+                    glyph = glyphs.get(s.get("status", "pending"), "[ ]")
+                    mark = ("  <-- ACTIVE"
+                            if s.get("id") == active and s.get("status") != "done"
+                            else "")
+                    line = f"  {s.get('id', '?')}. {glyph} {s.get('title', '')}{mark}"
+                    if s.get("notes"):
+                        line += f"  — {s['notes']}"
+                    out.append(line)
+            elif not pa.get("needs_refine"):
+                out.append("(no structured plan yet; raw capture follows)")
+                for ln in (pa.get("raw") or "(empty)").splitlines()[:40]:
+                    out.append(f"    {ln}")
+
+            out += ["",
+                    f"active_step               : {active or 'none'}",
+                    f"needs_refine              : {bool(pa.get('needs_refine'))}",
+                    f"last_refined_at           : {pa.get('last_refined_at') or '-'}",
+                    f"last_guardian_at          : {pa.get('last_guardian_at') or '-'}",
+                    f"edits_since_last_guardian : {pa.get('edits_since_last_guardian', 0)}",
+                    f"turns_since_last_guardian : {pa.get('turns_since_last_guardian', 0)}"]
+
+        self.progress_text.insert("1.0", "\n".join(out))
+        self.progress_text.config(state=tk.DISABLED)
+
     # ── SQL Console ──────────────────────────────────────────────────────────
+
+    def _sql_table_hint(self) -> str:
+        """Live table/view list from sqlite_master.
+
+        The old hardcoded hint named 6 of the 17 objects a v2.4 database
+        actually holds — it omitted every table added since v2.0 (observations,
+        progress, plan_active, session_summaries, _migrations, memories_fts*).
+        """
+        try:
+            with self.db._connect() as conn:
+                names = [r[0] for r in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type IN ('table','view') "
+                    "ORDER BY name").fetchall()]
+        except sqlite3.Error:
+            # why: the hint is decoration on an error message; a second
+            # failure must not replace the real SQL error the user needs
+            return ""
+        return ("\n\nTables: " + ", ".join(names)) if names else ""
 
     def _run_sql(self):
         if not self.db:
@@ -707,34 +1183,76 @@ Category Breakdown:
         if not query:
             return
 
+        # `MemoryDB._connect()` hands back a bare sqlite3.Connection, so the
+        # `with` block below COMMITS. A destructive statement typed here used
+        # to wipe the table and report "(no rows returned)" with no prompt of
+        # any kind. Confirm every write, and report its rowcount afterwards.
+        read_only = _sql_is_read_only(query)
+        if not read_only:
+            proj = self.project_path.name if self.project_path else "this project"
+            preview = query if len(query) <= 400 else query[:400] + "..."
+            if not messagebox.askyesno(
+                "Confirm write statement",
+                f"This is NOT a read-only query. It will be COMMITTED to "
+                f"{proj}'s memory database and CANNOT be undone:\n\n"
+                f"{preview}\n\n"
+                f"Run it anyway?"):
+                self.sql_output.insert("1.0", "(cancelled — nothing was executed)")
+                self.status_var.set("SQL write cancelled")
+                return
+
         try:
             with self.db._connect() as conn:
-                rows = conn.execute(query).fetchall()
-                if not rows:
-                    self.sql_output.insert("1.0", "(no rows returned)")
-                    return
-
-                headers = list(rows[0].keys())
-                # Calculate column widths
-                widths = [len(h) for h in headers]
-                str_rows = []
-                for r in rows:
-                    sr = [str(v) if v is not None else "NULL" for v in list(r)]
-                    str_rows.append(sr)
-                    for i, c in enumerate(sr):
-                        widths[i] = max(widths[i], min(len(c), 50))
-
-                fmt = "  ".join(f"{{:<{w}}}" for w in widths)
-                output = fmt.format(*headers) + "\n"
-                output += "  ".join("-" * w for w in widths) + "\n"
-                for sr in str_rows:
-                    truncated = [c[:widths[i]] for i, c in enumerate(sr)]
-                    output += fmt.format(*truncated) + "\n"
-                output += f"\n({len(rows)} rows)"
-
-                self.sql_output.insert("1.0", output)
+                cur = conn.execute(query)
+                rows = cur.fetchall()
+                affected = cur.rowcount
         except sqlite3.Error as e:
-            self.sql_output.insert("1.0", f"SQL Error: {e}\n\nTables: projects, sessions, memories, topics, keywords, plans")
+            self.sql_output.insert("1.0", f"SQL Error: {e}{self._sql_table_hint()}")
+            return
+
+        if not read_only:
+            shown = affected if isinstance(affected, int) and affected >= 0 else "n/a"
+            self.sql_output.insert(
+                "1.0", f"Statement executed and COMMITTED.\nRows affected: {shown}")
+            # A confirmed-but-destructive DDL used to take the whole app down
+            # with it: `DROP TABLE memories` made this _refresh() raise from
+            # its first loader, so the status line below never ran and every
+            # later refresh raised too. _refresh is now per-loader isolated and
+            # hands back what broke instead of propagating it.
+            errors = self._refresh()
+            note = f"SQL write committed (rowcount={shown})"
+            if errors:
+                note += f" — {errors[0]}"
+                self.sql_output.insert(
+                    tk.END,
+                    "\n\nWARNING — the database no longer matches what this "
+                    "dashboard expects:\n  " + "\n  ".join(errors))
+            self.status_var.set(note)
+            return
+
+        if not rows:
+            self.sql_output.insert("1.0", "(no rows returned)")
+            return
+
+        headers = list(rows[0].keys())
+        # Calculate column widths
+        widths = [len(h) for h in headers]
+        str_rows = []
+        for r in rows:
+            sr = [str(v) if v is not None else "NULL" for v in list(r)]
+            str_rows.append(sr)
+            for i, c in enumerate(sr):
+                widths[i] = max(widths[i], min(len(c), 50))
+
+        fmt = "  ".join(f"{{:<{w}}}" for w in widths)
+        output = fmt.format(*headers) + "\n"
+        output += "  ".join("-" * w for w in widths) + "\n"
+        for sr in str_rows:
+            truncated = [c[:widths[i]] for i, c in enumerate(sr)]
+            output += fmt.format(*truncated) + "\n"
+        output += f"\n({len(rows)} rows)"
+
+        self.sql_output.insert("1.0", output)
 
     # ── Tidy Memories (LLM-powered cleanup) ─────────────────────────────────
 
@@ -809,36 +1327,135 @@ Memories:
             messagebox.showerror("API Error", f"LLM analysis failed:\n\n{e}")
             return
 
-        # Collect all IDs to delete
+        # Collect all IDs to delete. EVERY value below is LLM-controlled and
+        # none of it is covered by the try/except above (which wraps only
+        # call_llm + json.loads), so plausible model output used to raise
+        # straight out of this Tk callback — no dialog, no traceback the
+        # --windowed exe could show, status bar frozen on "Analyzing memories
+        # with LLM...". Verified live: [1,2,3] -> AttributeError,
+        # {"id":"abc"} -> ValueError, delete_ids:[null] -> TypeError.
+        if not isinstance(analysis, dict):
+            self.status_var.set("Ready")
+            messagebox.showerror(
+                "Unusable LLM output",
+                f"The model returned a JSON {type(analysis).__name__}, not the "
+                'object with "delete" / "merge" / "summary" keys it was asked '
+                "for.\n\nNothing was changed.")
+            return
+
+        def _as_id(value):
+            """An LLM value -> a positive int row id, or None if it is not one."""
+            if value is None or isinstance(value, bool):
+                return None
+            if isinstance(value, int):
+                return value if value > 0 else None
+            if isinstance(value, float):
+                return int(value) if value > 0 and value.is_integer() else None
+            if isinstance(value, str):
+                try:
+                    n = int(value.strip().lstrip("#").strip())
+                except ValueError:
+                    return None
+                return n if n > 0 else None
+            return None
+
         delete_ids = set()
         reasons = {}
+        malformed = 0
 
-        for item in analysis.get("delete", []):
+        raw_delete = analysis.get("delete") or []
+        if not isinstance(raw_delete, list):
+            raw_delete, malformed = [], malformed + 1
+        for item in raw_delete:
             if isinstance(item, dict):
-                did = item.get("id", item.get("ID"))
+                did = _as_id(item.get("id", item.get("ID")))
                 reason = item.get("reason", "")
-                if did:
-                    delete_ids.add(int(did))
-                    reasons[int(did)] = reason
-            elif isinstance(item, int):
-                delete_ids.add(item)
+                reason = reason if isinstance(reason, str) else str(reason)
+            else:
+                did, reason = _as_id(item), ""
+            if did is None:
+                malformed += 1
+                continue
+            delete_ids.add(did)
+            if reason:
+                reasons[did] = reason
 
-        for merge in analysis.get("merge", []):
-            if isinstance(merge, dict):
-                for did in merge.get("delete_ids", []):
-                    delete_ids.add(int(did))
-                    reasons[int(did)] = f"Merged into #{merge.get('keep_id')}"
+        raw_merge = analysis.get("merge") or []
+        if not isinstance(raw_merge, list):
+            raw_merge, malformed = [], malformed + 1
+        for merge in raw_merge:
+            if not isinstance(merge, dict):
+                malformed += 1
+                continue
+            keep = _as_id(merge.get("keep_id"))
+            dids = merge.get("delete_ids")
+            if not isinstance(dids, list):
+                dids = [dids]
+            for raw in dids:
+                did = _as_id(raw)
+                if did is None or did == keep:
+                    # why: `did == keep` means the model listed the row it
+                    # elected to KEEP among the rows to archive — obeying that
+                    # would retire the surviving half of its own merge
+                    malformed += 1
+                    continue
+                delete_ids.add(did)
+                reasons[did] = f"Merged into #{keep if keep else '?'}"
+
+        # Only ids that are actually on screen can be reviewed. The confirm
+        # dialog skipped the rest while its button still counted them, so
+        # {"delete":[{"id":99999}]} produced a dialog with zero checkboxes and
+        # a button reading "Archive Selected (1)".
+        known = {r["id"] for r in rows}
+        unknown = sorted(i for i in delete_ids if i not in known)
+        delete_ids &= known
+
+        notes = []
+        if unknown:
+            listed = ", ".join("#%d" % i for i in unknown[:8])
+            notes.append(f"{len(unknown)} suggested id(s) are not active "
+                         f"memories of this project and were ignored ({listed})")
+        if malformed:
+            notes.append(f"{malformed} malformed entr"
+                         f"{'y' if malformed == 1 else 'ies'} ignored")
 
         if not delete_ids:
             self.status_var.set("Ready")
-            messagebox.showinfo("All Clean", "LLM found no garbage to remove.")
+            if notes:
+                messagebox.showwarning(
+                    "Nothing to archive",
+                    "The model's reply contained no usable memory id.\n\n- "
+                    + "\n- ".join(notes))
+            else:
+                messagebox.showinfo("All Clean", "LLM found no garbage to remove.")
             return
 
+        summary = analysis.get("summary", "")
+        if not isinstance(summary, str):
+            summary = str(summary)
+        if notes:
+            summary = (summary + "\n" if summary else "") + " | ".join(notes)
+
         # Show confirmation dialog
-        self._show_tidy_confirm(rows, delete_ids, reasons, analysis.get("summary", ""))
+        self._show_tidy_confirm(rows, delete_ids, reasons, summary)
 
     def _show_tidy_confirm(self, all_rows, delete_ids, reasons, summary):
         """Show dialog with LLM suggestions for user to confirm."""
+        id_to_row = {r["id"]: r for r in all_rows}
+        # A row that is not in all_rows cannot be rendered, and a button
+        # labelled "Archive Selected (1)" above an empty list is a trap: it
+        # promised an action it could not perform and then silently destroyed
+        # the dialog. Count only what is actually on screen — and if that is
+        # nothing, say so instead of opening an empty dialog.
+        shown_ids = [mid for mid in sorted(delete_ids) if mid in id_to_row]
+        if not shown_ids:
+            self.status_var.set("Ready")
+            messagebox.showinfo(
+                "Nothing to archive",
+                "None of the suggested memories are in this project's active "
+                "list, so there is nothing to review.")
+            return
+
         dlg = tk.Toplevel(self.root)
         dlg.title("Tidy Memories — Review")
         dlg.geometry("850x600")
@@ -846,13 +1463,15 @@ Memories:
         dlg.grab_set()
 
         # Summary
-        ttk.Label(dlg, text=f"LLM suggests removing {len(delete_ids)} of {len(all_rows)} memories",
+        ttk.Label(dlg, text=f"LLM suggests removing {len(shown_ids)} of "
+                            f"{len(all_rows)} memories",
                   font=("", 12, "bold")).pack(pady=(10, 2))
         if summary:
             ttk.Label(dlg, text=summary, wraplength=780, font=("", 9)).pack(pady=(0, 8))
 
         # Scrollable list with checkboxes
-        frame = ttk.LabelFrame(dlg, text="Memories to delete (uncheck to keep)", padding=8)
+        frame = ttk.LabelFrame(dlg, text="Memories to archive (uncheck to keep)",
+                               padding=8)
         frame.pack(fill=tk.BOTH, expand=True, padx=15, pady=5)
 
         canvas = tk.Canvas(frame)
@@ -865,12 +1484,9 @@ Memories:
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
 
         check_vars = []  # (BooleanVar, memory_id)
-        id_to_row = {r["id"]: r for r in all_rows}
 
-        for mid in sorted(delete_ids):
-            row = id_to_row.get(mid)
-            if not row:
-                continue
+        for mid in shown_ids:
+            row = id_to_row[mid]
 
             var = tk.BooleanVar(value=True)
             rf = ttk.Frame(scroll_frame)
@@ -899,18 +1515,32 @@ Memories:
                 dlg.destroy()
                 return
 
-            with self.db._connect() as conn:
-                conn.executemany(
-                    "DELETE FROM memories WHERE id = ?",
-                    [(mid,) for mid in ids_to_delete],
-                )
+            # Archive (is_active = 0) instead of DELETE. A hard delete broke
+            # every supersedes_id chain that pointed at the row: the column was
+            # added by a bare ALTER TABLE and declares no foreign key, so
+            # nothing caught the dangling reference and the provenance chain
+            # was destroyed irreversibly. bulk_archive is the writer's own
+            # retirement path — see docs/CONTRACTS.md#anti-patch-contract.
+            self.db.bulk_archive(ids_to_delete)
 
             dlg.destroy()
+            # MEMORY.md is a GENERATED artifact. _refresh() only repaints the
+            # trees, so without this the file kept advertising the retired
+            # rows (header count included) until the next hook run.
+            regenerate_memory_index(self.db, self.project_id,
+                                    self.project_path / "memory")
             self._refresh()
-            self.status_var.set(f"Deleted {len(ids_to_delete)} memories")
-            messagebox.showinfo("Done", f"Removed {len(ids_to_delete)} memories.")
+            self.status_var.set(f"Archived {len(ids_to_delete)} memories")
+            messagebox.showinfo(
+                "Done",
+                f"Archived {len(ids_to_delete)} memories (is_active = 0).\n\n"
+                "Rows are retired, not erased — supersedes_id provenance "
+                "chains stay intact and MEMORY.md has been regenerated.")
 
-        ttk.Button(bf, text=f"Delete Selected ({len(delete_ids)})", command=do_delete).pack(side=tk.RIGHT, padx=5)
+        # len(check_vars), never len(delete_ids): the label must count the
+        # checkboxes the user can actually see and untick.
+        ttk.Button(bf, text=f"Archive Selected ({len(check_vars)})",
+                   command=do_delete).pack(side=tk.RIGHT, padx=5)
         ttk.Button(bf, text="Cancel", command=dlg.destroy).pack(side=tk.RIGHT)
         self.status_var.set("Ready")
 
@@ -918,12 +1548,16 @@ Memories:
 
     def _add_memory_dialog(self):
         if not self.db:
+            # Was a silent no-op while Tidy / Save Session warn — the button
+            # simply appeared broken.
+            messagebox.showwarning("No Project", "Load a project first.")
             return
 
         dlg = tk.Toplevel(self.root)
         dlg.title("Add Memory")
-        dlg.geometry("500x300")
+        dlg.geometry("520x340")
         dlg.transient(self.root)
+        dlg.grab_set()
 
         ttk.Label(dlg, text="Category:").grid(row=0, column=0, padx=10, pady=5, sticky=tk.W)
         cat_var = tk.StringVar(value="note")
@@ -933,8 +1567,11 @@ Memories:
 
         ttk.Label(dlg, text="Importance:").grid(row=1, column=0, padx=10, pady=5, sticky=tk.W)
         imp_var = tk.StringVar(value="3")
-        ttk.Spinbox(dlg, textvariable=imp_var, from_=1, to=5, width=5).grid(
-            row=1, column=1, padx=10, pady=5, sticky=tk.W)
+        # readonly: clearing this field used to raise ValueError inside the Tk
+        # callback — swallowed to a stderr the --windowed exe does not have, so
+        # the dialog just sat there and nothing was ever saved.
+        ttk.Spinbox(dlg, textvariable=imp_var, from_=1, to=5, width=5,
+                    state="readonly").grid(row=1, column=1, padx=10, pady=5, sticky=tk.W)
 
         ttk.Label(dlg, text="Content:").grid(row=2, column=0, padx=10, pady=5, sticky=tk.NW)
         content_text = tk.Text(dlg, height=8, width=50)
@@ -943,34 +1580,61 @@ Memories:
         def save():
             content = content_text.get("1.0", tk.END).strip()
             if not content:
+                messagebox.showwarning("Empty", "Enter some content first.")
                 return
+            try:
+                importance = max(1, min(int(imp_var.get()), 5))
+            except (TypeError, ValueError):
+                # why: defence in depth behind state="readonly" — a
+                # programmatically-set variable can still hold garbage, and
+                # this callback must never die silently
+                importance = 3
             # Anti-patch: route through upsert_smart so MERGE/SUPERSEDE/INSERT
             # is decided by similarity, not by the caller. See docs/CONTRACTS.md#anti-patch-contract.
             result = upsert_smart(
                 self.db, self.project_id, None,
                 category=cat_var.get(),
                 content=content,
-                importance=int(imp_var.get()),
+                importance=importance,
                 tags=["manual", "dashboard"],
             )
             regenerate_memory_index(self.db, self.project_id, self.project_path / "memory")
-            self.status_var.set(
-                f"Add Memory: {result['action']} #{result.get('id')}"
-                f" (sim={result.get('similarity', 0.0):.2f})"
-            )
+            msg = f"Add Memory: {result['action']} #{result.get('id')}"
+            sim = result.get("similarity")
+            # Only report a similarity that was actually COMPUTED. The writer
+            # returns `sim if similar else 0.0` (llm/memory_writer.py:157) and
+            # _find_similar only keeps a candidate on `s > best_sim`
+            # (:87-92), so a genuine comparison result is always > 0 — a 0.0
+            # here means no comparison happened at all, and printing
+            # "(sim=0.00)" invented a measurement that was never taken.
+            if isinstance(sim, (int, float)) and not isinstance(sim, bool) and sim > 0:
+                msg += f" (sim={sim:.2f})"
+            if result.get("reason"):
+                msg += f" [{result['reason']}]"
             dlg.destroy()
+            # _load_memories() ends by setting the status bar to
+            # "Memories: N shown", so reporting the outcome BEFORE it meant the
+            # MERGE / SUPERSEDE / INSERT feedback was overwritten before anyone
+            # could read it. Repaint first, report last — the order do_delete
+            # already gets right.
             self._load_memories()
+            self.status_var.set(msg)
 
-        ttk.Button(dlg, text="Save", command=save).grid(row=3, column=1, pady=10)
+        bf = ttk.Frame(dlg)
+        bf.grid(row=3, column=1, pady=10, sticky=tk.W)
+        ttk.Button(bf, text="Save", command=save).pack(side=tk.LEFT, padx=5)
+        ttk.Button(bf, text="Cancel", command=dlg.destroy).pack(side=tk.LEFT)
 
     def _add_plan_dialog(self):
         if not self.db:
+            messagebox.showwarning("No Project", "Load a project first.")
             return
 
         dlg = tk.Toplevel(self.root)
         dlg.title("Add Plans")
         dlg.geometry("600x400")
         dlg.transient(self.root)
+        dlg.grab_set()
 
         ttk.Label(dlg, text="Enter plans (one per line):").pack(padx=10, pady=5, anchor=tk.W)
         plan_text = tk.Text(dlg, height=15, width=70)
@@ -980,6 +1644,7 @@ Memories:
             lines = plan_text.get("1.0", tk.END).strip().split("\n")
             lines = [l.strip() for l in lines if l.strip()]
             if not lines:
+                messagebox.showwarning("Empty", "Enter at least one plan line.")
                 return
             for content in lines:
                 self.db.add_plan(self.project_id, content)
@@ -987,26 +1652,40 @@ Memories:
             self._load_plans()
             self.status_var.set(f"Added {len(lines)} plan(s)")
 
-        ttk.Button(dlg, text="Add All", command=save).pack(pady=10)
+        bf = ttk.Frame(dlg)
+        bf.pack(pady=10)
+        ttk.Button(bf, text="Add All", command=save).pack(side=tk.LEFT, padx=5)
+        ttk.Button(bf, text="Cancel", command=dlg.destroy).pack(side=tk.LEFT)
 
     def _approve_plans(self):
         if not self.db:
             return
         selected = self.plan_tree.selection()
+        # project_id scopes every UPDATE below. `plans.id` is unique per DB
+        # FILE, not per project, and one memory.db can hold several projects
+        # (core/db.py:1306-1314), so an unscoped id rewrote whatever row owned
+        # it — including another project's status and result columns. Scoped, a
+        # stale or foreign id matches nothing and the rowcount says so.
+        done = 0
         for item in selected:
             values = self.plan_tree.item(item, "values")
             plan_id = int(values[0])
-            self.db.update_plan_status(plan_id, "ready")
+            done += self.db.update_plan_status(
+                plan_id, "ready", project_id=self.project_id) or 0
         self._load_plans()
+        if selected:
+            self.status_var.set(f"Approved {done} of {len(selected)} plan(s)")
 
     def _approve_all_plans(self):
         if not self.db:
             return
         plans = self.db.get_plans(self.project_id, statuses=["draft", "evaluating"])
+        done = 0
         for p in plans:
-            self.db.update_plan_status(p["id"], "ready")
+            done += self.db.update_plan_status(
+                p["id"], "ready", project_id=self.project_id) or 0
         self._load_plans()
-        self.status_var.set(f"Approved {len(plans)} plan(s)")
+        self.status_var.set(f"Approved {done} of {len(plans)} plan(s)")
 
     def _clear_done_plans(self):
         if not self.db:
@@ -1059,12 +1738,10 @@ Memories:
             f"Project: {proj_dir}"):
             return
 
-        # Mark as executing
-        for pid in ids:
-            self.db.update_plan_status(pid, "executing")
-        self._load_plans()
-
-        # Launch Claude Code in a new console window
+        # Launch Claude Code in a new console window FIRST. The old order
+        # marked every selected plan `executing` before Popen and the except
+        # branch never rolled it back, so a missing `claude` binary left the
+        # plans wedged in `executing` with nothing running.
         try:
             kwargs = {"cwd": proj_dir}
             if sys.platform == "win32":
@@ -1072,11 +1749,21 @@ Memories:
             else:
                 kwargs["start_new_session"] = True
             subprocess.Popen(["claude", prompt], **kwargs)
-
-            self.status_var.set(f"Launched Claude Code for {len(ids)} plan(s)")
         except Exception as e:
+            self._load_plans()
+            self.status_var.set("Launch failed — plan statuses unchanged")
             messagebox.showerror("Error", f"Failed to launch Claude Code:\n\n{e}\n\n"
                                  "Make sure 'claude' is on your PATH.")
+            return
+
+        marked = 0
+        for pid in ids:
+            marked += self.db.update_plan_status(
+                pid, "executing", project_id=self.project_id) or 0
+        self._load_plans()
+        self.status_var.set(
+            f"Launched Claude Code for {len(ids)} plan(s) "
+            f"({marked} marked executing)")
 
     def _mark_plan_done(self):
         """Mark selected plans as done, optionally with a result note."""
@@ -1101,11 +1788,14 @@ Memories:
 
         def do_done():
             note = result_var.get().strip()
+            n = 0
             for pid in ids:
-                self.db.update_plan_status(pid, "done", note or None, field="result")
+                n += self.db.update_plan_status(
+                    pid, "done", note or None, field="result",
+                    project_id=self.project_id) or 0
             dlg.destroy()
             self._load_plans()
-            self.status_var.set(f"Marked {len(ids)} plan(s) done")
+            self.status_var.set(f"Marked {n} of {len(ids)} plan(s) done")
 
         bf = ttk.Frame(dlg)
         bf.pack(pady=10)
@@ -1133,11 +1823,14 @@ Memories:
 
         def do_fail():
             reason = reason_var.get().strip()
+            n = 0
             for pid in ids:
-                self.db.update_plan_status(pid, "failed", reason or None, field="result")
+                n += self.db.update_plan_status(
+                    pid, "failed", reason or None, field="result",
+                    project_id=self.project_id) or 0
             dlg.destroy()
             self._load_plans()
-            self.status_var.set(f"Marked {len(ids)} plan(s) failed")
+            self.status_var.set(f"Marked {n} of {len(ids)} plan(s) failed")
 
         bf = ttk.Frame(dlg)
         bf.pack(pady=10)
@@ -1149,10 +1842,12 @@ Memories:
         if not self.db:
             return
         ids = self._get_selected_plan_ids()
+        n = 0
         for pid in ids:
-            self.db.update_plan_status(pid, "skipped")
+            n += self.db.update_plan_status(
+                pid, "skipped", project_id=self.project_id) or 0
         self._load_plans()
-        self.status_var.set(f"Skipped {len(ids)} plan(s)")
+        self.status_var.set(f"Skipped {n} of {len(ids)} plan(s)")
 
     def _edit_plan_dialog(self):
         """Edit the content of a selected plan."""
@@ -1195,13 +1890,18 @@ Memories:
         def save():
             new_content = content_text.get("1.0", tk.END).strip()
             if new_content and new_content != plan["content"]:
-                self.db.update_plan_content(plan_id, new_content)
+                self.db.update_plan_content(plan_id, new_content,
+                                            project_id=self.project_id)
             new_feas = feas_var.get().strip()
             if new_feas != (plan.get("feasibility") or ""):
-                self.db.update_plan_status(plan_id, plan["status"], new_feas, field="feasibility")
+                self.db.update_plan_status(plan_id, plan["status"], new_feas,
+                                           field="feasibility",
+                                           project_id=self.project_id)
             new_result = result_var.get().strip()
             if new_result != (plan.get("result") or ""):
-                self.db.update_plan_status(plan_id, plan["status"], new_result, field="result")
+                self.db.update_plan_status(plan_id, plan["status"], new_result,
+                                           field="result",
+                                           project_id=self.project_id)
             dlg.destroy()
             self._load_plans()
 
@@ -1220,10 +1920,18 @@ Memories:
         if not messagebox.askyesno("Delete Plans",
                                     f"Delete {len(ids)} plan(s)? This cannot be undone."):
             return
-        for pid in ids:
-            self.db.delete_plan(pid)
+        # project_id scopes the DELETE: plans.id is global to the DB file, and
+        # one memory.db can hold several projects (this dashboard switches
+        # between them), so an unscoped id can reach another project's row.
+        deleted = sum(self.db.delete_plan(pid, project_id=self.project_id)
+                      for pid in ids)
         self._load_plans()
-        self.status_var.set(f"Deleted {len(ids)} plan(s)")
+        if deleted != len(ids):
+            self.status_var.set(
+                f"Deleted {deleted} of {len(ids)} plan(s) — "
+                f"{len(ids) - deleted} did not belong to this project")
+        else:
+            self.status_var.set(f"Deleted {deleted} plan(s)")
 
     def _plan_context_menu(self, event):
         """Show right-click context menu on plan tree."""
@@ -1232,9 +1940,6 @@ Memories:
             if item not in self.plan_tree.selection():
                 self.plan_tree.selection_set(item)
             self.plan_menu.post(event.x_root, event.y_root)
-
-    _HAIKU_MODEL = "claude-haiku-4-5-20251001"
-    _API_URL = "https://api.anthropic.com/v1/messages"
 
     _EXTRACTION_PROMPT = """\
 You are a memory extraction system. Given a Claude Code conversation transcript, extract the most important information worth remembering across sessions.
@@ -1339,8 +2044,12 @@ Output ONLY valid JSON array."""
         if not transcript_dir:
             messagebox.showerror(
                 "No Transcripts",
-                f"Could not find Claude Code transcript directory for:\n{self.project_path}\n\n"
-                f"Looked in: {Path.home() / '.claude' / 'projects'}")
+                f"Could not find Claude Code transcript directory for:\n"
+                f"{self.project_path}\n\n"
+                f"Looked in: {Path.home() / '.claude' / 'projects'}\n\n"
+                f"Only an exact (case-insensitive) match on the project path is\n"
+                f"accepted. cc-memory will not guess a directory by name — that\n"
+                f"is how another project's transcript used to get ingested here.")
             return
 
         # Find the most recent JSONL file
@@ -1356,24 +2065,32 @@ Output ONLY valid JSON array."""
         latest = jsonl_files[0]
         mtime = datetime.fromtimestamp(latest.stat().st_mtime)
 
-        # Confirm with user
+        # Confirm with user. The matched DIRECTORY is shown, not just a UUID
+        # filename: it is the only thing that makes a wrong match visible
+        # before an unrelated project's history is written into this DB.
         if not messagebox.askyesno(
             "Save Session",
             f"Extract memories from the most recent transcript?\n\n"
+            f"Transcript dir: {transcript_dir}\n"
             f"File: {latest.name}\n"
             f"Modified: {mtime.strftime('%Y-%m-%d %H:%M:%S')}\n"
-            f"Size: {latest.stat().st_size / 1024:.0f} KB"):
+            f"Size: {latest.stat().st_size / 1024:.0f} KB\n\n"
+            f"Memories will be written to: {self.project_path / 'memory'}"):
             return
 
         try:
-            # Load transcript
+            # Parsing runs on the Tk main thread (the extractor is stdlib-only
+            # and deliberately synchronous), so give the user a busy cursor and
+            # a size hint rather than a frozen window.
+            self._set_busy(True, f"Parsing transcript {latest.name} "
+                                 f"({latest.stat().st_size / 1024:.0f} KB)...")
             messages = load_transcript(str(latest))
             if not messages:
+                self._set_busy(False, "Ready")
                 messagebox.showinfo("Empty", "Transcript is empty or could not be parsed.")
                 return
 
-            self.status_var.set("Extracting memories...")
-            self.root.update()
+            self._set_busy(True, "Extracting memories...")
 
             now = datetime.now()
             timestamp = now.strftime("%Y-%m-%d %H:%M:%S")
@@ -1450,6 +2167,7 @@ Output ONLY valid JSON array."""
             superseded = counts.get("superseded", 0)
             skipped = counts.get("skipped", 0)
 
+            self._set_busy(False)
             self._refresh()
             messagebox.showinfo(
                 "Saved",
@@ -1458,9 +2176,11 @@ Output ONLY valid JSON array."""
                 f"  Merged:      {merged}  (overwrote existing high-similarity)\n"
                 f"  Superseded:  {superseded} (archived older + linked new)\n"
                 f"  Skipped:     {skipped} (exact duplicates)\n\n"
+                f"Source:  {transcript_dir}\n"
                 f"Session: {latest.stem[:8]}...")
 
         except Exception as e:
+            self._set_busy(False, "Ready")
             messagebox.showerror("Error", f"Failed to extract memories:\n\n{e}")
 
     def _init_new_project(self):
@@ -1550,20 +2270,6 @@ Output ONLY valid JSON array."""
         bf.pack(fill=tk.X, padx=15)
 
         def do_init():
-            # Create memory directory
-            memory_dir = project / "memory"
-            memory_dir.mkdir(parents=True, exist_ok=True)
-            (memory_dir / "sessions").mkdir(exist_ok=True)
-            (memory_dir / "topics").mkdir(exist_ok=True)
-
-            # .gitignore
-            from core.progress import ensure_memory_gitignore
-            ensure_memory_gitignore(memory_dir)
-
-            # Initialize DB and save confirmed memories
-            db = MemoryDB(memory_dir / "memory.db")
-            pid = db.upsert_project(str(project))
-
             # Anti-patch: route initial-scan memories through the writer.
             # On a fresh project these all INSERT (no similar), but if the
             # user re-inits an existing project the writer will merge sensibly.
@@ -1572,17 +2278,36 @@ Output ONLY valid JSON array."""
                  "tags": ["auto-detected", "init"]}
                 for var, cat, content, imp in mem_vars if var.get()
             ]
-            counts = upsert_batch(db, pid, None, batch, memory_dir=memory_dir)
-            saved = counts.get("inserted", 0) + counts.get("merged", 0) + counts.get("superseded", 0)
+            try:
+                # Single shared helper: memory/ + sessions/ + topics/ + the
+                # .gitignore, identical on every path that can create a
+                # project. This used to be the ONLY place the ignore file was
+                # written. It now REFUSES a directory that no longer exists,
+                # which can happen between the picker and this click.
+                memory_dir = self._ensure_memory_dir(project)
 
-            # Save keywords
-            if scan.get("keywords"):
-                db.upsert_keywords(pid, scan["keywords"])
+                # Initialize DB and save confirmed memories
+                db = MemoryDB(memory_dir / "memory.db")
+                pid = db.upsert_project(str(project))
+                counts = upsert_batch(db, pid, None, batch, memory_dir=memory_dir)
+                saved = (counts.get("inserted", 0) + counts.get("merged", 0)
+                         + counts.get("superseded", 0))
 
-            # Create CLAUDE.md
-            if self._create_claude_md_var.get():
-                claude_md = _generate_claude_md(project, scan)
-                (project / "CLAUDE.md").write_text(claude_md, encoding="utf-8")
+                # Save keywords
+                if scan.get("keywords"):
+                    db.upsert_keywords(pid, scan["keywords"])
+
+                # Create CLAUDE.md
+                if self._create_claude_md_var.get():
+                    claude_md = _generate_claude_md(project, scan)
+                    (project / "CLAUDE.md").write_text(claude_md, encoding="utf-8")
+            except Exception as e:
+                # why: same rule as _load_project — a Tk callback that raises
+                # reports to stderr, which the --windowed exe does not have, so
+                # "Initialize" would appear to do nothing at all
+                dlg.destroy()
+                self._report_project_error("initialize", project, e)
+                return
 
             dlg.destroy()
             self._load_project(str(project))
@@ -1606,45 +2331,40 @@ def _find_transcript_dir(project_path: Path) -> "Path | None":
     """
     Find the Claude Code transcript directory for a project.
 
-    Claude stores transcripts at ~/.claude/projects/<hash>/ where <hash> is
-    the project path with ':' → '-' and path separators → '-'.
+    Claude Code stores transcripts at ``~/.claude/projects/<slug>/`` where
+    <slug> is the absolute project path with EVERY non-alphanumeric character
+    replaced by '-'. The old mangling only handled ':', '\\' and '/', so any
+    project path containing '_' or '.' failed the exact match outright — of
+    179 real slug directories on the development machine, zero contain either
+    character.
+
+    Exact match, then case-insensitive match, then None. There is deliberately
+    NO fuzzy fallback: the removed `proj_name in d.name` branch accepted any
+    slug merely CONTAINING the project's basename, so "Save Session" on a
+    project called `cc`, `core` or `data` silently harvested — and permanently
+    stored — an unrelated project's transcript. Guessing is never safe in a
+    tool that persists what it reads and re-injects it every session. The
+    sibling `extractor.find_latest_transcript` follows the same rule.
     """
     claude_projects = Path.home() / ".claude" / "projects"
     if not claude_projects.exists():
         return None
 
-    # Convert project path to the expected hash format
-    # e.g. D:\Projects\foo → D--Projects-foo
-    path_str = str(project_path.resolve())
-    # Normalize: replace : and separators with -
-    hash_candidate = path_str.replace(":", "-").replace("\\", "-").replace("/", "-")
+    # e.g. d:\Projects\cc-memory → d--Projects-cc-memory
+    slug = re.sub(r"[^A-Za-z0-9]", "-", str(project_path.resolve()))
 
     # Try exact match first
-    candidate = claude_projects / hash_candidate
-    if candidate.exists():
+    candidate = claude_projects / slug
+    if candidate.is_dir():
         return candidate
 
     # Case-insensitive match (Windows paths may differ in casing)
-    hash_lower = hash_candidate.lower()
+    slug_lower = slug.lower()
     for d in claude_projects.iterdir():
-        if d.is_dir() and d.name.lower() == hash_lower:
+        if d.is_dir() and d.name.lower() == slug_lower:
             return d
 
-    # Fuzzy match: check if any dir name contains the project name
-    proj_name = project_path.name.lower()
-    best = None
-    best_mtime = 0
-    for d in claude_projects.iterdir():
-        if d.is_dir() and proj_name in d.name.lower():
-            # Pick the one with most recent transcript
-            jsonls = list(d.glob("*.jsonl"))
-            if jsonls:
-                latest_mtime = max(f.stat().st_mtime for f in jsonls)
-                if latest_mtime > best_mtime:
-                    best = d
-                    best_mtime = latest_mtime
-
-    return best
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -1992,6 +2712,12 @@ def _generate_claude_md(project: Path, scan: dict) -> str:
 # Main
 # ---------------------------------------------------------------------------
 def main():
+    # The dashboard prints (and renders) memory content that can contain any
+    # unicode glyph — including the ↻ supersede marker cc-memory emits itself.
+    # On a gbk console that raised UnicodeEncodeError before the GUI ever
+    # appeared. This was one of five entry points that never called it.
+    enable_utf8_io()
+
     parser = argparse.ArgumentParser(description="cc-memory Dashboard")
     parser.add_argument("--project", help="Initial project path")
     args = parser.parse_args()

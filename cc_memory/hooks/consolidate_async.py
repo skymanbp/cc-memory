@@ -142,6 +142,14 @@ def main():
         _log.error(f"stdin parse error: {exc}")
         sys.exit(0)
 
+    # json.loads SUCCEEDS on well-formed non-object payloads (`null`, `42`,
+    # `"s"`, `[1,2]`, `true`). The `.get()` calls below sit outside the try, so
+    # without this guard those raise AttributeError, print a traceback to
+    # stderr and exit 1 — two hook-contract violations at once.
+    if not isinstance(data, dict):
+        _log.warn(f"stdin payload is {type(data).__name__}, not an object")
+        sys.exit(0)
+
     cwd = data.get("cwd", "")
     if not cwd:
         sys.exit(0)

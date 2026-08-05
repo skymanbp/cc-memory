@@ -274,17 +274,24 @@ def print_list(root: Path):
 # --------------------------------------------------------------------------- #
 
 def _read_version(root: Path) -> str:
-    """Best-effort read of cc_memory.__version__ for the marker's informational field."""
-    init = root / "cc_memory" / "__init__.py"
-    try:
-        text = init.read_text(encoding="utf-8")
-        m = re.search(r'__version__\s*=\s*["\']([^"\']+)["\']', text)
+    """Best-effort read of the canonical version for the marker's informational field.
+
+    `cc_memory/core/version.py` is the single source since v2.5.0;
+    `cc_memory/__init__.py` only re-exports it (`from .core.version import
+    __version__`), so scanning the latter for a literal — which is what this did
+    through v2.4.3 — silently yields "0.0.0". Probe both, canonical first.
+    """
+    for rel in (("cc_memory", "core", "version.py"), ("cc_memory", "__init__.py")):
+        try:
+            text = root.joinpath(*rel).read_text(encoding="utf-8")
+        except OSError:
+            # why: probe absent in this checkout shape — try the next candidate
+            continue
+        m = re.search(r'^__version__\s*=\s*["\']([^"\']+)["\']', text, re.M)
         if m:
             return m.group(1)
-    except Exception:
-        # why: version is an informational marker field only (drift is decided by the
-        # sha256, not this string). A missing/renamed __init__ must not crash the tool.
-        return "0.0.0"
+    # why: version is an informational marker field only (drift is decided by the
+    # sha256, not this string), so an unreadable source must not crash the tool.
     return "0.0.0"
 
 

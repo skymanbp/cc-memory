@@ -1,7 +1,7 @@
-<!-- i18n-source: ARCHITECTURE.md | sha256: 0e58c232efadf803 | version: 2.4.3 | translated: 2026-08-04 -->
+<!-- i18n-source: ARCHITECTURE.md | sha256: 47d2fa57845852be | version: 2.5.0 | translated: 2026-08-05 -->
 > [English](ARCHITECTURE.md) · **简体中文**
 
-# cc-memory — 架构（v2.4.3）
+# cc-memory — 架构（v2.5.0）
 
 cc-memory 是一个 Claude Code 插件，为 Claude 提供**跨压缩、跨会话的持久化结构化
 记忆**。本文档是总览：这个插件用来做什么、仓库如何布局、哪些钩子在何时触发、数据库
@@ -73,7 +73,7 @@ PROTOCOL）都是**有意**同时匹配中文和英文的，存储的记忆也�
 ```
 cc-memory/
 ├── .claude-plugin/
-│   ├── plugin.json              ← 插件清单（v2.4.3）
+│   ├── plugin.json              ← 插件清单（v2.5.0）
 │   └── marketplace.json         ← /plugin marketplace add 条目
 ├── hooks/hooks.json             ← 钩子声明（6 条命令 / 5 个事件）
 ├── skills/                      ← 技能的唯一规范位置
@@ -88,7 +88,7 @@ cc-memory/
 │   ├── ARCHITECTURE.md          ← 本文件（总览 + i18n 约定）
 │   └── CONTRACTS.md             ← 反补丁 + 强制交接 + 实时计划
 ├── cc_memory/                   ← Python 包（已拆分子包）
-│   ├── __init__.py              (__version__ = "2.4.3", cc_memory/__init__.py:64)
+│   ├── __init__.py              (转出口 core/version.py 的 __version__)
 │   ├── config.json
 │   ├── core/                    ← 领域层：db, extractor, consolidate, idle,
 │   │                              progress, plan, privacy, modes, auth,
@@ -99,7 +99,7 @@ cc-memory/
 │   ├── mcp/                     ← server.py（MCP stdio）
 │   └── ui/                      ← installer, dashboard, web_viewer
 ├── tests/                       ← smoke_test.py（规范的端到端检查）+
-│                                  test_plan_carryover.py
+│                                  test_plan_carryover.py + test_surfaces.py
 ├── tools/i18n_check.py          ← 文档翻译漂移检查器（仅 dev/CI）
 ├── build_exe.py                 ← PyInstaller 构建
 ├── pyproject.toml
@@ -116,11 +116,27 @@ cc-memory/
 [§9](#9-documentation-language-convention-i18n) 所规定的对象，也是
 `tests/smoke_test.py:878-895` 作为漂移门禁导入的模块。
 
-版本字符串在六个规范位置声明，且必须保持完全同步：
-`.claude-plugin/plugin.json:3`、`pyproject.toml:3`、`cc_memory/__init__.py:64`、
-`cc_memory/config.json:2`，外加 CLI 横幅（`cli/mem.py:276, 984`）与 MCP 服务器横幅
-（`mcp/server.py:274, 316`）。（在 v2.4.2 之前，它们曾漂移成三个不同的值——
-2.4.1 / 2.3.4 / 2.3.3；见 `CHANGELOG.md` 的 2.4.2 → Changed。）
+### 只有一个版本字符串（v2.5）
+
+`cc_memory/core/version.py` 持有 `__version__`，是运行时**唯一**的权威来源。它放在
+`core/` 而不是 `cc_memory/__init__.py` 里，原因是每个入口都通过把*包目录*插进
+`sys.path` 再扁平导入（`from core.db import MemoryDB`）来自举——独立安装器铺出来的
+是**扁平**目录树，在那种布局下 `import cc_memory` 会抛 `ModuleNotFoundError`，因此
+任何必须在两种布局下都能跑的模块都不能用 `from cc_memory import __version__`。
+`from core.version import __version__` 在两种布局下都成立，而
+`cc_memory/__init__.py:64` 把它转出口，使得可从 wheel 导入的写法继续可用。
+
+有四份**不可导入**的清单读不到它，必须一同 bump：`.claude-plugin/plugin.json`、
+`.claude-plugin/marketplace.json`、`cc_memory/config.json`（其中的 `version` 是给
+某个不知何故缺少 `core/version.py` 的扁平安装用的最后兜底）以及 `pyproject.toml`。
+`tests/smoke_test.py` 会断言它们全部一致。
+
+在 v2.5 之前，这个字符串还被重新手打进 CLI 横幅（`cli/mem.py`）、MCP 服务器横幅
+（`mcp/server.py`）、安装器横幅与 GUI 标题（`ui/installer.py`）以及 `build_exe.py`；
+其中两处字面量在 v2.4.3 时已经陈旧。它们现在全部在运行时解析该值，并带一条有文档的
+兜底链（`core.version` → 包 `__init__` → 文本扫描 → `config.json` → `"unknown"`），
+好让一次不完整的安装退化而不是崩溃。（在 v2.4.2 之前，这些副本曾漂移成三个不同的
+值——2.4.1 / 2.3.4 / 2.3.3；见 `CHANGELOG.md` 的 2.4.2 → Changed。）
 
 ### 合并前的那几份文档去哪了
 
@@ -197,35 +213,38 @@ SessionStart `10 × 1.5 = 15`、Stop 22、PostToolUse 8、UserPromptSubmit 8。�
 是单独追加的，采用**固定** 300 秒（`apply_mult=False`，`installer.py:122-123`），
 因为它是一个后台截止期限，而不是阻塞 UI 的预算。
 
-### 已知缺口：observation 闸门遮蔽了计划分支
+### observation 闸门不再遮蔽计划分支（v2.5 已修）
 
-当 `core.modes.should_observe(mode, tool_name)` 为假时，`post_tool_use.py:86-87`
-会提前返回，而实时计划集成块位于该闸门**之后**的
-`post_tool_use.py:113-141`。`should_observe`（`core/modes.py:65-71`）先做跳过列表
-检查，再对 `observe_tools` 做白名单检查，而在全部三种出厂模式中
-（`modes.py:9-56`）：
+一直到 v2.4.3 为止，当 `core.modes.should_observe(mode, tool_name)` 为假时
+`post_tool_use.py` 会提前返回，而实时计划集成块坐在那道闸门**之后**。
+`should_observe` 先做跳过列表检查，再对 `observe_tools` 做白名单检查，而在全部
+三种出厂模式中：
 
-- `TodoWrite` 位于每种模式的 `skip_tools` 里（`modes.py:18, 30, 45`）→
-  `should_observe` 为 False；
+- `TodoWrite` 位于每种模式的 `skip_tools` 里 → `should_observe` 为 False；
 - `ExitPlanMode` 不在任何模式的 `observe_tools` 里 → `should_observe` 为 False。
 
-已通过对三种模式直接运行 `core.modes.should_observe` 验证：两个工具在每种模式下都
-返回 `False`。因此按当前写法，`ExitPlanMode` 捕获（`post_tool_use.py:117-122`）与
-`TodoWrite` 步骤同步（`post_tool_use.py:124-129`）经由该钩子是不可达的；如今实时
-计划是由 `cli/mem.py:772`（`/cc-mem plan-set`）喂入的，而
-`tests/smoke_test.py:419, 466` 是直接调用 `core.plan.capture_exit_plan_mode` /
-`apply_todowrite_sync`，而不是经由钩子，所以测试套件抓不到这个问题。编辑计数器
-（`post_tool_use.py:131-133`）在 `code` 与 `writing` 模式下**确实**会触发（这两种
-模式会观察 `Edit`/`Write`/`MultiEdit`），但在 `research` 模式下不会，因为那里这些
-工具被跳过（`modes.py:31`）；敏感调用的加分（`post_tool_use.py:139-141`）需要
-`Bash`，它在 `code` 和 `research` 中被观察，但在 `writing` 中被跳过
-（`modes.py:46`）。这是一处记录在此的代码缺陷，而不是文档错误——它不在审计的行动
-清单里，作为新发现在此报告。
+于是整个 v2.2 实时计划锚点**经由它自己的钩子是死的**：`PostToolUse` 从未写过
+`plan_active`，从计划模式退出也从未生成 `memory/.plan_raw.md` 与 `memory/PLAN.md`，
+而漂移计数还会随模式静默变化（编辑加分在 `code` 与 `writing` 下会触发，`research`
+下不会；敏感 Bash 加分在 `code` 与 `research` 下会触发，`writing` 下不会）。实时
+计划只能通过 `/cc-mem plan-set` 触达，而 `tests/smoke_test.py` 是直接调用
+`core.plan.capture_exit_plan_mode` / `apply_todowrite_sync` 而不是经由钩子，所以
+测试套件从来抓不到它。
 
-另外注意，`config.json` 的 `observation.skip_tools` 键
-（`cc_memory/config.json:35-40`）是**死键**：没有任何 Python 读取它（`skip_tools`
-仅出现在 `core/modes.py:17, 29, 44, 67`）。真正生效的过滤器是 `core/modes.py` 中
-按模式的 `skip_tools` + `observe_tools`。
+`_apply_plan_integration`（`post_tool_use.py:77`）现在跑在闸门**之上**
+（在 `post_tool_use.py:163` 调用），`should_observe` 只包住 `insert_observation`
+那一块。按模式实测（code / research / writing）：`ExitPlanMode` → `plan_active`
+行数 `0/0/0` → `1/1/1`；`Edit` → `edits_since_last_guardian` `1/0/1` → `1/1/1`；
+Bash `git push`（1 次编辑 + 20）`21/20/1` → `21/21/21`。
+
+**这条不变量在此写明，以防再次被破坏：** 模式决定的是什么值得**记住**；它绝不该
+决定计划锚点是否跟得上现实。计划控制不是观测。不要把该块移回闸门之下，也不要靠
+把 `TodoWrite` / `ExitPlanMode` 加进模式白名单来「修」它——`core/modes.py` 的
+`should_observe` docstring 记录了这两条禁令。
+
+另外注意，`config.json` 已经不再带 `observation.skip_tools` 键。它属于那约 34 个
+没有任何读取者的叶子键之一，已在 v2.5 全部删除；真正生效的过滤器一直都是
+`core/modes.py` 中按模式的 `skip_tools` + `observe_tools`。
 
 ---
 
@@ -340,9 +359,41 @@ regenerate_memory_index(db, project_id, memory_dir)   ← MEMORY.md 刷新
 `cc_memory/` 内 grep `upsert_smart|upsert_batch` 得到的完整集合。）
 
 阈值只存在于一个地方——`memory_writer.HIGH_SIM = 0.80`、`MID_SIM = 0.50`、
-`MIN_CONTENT_LEN = 10`、`MAX_CANDIDATES_TO_SCAN = 50`（`memory_writer.py:44-47`），
-并以信息性方式镜像在 `config.json` 的 `writer` 块中。完整契约见
+`MIN_CONTENT_LEN = 10`、`MAX_CANDIDATES_TO_SCAN = 50`（`memory_writer.py:44-47`）。
+`config.json` 里那个只作信息展示的 `writer` 块没有任何读取者，已在 v2.5 删除——
+一个惰性的可调项比没有可调项更糟。完整契约见
 [docs/CONTRACTS.md](CONTRACTS.md#anti-patch-contract)。
+
+### 隐私过滤器（第 0 步）——线性、无上限、失败闭合（v2.5）
+
+`clean_for_storage`（`core/privacy.py`）同时守卫面向 LLM 的路径
+（`core/extractor.py`）与记忆写入路径，所以它的失效模式是**双向同时泄漏**。一直到
+v2.4.3 为止，它是 `re.sub(r"<private>.*?</private>", "", text)` 外加一层
+`text.count("<private>") > 100` 的 ReDoS 守卫——而那道守卫是**原样返回文本**，也就是
+说它恰好在载荷看起来有敌意时**失败开放**：100 个标签剥除正确，101 个就同时泄漏进
+Anthropic 请求**和** `memories` 表。
+
+这个上限也校准在错误的信号上。格式良好的标签对正则引擎来说是廉价的；**未闭合**的
+`<private>` 才是二次方那一档，因为每一个开标签位置都要把其后全部内容重新扫一遍去找
+一个并不存在的闭标签（实测，CPython 3.13）：
+
+| 输入 | `re.sub` | 线性扫描 |
+|---|---|---|
+| 20000 个格式良好标签（996.1 KiB） | 6.0 ms | 5.1 ms |
+| 16000 个未闭合标签（140.6 KiB） | **9517.4 ms**，尾部泄漏 | 0.0 ms，尾部丢弃 |
+
+`_strip_tagged_spans` 是一次从左到右、无回溯的 `str.find` 扫描，因此根本不需要任何
+上限——而且悬空的开标签现在**失败闭合**：从它到文本末尾的一切都会被丢弃而不是发出
+去。配对语义未变（每个开标签绑定其后第一个闭标签），并在 20000 个随机标签汤输入上
+验证：全部 13328 个格式良好输入零行为差异。
+
+同一类缺陷也存在于 `hooks/post_tool_use.py`，它在 `_truncate_output` **之后**才计算
+`is_private`——而那个辅助函数会把 `Read` 的正文替换成字面量 `"(file content)"`。于是
+对一个被用户标记为 private 的文件所做的 `Read` 会以 `is_private=0` 存下来；而
+`is_private` 是 `db.get_recent_observations` / `get_observations_since` 里唯一的
+过滤器，所以那一行的路径抵达了 Stop 观察者、PreCompact 抽取提示词以及
+`progress.files_touched`。现在分类改在原始输入/响应上运行，早于任何一个有损截断辅助
+函数。
 
 ### 交接流程（强制）
 
@@ -407,6 +458,43 @@ SessionStart：
 `SessionStart` 会报告残留的标记，但只在它至少已存在 10 分钟之后才报，因此一次仍在
 进行中的运行绝不会被误标（`session_start.py:187-206`）。
 
+### transcript 归属：永不做模糊匹配（v2.5）
+
+有两条 SessionStart 路径会读取 PreCompact 从未处理过的 `.jsonl` transcript ——
+`retroactive_save`（对未保存的既往会话做 LLM 抽取）与第 3 级的
+`_refresh_progress_row` 挖掘（`open_todos`、`files_touched`、`transcript_ptr`）。
+两者都要在 `~/.claude/projects/` 下解析本项目的目录，而一直到 v2.4.3 为止，两者都
+可能解析到**另一个项目的**目录。
+
+slug 约定是：把 `[A-Za-z0-9]` 之外的**每一个**字符替换成 `-`。cc-memory 只替换了其中
+三个（`:` `\` `/`），于是任何路径含 `_` 或 `.` 的项目都会算出一个并不存在的 slug ——
+而这次未命中会继续掉进对本机全部 slug 目录的模糊子串搜索。参考机器上的爆炸半径
+（179 个 slug 目录）：子串 `core` 命中其中 131 个，`app` 与 `data` 各 141 个，
+`proj` 33 个。于是一个项目可能摄取外来 transcript、把它送去 Haiku，再把抽取出的
+事实当作自己的记忆存下来。
+
+三处改动关闭了它：
+
+1. `core.extractor.mangle_project_path`（`extractor.py:390`）成为该约定的唯一真源，
+   由 `find_latest_transcript`、`hooks/session_start.py` 和 `ui/dashboard.py` 共用
+   —— 后者此前逐字复制了旧解析器，连模糊分支一起。
+2. 模糊兜底被**删除**。未命中返回 `None`。调用方必须把它当作「没有 transcript」，
+   绝不能当成可以猜的许可。
+3. 归属改为正向校验。`_transcript_belongs_to`（`session_start.py:478`）读取
+   transcript 自身记录携带的 `cwd`，并且是**失败闭合**的 —— 没有 `cwd` 就不摄取 ——
+   它在有界窗口加载之后为 `retroactive_save` 把关。第 3 级挖掘则使用故意更弱的
+   `_transcript_is_foreign`（`session_start.py:498`）：缺失 `cwd` 放行，`cwd`
+   **不同**才拒绝。两者的差异是刻意的 —— 追溯保存会把 LLM 抽取的记忆永久落库，
+   理应要求证明；而第 3 级还必须对 `tests/smoke_test.py:266-278` 构造的那种没有
+   `cwd` 的 transcript 形态继续可用。
+
+实测：用两份植入的 transcript（其中一份外来），追溯保存从 2 条 LLM 腿摄取
+`['aaaa-foreign', 'bbbb-mine']` 变为 1 条腿摄取 `['bbbb-mine']`；完全没有 `cwd` 的
+transcript 得到 0 条腿、0 条记忆。第 3 级从
+`open_todos=[{'content': 'FOREIGN TODO leak'}]` + `files=['FOREIGN_SECRET_FILE.py']`
++ 一个外来 `transcript_ptr` 变为全空，并记录一条拒绝日志。窗口在写入
+`transcript_ptr` **之前**加载，因为一个指向别的项目 transcript 的指针本身就是污染。
+
 ### 实时计划流程（v2.2）
 
 `ExitPlanMode` 的输出（或用户提供的 `/cc-mem plan-set` 文本）落入
@@ -462,11 +550,47 @@ Ollama，每一批整理都要冷加载一个 5.9 GB 的本地模型（`core/aut
 `"ollama: disabled (config ccl.enabled=false)"`（`ccl_backend.py:169-170`），因此
 默认安装根本没有本地兜底。
 
-`call_llm` 的 `fallback_timeout` 为 Ollama 支路设定上界。当它为 `None` 时默认取
-`min(timeout*3, 120)`；受时间预算约束的调用方**必须**传入一个显式值，这样最坏情况
-的在途墙钟时间才是已知的：每个 Anthropic 候选至多 `timeout`（上限 2 个）+ 启用
-Ollama 时的 `fallback_timeout`。正是这个上界让整理的 `BudgetGate` 能够保证在截止
-期限之前完成——见 `core.consolidate._worst_call_cost`（`ccl_backend.py:127-134`）。
+### 给墙钟设界：`fallback_timeout` 与 `deadline`
+
+`call_llm`（`ccl_backend.py:123`）提供两条互相独立的界限。
+
+`fallback_timeout` 为 Ollama 支路设定上界。当它为 `None` 时默认取
+`min(timeout*3, 120)`。于是一次调用的最坏包络是
+
+```
+2 * timeout  +  (启用 ccl 时的 fallback_timeout，否则 0)
+```
+
+因为 Anthropic 候选被限制在 2 个（`ccl_backend.py:149`）。正是这套算术让整理的
+`BudgetGate` 能保证按时完成——见 `core.consolidate._worst_call_cost`。
+
+**`deadline` 是更强的那条界限，也是钩子必须使用的那条。** 它是一个绝对的
+`time.monotonic()` 时刻，调用必须在此之前**结束**：每条腿的有效超时都会被夹到实际
+剩余的时间，剩余不足最小值的腿直接跳过。因此总墙钟时间由该期限兜底，与存在多少个
+凭据候选无关——这让调用方可以为常见的单候选路径保留一个宽裕的单腿 `timeout`，而不必
+为了扛住病态情形把它压小。
+
+一直到 v2.4.3 为止，`core/consolidate.py` 是**唯一**遵守这套规则的模块，而三个带硬性
+宿主超时的钩子都违反了它——其中一个在出厂默认配置下就违反：
+
+| 调用点 | 宿主预算 | v2.5 之前的包络，`ccl` 关 | 开 |
+|---|---|---|---|
+| `hooks/stop.py` | 22 s | 16 s | 40 s ✗ |
+| `hooks/pre_compact.py` | 120 s | 50 s + 约 26 s transcript 工作 | 125 s ✗ |
+| `hooks/session_start.py` | 15 s | **40 s ✗** | 100 s ✗ |
+
+`session_start` 在 v2.5 之前的 `_RETRO_DEADLINE_S` 只决定要不要再开一个*文件*；它
+无法中断一条已经在飞的腿，所以一个卡住的 socket 就是 40 s 撞 15 s 的强杀。三个钩子
+现在都在其包导入**之前**捕获 `_HOOK_T0 = time.monotonic()`（这样导入开销也计入预算），
+并把 `deadline=_HOOK_T0 + <预算>` 传进 `call_llm`：`stop.py` 的
+`_LLM_DEADLINE_S = 14.0`、`pre_compact.py` 的 `75.0`、`session_start.py` 的
+`_RETRO_DEADLINE_S = 13.0`。用刻意拖住的腿实测：Stop `25.45 s → 15.99 s`（预算 22 s）；
+PreCompact `约 144 s → 74.39 s`（预算 120 s）。常规路径延迟不变（0.29 s → 0.30 s），
+因为预算充裕时每条腿仍拿到完整的单腿 `timeout`。
+
+诚实的界限是 `deadline + (k-1) * timeout`，其中 `k` 是 socket 超时被实测到的超出
+比率（期限阻止腿*开始*，最后一条腿仍可能在飞）。按实测的 `k ≈ 1.48`，即 Stop 22 s
+中的 17.4 s、PreCompact 120 s 中的 87 s。
 
 如果所有启用的支路都失败，`call_llm` 抛出携带逐支路聚合原因的 `RuntimeError`
 （`ccl_backend.py:172-174`），钩子则优雅降级——抽取被跳过，但归档 / 交接 /
@@ -599,33 +723,58 @@ SQL 真相来源（PROGRESS.md 对应 `progress`，PLAN.md 对应 `plan_active`�
 排除在 `SUBPACKAGE_FILES` 和 `build_exe.py` 之外；打包后的插件不受它影响
 （见 [§9.5](#95-the-checker)）。
 
+### 五个用户界面是单独安装的（v2.5）
+
+`skills/`、`agents/` 和 `commands/` **不是**包文件，而一直到 v2.4.3 为止，独立安装器
+根本不发布它们：安装完成后 `~/.claude` 里只有 `hooks/` 和 `settings.json`，别无他物
+—— 没有 `/cc-mem` 命令、没有 `plan-refiner` / `plan-guardian` 子代理、没有技能。
+用户真正会去交互的东西全都缺失。
+
+`SURFACE_FILES`（`installer.py:79`）恰好点名五条路径 —— `commands/cc-mem.md`、
+`agents/plan-refiner.md`、`agents/plan-guardian.md`、`skills/ccm-load/SKILL.md`、
+`skills/save-memories/SKILL.md` —— 而 `_copy_surfaces`（`installer.py:286`）在安装的
+第 [2/3] 步把它们写进 `~/.claude/`，并把写了什么记录进 `installed_surfaces.json`
+（`installer.py:58`）。
+
+卸载是**按名字**进行的，绝不 `rmtree`：`~/.claude/{commands,agents,skills}` 里放着
+用户自己的文件。`_remove_surfaces`（`installer.py:323`）只删除被记录的那些路径，会
+移除被清空的 `skills/<name>/` 但绝不移除 `commands/` 或 `agents/` 本身，并且区分
+「没有清单」（回退到本次构建的 `SURFACE_FILES`）与「清单记录了零个文件」（什么都不
+删，并明说）。在预先放入用户自己的 `commands/my-own.md` 和 `agents/my-agent.md` 后
+做一次安装-卸载往返，剩下的恰好就是那两个文件。
+
+### settings.json 在任何复制之前就被校验（v2.5）
+
+`_read_settings`（`installer.py:508`）返回 `(dict, None)` 或 `(None, error)`，绝不
+抛异常；`cli_install` 在第 **[0/3]** 步调用它，解析失败时以 1 退出并打印
+`Nothing has been installed.`。一直到 v2.4.3 为止，解析发生在复制**之后**，所以一份
+安装器读不懂的 `settings.json` 会留下 32 个文件在盘上、**零个钩子被注册** —— 卸载器
+也以同样方式死在半途。19 种设置形状 ×{预检、安装、二次安装、卸载、二次卸载}：
+**18 次崩溃 → 0**。
+
+其中值得知道的几个判断：空文件或只含空白的文件按 `{}` 处理（没有用户数据会丢，而
+拒绝会让一台全新机器卡住）；UTF-8 BOM 被容忍，因为 PowerShell 的 `>` 就会写一个；
+三种确实编码了我们无法解析之意图的形状（JSONC 注释、尾逗号、顶层数组）以 rc=1 拒绝
+且不复制任何东西；畸形的钩子组被**逐字保留**而不是搅碎；一条仅仅提到 "cc-memory"
+却并未运行本次构建那六个钩子脚本之一的钩子命令，会被**保留并给出提示**而不是删除。
+
+### 布局检测与检查现在一致了（v2.5 已修）
+
 检测同时接受两种形态：`mem.py:181` 测试
-`(legacy / "cc_memory").exists() or (legacy / "core" / "db.py").exists()`，注释里
-记录了原因——只探测 `cc_memory/` 会让这个安装器产出的每一个安装对
-`/cc-mem status` 都不可见（`mem.py:176-179`）。
+`(legacy / "cc_memory").exists() or (legacy / "core" / "db.py").exists()`。检查此前
+与它自相矛盾：`_inspect_layout`（`mem.py:251`）把 `_REQUIRED_PLUGIN_FILES`
+（`mem.py:133`）中每一条带 `cc_memory/…` 前缀的条目都以布局**根目录**为基准解析，
+于是一个健康的扁平安装被报成 22 个文件全缺、打印 `[FAIL]`——而且因为
+`/cc-mem status` 只对「完全可用」的布局跑 API key 检查，那项检查被整个跳过。
 
-### 两处已核实的扁平布局不一致
+它现在只解析一次 `pkg_dir`（`mem.py:274`：若 `root/"cc_memory"` 目录存在则取它，
+否则取 `root`），据此剥去前缀，并且只对 plugin-manifest 安装要求
+`hooks/hooks.json` —— 独立安装器从不复制它，而当钩子来自 `settings.json` 时它也毫无
+意义。报告会打印 `(flat)` / `(nested)` 让形态可见，`cmd_status` 也改为把返回的
+`pkg_dir` 插进 `sys.path`，而不是硬编码的 `root/"cc_memory"`。
 
-之所以在这里说明，是因为任何探测独立布局的使用者都会撞上它们：
-
-1. **`/cc-mem status` 会把一个健康的扁平安装标成损坏。**
-   `_inspect_layout` 以布局根目录为基准解析 `_REQUIRED_PLUGIN_FILES`
-   （`mem.py:195`），而该列表中的每一项都带 `cc_memory/…` 前缀
-   （`mem.py:77-100`），外加 `hooks/hooks.json`。扁平安装没有这些路径中的任何一条，
-   于是全部 22 项都报缺失，即便钩子工作正常，该布局也会打印 `[FAIL]`。检测（接受
-   扁平）与检查（假定嵌套）互相矛盾。
-2. **安装器自己的安装后说明打印了一条它从不创建的路径。**
-   `installer.py:479` 与 `:481` 打印
-   `TARGET_DIR / 'cc_memory' / 'cli' / 'mem.py'` 和
-   `TARGET_DIR / 'cc_memory' / 'ui' / 'dashboard.py'`；而文件实际落在
-   `TARGET_DIR/cli/mem.py` 与 `TARGET_DIR/ui/dashboard.py`。同一文件里的 GUI 路径是
-   对的（`installer.py:396` 的 `TARGET_DIR / "ui" / "dashboard.py"`），已安装探测也
-   是对的（`installer.py:311` 的 `TARGET_DIR / "core" / "db.py"`）。模块文档字符串
-   中“hooks/settings 路径指向 `cc_memory/hooks/<name>.py`（不是扁平）”的说法
-   （`installer.py:13`）相对于 `_make_hooks_config` 同样已经过期。
-
-这两处都不是被纠正的文档错误——它们都是在核实本章时发现的代码缺陷，记录在此以免
-文档重复它们。
+安装器自己的安装后说明此前打印 `TARGET_DIR/cc_memory/cli/mem.py`——一条它从不创建的
+路径；现在打印的是确实存在的 `TARGET_DIR/cli/mem.py`（`installer.py:1087`）。
 
 ### 解释器要求
 
@@ -648,10 +797,12 @@ PATH” + “py launcher”，或者把 `python3` 别名到 `python`。否则钩
 它就是这套约定的英文真相来源。执行它的检查器是 `tools/i18n_check.py`（纯 stdlib，
 仅 dev/CI——不随插件分发）。
 
-> 合并说明：本章在 v2.4.1 之前是 `docs/I18N.md`。`core/extractor.py:34, 72`、
-> `hooks/session_start.py:271`、`hooks/user_prompt.py:125` 中的 Tier-3 守卫注释以及
-> `cc_memory/__init__.py:37` 中的指针仍引用 `docs/I18N.md §1`；在那些字符串被刷新
-> 之前，请把它读作下面的 §9.1。
+> 合并说明：本章在 v2.4.1 之前是 `docs/I18N.md`。所有代码内指针在同一次改动中已一并
+> 改指——Tier-3 守卫注释（`core/extractor.py:32`、`:71`、
+> `hooks/session_start.py:275`、`hooks/user_prompt.py:196`）与
+> `cc_memory/__init__.py:37` 全都引用
+> `docs/ARCHITECTURE.md#9-documentation-language-convention-i18n §1`，而且
+> `grep -rn I18N cc_memory/` 没有任何输出。
 
 ### 9.1 三层语言模型
 

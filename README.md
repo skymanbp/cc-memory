@@ -2,7 +2,7 @@
 
 # cc-memory
 
-**Claude Code persistent memory plugin (v2.4.3)** — anti-patch reconcile-on-write
+**Claude Code persistent memory plugin (v2.5.0)** — anti-patch reconcile-on-write
 with LLM-judged semantic de-duplication, forced PROGRESS.md handoff, live PLAN.md
 anchor with plan-refiner / plan-guardian subagents and a mandatory carryover
 gate, bounded transcript reads, injection observability, FTS5 search, AI-judged
@@ -16,6 +16,204 @@ disappear. Conversations that end normally (terminal closed) also lose context.
 
 cc-memory captures structured memories at every conversation boundary AND
 **forces the next session to read a handoff document** before it starts work.
+
+## What's new in v2.5
+
+The largest correctness release so far, and not a feature release: roughly 134
+defects closed across 26 files, then re-attacked by four read-only adversarial
+verifiers whose findings were closed as well. The headline items below were all
+**silently wrong in shipped code**.
+
+### Cross-project data contamination is closed
+
+Claude Code's `~/.claude/projects/` directory names replace **every** character
+outside `[A-Za-z0-9]` with `-`; cc-memory replaced only three of them
+(`:` `\` `/`). Any project path containing `_` or `.` therefore mangled to a
+slug that does not exist — and the miss fell through to a **fuzzy substring
+search** across every slug directory on the machine. On the reference machine
+(179 slug directories) the substring `core` matched 131 of them, and `app` and
+`data` matched 141 each. A project could ingest another project's transcript,
+send it to the extraction LLM, and store the result as its own memories.
+
+- `core.extractor.mangle_project_path` is now the single source of truth for the
+  slug convention, and the fuzzy fallback is **deleted** — a miss means "no
+  transcript", never "guess". Four probes that previously resolved to a real but
+  wrong directory now return `None`.
+- Retroactive save demands **positive proof** that a transcript belongs to this
+  project (the `cwd` its records carry) and fails closed when there is none.
+  With two planted transcripts, one foreign: 2 LLM legs ingesting
+  `['aaaa-foreign', 'bbbb-mine']` → 1 leg, `['bbbb-mine']`; a transcript with no
+  `cwd` at all → 0 legs, 0 memories.
+- The tier-3 PROGRESS.md mine is gated too, with a deliberately weaker
+  disagreement rule (absent `cwd` allowed, a *different* `cwd` refused) so
+  cwd-less transcripts keep working. A foreign transcript that used to yield
+  `open_todos=['FOREIGN TODO leak']` and `files=['FOREIGN_SECRET_FILE.py']` now
+  yields nothing and logs the refusal.
+- The dashboard carried a verbatim copy of the same fuzzy resolver. It is gone
+  there too.
+
+### The v2.2 live plan anchor works through its hook — for the first time
+
+`PostToolUse` returned early when `core.modes.should_observe()` was false, and
+the whole live-plan block sat *below* that gate. `TodoWrite` is in every mode's
+`skip_tools` and `ExitPlanMode` is in no mode's allow-list, so `should_observe`
+was `False` for both plan-control tools in all three modes: `plan_active` was
+never written by the hook, `memory/.plan_raw.md` and `memory/PLAN.md` never
+appeared, and the guardian drift counters silently varied by mode. Plan control
+is not observation — the block now runs above the gate, in every mode.
+
+| via `PostToolUse`, per mode (code / research / writing) | before | after |
+|---|---|---|
+| `ExitPlanMode` → `plan_active` rows | 0 / 0 / 0 | 1 / 1 / 1 |
+| `TodoWrite` → PLAN.md step statuses | untouched | `[x] [x] [~] ← ACTIVE` |
+| `Edit` → `edits_since_last_guardian` | 1 / 0 / 1 | 1 / 1 / 1 |
+| Bash `git push` → counter (1 edit + 20) | 21 / 20 / 1 | 21 / 21 / 21 |
+
+A raw plan awaiting refinement is also visible now: `PLAN.md` and
+`/cc-mem plan-status` lead with a **PENDING REFINEMENT** banner and the raw
+text, with any older structured plan clearly labelled stale, instead of showing
+only the superseded plan.
+
+### The privacy filter failed OPEN, and is now linear-time and fails CLOSED
+
+`strip_private` was `re.sub(r"<private>.*?</private>", "", text)` behind a
+`text.count("<private>") > 100` ReDoS guard — and that guard **returned the text
+unchanged**. Above the cap, `<private>` content reached both the Anthropic API
+call and the `memories` table: 100 tags stripped correctly, 101 leaked.
+
+The cap was also calibrated on the wrong signal. Well-formed tags are cheap;
+an **unterminated** `<private>` is the quadratic case — 16,000 unterminated tags
+(140.6 KiB) took `re.sub` **9,517.4 ms** and leaked the tail. A single
+left-to-right `str.find` scan replaces it: 0.0 ms on that input, 5.1 ms vs
+6.0 ms on 20,000 well-formed tags, no cap at all, and a dangling open tag now
+drops the rest of the text rather than emitting it. Equivalence was proved on
+20,000 random tag-soup inputs — zero behavioural differences on all 13,328
+well-formed ones; the 6,672 unterminated ones differ intentionally.
+
+### MCP: correct on the wire, and the schema is actually enforced
+
+- **UTF-8 both directions, before the handles are captured.** Under the box's
+  default gbk codec only 1 of 7 non-ASCII payloads round-tripped byte-identical;
+  under strict gbk five got no response at all and the server exited 1. Now 7/7
+  in all four locale regimes tested, stderr 0 B, exit 0. No `PYTHONUTF8` env
+  block is needed any more.
+- **Every parsed message with an id gets exactly one frame.** `params: null` —
+  which many clients send for "no params" — produced **no response**, hanging any
+  client without a timeout. So did a non-object `params` and a non-string tool
+  `name`. All now answer `-32602`; 13/13 ids answered where 8 were orphaned.
+- **Nothing escapes `main()`.** A 4301-digit integer (`ValueError`) and ~3000
+  levels of nesting (`RecursionError`) were both reachable through an advertised
+  tool argument *before* validation ran, and killed the server with a traceback
+  on stderr. Frames are also length-capped and strict RFC 8259 in both
+  directions (`NaN` / `Infinity` rejected instead of echoed).
+- **`tools/call` arguments are validated against the advertised `inputSchema`**
+  (required / type / enum / bounds / lengths) and rejected with `-32602` instead
+  of being coerced. `memory_search` with no `query` used to dump the whole table
+  and rebuild the FTS index; six malformed queries triggered six index rebuilds
+  (27.3 ms) and now trigger none (6.1 ms). `memory_get_details` no longer serves
+  retracted rows, and a failed write is no longer reported as success.
+
+### The web viewer was unusable, and was a prompt-injection channel
+
+- **One idle TCP connection wedged the whole server.** A single-threaded
+  `HTTPServer` with no handler timeout meant a browser's speculative pre-connect
+  — which `webbrowser.open` triggers by design — blocked every subsequent
+  request. It now runs threaded with daemon threads and a per-connection
+  timeout: 8 idle pre-connects → 200 in 0.02 s, 30 concurrent GETs → 30/30.
+- **`Access-Control-Allow-Origin: *` on every response.** Anything written
+  through `POST /api/memory` is injected into your next session, so any web page
+  you had open could write into your own context — and read `/api/sessions`,
+  which returns `archive_path` filesystem paths. The header is gone; `Origin`,
+  `Host` (against DNS rebinding, where the attacking page is same-origin and
+  sends no `Origin` at all) and `Content-Type: application/json` are all
+  enforced.
+- **`POST` rewrote the wrong project's `MEMORY.md`** — it derived the project
+  root from `os.getcwd()` instead of the served project.
+- Four routes answered malformed queries with **no HTTP response at all**; body
+  reads had no wall-clock deadline, so one client dripping a byte every few
+  seconds leased a worker thread for hours (measured: 403 after 52.09 s → 3.02 s;
+  10 concurrent drips, thread delta 10 → 0-2).
+- The `Add memory` form the docs already described now actually exists in the
+  page.
+
+### The standalone install shipped none of the user-facing surfaces
+
+`~/.claude` after a standalone install contained `hooks/` and `settings.json`
+and nothing else — no `/cc-mem` command, no `plan-refiner` / `plan-guardian`
+agents, no skills. The installer now copies all five, records them in
+`installed_surfaces.json`, and removes exactly those files **by name** on
+uninstall (your own `commands/`, `agents/`, `skills/` entries survive).
+
+It also **crashed after copying files** on any `settings.json` it could not
+parse — a JSONC comment, a trailing comma, a UTF-8 BOM (which is what
+PowerShell's `>` writes), or a hook group of an unexpected shape — leaving a
+half-installed tree with no hooks registered. Settings are now validated at step
+[0/3] before anything is copied, malformed shapes are preserved verbatim rather
+than shredded, and a hook that merely *mentions* cc-memory is kept and warned
+about instead of deleted. Across 19 settings shapes × 6 operations: **18 crashes
+→ 0**.
+
+### Hooks with hard host timeouts now bound their LLM wall-clock
+
+`call_llm`'s own docstring required a time-budgeted caller to bound its
+worst case; only `core/consolidate.py` did. `hooks/session_start.py` overran its
+**15 s** budget with the shipped default config (2 credential candidates × 20 s
+= 40 s), and `hooks/stop.py` measured **25.45 s** against a 22 s budget with
+stalled legs. Every LLM-calling hook now passes an **absolute deadline** — not
+just a per-leg timeout — which clamps each leg to the time actually remaining
+and skips a leg that cannot finish. Stop: 25.45 s → 15.99 s. PreCompact: ~144 s
+→ 74.39 s of its 120 s. Normal-path latency is unchanged (0.29 s → 0.30 s).
+
+### Also in this release
+
+- **One version string.** `cc_memory/core/version.py` is the canonical runtime
+  source, importable under both the nested and the flat install layout;
+  `cc_memory/__init__.py` re-exports it and the CLI, MCP and installer banners
+  resolve it instead of carrying literals (two of which were stale).
+- **`/cc-mem status` sees standalone installs.** Every layout probe assumed the
+  nested `cc_memory/` segment, so a healthy flat install reported 22 of 22 files
+  missing and the API-key check was skipped entirely.
+- **`config.json` no longer lies.** Two audits found 34 of 51 leaf keys with no
+  reader; every inert key is deleted, and the surviving ones cite their reader
+  in-file. The one new key, `excluded_projects`, is a real opt-out: a listed
+  directory and everything beneath it gets no `memory/`, no DB, no extraction.
+- **`/cc-mem sql` is read-only for real.** `DROP TABLE topics` used to exit 0
+  and drop the table. The dashboard's SQL console now requires a confirmation
+  naming the statement before any write, and reports the rowcount.
+- **The dashboard stopped destroying data**: bulk delete became bulk *archive*
+  (no more dangling `supersedes_id` rows), `MEMORY.md` is regenerated after a
+  tidy, a corrupt project registry is backed up before it is overwritten, and no
+  callback can raise into a windowed build. It also gained a read-only
+  **Progress / Plan** tab.
+- **A third test suite.** `tests/test_surfaces.py` joins `smoke_test.py` and
+  `test_plan_carryover.py` as a release gate, covering the surfaces neither of
+  them touched: the standalone installer (surface install/uninstall by name,
+  malformed-`settings.json` handling, hook-timeout lockstep with
+  `hooks/hooks.json`), the MCP stdio server, the web viewer's request guards,
+  and the rule that every LLM-calling hook passes an absolute deadline.
+
+### What is *not* fixed
+
+Recorded honestly, because each was measured rather than assumed:
+
+- The web viewer is threaded with **no worker cap** — body reads are now
+  deadline-bounded, but `ThreadingHTTPServer` still spawns a thread per
+  connection. It is loopback-only. HTTP/1.0 pipelining is unchanged (browsers
+  do not pipeline). The DNS-rebinding fix was verified with forged `Host`
+  headers, not with real DNS control, and the SPA escaping hardening is
+  defence-in-depth: no XSS was executed.
+- MCP still echoes array/object `id`s (non-conforming but valid JSON; answering
+  beats orphaning), and an unparsable or over-length frame is answered with
+  `"id": null` because its id is genuinely unknowable. `MemoryError` from a huge
+  line was never reproduced — the 1 MiB frame cap is justified by the escape
+  class, not by a measured crash.
+- `core/db.py`'s three plan mutators (`update_plan_status`, `delete_plan`,
+  `update_plan_content`) all accept `project_id` and every shipped caller now
+  passes it, but none of them *requires* it — an unscoped raw call from new code
+  would still cross projects, because `plans.id` is global to the DB file.
+- `excluded_projects` has no coverage in either pre-existing gate.
+- Searching for a bare `%` or `_` now returns 0 rows instead of the whole table.
+  That is the fix, but it is a visible result change.
 
 ## What's new in v2.4.2
 
@@ -173,13 +371,29 @@ python cc-memory/cc_memory/ui/installer.py --cli  # CLI
 ```
 
 The installer:
-1. Copies the subpackage tree to `~/.claude/hooks/cc-memory/`.
-2. Adds the hook entries to `~/.claude/settings.json` (6 commands across 5
-   events — `PreCompact` declares a sync + an `async` leg).
-3. Auto-detects + upgrades any v2.0 flat-layout install.
+0. **Validates `~/.claude/settings.json` before copying anything.** If it cannot
+   be parsed (JSONC comments, a trailing comma, a top-level array), it refuses
+   with `Nothing has been installed.` rather than leaving a half-installed tree.
+   A UTF-8 BOM — what PowerShell's `>` writes — is tolerated.
+1. Copies the subpackage tree to `~/.claude/hooks/cc-memory/`. This tree is
+   **FLAT**: `core/`, `hooks/`, `llm/`, `cli/`, `mcp/`, `ui/` sit directly under
+   that directory, with **no `cc_memory/` path segment**. (The marketplace / dev
+   checkout keeps the nested `<plugin root>/cc_memory/…` shape.)
+2. Installs the five user-facing surfaces into `~/.claude/`:
+   `commands/cc-mem.md`, `agents/plan-refiner.md`, `agents/plan-guardian.md`,
+   `skills/ccm-load/SKILL.md`, `skills/save-memories/SKILL.md`. They are
+   recorded in `~/.claude/hooks/cc-memory/installed_surfaces.json` and removed
+   **by name** on uninstall, so your own files in those directories survive.
+3. Adds the hook entries to `~/.claude/settings.json` (6 commands across 5
+   events — `PreCompact` declares a sync + an `async` leg), with the same
+   timeouts `hooks/hooks.json` declares. A hook of yours that merely mentions
+   cc-memory is kept and reported, never deleted.
+4. Prunes stale modules from a previous version and auto-detects + upgrades any
+   v2.0 flat-layout install. `logs/` is preserved on uninstall.
 
 Per-project initialization is **automatic** — the first user message creates
-`<project>/memory/` and the SQLite DB.
+`<project>/memory/` and the SQLite DB. To opt a directory out entirely, list it
+in `config.json`'s `excluded_projects` (see [Configuration](#configuration)).
 
 ## Architecture at a glance
 
@@ -189,7 +403,9 @@ Hooks (declared in hooks/hooks.json; discovered via the plugin manifest):
   UserPromptSubmit ─► turn count + first-prompt seeding of PROGRESS.md
                       auto-init memory/ on first contact
 
-  PostToolUse     ─► insert one observation row per tool call (no LLM)
+  PostToolUse     ─► live plan anchor, in EVERY mode: ExitPlanMode → plan_active.raw,
+                     TodoWrite → mechanical step sync, edits/sensitive Bash → drift counters
+                     insert one observation row per OBSERVED tool call (no LLM)
 
   Stop            ─► Haiku observer extracts memories from this turn
                      patch_progress(files_touched=...)
@@ -255,7 +471,8 @@ translation convention. See [docs/ARCHITECTURE.md#9-documentation-language-conve
 ```
 /cc-mem status                                    # Full health check
 /cc-mem stats                                     # Memory + supersede-chain counts
-/cc-mem list decisions                            # Recent memories by category
+/cc-mem list decision                             # Recent memories by category
+                                                  # (all|decision|result|config|bug|task|arch|note)
 /cc-mem search "auth flow"                        # FTS5 search
 /cc-mem topics                                    # Topic summaries
 /cc-mem progress                                  # Regenerate memory/PROGRESS.md and print
@@ -304,12 +521,41 @@ $M search "auth flow"
 | `progress_get` | Read PROGRESS.md state (structured fields) |
 | `progress_regenerate` | Force-rewrite memory/PROGRESS.md from SQL state |
 
-The server speaks JSON-RPC 2.0 over stdio. Register it with your MCP client by
-pointing it at `python <plugin-root>/cc_memory/mcp/server.py`.
+The server speaks JSON-RPC 2.0 over stdio, and forces UTF-8 with LF-only
+newlines on both stdin and stdout itself — **no `PYTHONUTF8` /
+`PYTHONIOENCODING` env block is needed**.
 
-> **Note:** the `mcp.auto_register` key in `config.json` is currently **inert** —
-> no code reads it and nothing writes an MCP client config. Registration is
-> manual until that is implemented.
+**Marketplace / dev checkout — nothing to do.** `.claude-plugin/plugin.json`
+ships the registration inline:
+
+```jsonc
+"mcpServers": {
+  "cc-memory": {
+    "command": "python3",
+    "args": ["${CLAUDE_PLUGIN_ROOT}/cc_memory/mcp/server.py"]
+  }
+}
+```
+
+**Standalone install — register it by hand.** The installer copies the package
+and the five surfaces only; it never writes a client config, and the flat tree
+has no `.claude-plugin/` to be read. Note the **absent `cc_memory/` segment**:
+
+```jsonc
+// <project>/.mcp.json, or the user-scoped equivalent
+{
+  "mcpServers": {
+    "cc-memory": {
+      "command": "python3",
+      "args": ["<HOME>/.claude/hooks/cc-memory/mcp/server.py"]
+    }
+  }
+}
+```
+
+`tools/call` arguments are validated against each tool's advertised
+`inputSchema` and rejected with `-32602` rather than coerced, so a malformed
+call fails loudly instead of writing something you did not ask for.
 
 ## Visual Dashboard
 
@@ -317,14 +563,23 @@ pointing it at `python <plugin-root>/cc_memory/mcp/server.py`.
 # Marketplace install or standalone — auto-resolves the plugin path:
 /cc-mem dashboard
 
-# Or invoke the CLI directly (replace <plugin-root> with your install path):
+# Or invoke the CLI directly. Marketplace / dev checkout:
 python <plugin-root>/cc_memory/cli/mem.py --project . dashboard
+# Standalone install (FLAT — no cc_memory/ segment):
+python ~/.claude/hooks/cc-memory/cli/mem.py --project . dashboard
 
 # Or the standalone exe (Windows):
 cc-memory-dashboard.exe
 ```
 
-6 tabs: Memories · Plans · Sessions · Keywords · SQL Console · Stats.
+7 tabs: Memories · Plans · Sessions · Keywords · SQL Console · Stats ·
+Progress / Plan (read-only view of the `progress` and `plan_active` rows behind
+PROGRESS.md and PLAN.md).
+
+Launching with no `--project` opens nothing: it lists the projects it knows and
+waits for you to pick one. Deletions are **archives** (`is_active=0`), and any
+non-`SELECT` statement in the SQL console requires a confirmation naming the
+statement.
 
 ## Web viewer
 
@@ -333,22 +588,49 @@ cc-memory-dashboard.exe
 # opens http://127.0.0.1:9377 in your browser
 ```
 
+Browse, search, and **add** memories: the `+ Add memory` form POSTs JSON to
+`/api/memory`, which routes through `upsert_smart` like every other save path,
+so a near-duplicate merges or supersedes instead of stacking.
+
+Everything written through that endpoint is injected into your next Claude
+session, and `/api/sessions` returns whole session rows including
+`archive_path`. The server is guarded accordingly:
+
+- binds to `127.0.0.1` only;
+- sends **no** `Access-Control-Allow-Origin` header, and rejects any request
+  whose `Origin` is not this exact origin (`OPTIONS` answers 405 — no preflight
+  is ever granted);
+- rejects any request whose `Host` is not this loopback origin. Origin alone
+  cannot stop a DNS-rebound page, whose GETs are *same-origin* and carry no
+  `Origin` header at all;
+- requires `Content-Type: application/json` on POST, which an HTML form cannot
+  send without a preflight.
+
 ## Plan Queue
 
-Task planning system using the same SQLite DB:
+Task planning system using the same SQLite DB. This is the plan **queue**
+(`plans` table) — distinct from the live plan **anchor** (`plan_active` /
+`memory/PLAN.md`, driven by `/cc-mem plan-*`).
 
 ```bash
+# Console script, if you installed the package with pip:
+P="cc-memory-plan --project ."
+# Or run the module from a standalone install (FLAT — no cc_memory/ segment):
 P="python ~/.claude/hooks/cc-memory/cli/plan.py --project ."
 
 $P add "Task A" "Task B" "Task C"
 $P list
 $P evaluate           # mark draft → evaluating; Claude evaluates feasibility
 $P approve --all      # evaluating → ready
-$P exec --next        # ready → executing (launches Claude Code CLI)
+$P exec --next        # ready → executing, and print the plan for Claude to run
 $P done 1 "Result"    # mark complete
 $P status             # queue summary
 $P clear              # drop done/failed/skipped
 ```
+
+`exec` does **not** spawn anything — it flips status and prints the plan text
+plus the `done` command to run afterwards. Every subcommand that names plan IDs
+resolves them within `--project` first and exits 1 on an unknown or foreign ID.
 
 Status flow: `draft` → `evaluating` → `ready` → `executing` → `done`/`failed`/`skipped`.
 
@@ -356,18 +638,33 @@ Status flow: `draft` → `evaluating` → `ready` → `executing` → `done`/`fa
 
 Edit `config.json` in your install root — standalone (flat layout):
 `~/.claude/hooks/cc-memory/config.json`; marketplace / dev checkout:
-`<plugin-root>/cc_memory/config.json`:
+`<plugin-root>/cc_memory/config.json`.
 
-- `extraction.*` — extraction caps (sentences, metrics, todos, file changes)
-- `writer.*` — anti-patch thresholds (`high_similarity_threshold`,
-  `mid_similarity_threshold`)
-- `injection.*` — SessionStart token budget and per-layer fractions
-- `observation.*` — PostToolUse truncation limits, skip lists
-- `idle_reorg.interval_turns` — N turns between idle reorg runs (default 5)
-- `consolidation.*` — full LLM consolidation schedule (incl.
-  `auto_interval_sessions` for the async leg)
-- `ccl.*` — Ollama fallback URL + model
-- `modes.default` — default project mode (code/research/writing)
+**Every key in this file is read by code.** Keys that nothing read were deleted
+in v2.5 rather than left in place — an inert tunable is worse than no tunable,
+because editing it looks like it does something. What remains:
+
+- `version` — last-resort version fallback for a flat install that has no
+  `core/version.py`. `cc_memory/core/version.py` is canonical.
+- `consolidation.auto_interval_sessions` — sessions between async consolidation
+  runs (default 5).
+- `ccl.enabled` / `ccl.ollama_url` / `ccl.local_model` — the local Ollama
+  fallback. **Opt-in; `enabled` defaults to `false`**, in which case the
+  Anthropic legs are the only backends.
+- `excluded_projects` — absolute paths that opt OUT of cc-memory entirely. A
+  listed directory *and everything beneath it* gets no `memory/` directory, no
+  DB, no extraction and no PROGRESS.md: the two hooks that would create them
+  exit immediately. Matching is on the resolved absolute path, case-insensitive
+  on Windows. This is the only opt-out.
+- `notes` — in-file documentation, including which module owns each value that
+  used to live here.
+
+The removed tunables are module constants; change them there:
+anti-patch thresholds in `llm/memory_writer.py`, SessionStart injection budgets
+in `hooks/session_start.py`, the idle-reorg interval in `core/idle.py`, the
+per-mode observation skip-list in `core/modes.py`, the web viewer's default port
+in `ui/web_viewer.py`. MCP registration is the `mcpServers` block in
+`.claude-plugin/plugin.json`, not a config key.
 
 ## API key
 
@@ -378,16 +675,31 @@ Resolution order: `ANTHROPIC_API_KEY` env var → Claude OAuth token.
 
 ## Tests
 
-`tests/smoke_test.py` is an end-to-end stdlib script (no pytest needed)
-that verifies the anti-patch writer decisions, PROGRESS.md full-rewrite,
-the fill-only-empty refresh contract, last-wins TodoWrite extraction, the
-tier-3 transcript fallback, legacy `SESSION_HANDOFF.md` migration, the
-layout inspector, the two-hook PreCompact shape, and the i18n drift gate.
+Three stdlib scripts, no pytest and no pip dependencies. **All three are release
+gates — run all three.**
 
 ```bash
 python tests/smoke_test.py
 # expect a series of [OK] lines ending with "===== ALL SMOKE TESTS PASSED ====="
+
+python tests/test_plan_carryover.py
+# expect "RESULT: 14 passed, 0 failed"
+
+python tests/test_surfaces.py
 ```
+
+- `tests/smoke_test.py` — the canonical end-to-end check: anti-patch writer
+  decisions, PROGRESS.md full-rewrite, the fill-only-empty refresh contract,
+  last-wins TodoWrite extraction, the tier-3 transcript fallback, legacy
+  `SESSION_HANDOFF.md` migration, the layout inspector, the two-hook PreCompact
+  shape, the bounded transcript window, and the i18n drift gate.
+- `tests/test_plan_carryover.py` — the v2.4.0 carryover gate (14 checks); the
+  only coverage of that feature.
+- `tests/test_surfaces.py` — new in v2.5, for the surfaces neither of the others
+  touched: the standalone installer (surface install/uninstall by name,
+  malformed-`settings.json` handling, hook-timeout lockstep with
+  `hooks/hooks.json`), the MCP stdio server, the web viewer's request guards,
+  and the rule that every LLM-calling hook passes an absolute deadline.
 
 Documentation translations are drift-checked separately:
 
@@ -419,6 +731,9 @@ python build_exe.py
 ## Documentation
 
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — full architecture overview
+  ([简体中文](docs/ARCHITECTURE.zh.md))
+- [docs/CONTRACTS.md](docs/CONTRACTS.md) — the three hard contracts
+  ([简体中文](docs/CONTRACTS.zh.md))
 - [docs/CONTRACTS.md#anti-patch-contract](docs/CONTRACTS.md#anti-patch-contract) — anti-patch write contract
 - [docs/CONTRACTS.md#handoff-contract](docs/CONTRACTS.md#handoff-contract) — PROGRESS.md spec
 - [docs/CONTRACTS.md#plan-contract](docs/CONTRACTS.md#plan-contract) — PLAN.md + subagent spec
