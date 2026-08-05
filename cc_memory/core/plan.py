@@ -37,9 +37,52 @@ The structured plan is a JSON dict with the following schema:
 from __future__ import annotations
 
 import json
+import os
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+
+# Render-path marker defence. PLAN.md is read by Claude as the live plan
+# anchor, and every field it renders originates outside the plugin.
+from core.privacy import neutralize_block, neutralize_inline
+
+
+# ── Atomic artifact write ───────────────────────────────────────────────────
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    """Write `text` to `path` without ever exposing a truncated file.
+
+    ``Path.write_text`` truncates before it writes, so a reader landing in that
+    window gets 0 bytes — measured 456 empty reads in 13,594 samples with ONE
+    writer and one reader. PLAN.md is a live anchor another window's Claude
+    reads at will, and an empty read is indistinguishable from "no active
+    plan": silent, no error, wrong. ``os.replace`` is atomic on POSIX and
+    Windows alike; it is already the idiom used for the smaller state files
+    (hooks/session_start.py:310, hooks/pre_compact.py:_write_attempt).
+
+    DELIBERATE literal twin in llm/memory_writer.py (which writes MEMORY.md):
+    the two live in different subpackages and `core` must not depend on `llm`,
+    so a private copy on each side is cheaper than the cross-package import.
+    Same convention as the memory/.gitignore literals noted in CLAUDE.md — if
+    you change one, change the other.
+    """
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    try:
+        tmp.write_text(text, encoding="utf-8")
+        os.replace(str(tmp), str(path))
+        return
+    except OSError:
+        try:
+            tmp.unlink()
+        except OSError:
+            # why: removing our own temp file is best-effort — memory/.gitignore
+            # already carries `*.tmp`, so a leftover never reaches a user's repo
+            pass
+    # why no re-raise: on Windows os.replace onto a destination another process
+    # currently holds open fails with ERROR_SHARING_VIOLATION. Falling back to
+    # the plain truncating write preserves the pre-v2.5.2 guarantee that the
+    # artifact is ALWAYS written; it forfeits atomicity for that one call only.
+    path.write_text(text, encoding="utf-8")
 
 
 # ── Similarity (re-uses the trigram-Jaccard from memory_writer) ─────────────
@@ -369,10 +412,19 @@ def render_plan_md(structured: Dict, active_step_id: int = 0,
             "*(No active plan. Enter Claude's plan mode or use "
             "`/cc-mem plan-set` to create one.)*\n"
         )
+    # Every slot below is neutralised, because none of this text is the
+    # plugin's own: `structured` comes from the plan-refiner subagent acting on
+    # ExitPlanMode output, so any content the model read can reach it. Measured
+    # on one armed step title: 1 complete <system-reminder> block, 2 lines
+    # carrying the "← ACTIVE" marker when exactly one step is active, and 2
+    # "## Goal" headings in a document that has 1. `neutralize_block` for the
+    # slots whose newlines are real structure, `neutralize_inline` for the ones
+    # that own exactly one output line — a newline in a step title is what
+    # forged the second "## Goal".
     lines = list(_PLAN_MD_HEADER) + [
         "## Goal",
         "",
-        structured["goal"].strip(),
+        neutralize_block(structured["goal"].strip()),
         "",
     ]
 
@@ -380,7 +432,7 @@ def render_plan_md(structured: Dict, active_step_id: int = 0,
     if sc:
         lines += ["## Success criteria", ""]
         for c in sc:
-            lines.append(f"- {c}")
+            lines.append(f"- {neutralize_inline(str(c))}")
         lines.append("")
 
     lines += ["## Steps", ""]
@@ -389,15 +441,15 @@ def render_plan_md(structured: Dict, active_step_id: int = 0,
     for s in structured["steps"]:
         glyph = _STATUS_GLYPH.get(s.get("status", "pending"), "[ ]")
         active_marker = "  ← ACTIVE" if s.get("id") == active_step_id and s.get("status") != "done" else ""
-        line = f"{s.get('id', '?')}. {glyph} **{s['title']}**{active_marker}"
+        line = f"{s.get('id', '?')}. {glyph} **{neutralize_inline(s['title'])}**{active_marker}"
         if s.get("notes"):
-            line += f" — {s['notes']}"
+            line += f" — {neutralize_inline(str(s['notes']))}"
         lines.append(line)
     lines.append("")
 
     ctx = (structured.get("context") or "").strip()
     if ctx:
-        lines += ["## Context", "", ctx, ""]
+        lines += ["## Context", "", neutralize_block(ctx), ""]
 
     lines += [
         "## Status",
@@ -436,7 +488,7 @@ def write_plan_md(db, project_id: int, memory_dir: Path) -> Path:
     text = render_plan_md(structured, active_step_id=active_step_id, meta=meta)
     memory_dir.mkdir(parents=True, exist_ok=True)
     out = memory_dir / "PLAN.md"
-    out.write_text(text, encoding="utf-8")
+    _atomic_write_text(out, text)
     return out
 
 
@@ -539,6 +591,11 @@ def check_carryover(old_structured: Optional[Dict], new_plan: Dict) -> List[str]
     return violations
 
 
+# Bound on the collision-suffix search in archive_plan. 200 archives inside one
+# millisecond is unreachable; the loop simply must terminate.
+_ARCHIVE_NAME_TRIES = 200
+
+
 def archive_plan(row: Optional[Dict], memory_dir: Optional[Path],
                  event: str, reason: str = "") -> Optional[Path]:
     """Append-only archive of an outgoing plan (replace/clear) under
@@ -551,18 +608,41 @@ def archive_plan(row: Optional[Dict], memory_dir: Optional[Path],
     try:
         hist_dir = memory_dir / ".plan_history"
         hist_dir.mkdir(parents=True, exist_ok=True)
-        ts = datetime.now().strftime("%Y%m%dT%H%M%S")
-        out = hist_dir / f"plan_{ts}_{event}.json"
+        now = datetime.now()
         payload = {
-            "archived_at": datetime.now().isoformat(timespec="seconds"),
+            "archived_at": now.isoformat(timespec="seconds"),
             "event": event,
             "reason": reason,
             "structured": row.get("structured"),
             "raw": row.get("raw"),
             "active_step": row.get("active_step"),
         }
-        out.write_text(json.dumps(payload, ensure_ascii=False, indent=2),
-                       encoding="utf-8")
+        blob = json.dumps(payload, ensure_ascii=False, indent=2)
+        # The old `%Y%m%dT%H%M%S` stem made this archive neither append-only nor
+        # a backstop: FOUR STRICTLY SEQUENTIAL replacements — one process, no
+        # concurrency, 0.023 s total — left ONE file and destroyed gen0/gen1/
+        # gen2, and because the survivor is the LAST write, the earliest and
+        # most complete generation is the first to go. Under concurrency it
+        # measured 60 replacements -> 3 files. Millisecond precision (still
+        # sortable, still human-readable) plus an O_CREAT|O_EXCL claim, atomic
+        # across processes, is what actually makes it append-only.
+        base = now.strftime("%Y%m%dT%H%M%S_") + now.strftime("%f")[:3]
+        for n in range(_ARCHIVE_NAME_TRIES):
+            stem = base if n == 0 else f"{base}-{n}"
+            out = hist_dir / f"plan_{stem}_{event}.json"
+            try:
+                fd = os.open(str(out), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            except FileExistsError:
+                continue
+            # fdopen, not a reopen: writing through the descriptor we just
+            # claimed means no second process can slip in between claim and
+            # write. Default newline handling matches the Path.write_text this
+            # replaces, so archived bytes are unchanged.
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(blob)
+            return out
+        out = hist_dir / f"plan_{base}-{os.getpid()}_{event}.json"
+        out.write_text(blob, encoding="utf-8")
         return out
     except OSError as e:
         # why: the gate's dispositions are the primary anti-loss guarantee;

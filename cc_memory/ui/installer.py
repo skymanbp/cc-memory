@@ -787,13 +787,103 @@ def _marketplace_warning_lines(key):
     ]
 
 
-def _merge_into_settings(hooks_config, log_fn=print, settings=None):
-    """Register cc-memory's hooks in settings.json. Returns True on success."""
-    if settings is None:
-        settings, err = _read_settings()
-        if err is not None:
-            log_fn(f"[ERR] {SETTINGS_PATH} {err}")
-            return False
+def _write_settings_json(settings, log_fn=print):
+    """Replace settings.json ATOMICALLY, keeping a backup of what was there.
+
+    This is the user's GLOBAL Claude Code config. Both write paths used to call
+    SETTINGS_PATH.write_text(), which TRUNCATES before writing a byte: a watcher
+    on a single, uncontended `--cli` install caught the file at 0 bytes, so a
+    crash / kill / power loss inside that window left the user with an empty
+    global config and nothing to restore from. Write to a sibling temp file and
+    rename over the target instead - Path.replace IS os.replace, the same
+    discipline hooks/session_start.py:_write_inject_manifest and
+    hooks/pre_compact.py:_write_attempt already use for far less valuable files.
+
+    The .bak is best-effort and deliberately NOT named settings.json.bak: that
+    name belongs to the user, who may well have made one by hand.
+
+    The rename is not unconditional, because on Windows it CANNOT be. MoveFileEx
+    needs DELETE access on the destination, and any process holding
+    settings.json open without FILE_SHARE_DELETE - an editor, an AV scanner,
+    Claude Code itself reading it at that instant - makes it fail with
+    [WinError 5] (the same failure hooks/pre_compact.py hits on its attempt
+    marker). Measured: a reader polling every 50-500 ms never triggered it in
+    10 installs; a reader spinning continuously triggered it every time. An
+    ordinary in-place write survives that case because Python opens with
+    _SH_DENYNO. So: retry the rename a few times, and only if the OS keeps
+    refusing fall back to the old truncating write - which is now recoverable,
+    since the .bak above was taken first. Losing the user's hook registration
+    is a worse outcome than losing atomicity for one write.
+    """
+    payload = json.dumps(settings, indent=2, ensure_ascii=False)
+    bak = SETTINGS_PATH.with_name(SETTINGS_PATH.name + ".cc-memory.bak")
+    tmp = None
+    try:
+        SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
+        if SETTINGS_PATH.exists():
+            try:
+                shutil.copy2(str(SETTINGS_PATH), str(bak))
+            except OSError as e:
+                # why: the backup is a courtesy copy - failing to take it must
+                # not block the registration the user actually asked for
+                log_fn(f"  [WARN] could not back up {SETTINGS_PATH.name} to "
+                       f"{bak.name}: {e}")
+        with tempfile.NamedTemporaryFile(
+                "w", encoding="utf-8", delete=False,
+                dir=str(SETTINGS_PATH.parent),
+                prefix=SETTINGS_PATH.name + ".", suffix=".tmp") as fh:
+            tmp = Path(fh.name)
+            fh.write(payload)
+        last = None
+        for _attempt in range(5):
+            try:
+                tmp.replace(SETTINGS_PATH)
+                tmp = None
+                break
+            except OSError as e:
+                # why: a sharing violation from a transient reader clears on its
+                # own; retrying costs nothing and keeps the write atomic
+                last = e
+        if tmp is not None:
+            log_fn(f"  [WARN] the OS refused an atomic replace of "
+                   f"{SETTINGS_PATH.name} ({last}); writing in place instead - "
+                   f"{bak.name} holds the previous contents")
+            SETTINGS_PATH.write_text(payload, encoding="utf-8")
+    except OSError as e:
+        log_fn(f"[ERR] Could not write {SETTINGS_PATH}: {e}")
+        return False
+    finally:
+        if tmp is not None:
+            try:
+                tmp.unlink()
+            except OSError:
+                # why: a temp file left beside settings.json is litter, not a
+                # failure; the real error is already reported above
+                pass
+    return True
+
+
+def _merge_into_settings(hooks_config, log_fn=print):
+    """Register cc-memory's hooks in settings.json. Returns True on success.
+
+    settings.json is READ HERE, immediately before the merge, and never handed
+    in by a caller. cli_install used to pass the copy it validated at step
+    [0/3] - measured 0.45-0.54 s earlier, i.e. the whole install - and this
+    function wrote that stale dict back at the end: everything Claude Code
+    persisted in between (a /permissions approval, a model change, an env var)
+    was silently reverted, with rc=0 and "installation complete!". Six of six
+    trials lost the concurrent edit.
+
+    Re-reading narrows the window to the microseconds between the read below
+    and the rename inside _write_settings_json. It does NOT close it - nothing
+    locks settings.json and Claude Code takes no lock either - but it is the
+    difference between "the entire install" and "one dict merge". Do not
+    reintroduce a caller-supplied settings dict.
+    """
+    settings, err = _read_settings()
+    if err is not None:
+        log_fn(f"[ERR] {SETTINGS_PATH} {err}")
+        return False
 
     hooks = settings.get("hooks")
     if not isinstance(hooks, dict):
@@ -826,14 +916,7 @@ def _merge_into_settings(hooks_config, log_fn=print, settings=None):
         log_fn(f"  {event}: {len(kept)} kept + {len(hook_list)} cc-memory")
     _warn_ambiguous(ambiguous, log_fn)
 
-    try:
-        SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
-        SETTINGS_PATH.write_text(
-            json.dumps(settings, indent=2, ensure_ascii=False), encoding="utf-8")
-    except OSError as e:
-        log_fn(f"[ERR] Could not write {SETTINGS_PATH}: {e}")
-        return False
-    return True
+    return _write_settings_json(settings, log_fn)
 
 
 def _uninstall_settings(log_fn=print):
@@ -889,11 +972,10 @@ def _uninstall_settings(log_fn=print):
             _kept_dirs.append(d)
         perms["additionalDirectories"] = _kept_dirs
 
-    try:
-        SETTINGS_PATH.write_text(
-            json.dumps(settings, indent=2, ensure_ascii=False), encoding="utf-8")
-    except OSError as e:
-        log_fn(f"[ERR] Could not write {SETTINGS_PATH}: {e}")
+    # Same atomic-with-backup write as install: an uninstall that truncates the
+    # user's global config and then dies is not a better failure than an
+    # install that does.
+    if not _write_settings_json(settings, log_fn):
         return False
     log_fn("[OK] Removed cc-memory entries from settings.json")
 
@@ -930,23 +1012,35 @@ def _init_project(project_path, log_fn=print):
     log_fn(f"[OK] DB initialized at {memory_dir / 'memory.db'}")
 
     # Literal copy: this installer is a stdlib-only bootstrap that runs before
-    # the package is importable. Keep in sync with
-    # core.progress.MEMORY_GITIGNORE_LINES.
+    # the package is importable. It must mirror BOTH halves of
+    # core.progress.ensure_memory_gitignore - the LINE LIST
+    # (core.progress.MEMORY_GITIGNORE_LINES, same lines, same order) and the
+    # APPEND SEMANTICS below. Only the list was ever mirrored: this copy did
+    # open(gi, "a") + "\n".join(missing), so against an existing .gitignore
+    # whose last line had no trailing newline it produced
+    #     sessions/# cc-memory: generated state, not content
+    # - fusing the user's last rule with our first comment and DESTROYING that
+    # rule (measured: `sessions/` gone, archived transcripts git-trackable
+    # until the next hook self-healed it). The three-line read / normalise /
+    # write shape below is deliberately identical to core/progress.py:70-76 so
+    # the two can be diffed by eye. skills/ccm-load/SKILL.md is copy #3 and
+    # carries the same shape.
     gi = memory_dir / ".gitignore"
-    _ignore = (
-        "# cc-memory: generated state, not content\n"
-        "memory.db\nmemory.db-wal\nmemory.db-shm\nsessions/\n"
-        ".last_save.json\n.last_inject.json\n.last_consolidation.json\n"
-        ".consolidation.lock\n.pre_compact_attempt.json\n"
-        ".plan_raw.md\n.plan_history/\n*.tmp\n"
-    )
+    _ignore_lines = [
+        "# cc-memory: generated state, not content",
+        "memory.db", "memory.db-wal", "memory.db-shm", "sessions/",
+        ".last_save.json", ".last_inject.json", ".last_consolidation.json",
+        ".consolidation.lock", ".pre_compact_attempt.json",
+        ".plan_raw.md", ".plan_history/", "*.tmp",
+    ]
     try:
-        _have = {ln.strip() for ln in gi.read_text(encoding="utf-8").splitlines()} \
-            if gi.exists() else set()
-        _missing = [ln for ln in _ignore.splitlines() if ln not in _have]
+        _existing = gi.read_text(encoding="utf-8") if gi.exists() else ""
+        _have = {ln.strip() for ln in _existing.splitlines()}
+        _missing = [ln for ln in _ignore_lines if ln not in _have]
         if _missing:
-            with open(gi, "a", encoding="utf-8") as _fh:
-                _fh.write("\n".join(_missing) + "\n")
+            _prefix = (_existing if _existing.endswith("\n") or not _existing
+                       else _existing + "\n")
+            gi.write_text(_prefix + "\n".join(_missing) + "\n", encoding="utf-8")
             log_fn(f"[OK] .gitignore written ({len(_missing)} lines)")
     except OSError as _e:
         # why: .gitignore is a courtesy to the user's VCS; failing to write it
@@ -1238,7 +1332,10 @@ def cli_install(force=False):
 
     print(f"\n[3/3] Configuring hooks in {SETTINGS_PATH}...")
     hooks_config = _make_hooks_config(TARGET_DIR)
-    if not _merge_into_settings(hooks_config, settings=settings):
+    # NOT settings=settings. That copy is the [0/3] pre-flight validation and is
+    # ~0.5 s stale by the time we get here; writing it back reverted whatever
+    # Claude Code persisted during the install. _merge_into_settings re-reads.
+    if not _merge_into_settings(hooks_config):
         print("[FAIL] Hooks were NOT registered; the plugin files are installed.")
         return 1
     n_cmds = sum(len(g["hooks"]) for groups in hooks_config.values() for g in groups)

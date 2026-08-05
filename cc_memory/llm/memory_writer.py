@@ -24,6 +24,7 @@ After every successful upsert, `regenerate_memory_index(project_id, memory_dir)`
 is called so memory/MEMORY.md is always fresh (anti the 50-day-stale failure
 mode observed in v2.0).
 """
+import os
 import sys
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -35,10 +36,48 @@ if str(_PKG_ROOT) not in sys.path:
     sys.path.insert(0, str(_PKG_ROOT))
 
 from core.db import MemoryDB
-from core.privacy import clean_for_storage
+from core.privacy import clean_for_storage, neutralize_inline
 from core.logger import get_logger
 
 _log = get_logger("memory_writer")
+
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    """Write `text` to `path` without ever exposing a truncated file.
+
+    ``Path.write_text`` truncates before it writes, so a reader landing in that
+    window gets 0 bytes — measured 456 empty reads in 13,594 samples with ONE
+    writer and one reader. MEMORY.md is rewritten after EVERY batch upsert and
+    on every Stop-hook idle reorg, i.e. constantly, while another window's
+    Claude may be reading it; an empty read looks like "this project has no
+    memories": silent, no error, wrong. ``os.replace`` is atomic on POSIX and
+    Windows alike, and is already the idiom used for the smaller state files
+    (hooks/session_start.py:310, hooks/pre_compact.py:_write_attempt).
+
+    DELIBERATE literal twin in core/plan.py (which writes PLAN.md): the two
+    live in different subpackages and `core` must not depend on `llm`, so a
+    private copy on each side is cheaper than the cross-package import. Same
+    convention as the memory/.gitignore literals noted in CLAUDE.md — if you
+    change one, change the other.
+    """
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    try:
+        tmp.write_text(text, encoding="utf-8")
+        os.replace(str(tmp), str(path))
+        return
+    except OSError:
+        try:
+            tmp.unlink()
+        except OSError:
+            # why: removing our own temp file is best-effort — memory/.gitignore
+            # already carries `*.tmp`, so a leftover never reaches a user's repo
+            pass
+    # why no re-raise: on Windows os.replace onto a destination another process
+    # currently holds open fails with ERROR_SHARING_VIOLATION. Falling back to
+    # the plain truncating write preserves the pre-v2.5.2 guarantee that the
+    # artifact is ALWAYS written; it forfeits atomicity for that one call only.
+    path.write_text(text, encoding="utf-8")
+
 
 # Similarity thresholds (tuned: 0.8 demands "essentially same sentence")
 HIGH_SIM = 0.80
@@ -235,30 +274,40 @@ def regenerate_memory_index(db: MemoryDB, project_id: int, memory_dir: Path) -> 
         "",
     ]
 
+    # Every interpolated value below is neutralised. MEMORY.md renders no
+    # memory CONTENT — but topic names, category names and keywords are all
+    # derived by the LLM extractor from transcript text, so they are just as
+    # model-reachable. Measured on one armed topic name (content untouched,
+    # ordinary): 1 complete <system-reminder> block and 3 "## " headings in a
+    # document that has 2. `neutralize_inline` because each of these owns
+    # exactly one output line, and several sit inside `backticks` that a
+    # newline would also escape from.
     if topics:
         lines += ["## Topic Summaries", ""]
         for t in topics:
             preview = t["content"][:120] + "..." if len(t["content"]) > 120 else t["content"]
-            lines.append(f"- **{t['name']}** (v{t['version']}): {preview}")
+            lines.append(f"- **{neutralize_inline(t['name'])}** "
+                         f"(v{t['version']}): {neutralize_inline(preview)}")
         lines.append("")
 
     topic_counts = db.get_topic_memory_counts(project_id)
     if topic_counts:
         lines += ["## Memory Distribution", ""]
         for topic, count in sorted(topic_counts.items(), key=lambda x: -x[1])[:30]:
-            lines.append(f"- `{topic}`: {count}")
+            lines.append(f"- `{neutralize_inline(str(topic))}`: {count}")
         lines.append("")
 
     if stats["by_category"]:
         lines += ["## By Category", ""]
         for row in stats["by_category"]:
             avg = f"{row['avg_imp']:.1f}"
-            lines.append(f"- `{row['category']}`: {row['n']} entries  (avg importance {avg})")
+            lines.append(f"- `{neutralize_inline(str(row['category']))}`: "
+                         f"{row['n']} entries  (avg importance {avg})")
         lines.append("")
 
     if top_kw:
         lines += ["## Project Vocabulary", ""]
-        lines.append(", ".join(f"`{kw}`" for kw in top_kw))
+        lines.append(", ".join(f"`{neutralize_inline(str(kw))}`" for kw in top_kw))
         lines.append("")
 
     sessions_dir = memory_dir / "sessions"
@@ -281,4 +330,4 @@ def regenerate_memory_index(db: MemoryDB, project_id: int, memory_dir: Path) -> 
         "*Consolidate:  `python -m cc_memory.cli.mem --project <path> consolidate`*",
         "*Anti-patch contract:  see `docs/CONTRACTS.md#anti-patch-contract`*",
     ]
-    (memory_dir / "MEMORY.md").write_text("\n".join(lines), encoding="utf-8")
+    _atomic_write_text(memory_dir / "MEMORY.md", "\n".join(lines))

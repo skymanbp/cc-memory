@@ -2,7 +2,7 @@
 
 ## Project: cc-memory
 
-**Claude Code persistent memory plugin (v2.5.1)** — anti-patch reconcile-on-write
+**Claude Code persistent memory plugin (v2.5.2)** — anti-patch reconcile-on-write
 + LLM-judged semantic de-duplication, forced PROGRESS.md handoff with
 per-session annotation, live PLAN.md anchor with plan-refiner / plan-guardian
 subagents + mandatory carryover gate, bounded transcript reads, injection
@@ -10,9 +10,70 @@ observability, FTS5 search, AI-judged extraction with Haiku (optional local
 Ollama fallback).
 
 - **Language**: Python 3.8+ (pure stdlib, zero pip dependencies at runtime)
-- **Version**: 2.5.1
+- **Version**: 2.5.2
 - **License**: MIT
 - **Platform**: Windows-primary, cross-platform compatible (Tkinter required for GUI)
+
+## What changed in v2.5.2 (over v2.5.1)
+
+**A third audit, on angles the first two never used** — time, concurrency,
+cross-surface agreement, hostile input — followed by seven fix agents on
+disjoint files and an independent maintainer re-verification against each
+finding's own repro (41/41). Full detail in `CHANGELOG.md`. The invariants a
+future change must not break:
+
+1. **Stored content is NEVER interpolated raw into anything Claude reads.**
+   A memory row could forge a complete `<system-reminder>` block into the
+   SessionStart injection (**8 blocks where the plugin emits 1**) and into
+   PROGRESS.md, and `memory_add` is a model-invokable MCP tool — so one indirect
+   injection became a *permanent* memory re-injected as authoritative context
+   every session. `core.privacy.neutralize_markers` (escape, never delete) runs
+   on the write path via `clean_for_storage` **and again on every render path**,
+   because rows written by v2.5.1 and earlier are already armed in users' DBs.
+   `neutralize_inline` for single-line slots, `neutralize_block` for slots whose
+   newlines are real structure. Four renderers are covered: `core/progress.py`,
+   `hooks/session_start.py`, `core/plan.py`, `llm/memory_writer.py`. If you add
+   a fifth, neutralise there too. `core/consolidate.py`'s
+   `^</?(ide_opened_file|system-reminder|antml)` list is garbage cleanup, **not**
+   this defence — it is anchored at position 0 and one leading word evades it.
+
+2. **`core.modes.is_excluded` has SEVEN callers, not six.** The six hooks plus
+   `mcp/server.py:_get_db`, the single choke point every MCP tool reaches. MCP
+   is loaded by default from the shipped manifest and every call is
+   model-initiated, which makes it the *least* optional of the seven. Do not add
+   an MCP handler that opens a DB path itself.
+
+3. **`core.modes.read_config` is THE runtime reader of `config.json`.** It reads
+   `utf-8-sig` (a BOM — PowerShell's `Out-File` default — used to switch the
+   whole opt-out off silently) and **fails CLOSED**: a file that exists and
+   cannot be used excludes every project and logs why. Absent/empty is not that
+   case. `_norm_path` cannot raise, so no single entry can abort the loop
+   (`~user` raises `RuntimeError`, which is neither `OSError` nor `ValueError`).
+   Do not re-add a private config read; `cli/mem.py` and `mcp/server.py` keep
+   version-only readers on purpose, both `utf-8-sig`.
+
+4. **Generated artifacts are written atomically and named uniquely.**
+   PROGRESS.md / MEMORY.md / PLAN.md go through tmp + `os.replace` (0-byte reads
+   were routine: 4,867 in 16,071 samples). Session archives carry millisecond
+   stems **and** an `O_CREAT|O_EXCL` claim of the exact path; `.plan_history`
+   likewise (4 sequential replacements used to leave 1 file).
+   `write_session_archive` must derive `YYYY/MM` from the stem it is given, not
+   from its own clock.
+
+5. **`MemoryDB._connect` is a context manager that CLOSES.** It commits /
+   rolls back exactly as `sqlite3.Connection.__exit__` does; the `close()` in
+   the `finally` is the only new behaviour. All 81 call sites keep
+   `with self._connect() as conn:`. Cost is real and measured: +340 % per
+   operation (WAL checkpoint on last-close), +0.6 s on a 120 s PreCompact
+   budget. Do not "optimise" it back into a factory.
+
+6. **`<private>` is honoured on BOTH progress ingresses** —
+   `hooks/user_prompt.py` and `hooks/pre_compact.py:_first_user_request` — and
+   cleaning happens **before** the 500-char cut so a span straddling the cut
+   stays a matched pair. PROGRESS.md is not in `memory/.gitignore`, so a leak
+   there is a leak into the user's repository.
+
+7. **`tools/citation_check.py` gates doc `file:line` citations** (see § Tests).
 
 ## What changed in v2.5.0 (over v2.4.3)
 
@@ -43,7 +104,7 @@ were closed too. Nine things that were silently wrong in shipped code:
    `skip_tools` and `ExitPlanMode` is in no mode's `observe_tools`, so both
    plan-control tools were `False` in all three modes: `plan_active` was never
    written, `.plan_raw.md` / `PLAN.md` never appeared, and the drift counters
-   varied by mode. `_apply_plan_integration` (`post_tool_use.py:77`) now runs
+   varied by mode. `_apply_plan_integration` (`post_tool_use.py:82`) now runs
    **above** the gate; the gate wraps only the `insert_observation` block.
    Plan control is not observation — `core/modes.py`'s `should_observe`
    docstring now forbids re-inverting this. Per mode: ExitPlanMode → plan rows
@@ -158,7 +219,7 @@ not be imported at all — `cli/plan.py` now has a `main()`.
 
 **Residual limits, recorded rather than papered over:**
 
-- `core/db.py`'s three plan mutators — `update_plan_status` (`db.py:1349`),
+- `core/db.py`'s three plan mutators — `update_plan_status` (`db.py:1417`),
   `delete_plan` (`:1410`) and `update_plan_content` (`:1427`) — all accept
   `project_id`, and `cli/plan.py` + `ui/dashboard.py` pass it at every call
   site, but none of them *requires* it (it defaults to `None`). An unscoped raw
@@ -633,8 +694,11 @@ python tests/smoke_test.py
 python tests/test_plan_carryover.py
 # expect: "RESULT: 14 passed, 0 failed"
 python tests/test_surfaces.py
+# expect: "===== ALL SURFACE TESTS PASSED ====="  (§1-§5)
 python tools/i18n_check.py
 # expect: "3 in-sync", exit 0
+python tools/citation_check.py
+# expect: "0 stale, 0 missing", exit 0  (also asserted inside smoke_test.py)
 ```
 
 No pytest / pip dependencies — all three are stdlib scripts and reflect the
@@ -653,12 +717,22 @@ implementation got wrong). Keep that block in step with any hook you add: a hook
 that does not call `core.modes.is_excluded` is a privacy regression, not a style
 nit.
 
-**Nothing gates doc `file:line` citations.** They are hand-maintained and rot on
-every refactor. A definition-site checker — for each `path:lines` citation,
-resolve the symbols named in the same sentence and assert the range covers their
-unique definition — finds them mechanically and would make a cheap CI gate
-alongside `tools/i18n_check.py`. Until one exists, re-derive a citation before
-you trust it.
+**Doc `file:line` citations ARE gated now — `tools/citation_check.py` (v2.5.2).**
+For each `path:lines` citation in the tracked docs it resolves the symbols named
+in the surrounding prose with `ast` and asserts the cited range covers the
+definition **or** mentions the symbol (the docs cite call sites at least as often
+as definitions). It runs inside `smoke_test.py`, so rot turns the suite red.
+`python tools/citation_check.py --fix` repairs what it can; `--list` shows every
+verdict. First run measured **163 of 594 citations stale** — the cost of three
+releases with no gate.
+
+Two limits to know before trusting a green result: a citation whose sentence
+names no *uniquely* resolvable function / class / ALL_CAPS constant is reported
+**SKIP**, not OK (370 of 594 today), and `--fix` rewrites to the **definition**
+site, which is not always the call site a sentence meant. Ordinary variable
+assignments are deliberately not indexed — indexing them made the checker anchor
+prose words like `db`, `pid` and `plan` onto unrelated locals and report ~40
+correct citations as rot, which is the failure mode that makes a gate worthless.
 
 ## Interpreter requirement
 

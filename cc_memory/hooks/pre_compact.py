@@ -57,6 +57,10 @@ from core.logger import get_logger
 # check at all, so a project initialised BEFORE being listed stayed fully
 # captured. One implementation now, called by all six. See core/modes.py.
 from core.modes import is_excluded
+# Privacy filter for the PROGRESS ingress below. The observation and memory
+# write paths honoured <private> from v2.5.0; this hook's progress ingress
+# never did (see _first_user_request).
+from core.privacy import clean_for_storage
 from core.progress import (write_progress_md, write_session_archive, collect_progress_state,
                            migrate_legacy_handoff, ensure_memory_gitignore)
 from llm.memory_writer import upsert_batch, regenerate_memory_index
@@ -243,12 +247,21 @@ def _extract_via_llm(messages, observations=None, total_records=None):
         return valid if valid else None
 
     except (urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError,
-            TimeoutError, OSError, KeyError, ValueError, RuntimeError) as e:
+            TimeoutError, OSError, KeyError, ValueError, RuntimeError,
+            AttributeError, TypeError) as e:
         # RuntimeError: llm.ccl_backend.call_llm raises it when EVERY backend
         # candidate fails. Without it here that escapes to main()'s handler and
         # aborts the whole hook — skipping the PROGRESS.md rewrite — so a
         # transient API outage would silently cost a session handoff. Extraction
         # is optional; the handoff is not.
+        # AttributeError / TypeError, added in v2.5.2: a config.json whose `ccl`
+        # key held a string, or whose top level was not an object, made
+        # _load_local_config raise AttributeError THROUGH call_llm (which is
+        # called outside any try of its own) and out of this tuple — costing the
+        # handoff for a config typo. v2.5.2 fixed that reader, so this is
+        # defence in depth for the next shape-mismatch, of which there will be
+        # one: the sentence above is a contract, and the tuple has to hold it
+        # against causes nobody enumerated yet.
         _log.error(f"LLM extraction failed: {e}")
         return None
 
@@ -300,7 +313,7 @@ def _fmt_archive(ext, timestamp, trigger, project_name):
 
 
 def _first_user_request(messages, max_scan=200):
-    """Return the session's opening user request.
+    """Return the session's opening user request, PRIVACY-CLEANED.
 
     Scans further than the first handful of records on purpose: a transcript
     opens with meta rows (`queue-operation`, `attachment`, …) that carry no
@@ -308,21 +321,39 @@ def _first_user_request(messages, max_scan=200):
     transcript the first genuine user message sat at index 5, so the previous
     `messages[:5]` slice returned "" and PROGRESS.md's current_request came up
     empty. Empty candidates are skipped rather than returned.
+
+    `clean_for_storage` is applied HERE rather than at the two call sites
+    (`session_summaries.request` and `progress.current_request`, both below)
+    because both store the value and PROGRESS.md renders `current_request`
+    verbatim — into a file `memory/.gitignore` does NOT ignore, so a
+    `<private>` span in the opening request used to be committed to the user's
+    repository. Cleaning at the source covers every present and future
+    consumer; cleaning at the call sites is the shape that let this ingress
+    diverge from the observation and memory write paths in the first place.
+
+    Cleaned BEFORE the 500-char cut, for the same reason as
+    hooks/user_prompt.py: a span straddling the boundary is still a matched
+    pair, and `clean_for_storage` fails CLOSED on a dangling open tag. A
+    request that redacts away entirely returns "" rather than falling through
+    to the next user message — the opening request WAS the private one, and
+    silently substituting a later turn would misreport the session.
     """
     for msg in messages[:max_scan]:
         message = msg.get("message", {})
         if not isinstance(message, dict) or message.get("role") != "user":
             continue
         content_field = message.get("content", "")
+        candidate = ""
         if isinstance(content_field, str):
-            if content_field.strip():
-                return content_field[:500]
+            candidate = content_field
         elif isinstance(content_field, list):
             for block in content_field:
                 if isinstance(block, dict) and block.get("type") == "text":
-                    text = block.get("text", "")
-                    if text.strip():
-                        return text[:500]
+                    if (block.get("text") or "").strip():
+                        candidate = block["text"]
+                        break
+        if candidate.strip():
+            return clean_for_storage(candidate)[:500]
     return ""
 
 
@@ -366,6 +397,60 @@ def _clear_attempt(memory_dir):
         # why: absent or locked marker is harmless — a stale marker only ever
         # causes an advisory "previous run did not finish" line at SessionStart
         pass
+
+
+# Bound on the collision-suffix search below. 200 same-millisecond archives in
+# one project is already far past anything reachable; the loop must terminate.
+_ARCHIVE_TS_TRIES = 200
+
+
+def _reserve_archive_ts(memory_dir, now):
+    """Return a session-archive stem no other run can already be using.
+
+    core.progress.write_session_archive names the file ``session_<stem>.md``
+    and writes it unconditionally, and ``sessions.archive_path`` has no
+    uniqueness constraint — so a stem that already exists on disk DESTROYS that
+    archive. Second-resolution stems made that routine: two PreCompacts in one
+    wall-clock second produced two `sessions` rows pointing at ONE file, the
+    first session's transcript gone with no error anywhere (measured: 12 real
+    compactions across two windows -> 3 archive files on disk). The rows still
+    render in `cli/mem.py sessions` and the dashboard, so the misattribution is
+    user-visible while the loss is silent.
+
+    Two defences, because neither alone closes it:
+      * millisecond precision, so the ordinary case (a manual /compact landing
+        in the same second as an auto one) never collides at all — and the stem
+        stays sortable and human-readable: ``20260805_170025_412``;
+      * an ``O_CREAT|O_EXCL`` claim of the exact target path, which is atomic
+        across processes, with a ``-N`` suffix for the loser. Precision alone
+        narrows the race; it does not end it.
+
+    The claimed placeholder is 0 bytes and write_session_archive overwrites it
+    microseconds later. Both sides derive ``sessions/YYYY/MM`` from the SAME
+    instant: this function from the ``now`` its caller passes, and
+    core.progress.write_session_archive from the ``%Y%m%d`` prefix of the stem
+    returned here — it must never take its own clock reading, or a claim and a
+    write that straddle a month boundary would land in different directories,
+    voiding this claim and orphaning the placeholder.
+    """
+    base = now.strftime("%Y%m%d_%H%M%S_") + now.strftime("%f")[:3]
+    try:
+        archive_dir = memory_dir / "sessions" / now.strftime("%Y/%m")
+        archive_dir.mkdir(parents=True, exist_ok=True)
+        for n in range(_ARCHIVE_TS_TRIES):
+            stem = base if n == 0 else f"{base}-{n}"
+            try:
+                fd = os.open(str(archive_dir / f"session_{stem}.md"),
+                             os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            except FileExistsError:
+                continue
+            os.close(fd)
+            return stem
+    except OSError as e:
+        # why: this is a collision guard, not the archive write itself. A
+        # failing probe must cost at most uniqueness, never the archive.
+        _log.error(f"archive name reservation failed: {e}")
+    return f"{base}-{os.getpid()}"
 
 
 def main():
@@ -465,7 +550,10 @@ def main():
 
         now = datetime.now()
         timestamp = now.strftime("%Y-%m-%d %H:%M:%S")
-        file_ts = now.strftime("%Y%m%d_%H%M%S")
+        # NOT now.strftime("%Y%m%d_%H%M%S"): that stem collides at second
+        # resolution and the collision silently overwrites an existing
+        # archive. See _reserve_archive_ts.
+        file_ts = _reserve_archive_ts(memory_dir, now)
 
         # Session archive
         archive_text = _fmt_archive(ext, timestamp, trigger, project_name)

@@ -24,6 +24,7 @@ Anti-patch contract (v2.1):
   `update_memory` (modify in place) or `supersede_memory` (archive+link)
   instead of appending. The supersedes_id column forms the update chain.
 """
+import contextlib
 import hashlib
 import sqlite3
 import json
@@ -259,17 +260,84 @@ class MemoryDB:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._bootstrap()
 
-    def _connect(self) -> sqlite3.Connection:
+    @contextlib.contextmanager
+    def _connect(self):
+        """Yield a connection that COMMITS on success, ROLLS BACK on error, and
+        — unlike `sqlite3.Connection.__exit__` — ALWAYS CLOSES.
+
+        This is a context manager, not a factory: every one of the 66 call sites
+        in this file and the 15 elsewhere in the package already consumes it as
+        `with self._connect() as conn:`, so the `with` keeps working unchanged.
+
+        WHY it had to change. `sqlite3.Connection.__exit__` commits or rolls
+        back but does NOT close (documented CPython behaviour). Each call site
+        therefore leaked one connection, which its own statement-cache reference
+        cycle then kept alive until the cyclic GC happened to run. Measured at
+        v2.5.1: 4 live `sqlite3.Connection` objects after `MemoryDB(...)`, 5
+        after one `upsert_project()`, 25 after 20 further `insert_memory()`
+        calls — one per operation, linear and unbounded. `ui/dashboard.py`,
+        `ui/web_viewer.py` and `mcp/server.py` each hold a MemoryDB for their
+        whole process lifetime, so every refresh / request / tool call added a
+        handle carrying this block's 256 MiB `mmap_size`; and on Windows an open
+        handle makes memory.db undeletable (`PermissionError [WinError 32]` on
+        `shutil.rmtree`, which is why both test suites have to sweep
+        `gc.get_objects()` before their teardown).
+
+        WHAT MUST NOT CHANGE is the transaction semantics — every write path in
+        the plugin depends on them, so they reproduce `Connection.__exit__`
+        exactly:
+          - normal exit (including leaving the block via `return`, which most
+            of the call sites do) -> commit;
+          - ANY exception -> rollback, then re-raise. `__exit__` keys off
+            `exc_type` alone, so it rolls back for BaseException too
+            (KeyboardInterrupt / GeneratorExit included) — hence `except
+            BaseException` and not `except Exception` here.
+        Only the `close()` in the `finally` is new behaviour.
+
+        Nesting stays legal: `search_fts` -> `_match_fts` -> `_rebuild_fts5`
+        opens an inner connection inside an outer one. Each gets its own handle,
+        WAL lets the inner writer proceed under the outer reader, and
+        `busy_timeout` covers the cross-process case (the PreCompact sync leg
+        running alongside the async consolidation leg).
+        """
         conn = sqlite3.connect(str(self.db_path), timeout=10)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA foreign_keys = ON")
-        conn.execute("PRAGMA journal_mode = WAL")
-        conn.execute("PRAGMA synchronous = NORMAL")
-        conn.execute("PRAGMA busy_timeout = 5000")
-        conn.execute("PRAGMA temp_store = memory")
-        conn.execute("PRAGMA mmap_size = 268435456")
-        conn.execute("PRAGMA cache_size = 10000")
-        return conn
+        try:
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA foreign_keys = ON")
+            conn.execute("PRAGMA journal_mode = WAL")
+            conn.execute("PRAGMA synchronous = NORMAL")
+            conn.execute("PRAGMA busy_timeout = 5000")
+            conn.execute("PRAGMA temp_store = memory")
+            conn.execute("PRAGMA mmap_size = 268435456")
+            conn.execute("PRAGMA cache_size = 10000")
+        except BaseException:
+            # why: a PRAGMA that fails (locked file, damaged header, read-only
+            # volume) must not leave the half-configured handle open — that is
+            # exactly the leak this wrapper exists to close. The caller still
+            # sees the original error, unchanged.
+            conn.close()
+            raise
+
+        try:
+            yield conn
+        except BaseException:
+            try:
+                conn.rollback()
+            except Exception:
+                # why: the connection is already broken; a rollback error
+                # raised from here would MASK the caller's real exception
+                pass
+            raise
+        else:
+            conn.commit()
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                # why: a close() failure must never turn a with-block that
+                # otherwise succeeded into a raising one (hook contract:
+                # hooks never raise)
+                pass
 
     def _bootstrap(self):
         with self._connect() as conn:

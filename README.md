@@ -2,7 +2,7 @@
 
 # cc-memory
 
-**Claude Code persistent memory plugin (v2.5.1)** — anti-patch reconcile-on-write
+**Claude Code persistent memory plugin (v2.5.2)** — anti-patch reconcile-on-write
 with LLM-judged semantic de-duplication, forced PROGRESS.md handoff, live PLAN.md
 anchor with plan-refiner / plan-guardian subagents and a mandatory carryover
 gate, bounded transcript reads, injection observability, FTS5 search, AI-judged
@@ -17,7 +17,38 @@ disappear. Conversations that end normally (terminal closed) also lose context.
 cc-memory captures structured memories at every conversation boundary AND
 **forces the next session to read a handoff document** before it starts work.
 
-## What's new in v2.5
+## What's new in v2.5.2
+
+A third audit, on angles the first two never used — time, concurrency,
+cross-surface agreement, hostile input. Full detail in
+[CHANGELOG.md](CHANGELOG.md); the four that matter most:
+
+- **Stored memory content could forge a complete `<system-reminder>` block** into
+  the SessionStart injection (**8 blocks in a stdout where the plugin emits 1**)
+  and into PROGRESS.md. `memory_add` is a model-invokable MCP tool, so one
+  indirect injection — a malicious README, a fetched page, a dependency's source
+  — became a *permanent* memory re-injected as authoritative context at the
+  start of every later session. Markers are now **escaped, not deleted**, on the
+  write path *and* on every render path (PROGRESS.md, the injection, PLAN.md,
+  MEMORY.md), so text stays readable and stops carrying authority.
+- **Two ways the privacy opt-out silently switched itself off**: a UTF-8 BOM on
+  `config.json` (PowerShell's `Out-File` default) made `json.load` raise into a
+  swallow-and-continue, and one unexpandable `~user` entry voided every entry
+  after it. The parser now reads `utf-8-sig`, cannot be aborted by one bad
+  entry, and **fails closed** on a config it cannot use.
+- **The MCP server ignored `excluded_projects` entirely** — the seventh caller
+  of a control v2.5.1 had just wired into the six hooks, and the one loaded by
+  default with every call chosen by the model.
+- **Concurrent and same-second writes destroyed data**: 12 compactions left 3
+  session archives; four *sequential* plan replacements left 1 history file;
+  PROGRESS.md / MEMORY.md / PLAN.md could be read as 0 bytes. All are now
+  claimed atomically and written through `os.replace`.
+
+Also: `MemoryDB._connect` no longer leaks a sqlite handle per operation (25 live
+after 20 inserts → 0), and `tools/citation_check.py` now gates doc `file:line`
+citations — its first run found **163 of 594 stale**.
+
+## What's new in v2.5.0
 
 The largest correctness release so far, and not a feature release: roughly 134
 defects closed across 26 files, then re-attacked by four read-only adversarial
@@ -675,15 +706,28 @@ because editing it looks like it does something. What remains:
   Anthropic legs are the only backends.
 - `excluded_projects` — absolute paths that opt OUT of cc-memory entirely. A
   listed directory *and everything beneath it* gets no `memory/` directory, no
-  DB, no observations, no extraction and no PROGRESS.md: **all six hooks** call
-  `core.modes.is_excluded(cwd)` as their first act after resolving `cwd` and
-  exit 0. That is one shared implementation, not a copy per hook — v2.5.0
-  shipped it as two private copies in the only two hooks that *create*
-  `memory/`, which left a project that was initialised BEFORE it was listed
-  fully instrumented: observations kept accumulating, PROGRESS.md kept naming
-  its files, and with a live credential the Stop observer kept POSTing them to
-  the Anthropic API. Matching is on the resolved absolute path, case-insensitive
-  on Windows. This is the only opt-out.
+  DB, no observations, no extraction and no PROGRESS.md: **all six hooks, plus
+  the MCP server**, call `core.modes.is_excluded(cwd)` as their first act after
+  resolving `cwd` and exit 0 (MCP answers `isError`). That is one shared
+  implementation, not a copy per caller — v2.5.0 shipped it as two private
+  copies in the only two hooks that *create* `memory/`, which left a project
+  that was initialised BEFORE it was listed fully instrumented: observations
+  kept accumulating, PROGRESS.md kept naming its files, and with a live
+  credential the Stop observer kept POSTing them to the Anthropic API. v2.5.1
+  fixed the six hooks and missed the seventh caller: **the MCP server had no
+  check at all** through v2.5.1 — it is loaded by default from the shipped
+  manifest and every call is model-initiated, so a listed project stayed fully
+  readable and writable by the model. v2.5.2 gates it in `_get_db`, the single
+  choke point all eight tools reach. Matching is on the resolved absolute path,
+  case-insensitive on Windows. This is the only opt-out.
+  **Since v2.5.2 the parser fails CLOSED**: a `config.json` that exists and
+  cannot be used — invalid JSON, not an object, not UTF-8 — excludes *every*
+  project and logs the reason, rather than guessing "not excluded" and storing
+  data irreversibly. An **absent or empty** config is not that case (no list,
+  nothing excluded). The file is read as `utf-8-sig` and a `~user` entry that
+  cannot be expanded now degrades to a literal comparison — a BOM (PowerShell's
+  `Out-File` default) and one bad `~` entry each used to switch the whole
+  opt-out off silently.
 - `notes` — in-file documentation, including which module owns each value that
   used to live here.
 

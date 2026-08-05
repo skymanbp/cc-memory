@@ -44,6 +44,7 @@ from core.db import MemoryDB
 from core.extractor import load_transcript_window, mangle_project_path
 from core.logger import get_logger
 from core.modes import is_excluded
+from core.privacy import neutralize_inline, neutralize_markers
 from core.progress import write_progress_md
 from llm.memory_writer import upsert_batch
 
@@ -62,6 +63,23 @@ _LAYER_BUDGETS = {
 }
 
 
+# ── Why every content field below is neutralised ───────────────────────────
+# This hook's stdout IS the injection: Claude reads it as authoritative
+# context, and the plugin's own `<system-reminder>` block is emitted into the
+# same stream. Stored memory content used to be concatenated in RAW, so a
+# single row could close the plugin's block and open its own. Measured driving
+# the real MCP server + this hook: 8 complete `<system-reminder>` blocks in one
+# injection (this hook emits 1) and 6 copies of the "=== CC-MEMORY: Context
+# Restored ===" banner (1), plus U+202E, ZWJ, NUL and ANSI ESC verbatim.
+# `memory_add` is a MODEL-INVOKABLE MCP tool, so the payload persists in
+# memory.db and is re-injected at EVERY future SessionStart.
+#
+# core.privacy.clean_for_storage now neutralises on the WRITE path, but rows
+# written by v2.5.1 and earlier are already in users' databases armed — so the
+# render path neutralises again. The three memory/topic layers use
+# `neutralize_inline`, because each renders exactly ONE line per row and a
+# newline there lets content forge a new markdown section; the PROGRESS.md
+# preview below uses `neutralize_markers`, which keeps newlines.
 def _build_topics_layer(db, project_id, budget):
     topics = db.get_topics(project_id)
     if not topics:
@@ -70,16 +88,20 @@ def _build_topics_layer(db, project_id, budget):
     used = 0
     topic_names = set()
     for t in topics:
-        summary = t["content"]
+        name = neutralize_inline(str(t["name"]))
+        summary = neutralize_inline(str(t["content"]))
         max_len = min(250, (budget - used) // max(len(topics), 1))
         if len(summary) > max_len:
             cut = summary[:max_len].rfind(".")
             summary = summary[:cut+1] if cut > 50 else summary[:max_len-3] + "..."
-        entry = f"**[{t['name']}]** {summary}\n"
+        entry = f"**[{name}]** {summary}\n"
         if used + len(entry) > budget:
             break
         lines.append(entry)
         used += len(entry)
+        # RAW name, deliberately: _build_critical_layer matches this set against
+        # `memories.topic` straight out of the DB, so a neutralised copy here
+        # would silently stop de-duplicating the critical layer.
         topic_names.add(t["name"])
     return "\n".join(lines), topic_names
 
@@ -96,7 +118,8 @@ def _build_critical_layer(db, project_id, budget, topic_names):
     used = 0
     shown = set()
     for m in unmerged[:8]:
-        entry = f"- [{m['category']}] {m['content']}"
+        entry = (f"- [{neutralize_inline(str(m['category']))}] "
+                 f"{neutralize_inline(str(m['content']))}")
         if used + len(entry) > budget:
             break
         lines.append(entry)
@@ -121,12 +144,14 @@ def _build_timeline_layer(db, project_id, budget, shown_ids, mode_name="code"):
     used = 0
     injected = []
     for i, m in enumerate(fresh):
+        cat = neutralize_inline(str(m["category"]))
+        content = neutralize_inline(str(m["content"]))
         if i < 5:
             prefix = "! " if m["importance"] >= 4 else "- "
-            entry = f"{prefix}[{m['category']}] {m['content']}"
+            entry = f"{prefix}[{cat}] {content}"
         else:
-            short = m["content"][:60] + "..." if len(m["content"]) > 60 else m["content"]
-            entry = f"#{m['id']} {m['category']}: {short}"
+            short = content[:60] + "..." if len(content) > 60 else content
+            entry = f"#{m['id']} {cat}: {short}"
         if used + len(entry) > budget:
             break
         lines.append(entry)
@@ -151,6 +176,12 @@ def _build_progress_preview(memory_dir, budget):
     except OSError:
         # why: read failure shouldn't break SessionStart; fall through to empty
         return ""
+    # A PROGRESS.md written by v2.5.1 or earlier can still hold armed markers
+    # (core/progress.py only started neutralising on its render path in v2.5.2),
+    # and this preview is concatenated straight into the injection. Markers get
+    # escaped; NEWLINES ARE KEPT — the preview's markdown structure is the whole
+    # point of showing a preview, so `neutralize_markers`, not the inline form.
+    text = neutralize_markers(text)
     # Trim to budget
     if len(text) > budget:
         text = text[:budget].rsplit("\n", 1)[0] + "\n…[truncated, read memory/PROGRESS.md]"
@@ -163,25 +194,37 @@ def _build_footer(db, project_id, memory_dir):
     if last_save.exists():
         try:
             info = json.loads(last_save.read_text(encoding="utf-8"))
-            ts = info.get("timestamp", "?")
+            if not isinstance(info, dict):
+                # A JSON list/int/string/null parses fine but has no .get(), and
+                # the AttributeError escaped the (JSONDecodeError, OSError)
+                # tuple below — taking the ENTIRE injection with it. Measured:
+                # 5793 B -> 58 B, no memories, no PROGRESS preview, and NO
+                # forced system-reminder. The sibling .pre_compact_attempt.json
+                # block 30 lines down has carried this guard since v2.4.2.
+                raise ValueError("status file is not a JSON object")
+            ts = neutralize_inline(str(info.get("timestamp", "?")))
             # trigger makes AUTO compactions visible. Claude Code only surfaces
             # hook execution in its UI for MANUAL /compact, so an automatic
             # compaction was previously indistinguishable from "never ran".
-            trig = info.get("trigger", "")
+            trig = neutralize_inline(str(info.get("trigger", "")))
             trig_s = f" ({trig})" if trig else ""
             if info.get("success"):
-                method = info.get("method", "?")
-                ni = info.get("n_inserted", 0)
-                nm = info.get("n_merged", 0)
-                ns = info.get("n_superseded", 0)
+                method = neutralize_inline(str(info.get("method", "?")))
+                ni = neutralize_inline(str(info.get("n_inserted", 0)))
+                nm = neutralize_inline(str(info.get("n_merged", 0)))
+                ns = neutralize_inline(str(info.get("n_superseded", 0)))
                 lines.append(
                     f"[Last save: {ts}{trig_s} | +{ni}/~{nm}/↻{ns} via {method}]"
                 )
             else:
                 lines.append(f"[Last save FAILED at {ts}{trig_s}]")
-        except (json.JSONDecodeError, OSError):
-            # why: malformed status file shouldn't block injection;
-            # the next PreCompact will overwrite it
+        except (json.JSONDecodeError, OSError, ValueError, TypeError,
+                AttributeError):
+            # why: a malformed status file is purely advisory and must never
+            # block injection; the next PreCompact overwrites it. The tuple is
+            # deliberately wide for the same reason as the marker block below —
+            # trading one missing diagnostic line for total memory loss is not
+            # a trade worth making.
             pass
 
     # A PreCompact killed by the host timeout dies on TerminateProcess: no
@@ -205,8 +248,10 @@ def _build_footer(db, project_id, memory_dir):
             if age_min >= 10:
                 mib = float(a.get("transcript_bytes") or 0) / 1024 ** 2
                 lines.append(
-                    f"[WARNING: PreCompact at {a.get('started_at')} "
-                    f"({a.get('trigger', '?')}) DID NOT FINISH — killed before "
+                    f"[WARNING: PreCompact at "
+                    f"{neutralize_inline(str(a.get('started_at')))} "
+                    f"({neutralize_inline(str(a.get('trigger', '?')))}) "
+                    f"DID NOT FINISH — killed before "
                     f"save (transcript {mib:.0f} MiB). Memories from that "
                     f"compaction were lost.]"
                 )

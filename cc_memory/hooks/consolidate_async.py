@@ -49,7 +49,7 @@ enable_utf8_io()
 
 from core.db import MemoryDB
 from core.logger import get_logger
-from core.modes import is_excluded
+from core.modes import is_excluded, read_config
 
 _log = get_logger("consolidate_async")
 
@@ -68,16 +68,44 @@ _DEFAULT_INTERVAL = 5
 
 
 def _auto_interval():
-    """Sessions between consolidations, from config.json (fallback 5)."""
+    """Sessions between consolidations, from config.json (fallback 5).
+
+    Reads through `core.modes.read_config`, which is BOM-tolerant: this hook
+    used to open config.json with plain ``encoding="utf-8"``, so a
+    PowerShell-resaved file (``Out-File`` writes UTF-8 WITH a BOM on the
+    primary platform) silently reverted the cadence to 5 — the same parser hole
+    that switched the privacy opt-out off, and just as silent.
+
+    Every degradation is logged: a consolidation cadence that is not the one
+    the user configured should be explainable after the fact.
+    """
     try:
-        cfg_path = _PKG_ROOT / "config.json"
-        with open(cfg_path, encoding="utf-8") as f:
-            cfg = json.load(f)
-        n = int(cfg.get("consolidation", {}).get("auto_interval_sessions",
-                                                 _DEFAULT_INTERVAL))
-        return n if n > 0 else _DEFAULT_INTERVAL
-    except Exception:
-        # why: config absent/malformed must not break the hook; use the default.
+        cfg, note = read_config()
+        if cfg is None:
+            _log.warn(f"config.json {note} -- using default consolidation "
+                      f"interval {_DEFAULT_INTERVAL}")
+            return _DEFAULT_INTERVAL
+        section = cfg.get("consolidation")
+        if section is None:
+            return _DEFAULT_INTERVAL
+        if not isinstance(section, dict):
+            _log.warn(f"config.json consolidation is a "
+                      f"{type(section).__name__}, not an object -- using "
+                      f"default interval {_DEFAULT_INTERVAL}")
+            return _DEFAULT_INTERVAL
+        n = int(section.get("auto_interval_sessions", _DEFAULT_INTERVAL))
+        if n > 0:
+            return n
+        _log.warn(f"config.json consolidation.auto_interval_sessions={n} is "
+                  f"not positive -- using default {_DEFAULT_INTERVAL}")
+        return _DEFAULT_INTERVAL
+    except Exception as e:
+        # why: hook contract — never raise. A non-numeric auto_interval_sessions
+        # (TypeError/ValueError from int()) or any unforeseen shape falls back
+        # to the shipped cadence rather than killing the consolidation leg.
+        _log.warn(f"config.json consolidation.auto_interval_sessions unusable "
+                  f"({type(e).__name__}: {e}) -- using default "
+                  f"{_DEFAULT_INTERVAL}")
         return _DEFAULT_INTERVAL
 
 

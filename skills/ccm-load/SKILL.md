@@ -213,18 +213,26 @@ if not db_path.exists():
     mem_dir.mkdir(exist_ok=True)
     (mem_dir / 'sessions').mkdir(exist_ok=True)
     (mem_dir / 'topics').mkdir(exist_ok=True)
-    # Literal copy (inline script, no package import). Keep in sync with
-    # core.progress.MEMORY_GITIGNORE_LINES.
+    # Literal copy (inline script, no package import). Must mirror BOTH halves
+    # of core.progress.ensure_memory_gitignore: the LINE LIST
+    # (core.progress.MEMORY_GITIGNORE_LINES) and the APPEND SEMANTICS. Only the
+    # list was ever mirrored: this copy did open(gi, 'a') + join(missing), so
+    # against an existing .gitignore whose last line had no trailing newline it
+    # emitted 'sessions/# cc-memory: generated state, not content' - fusing the
+    # user's last rule with our first comment and destroying that rule. The
+    # read / normalise / write shape below matches core/progress.py:70-76 line
+    # for line; cc_memory/ui/installer.py:_init_project is copy #3.
     gi = mem_dir / '.gitignore'
     _ign = ['# cc-memory: generated state, not content', 'memory.db', 'memory.db-wal',
             'memory.db-shm', 'sessions/', '.last_save.json', '.last_inject.json',
             '.last_consolidation.json', '.consolidation.lock',
             '.pre_compact_attempt.json', '.plan_raw.md', '.plan_history/', '*.tmp']
-    _have = {l.strip() for l in gi.read_text(encoding='utf-8').splitlines()} if gi.exists() else set()
+    _cur = gi.read_text(encoding='utf-8') if gi.exists() else ''
+    _have = {l.strip() for l in _cur.splitlines()}
     _miss = [l for l in _ign if l not in _have]
     if _miss:
-        with open(gi, 'a', encoding='utf-8') as _f:
-            _f.write('\n'.join(_miss) + '\n')
+        _pre = _cur if _cur.endswith('\n') or not _cur else _cur + '\n'
+        gi.write_text(_pre + '\n'.join(_miss) + '\n', encoding='utf-8')
 
 # ── (3) Resolve the package tree (env override > activated layout) ─────
 # why: hardcoding the maintainer's path breaks the skill on every other

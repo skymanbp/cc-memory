@@ -26,7 +26,10 @@ The forced-handoff system-reminder injected at SessionStart points to this
 file. See docs/CONTRACTS.md#handoff-contract for the full handoff spec.
 """
 import json
+import os
 import sys
+import tempfile
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -85,6 +88,7 @@ if str(_PKG_ROOT) not in sys.path:
 
 from core.db import MemoryDB
 from core.logger import get_logger
+from core.privacy import neutralize_block, neutralize_inline, neutralize_markers
 
 _log = get_logger("progress")
 
@@ -185,17 +189,64 @@ def collect_progress_state(db: MemoryDB, project_id: int,
 def _short_sid(sid: str, width: int = 8) -> str:
     """First N chars of a Claude session UUID, with a leading hash to make it
     visually distinct from plain numbers in the rendered table."""
-    s = (sid or "").strip()
+    s = neutralize_inline(sid)
     return ("#" + s[:width]) if s else "(untagged)"
 
 
 def _short_ts(ts: str) -> str:
     """Trim ISO timestamps to date+HH:MM for readability in the timeline."""
-    s = (ts or "").strip()
+    s = neutralize_inline(ts)
     if not s:
         return "(unknown)"
     # accept '2026-06-02T12:56:18' or '2026-06-02T12:56:18.123' etc.
     return s.replace("T", " ")[:16]
+
+
+def _atomic_write(path: Path, text: str) -> None:
+    """Write `text` to `path` so a concurrent reader never sees a partial file.
+
+    `Path.write_text` truncates first and writes second; a reader landing in
+    that window gets 0 bytes. Measured on PROGRESS.md with one writer and one
+    reader: 558 torn/empty reads in 21782 samples. PROGRESS.md is the handoff
+    contract that the SessionStart `<system-reminder>` ORDERS the next Claude to
+    Read FIRST, so an empty read silently voids the exact guarantee the plugin
+    exists to provide. tempfile + os.replace is the idiom already used for
+    `.last_inject.json` (session_start.py) and `.pre_compact_attempt.json`
+    (pre_compact.py); the `*.tmp` name is already in MEMORY_GITIGNORE_LINES.
+
+    `errors="replace"` because a lone surrogate — reachable from a
+    `surrogateescape`-decoded filename that lands in `files_touched` — would
+    otherwise raise UnicodeEncodeError and take the whole rewrite with it.
+    """
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent),
+                               prefix="." + path.name + ".", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", errors="replace") as fh:
+            fh.write(text)
+        last_err = None
+        for attempt in range(5):
+            try:
+                os.replace(tmp, str(path))
+                return
+            except PermissionError as e:
+                # why: Windows-only sharing violation — a concurrent reader
+                # holding the target open without FILE_SHARE_DELETE blocks the
+                # rename for microseconds. Retry briefly rather than fall back
+                # to a truncating write, which IS the torn-read defect above.
+                last_err = e
+                time.sleep(0.01 * (attempt + 1))
+        raise last_err
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+
+
+# Moved to core.privacy in v2.5.2 — core/plan.py needs the identical escaping
+# for PLAN.md's Goal and Context blocks, and a second copy of the marker
+# defence is exactly how the six `is_excluded` call sites drifted apart before
+# v2.5.0. Bound to the old private name so this module's six call sites below
+# are unchanged; the implementation and its rationale now live in one place.
+_neutralize_block = neutralize_block
 
 
 def _render_session_section(db: MemoryDB, project_id: int, prog: Dict) -> List[str]:
@@ -209,9 +260,11 @@ def _render_session_section(db: MemoryDB, project_id: int, prog: Dict) -> List[s
     the file knows immediately whether the row belongs to its own session.
     Prior sessions are listed newest-first with brief summaries.
     """
+    # cur_sid stays RAW: it is compared against `sessions.claude_session_id`
+    # below. Every RENDER of it goes through _short_sid, which neutralises.
     cur_sid = (prog.get("current_session_id") or "").strip()
     started = (prog.get("session_started_at") or "").strip()
-    trigger = (prog.get("trigger_type") or "").strip()
+    trigger = neutralize_inline(prog.get("trigger_type") or "")
     updated = (prog.get("updated_at") or "").strip()
 
     out: List[str] = ["## 0. Session", ""]
@@ -256,8 +309,10 @@ def _render_session_section(db: MemoryDB, project_id: int, prog: Dict) -> List[s
                 or "(no summary)"
             )
             # Flatten embedded newlines + collapse runs of whitespace so a
-            # multi-line brief_summary doesn't break the list-item alignment.
-            summary = " ".join(summary.split())
+            # multi-line brief_summary doesn't break the list-item alignment —
+            # and neutralise markers, because a summary is LLM-written text
+            # rendered into a one-line slot (see core.privacy).
+            summary = neutralize_inline(summary)
             if len(summary) > 100:
                 summary = summary[:97] + "..."
             out.append(f"- `{sid}`  ·  ended `{ended}`  ·  {msgs} msgs  ·  {summary}")
@@ -269,6 +324,17 @@ def write_progress_md(db: MemoryDB, project_id: int, memory_dir: Path) -> Path:
     """Render the `progress` row to memory/PROGRESS.md (FULL REWRITE).
 
     Returns the path to the written file.
+
+    Every field interpolated below is CONTENT, not structure, and all of it is
+    model-reachable: `critical_context` is memory text (and `memory_add` is a
+    model-invokable MCP tool), `plan` / `status_*` come from the LLM session
+    summary, `open_todos` / `files_touched` come from tool traffic. So each one
+    goes through core.privacy — `neutralize_inline` for slots that own exactly
+    one rendered line (a newline there opens a forged `## N.` section),
+    `neutralize_markers` for the genuinely multi-line slots, whose newlines are
+    real structure. Measured before this change, from ONE stored memory: 4
+    complete `<system-reminder>` blocks and 3 copies of
+    "## 7. Pre-compact Transcript Pointer" in a document that has 1.
     """
     prog = db.get_progress(project_id) or {}
     project_name = Path(db.get_project_by_path(
@@ -280,11 +346,12 @@ def write_progress_md(db: MemoryDB, project_id: int, memory_dir: Path) -> Path:
         row = conn.execute(
             "SELECT name, path FROM projects WHERE id = ?", (project_id,)
         ).fetchone()
-        project_name = row["name"] if row else "(unknown)"
-        project_path = row["path"] if row else ""
+        project_name = neutralize_inline(row["name"] if row else "(unknown)")
+        project_path = neutralize_inline(row["path"] if row else "")
 
-    updated_at = prog.get("updated_at", datetime.now().isoformat(timespec="seconds"))
-    trigger = prog.get("trigger_type", "")
+    updated_at = neutralize_inline(
+        prog.get("updated_at") or datetime.now().isoformat(timespec="seconds"))
+    trigger = neutralize_inline(prog.get("trigger_type") or "")
 
     lines = [
         f"# PROGRESS — {project_name}",
@@ -306,15 +373,15 @@ def write_progress_md(db: MemoryDB, project_id: int, memory_dir: Path) -> Path:
 
     # --- Current Request -----------------------------------------------------
     lines += ["## 1. Current Request", ""]
-    cr = (prog.get("current_request") or "").strip()
+    cr = _neutralize_block((prog.get("current_request") or "").strip())
     lines.append(cr or "*(no request recorded yet)*")
     lines += [""]
 
     # --- Status --------------------------------------------------------------
     lines += ["## 2. Status", ""]
-    done = (prog.get("status_done") or "").strip()
-    in_flight = (prog.get("status_in_flight") or "").strip()
-    blocked = (prog.get("status_blocked") or "").strip()
+    done = _neutralize_block((prog.get("status_done") or "").strip())
+    in_flight = _neutralize_block((prog.get("status_in_flight") or "").strip())
+    blocked = _neutralize_block((prog.get("status_blocked") or "").strip())
     lines.append(f"**Done** —    {done or '*(none yet)*'}")
     lines.append("")
     lines.append(f"**In-flight** — {in_flight or '*(none active)*'}")
@@ -331,15 +398,16 @@ def write_progress_md(db: MemoryDB, project_id: int, memory_dir: Path) -> Path:
         lines.append("*(no open todos)*")
     else:
         for t in todos:
-            prio = t.get("priority", "medium")
+            prio = neutralize_inline(str(t.get("priority", "medium")))
             status = t.get("status", "pending")
             mark = "[ ]" if status == "pending" else "[~]"
-            lines.append(f"- {mark} `{prio}` {t.get('content','')}")
+            lines.append(f"- {mark} `{prio}` "
+                         f"{neutralize_inline(str(t.get('content','')))}")
     lines += [""]
 
     # --- Plan ----------------------------------------------------------------
     lines += ["## 4. Plan (sequenced next steps)", ""]
-    plan = (prog.get("plan") or "").strip()
+    plan = _neutralize_block((prog.get("plan") or "").strip())
     lines.append(plan or "*(no plan recorded)*")
     lines += [""]
 
@@ -350,11 +418,11 @@ def write_progress_md(db: MemoryDB, project_id: int, memory_dir: Path) -> Path:
         lines.append("*(no critical memories)*")
     else:
         for m in crit[:10]:
-            mid = m.get("id", "?")
-            cat = m.get("category", "")
-            topic = m.get("topic", "")
+            mid = neutralize_inline(str(m.get("id", "?")))
+            cat = neutralize_inline(str(m.get("category", "")))
+            topic = neutralize_inline(str(m.get("topic", "")))
             topic_tag = f"[{topic}] " if topic else ""
-            content = (m.get("content", "") or "")[:200]
+            content = neutralize_inline(str(m.get("content", "") or ""))[:200]
             lines.append(f"- #{mid} `{cat}` {topic_tag}{content}")
     lines += [""]
 
@@ -369,7 +437,9 @@ def write_progress_md(db: MemoryDB, project_id: int, memory_dir: Path) -> Path:
         # Group by action
         by_action: Dict[str, List[str]] = {}
         for f in files:
-            by_action.setdefault(f.get("action", "?"), []).append(f.get("path", ""))
+            by_action.setdefault(
+                neutralize_inline(str(f.get("action", "?"))) or "?", []
+            ).append(neutralize_inline(str(f.get("path", ""))))
         for action, paths in by_action.items():
             lines.append(f"**{action}**:")
             for p in list(dict.fromkeys(paths))[:30]:
@@ -378,11 +448,20 @@ def write_progress_md(db: MemoryDB, project_id: int, memory_dir: Path) -> Path:
 
     # --- Transcript pointer --------------------------------------------------
     lines += ["## 7. Pre-compact Transcript Pointer", ""]
-    tptr = (prog.get("transcript_ptr") or "").strip()
+    tptr = neutralize_inline(prog.get("transcript_ptr") or "")
     if tptr:
         lines.append("If you need raw conversation history before compaction, read:")
         lines.append("")
-        lines.append(f"```\n{tptr}\n```")
+        # Fence widened past the longest backtick run in the pointer — the same
+        # defence core.plan.render_pending_plan_md already applies to raw plan
+        # text. A path containing ``` would otherwise close the block early and
+        # let the rest of the value render as document structure.
+        longest_run, run = 0, 0
+        for ch in tptr:
+            run = run + 1 if ch == "`" else 0
+            longest_run = max(longest_run, run)
+        fence = "`" * max(3, longest_run + 1)
+        lines.append(f"{fence}\n{tptr}\n{fence}")
         lines.append("")
         lines.append("This is a JSONL file: one message per line. Read with the Read tool.")
     else:
@@ -397,19 +476,38 @@ def write_progress_md(db: MemoryDB, project_id: int, memory_dir: Path) -> Path:
     ]
 
     out = memory_dir / "PROGRESS.md"
-    out.write_text("\n".join(lines), encoding="utf-8")
+    _atomic_write(out, "\n".join(lines))
     return out
 
 
 def write_session_archive(memory_dir: Path, project_name: str,
                           archive_text: str, file_ts: str) -> Path:
-    """Write a session archive (one per compaction) under sessions/YYYY/MM/."""
-    now = datetime.now()
-    ym = now.strftime("%Y/%m")
+    """Write a session archive (one per compaction) under sessions/YYYY/MM/.
+
+    `errors="replace"`: this call sits ABOVE insert_session, upsert_batch and
+    write_progress_md in hooks/pre_compact.py, so one lone surrogate anywhere in
+    the extracted text used to raise UnicodeEncodeError and lose the ENTIRE
+    compaction — no archive, no session row, no memories, and no PROGRESS.md,
+    which is the one thing the plugin exists to guarantee. A replacement
+    character in an archive is strictly better than losing the handoff.
+    """
+    # `ym` comes from file_ts, NOT from a second datetime.now(). The caller
+    # (hooks/pre_compact.py:_reserve_archive_ts) has ALREADY claimed the exact
+    # path sessions/<ym>/session_<file_ts>.md with O_CREAT|O_EXCL, using its own
+    # `now`; taking a fresh clock reading here means the claim and the write can
+    # straddle a month boundary, which voids that atomic claim (collisions can
+    # destroy an archive again) and orphans a 0-byte placeholder in the previous
+    # month. file_ts begins with %Y%m%d by construction — plus a millisecond
+    # field and, on collision, a -N suffix — so deriving from it makes the two
+    # agree by definition. The clock fallback covers a caller that passes some
+    # other stem shape.
+    ym = (f"{file_ts[:4]}/{file_ts[4:6]}"
+          if len(file_ts) >= 6 and file_ts[:6].isdigit()
+          else datetime.now().strftime("%Y/%m"))
     archive_dir = memory_dir / "sessions" / ym
     archive_dir.mkdir(parents=True, exist_ok=True)
     archive_path = archive_dir / f"session_{file_ts}.md"
-    archive_path.write_text(archive_text, encoding="utf-8")
+    archive_path.write_text(archive_text, encoding="utf-8", errors="replace")
     return archive_path
 
 

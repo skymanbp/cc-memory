@@ -1192,10 +1192,11 @@ Category Breakdown:
         if not query:
             return
 
-        # `MemoryDB._connect()` hands back a bare sqlite3.Connection, so the
-        # `with` block below COMMITS. A destructive statement typed here used
-        # to wipe the table and report "(no rows returned)" with no prompt of
-        # any kind. Confirm every write, and report its rowcount afterwards.
+        # `MemoryDB._connect()` is a context manager that COMMITS on a clean
+        # exit (and, since v2.5.2, closes — it used to leak the handle). Either
+        # way the `with` block below commits, so a destructive statement typed
+        # here used to wipe the table and report "(no rows returned)" with no
+        # prompt of any kind. Confirm every write, and report its rowcount.
         read_only = _sql_is_read_only(query)
         if not read_only:
             proj = self.project_path.name if self.project_path else "this project"

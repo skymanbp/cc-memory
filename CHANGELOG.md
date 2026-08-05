@@ -7,6 +7,208 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [2.5.2] — 2026-08-05
+
+**A third audit, on angles the first two never used: time, concurrency,
+cross-surface agreement, and hostile input.** Six read-only agents, then seven
+fix agents on disjoint files, then an independent re-verification harness run by
+the maintainer against each finding's own repro (41/41).
+
+The headline is a **persistent prompt-injection channel**, and it is the worst
+defect of all three rounds. Everything else here is a data-loss or
+privacy-control defect that a green test suite could not see — for the third
+release running.
+
+### Fixed — security
+
+- **Stored memory content could forge a complete `<system-reminder>` block into
+  the SessionStart injection and into PROGRESS.md.** `clean_for_storage` removed
+  `<private>` and `<cc-memory-context>` spans and then interpolated the
+  remainder **verbatim** into both. Measured on one stored memory, through the
+  real MCP writer and the real SessionStart hook: **8 complete
+  `<system-reminder>` blocks in a stdout where the plugin emits 1**, 6 copies of
+  the `=== CC-MEMORY: Context Restored ===` banner, forged `<ide_opened_file>`
+  and `<invoke>` tags, NUL / ESC / U+202E control characters, and 4 complete
+  blocks plus 4 forged `## 7.` headings inside PROGRESS.md.
+
+  `memory_add` is a **model-invokable MCP tool**, so a single indirect injection
+  — a malicious README, a fetched page, a dependency's source — becomes a
+  *permanent* memory that is re-injected as authoritative context at the start
+  of every later session, in a block whose own text orders the next Claude to
+  trust it. One-shot injection upgraded to persistence.
+
+  `core.privacy.neutralize_markers` / `neutralize_inline` / `neutralize_block`
+  **escape** rather than delete, so a memory that legitimately discusses
+  `<system-reminder>` stays readable while the delimiters stop carrying
+  authority. They run on the write path (`clean_for_storage`) **and** on every
+  render path, because rows written by v2.5.1 and earlier are already armed in
+  users' databases. After: 1 block, 1 banner, 0 forged tags, 0 control
+  characters, 0 blocks in PROGRESS.md, exactly the 8 real headings.
+
+  The `^</?(ide_opened_file|system-reminder|antml)` heuristic in
+  `core/consolidate.py` is **not** this defence and never was — it is anchored
+  at position 0, so one leading word evades it, and it only runs during
+  consolidation. It is now labelled as garbage cleanup, explicitly not a
+  security control.
+
+- **PLAN.md and MEMORY.md were the same channel, unguarded.** Both are
+  generated artifacts that Claude reads. An armed plan step title produced 1
+  complete `<system-reminder>` block, **2 `← ACTIVE` markers when exactly one
+  step was active**, and 2 `## Goal` headings in a document that has 1 — the
+  steps come from the plan-refiner subagent, so anything the model read can
+  reach them. MEMORY.md renders no memory *content*, but its **topic names** are
+  LLM-derived: one armed topic name gave 1 block and 3 `## ` headings in a
+  document that has 2. Both render paths now neutralise; both stay readable.
+
+### Fixed — privacy
+
+- **A UTF-8 BOM on `config.json` switched the entire opt-out off, silently.**
+  `json.load` raised, the outer `except Exception` returned "not excluded", and
+  nothing was logged in any of the three channels. PowerShell's `Out-File` — on
+  the primary platform — writes a BOM by default, and Notepad offers it. With
+  one BOM added and nothing else changed: `memory.db` created, 3 observations
+  stored, PROGRESS.md written for a project the user had opted out of.
+  `core.modes.read_config` is now THE runtime reader (`utf-8-sig`), and every
+  config failure is logged.
+
+- **One `~user` entry disabled the whole list, order-dependently.**
+  `Path.expanduser()` raises `RuntimeError` — neither `OSError` nor
+  `ValueError` — so it escaped the inner handler whose own comment promised
+  "one malformed entry must not disable the rest of the opt-out list". A bad
+  entry *first* voided every entry after it; the same entry *last* was harmless,
+  which made it look intermittent. `_norm_path` cannot raise at all.
+
+- **The MCP server ignored `excluded_projects` entirely** — the seventh caller
+  of a control v2.5.1 had just finished wiring into the six hooks, and the one
+  that is loaded by default from the shipped manifest with every call chosen by
+  the model. On a listed project it served stored content verbatim, accepted
+  `memory_add`, and created PROGRESS.md. Gated in `_get_db`, the single choke
+  point all eight tools reach, with a refusal message that tells the model not
+  to retry. `initialize` / `tools/list` / `ping` stay outside the gate.
+
+- **`config.json` now fails CLOSED.** A file that exists and cannot be used
+  (invalid JSON, non-object, non-UTF-8, unreadable) excludes *every* project and
+  logs why. The two outcomes are not symmetric: guessing "not excluded" on a
+  typo writes tool inputs and outputs to disk and, with a credential present,
+  ships them to the API — unrecoverable. An **absent or empty** config is not
+  this case. Cost of the choice, stated plainly: a merge-conflicted
+  `config.json` suspends the plugin until it parses.
+
+- **A drive/filesystem root in the list matched nothing.** `c:\` resolves with
+  its separator attached, so the prefix test built `c:\\` and excluded no
+  project at all.
+
+- **`<private>` was honoured on the memory path but not on the progress path.**
+  Both ingresses now clean: `hooks/user_prompt.py` (turn 1) and
+  `hooks/pre_compact.py:_first_user_request`. PROGRESS.md used to carry the
+  redacted text verbatim — into a file `memory/.gitignore` does not ignore, so
+  it was committed to the user's repository.
+
+### Fixed — data loss
+
+- **Two PreCompacts in the same wall-clock second destroyed a session
+  archive.** Second-resolution stems plus an unconditional write, and
+  `sessions.archive_path` has no uniqueness constraint: 12 real compactions →
+  **3 files on disk**, 9 transcripts gone with no error anywhere, while the rows
+  still render in `/cc-mem sessions`. Stems now carry milliseconds *and* the
+  exact target path is claimed with `O_CREAT|O_EXCL` (atomic across processes).
+  12 compactions → 12 files, no 0-byte placeholders. `write_session_archive`
+  derives its `YYYY/MM` directory from that stem instead of taking its own clock
+  reading, which used to void the claim across a month boundary.
+
+- **`.plan_history` overwrote itself with no concurrency at all.** Four
+  sequential plan replacements in 23 ms → **1 file**, generations 0-2 lost. Its
+  docstring called it "append-only … last-resort backstop: even a wrong
+  disposition stays recoverable" — neither clause was true, and the survivor was
+  the *newest*. Now 4 replacements → 4 files.
+
+- **PROGRESS.md, MEMORY.md and PLAN.md could be read as 0 bytes.** Truncate-then-
+  write against a concurrent reader: 4,867 empty reads in 16,071 samples for
+  PROGRESS.md, 344 for MEMORY.md + PLAN.md. All three write to a temp file and
+  `os.replace`. Silent 0-byte reads → 0; under pathological contention the
+  reader instead gets a loud, transient sharing violation and the file keeps its
+  previous *complete* content.
+
+- **A lone surrogate anywhere in the extracted text aborted the whole
+  compaction** — `write_session_archive` sits above `insert_session`,
+  `upsert_batch` and `write_progress_md`, so `UnicodeEncodeError` cost the
+  archive, the session row, the memories *and* the handoff.
+
+- **A non-dict `.last_save.json` voided the entire SessionStart injection** —
+  5,793 B of context became 58 B.
+
+- **The installer discarded concurrent edits to the global `settings.json`**
+  (6/6 lost updates) and truncated it non-atomically (a 0-byte read observed in
+  ~2,300 samples). It now re-reads immediately before merging, backs up to
+  `settings.json.cc-memory.bak`, and renames into place — with a bounded retry
+  and a warned in-place fallback, because a bare rename traded a rare 0-byte
+  window for a *failed installation* when any process held the file open.
+
+- **The `.gitignore` literal in the installer and in `skills/ccm-load` fused the
+  user's last rule with our first comment** when the existing file had no
+  trailing newline (`sessions/# cc-memory: generated state, not content` —
+  destroying `sessions/`). All three copies now share the read/normalise/write
+  shape, and a smoke test asserts the three line lists and forbids `"a"`-mode
+  append.
+
+### Fixed — resource hygiene
+
+- **`MemoryDB._connect` leaked one sqlite3 connection per operation.** `with
+  conn:` commits but does **not** close, and the handle then survived in its own
+  statement-cache cycle. Measured: 4 live after the constructor, 5 after one
+  `upsert_project`, **25 after 20 inserts** — linear and unbounded, in three
+  processes that hold a `MemoryDB` for their whole lifetime, each handle
+  carrying a 256 MiB `mmap_size`; on Windows `shutil.rmtree` failed with
+  `WinError 32` until the GC happened to run. `_connect` is now a context
+  manager that commits / rolls back exactly as before and closes in its
+  `finally`: **0 live handles**, all 81 call sites unchanged.
+
+  Honest cost, measured rather than assumed: closing the last connection to a
+  WAL database forces a checkpoint + fsync, so a PreCompact-shaped workload of
+  127 operations goes 182.3 ms → 802.7 ms (+340 %). That is +0.6 s against a
+  120 s budget; every hook still finishes well inside its `hooks.json` timeout.
+
+- **`Logger.close()` was a one-way kill switch** — it cleared the handle but
+  left `_today` set, so the next write took the "same day, nothing to do" branch
+  and silently dropped that line and every later one. That is why it was never
+  safe to call and stayed dead. Fixed, plus `close_all_loggers()` and an
+  `atexit` hook.
+
+### Added — the gate for the thing nothing gated
+
+- **`tools/citation_check.py`** — the definition-site checker `CLAUDE.md` has
+  been describing as "would make a cheap CI gate" since v2.5.0. For every
+  ``file.py:LINE`` citation in the tracked docs it resolves the symbols named in
+  the surrounding prose with `ast` and asserts the cited range covers the
+  definition **or** mentions the symbol (docs cite call sites too). First run:
+  **163 of 594 citations were rot** — pointing at a line that neither defines
+  nor mentions the symbol its own sentence names. All 163 repaired by
+  `--fix`; the checker now runs inside `smoke_test.py`, so the next one turns
+  the suite red. Citations it cannot anchor are reported SKIP, never guessed: a
+  gate that invents verdicts is a gate people learn to ignore.
+
+- **`tests/test_surfaces.py` §5** — the config-parser shapes §4 could not see
+  (BOM, `~user` first, unparseable → fail-closed, absent → still on) driven
+  through all six hooks, plus the MCP server's half of the same opt-out.
+
+- **`tests/smoke_test.py`** gained the `.gitignore` three-copy parity gate, a
+  connection-handle regression assertion, and the PLAN.md / MEMORY.md forgery
+  assertions.
+
+### Known limits
+
+- `--fix` rewrites a stale citation to the symbol's **definition**, which may
+  not be the call site the sentence meant. 370 of 594 citations remain
+  unanchorable and are therefore unchecked.
+- The atomic-write fallback still has a truncation window when `os.replace` is
+  refused (20 empty reads in 28,141 samples, vs 344 before) — bounded retries
+  were measured and deliberately not shipped in this release.
+- The installer's `settings.json` TOCTOU is shrunk from the whole install
+  (~0.5 s) to one dict merge, not closed; nothing locks that file and Claude
+  Code takes no lock either.
+- `core/db.py`'s three plan mutators still default `project_id=None` (unchanged
+  from v2.5.1).
+
 ## [2.5.1] — 2026-08-05
 
 **v2.5.0 was audited an hour after it shipped, and the audit found 23 defects.**

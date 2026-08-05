@@ -62,10 +62,15 @@ def _resolve_version() -> str:
             # why: an absent/unreadable probe is not fatal for a version banner
             continue
     try:
+        # utf-8-sig, not utf-8: PowerShell's Out-File writes a BOM by default on
+        # the primary platform and a BOM makes json.load raise, which used to
+        # print "unknown" on an otherwise healthy install. ValueError rather
+        # than json.JSONDecodeError, because UnicodeDecodeError (a UTF-16 file)
+        # is also a ValueError and was NOT caught before.
         return str(json.loads(
-            (_PKG_ROOT / "config.json").read_text(encoding="utf-8")
+            (_PKG_ROOT / "config.json").read_text(encoding="utf-8-sig")
         ).get("version") or "unknown")
-    except (OSError, json.JSONDecodeError, AttributeError):
+    except (OSError, ValueError, AttributeError):
         # why: same — a missing version must degrade, never abort the CLI
         return "unknown"
 
@@ -157,6 +162,113 @@ _REQUIRED_PLUGIN_FILES = [
 ]
 
 
+_HOOK_EVENTS = ("PreCompact", "SessionStart", "Stop",
+                "PostToolUse", "UserPromptSubmit")
+
+
+def _read_user_settings():
+    """~/.claude/settings.json as a dict. Never raises; always returns a dict.
+
+    `utf-8-sig`, NOT `utf-8`. PowerShell's `>` and `Out-File` write a UTF-8 BOM
+    by default and `json.loads` rejects the leading U+FEFF, so a settings.json
+    the user once edited from a PS prompt made ONE healthy marketplace install
+    report `[FAIL] No cc-memory install detected.` here — while
+    ui/installer.py:687 read the same file as `utf-8-sig` (with a comment naming
+    PowerShell) and `skills/ccm-load` reported ACTIVATED. Same machine, three
+    verdicts. `utf-8-sig` is a strict superset for READING: it drops a BOM when
+    one is present and is byte-identical to `utf-8` otherwise, so this can only
+    ever add installs to the report, never remove one.
+    """
+    path = Path.home() / ".claude" / "settings.json"
+    if not path.exists():
+        return {}
+    try:
+        settings = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError):
+        # why: settings.json being malformed is a recoverable diagnostic
+        # state — we still want to report on the OTHER layouts (legacy,
+        # cache) so the user can see they're broken too; default to {}
+        return {}
+    return settings if isinstance(settings, dict) else {}
+
+
+def _marketplace_enabled_key(settings):
+    """The `enabledPlugins` key of an ACTIVE plugin install, or None.
+
+    DELIBERATE MIRROR of `ui/installer.py:_marketplace_registration`, down to
+    the `key.split("@")[0] == "cc-memory"` match. Testing only the literal
+    `"cc-memory@cc-memory"`, as this file used to, disagreed with the installer
+    for any other marketplace name — `cc-memory@<anything>` is the same plugin
+    as far as Claude Code is concerned, and the installer refuses to install
+    alongside it.
+    """
+    plugins = settings.get("enabledPlugins")
+    if isinstance(plugins, dict):
+        for key, val in plugins.items():
+            if isinstance(key, str) and key.split("@")[0] == "cc-memory" and val:
+                return key
+    return None
+
+
+def _settings_hook_events(settings):
+    """`{event: first cc-memory command}` registered in settings.json["hooks"].
+
+    settings.json is user-editable, so nothing about its shape is guaranteed and
+    every level is type-checked — the installer learned the same lesson at
+    `ui/installer.py:_group_commands`.
+    """
+    found = {}
+    hooks_block = settings.get("hooks")
+    if not isinstance(hooks_block, dict):
+        return found
+    for ev in _HOOK_EVENTS:
+        entries = hooks_block.get(ev)
+        if not isinstance(entries, list):
+            continue
+        for mg in entries:
+            if not isinstance(mg, dict):
+                continue
+            group = mg.get("hooks")
+            for h in group if isinstance(group, list) else []:
+                if not isinstance(h, dict):
+                    continue
+                cmd = h.get("command")
+                if isinstance(cmd, str) and "cc-memory" in cmd:
+                    found[ev] = cmd
+                    break
+            if ev in found:
+                break
+    return found
+
+
+def _double_registration():
+    """`(enabledPlugins key, {event: command})` when BOTH hook registries are
+    live at once, else None.
+
+    Claude Code loads a plugin's hooks from its manifest (`hooks/hooks.json`)
+    whenever `enabledPlugins` names it; the STANDALONE installer instead writes
+    hook commands into `~/.claude/settings.json["hooks"]`. Neither registry
+    removes the other, and the normal upgrade sequence reaches the state from
+    both directions — an exe user later runs `/plugin`, or a marketplace user
+    runs the exe with `--force`, which `ui/installer.py:cli_install` explicitly
+    offers.
+
+    `ui/installer.py:cli_install` calls exactly this state a hard FAIL (rc=2,
+    "A standalone install registers the SAME hooks a second time"), while
+    `/cc-mem status` printed two cheerful `[OK  ]` layouts and said nothing —
+    and `/cc-mem status` is the surface a user actually consults. Same machine
+    state, opposite verdicts from two shipped surfaces. This makes them agree.
+    """
+    settings = _read_user_settings()
+    key = _marketplace_enabled_key(settings)
+    if not key:
+        return None
+    events = _settings_hook_events(settings)
+    if not events:
+        return None
+    return key, events
+
+
 def _detect_install_layouts():
     """Detect every cc-memory install layout active on this machine.
 
@@ -169,26 +281,15 @@ def _detect_install_layouts():
                                == "directory"; root = source.path (dev checkout)
       - marketplace-cache:     installed_plugins.json[cc-memory@cc-memory][0].installPath
       - legacy-install:        ~/.claude/hooks/cc-memory/ (nested OR flat)
+
+    Detecting TWO of them is not the same as detecting two healthy installs —
+    see `_double_registration`, which `cmd_status` reports separately.
     """
     layouts = []
     home = Path.home() / ".claude"
 
-    settings = {}
-    settings_path = home / "settings.json"
-    if settings_path.exists():
-        try:
-            settings = json.loads(settings_path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            # why: settings.json being malformed is a recoverable diagnostic
-            # state — we still want to report on the OTHER layouts (legacy,
-            # cache) so the user can see they're broken too; default to {}
-            settings = {}
-    if not isinstance(settings, dict):
-        settings = {}
-
-    enabled_marketplace = bool(
-        settings.get("enabledPlugins", {}).get("cc-memory@cc-memory", False)
-    )
+    settings = _read_user_settings()
+    enabled_marketplace = bool(_marketplace_enabled_key(settings))
 
     mp_entry = settings.get("extraKnownMarketplaces", {}).get("cc-memory", {})
     mp_src = mp_entry.get("source", {})
@@ -299,25 +400,13 @@ def _inspect_layout(layout_name, root: Path,
                 # downstream _print_layout_report will flag the mismatch
                 hooks_registered = []
     elif hooks_via == "user-settings" and settings_dict is not None:
-        hooks_block = settings_dict.get("hooks", {})
-        if not isinstance(hooks_block, dict):
-            hooks_block = {}
-        for ev in ("PreCompact", "SessionStart", "Stop",
-                   "PostToolUse", "UserPromptSubmit"):
-            entries = hooks_block.get(ev, [])
-            if not isinstance(entries, list):
-                continue
-            for mg in entries:
-                if not isinstance(mg, dict):
-                    continue
-                for h in mg.get("hooks", []):
-                    if not isinstance(h, dict):
-                        continue
-                    if "cc-memory" in (h.get("command") or ""):
-                        hooks_registered.append(ev)
-                        break
-                if ev in hooks_registered:
-                    break
+        # ONE implementation of "which events does settings.json[hooks]
+        # register for cc-memory", shared with _double_registration. When this
+        # scan was inline here, the double-registration verdict had no way to
+        # reuse it without a second copy — and a second copy is how two surfaces
+        # start disagreeing about the same machine state in the first place.
+        hooks_registered = sorted(_settings_hook_events(
+            settings_dict if isinstance(settings_dict, dict) else {}))
 
     return {
         "layout": layout_name,
@@ -389,6 +478,43 @@ def cmd_status(args):
         if not functional:
             print("  [WARN] No fully-functional install layout. Hooks may still "
                   "fire if one source is partially configured.")
+
+    # TWO functional layouts is not twice as healthy. Reported outside the loop
+    # above (and outside its `if layouts` guard) because the condition is about
+    # the two REGISTRIES, not about the two install trees: settings.json can
+    # still register the hooks after the standalone tree itself was deleted.
+    dual = _double_registration()
+    if dual:
+        dual_key, dual_events = dual
+        dual_cmd = dual_events[sorted(dual_events)[0]]
+        print(f"\n  [FAIL] DOUBLE REGISTRATION — cc-memory's hooks are registered "
+              f"TWICE,")
+        print(f"         in two independent registries:")
+        print(f"           1. plugin      settings.json enabledPlugins"
+              f"[\"{dual_key}\"] = true")
+        print(f"                          (Claude Code loads hooks/hooks.json "
+              f"from the plugin manifest)")
+        print(f"           2. standalone  settings.json[\"hooks\"] registers "
+              f"{len(dual_events)} event(s):")
+        print(f"                          {', '.join(sorted(dual_events))}")
+        print(f"                          e.g. {_trunc(dual_cmd, 62)}")
+        print("         Two independent hook registries very likely means every "
+              "hook fires")
+        print("         twice — duplicated PostToolUse observations, two "
+              "PreCompact")
+        print("         extractions (double LLM spend AND two writes), two Stop "
+              "observers")
+        print("         (inferred from the two registrations - not directly "
+              "observed).")
+        print("         ui/installer.py REFUSES to install into this state "
+              "(rc=2), so this")
+        print("         report and the installer now agree. Keep exactly ONE:")
+        print("           - disable the plugin:  /plugin  (keeps the standalone "
+              "install)")
+        print("           - or drop the standalone registration:  "
+              "installer.py --uninstall")
+        print("             (removes only the settings.json entries; project "
+              "memory/ is kept)")
 
     active_layout = next((L for L in layouts
                           if "broken_reason" not in L
@@ -894,9 +1020,21 @@ def cmd_progress(args):
         sys.exit(1)
     db = MemoryDB(db_path)
     pid = db.upsert_project(args.project)
-    progress_path = write_progress_md(db, pid, memory_dir)
-    print(f"\nRegenerated: {progress_path}\n")
-    print(progress_path.read_text(encoding="utf-8"))
+    try:
+        progress_path = write_progress_md(db, pid, memory_dir)
+        print(f"\nRegenerated: {progress_path}\n")
+        print(progress_path.read_text(encoding="utf-8"))
+    except OSError as e:
+        # why: this was the ONLY write_progress_md call site with no handler —
+        # stop.py, user_prompt.py and mcp/server.py all wrap theirs. It could
+        # already raise on a read-only PROGRESS.md, and v2.5.2's atomic write
+        # adds a second, rarer trigger (a transient Windows sharing violation
+        # when another process holds the file open). An unhandled traceback out
+        # of `/cc-mem progress` is a worse answer than a diagnosis, and the
+        # previous COMPLETE PROGRESS.md is still on disk either way.
+        print(f"Error: could not rewrite PROGRESS.md ({e})")
+        print(f"       The previous {memory_dir / 'PROGRESS.md'} is unchanged.")
+        sys.exit(1)
 
 
 def cmd_supersedes(args):

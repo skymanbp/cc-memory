@@ -33,6 +33,12 @@ enable_utf8_io()
 # every hook calls it. See core/modes.py:is_excluded.
 from core.modes import is_excluded
 
+# Privacy opt-out. `<private>…</private>` was honoured on the observation path
+# (hooks/post_tool_use.py) and on every memory-write path (llm/memory_writer.py,
+# core/extractor.py) but NOT on the progress path this hook feeds — the same tag,
+# in the same session, behaving in opposite ways. See the call site in main().
+from core.privacy import clean_for_storage
+
 _TURN_FILE_PREFIX = "cc_mem_turns_"
 _PROMPT_FILE_PREFIX = "cc_mem_prompt_"
 
@@ -121,9 +127,25 @@ def main():
         if prompt and isinstance(prompt, str):
             if prompt.startswith("/"):
                 prompt = prompt[1:]
-            prompt = prompt[:500]
+            # PRIVACY GATE (v2.5.2). BOTH consumers of this variable ship the
+            # text somewhere it cannot be taken back, and neither used to clean
+            # it — while the observation and memory paths always did:
+            #   * the temp prompt file below, which hooks/stop.py reads and
+            #     splices VERBATIM into the Anthropic observer request as
+            #     "User request: …" (stop.py `_observer_evaluate`);
+            #   * progress.current_request, rendered into memory/PROGRESS.md —
+            #     a file core.progress.MEMORY_GITIGNORE_LINES deliberately does
+            #     NOT ignore, so it is committed to the user's repository.
+            # Cleaned BEFORE the 500-char cut so a span straddling the cut is
+            # still seen as a matched pair; clean_for_storage fails CLOSED on a
+            # dangling open tag, so a cut landing mid-span drops the remainder
+            # instead of emitting it.
+            prompt = clean_for_storage(prompt)[:500]
             prompt_file = tmp / f"{_PROMPT_FILE_PREFIX}{safe}"
             try:
+                # Written even when cleaning emptied it: this marker is
+                # per-SESSION and reused every turn, so skipping the write would
+                # leave the PREVIOUS turn's prompt in place for stop.py to read.
                 prompt_file.write_text(prompt, encoding="utf-8")
             except OSError:
                 # why: prompt context for observer is enrichment, not required
@@ -138,7 +160,15 @@ def main():
             # first compaction. db.patch_progress bootstraps the row itself
             # (core/db.py: `if not self.get_progress(...): self.upsert_progress(...)`),
             # so running on a just-created DB is safe.
-            if turn_count == 1:
+            #
+            # `and prompt` is the privacy gate's second half: a prompt that was
+            # ENTIRELY private redacts to "" and must not be stored — and must
+            # not fall through to the resume-signal whitelist below, which
+            # contains "" and would mislabel it a resume_request. Whitespace-only
+            # prompts are unaffected (clean_for_storage returns text with no
+            # open tag byte-identical, so "   " stays truthy and still resolves
+            # to the "" resume signal exactly as before).
+            if turn_count == 1 and prompt:
                 try:
                     from core.db import MemoryDB
                     from core.progress import write_progress_md

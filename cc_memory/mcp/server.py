@@ -44,6 +44,23 @@ Wire contract
   (required / type / enum / bounds / lengths) and rejected with -32602 instead
   of being coerced, clamped, or ignored.
 
+Privacy
+-------
+config.json's `excluded_projects` is enforced HERE as well, not only in the six
+hooks. This server ships ENABLED BY DEFAULT (`.claude-plugin/plugin.json`
+`mcpServers`) on every marketplace / dev-checkout install and is model-driven
+exactly like a hook, so through v2.5.1 a project the user had opted out of
+still answered memory_search / memory_get_details / memory_recent /
+memory_topics / memory_stats / progress_get with its stored content, and still
+accepted memory_add and progress_regenerate WRITES. config.json promises a
+listed directory gets "no memory.db … no PROGRESS.md and no context injection";
+three of those clauses were false whenever this server was loaded.
+
+One gate, in `_get_db`, which all eight database-touching handlers reach.
+`initialize`, `tools/list` and `ping` sit deliberately outside it: they touch no
+project, and refusing the handshake would break the client for every project
+rather than for the excluded one.
+
 Tools:
   memory_search       FTS5 search (compact results)
   memory_get_details  Batch fetch full details by IDs (active rows only)
@@ -131,8 +148,13 @@ def _resolve_version() -> str:
             return m.group(1)
     try:
         # Last resort: config.json carries the same literal and the standalone
-        # installer always copies it into the package root.
-        cfg = json.loads((_PKG_ROOT / "config.json").read_text(encoding="utf-8"))
+        # installer always copies it into the package root. utf-8-sig, not
+        # utf-8: PowerShell's Out-File writes a BOM by default on the primary
+        # platform, and a BOM makes json.load raise — which used to drop this
+        # server's advertised version to "unknown" on an otherwise healthy
+        # install. Read this way inline rather than via core.modes.read_config
+        # so server boot stays lazy (see _MIN_CONTENT_LEN's note).
+        cfg = json.loads((_PKG_ROOT / "config.json").read_text(encoding="utf-8-sig"))
         if isinstance(cfg.get("version"), str):
             return cfg["version"]
     except (OSError, ValueError, AttributeError):
@@ -364,8 +386,35 @@ def _validate_tool_args(tool_name, args):
 # ── db resolution ──────────────────────────────────────────────────────────
 
 def _get_db(project_path=None):
-    """Open the project DB. Returns (db, project_id, error_message)."""
+    """Open the project DB. Returns (db, project_id, error_message).
+
+    THE privacy choke point. All eight database-touching handlers reach the DB
+    through here, so config.json's `excluded_projects` opt-out is applied once,
+    in one place, via `core.modes.is_excluded` — the same single implementation
+    all six hooks call. Do not add a handler that opens a DB path itself; that
+    is a privacy regression, not a style nit (see core/modes.py).
+
+    The gate runs BEFORE the existence check, so it also covers an excluded
+    project that has no DB yet, and it covers the `project`-omitted case
+    (which resolves to this server's cwd — normally the project directory
+    Claude Code launched it in).
+
+    The refusal is an ERROR — the dispatcher turns a truthy "error" into
+    `isError: true` — and not an empty success. `{"results": []}` would assert
+    that the project HAS no memories, which is untrue and is an invitation to
+    helpfully store one; and `{"action": "inserted"}` for a write that never
+    happened is the exact lie `_is_failed_result` exists to prevent. The
+    wording is also deliberately distinct from the missing-database message
+    below: that one IS worth retrying after an init, and this one never is.
+
+    `is_excluded` is imported lazily, beside MemoryDB, so a partial install
+    still boots far enough to answer tools/list. That also fails CLOSED: if
+    core/modes.py is unimportable the ImportError propagates to
+    `_dispatch_tool_call`, which answers `isError` — rather than serving a
+    project whose opt-out status could not be determined.
+    """
     from core.db import MemoryDB
+    from core.modes import is_excluded
     if project_path is None:
         project = os.getcwd()          # absent == "this server's cwd"
     elif isinstance(project_path, str) and project_path.strip():
@@ -375,6 +424,20 @@ def _get_db(project_path=None):
         # fall through to cwd and silently answer for a DIFFERENT project.
         return None, None, (f"invalid 'project' argument {project_path!r}: "
                             "expected a non-empty path string")
+    if is_excluded(project):
+        # Logged (unlike the per-turn hooks, which are silent because they fire
+        # on every prompt): a model-driven tool call is rare, and a refusal the
+        # user cannot explain afterwards is worse than a log line. The path is
+        # the caller's own argument, so echoing it discloses nothing the caller
+        # did not already supply — no stored content is ever read.
+        _log.info(f"refused: {project} is in config.json excluded_projects")
+        return None, None, (
+            f"Project opted out of cc-memory: {project} is listed in "
+            "config.json 'excluded_projects' (or lies beneath a listed "
+            "directory). Its memories are neither readable nor writable "
+            "through any cc-memory tool. This is a standing user setting, not "
+            "a transient failure — do not retry, and do not try another "
+            "cc-memory tool for this path.")
     db_path = Path(project) / "memory" / "memory.db"
     if not db_path.exists():
         return None, None, f"No memory database found for this project: {project}"

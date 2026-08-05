@@ -34,23 +34,64 @@ _DEFAULT_LOCAL_MODEL = "ccl-9b"
 _DEFAULT_OLLAMA_ENABLED = False
 
 
-def _load_local_config():
-    from pathlib import Path
-    # config.json lives one level up (cc_memory/config.json)
-    config_path = Path(__file__).resolve().parent.parent / "config.json"
+def _log_config(msg):
+    """File-log a config.json problem. Never stderr, never raises.
+
+    Imported lazily, like `core.auth` below: `core.logger` resolves the home
+    directory at import time and this is the failure path only.
+    """
     try:
-        with open(config_path, encoding="utf-8") as f:
-            cfg = json.load(f)
-        ccl = cfg.get("ccl", {})
-        return (
-            ccl.get("ollama_url", _DEFAULT_OLLAMA_URL),
-            ccl.get("local_model", _DEFAULT_LOCAL_MODEL),
-            bool(ccl.get("enabled", _DEFAULT_OLLAMA_ENABLED)),
-        )
-    except (FileNotFoundError, json.JSONDecodeError, OSError):
-        # why: config absent/malformed — compiled-in defaults keep the
-        # Anthropic leg working; local fallback stays off. Hooks never raise.
+        from core.logger import get_logger
+        get_logger("config").warn(f"[ccl_backend] {msg}")
+    except Exception:
+        # why: logging is best-effort — a hook must never fail because the log
+        # directory is unwritable, and stderr is forbidden (hook contract).
+        pass
+
+
+def _load_local_config():
+    """(ollama_url, local_model, enabled) from config.json ``ccl``. NEVER raises.
+
+    `call_llm` calls this OUTSIDE any try (see below), and its callers' except
+    tuples are narrow — `hooks/pre_compact.py` catches ValueError/RuntimeError
+    and friends, not AttributeError — so anything escaping here skips the
+    PROGRESS.md handoff that pre_compact's own comment calls non-optional.
+    Through v2.5.1 four config shapes did escape: a non-dict ``ccl``
+    (``"on"`` / ``null`` / a list) raised AttributeError from ``ccl.get``, a
+    non-object top level raised it from ``cfg.get``, and a UTF-16 file raised
+    UnicodeDecodeError (a ValueError, not one of the three caught types).
+
+    Reads through `core.modes.read_config`, which is BOM-tolerant — a
+    PowerShell-resaved config.json used to revert ``ccl.*`` to the compiled-in
+    defaults with no signal at all.
+    """
+    url, model, enabled = (_DEFAULT_OLLAMA_URL, _DEFAULT_LOCAL_MODEL,
+                           _DEFAULT_OLLAMA_ENABLED)
+    try:
+        from core.modes import read_config
+        cfg, note = read_config()
+        if cfg is None:
+            _log_config(f"config.json {note} -- using compiled-in ccl defaults "
+                        f"(local fallback stays off)")
+            return url, model, enabled
+        ccl = cfg.get("ccl")
+        if ccl is None:
+            return url, model, enabled
+        if not isinstance(ccl, dict):
+            _log_config(f"config.json ccl is a {type(ccl).__name__}, not an "
+                        f"object -- using compiled-in ccl defaults")
+            return url, model, enabled
+        url = str(ccl.get("ollama_url") or _DEFAULT_OLLAMA_URL)
+        model = str(ccl.get("local_model") or _DEFAULT_LOCAL_MODEL)
+        enabled = bool(ccl.get("enabled", _DEFAULT_OLLAMA_ENABLED))
+    except Exception as e:
+        # why: this function is on the handoff-critical PreCompact path and is
+        # called outside every caller's try. Defaults keep the Anthropic leg
+        # working and the local fallback off; nothing here is worth a raise.
+        _log_config(f"could not read ccl settings ({type(e).__name__}: {e}) -- "
+                    f"using compiled-in defaults")
         return _DEFAULT_OLLAMA_URL, _DEFAULT_LOCAL_MODEL, _DEFAULT_OLLAMA_ENABLED
+    return url, model, enabled
 
 
 def _call_haiku(system, user, api_key, max_tokens, timeout, wire="api_key"):

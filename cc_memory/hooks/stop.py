@@ -199,7 +199,16 @@ def _observer_evaluate(cwd, session_id, memory_dir):
     user_prompt = ""
     if prompt_file.exists():
         try:
-            user_prompt = prompt_file.read_text(encoding="utf-8").strip()
+            # clean_for_storage on the INPUT too (v2.5.2). The observer's OUTPUT
+            # has always been cleaned (see the `cleaned` loop below), but this
+            # marker was spliced RAW into the Anthropic request at `user_context`
+            # — so `<private>…</private>` typed by the user left the machine.
+            # hooks/user_prompt.py now writes the marker already cleaned; this
+            # stays because the marker is a plain temp file with a predictable
+            # per-session name that OUTLIVES a plugin upgrade, so one written by
+            # a pre-2.5.2 UserPromptSubmit (or by anything else) must not leak.
+            user_prompt = clean_for_storage(
+                prompt_file.read_text(encoding="utf-8").strip())
         except OSError:
             # why: prompt context is enrichment, not required for extraction
             user_prompt = ""

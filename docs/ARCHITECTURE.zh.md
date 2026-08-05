@@ -1,7 +1,7 @@
-<!-- i18n-source: ARCHITECTURE.md | sha256: bcef4cdac790617b | version: 2.5.1 | translated: 2026-08-05 -->
+<!-- i18n-source: ARCHITECTURE.md | sha256: 2b16623a67756e1e | version: 2.5.2 | translated: 2026-08-05 -->
 > [English](ARCHITECTURE.md) · **简体中文**
 
-# cc-memory — 架构（v2.5.1）
+# cc-memory — 架构（v2.5.2）
 
 cc-memory 是一个 Claude Code 插件，为 Claude 提供**跨压缩、跨会话的持久化结构化
 记忆**。本文档是总览：这个插件用来做什么、仓库如何布局、哪些钩子在何时触发、数据库
@@ -12,11 +12,16 @@ cc-memory 是一个 Claude Code 插件，为 Claude 提供**跨压缩、跨会�
 [docs/CONTRACTS.md](CONTRACTS.md) 中。本文件描述机器；那份文件描述机器必须遵守的
 规则。
 
-**关于 `file:line` 引用。** 没有任何东西强制它们，而且它们在每一次重构后都会腐化。
-v2.5.1 的文档整理重新推导了 §4 中 `core/db.py` 的引用，并对着代码核查了全部散文式
-断言；但指向 `cc_memory/hooks/*`、`cli/mem.py` 和 `ui/installer.py` 的引用**刻意
-没有**重新推导——那几个文件正在同一轮里被重写。请把行号当作线索，把**符号名**当作
-事实。
+**关于 `file:line` 引用。** 它们现在有强制手段了：`tools/citation_check.py`
+（v2.5.2），并在 `tests/smoke_test.py` 内部运行。对每一条引用，它用 `ast` 解析出
+上下文散文里点到的符号，然后断言被引用的行号区间覆盖了该符号的定义，或者至少提到了
+它。第一次运行就查出 **594 条引用里有 163 条已经失效**——每一条在写下时都是对的，
+只是后来它上面的某处改动把它甩在了后面——并已机械修复。
+
+那是一道防腐化的门禁，不是正确性的证明。如果一条引用所在的句子里没有任何可以唯一
+解析的函数、类或 ALL_CAPS 常量，它会被判为 SKIP，**不做检查**（今天是 594 条里的
+370 条）。请把行号当作线索，把**符号名**当作事实：`grep -n "def <symbol>" <file>`
+才是权威，而修行号请用 `python tools/citation_check.py --fix`，不要手数。
 
 ## 目录
 
@@ -65,7 +70,7 @@ v2.5.1 的文档整理重新推导了 §4 中 `core/db.py` 的引用，并对着
 ### 设计上就是双语的——记忆内容与语言无关
 
 记忆**内容**刻意保持语言中立。类别检测器（`core/extractor.py` 的 `_PATTERNS`，位于
-`extractor.py:35-69`；`_IMPORTANCE_BOOST`，位于 `extractor.py:73-77`）与恢复信号
+`extractor.py:73-77`；`_IMPORTANCE_BOOST`，位于 `extractor.py:73-77`）与恢复信号
 集合（`hooks/user_prompt.py:127-130`、`hooks/session_start.py:269-273` 的 RESUME
 PROTOCOL）都是**有意**同时匹配中文和英文的，存储的记忆也可以是任意语言。这是文档
 语言模型中的 **Tier 3**——与英文骨架的*文档*约定（Tier 1）是分开的。那些检测器带有
@@ -79,7 +84,7 @@ PROTOCOL）都是**有意**同时匹配中文和英文的，存储的记忆也�
 ```
 cc-memory/
 ├── .claude-plugin/
-│   ├── plugin.json              ← 插件清单（v2.5.1）
+│   ├── plugin.json              ← 插件清单（v2.5.2）
 │   └── marketplace.json         ← /plugin marketplace add 条目
 ├── hooks/hooks.json             ← 钩子声明（6 条命令 / 5 个事件）
 ├── skills/                      ← 技能的唯一规范位置
@@ -202,13 +207,13 @@ v2.3.2 把这个事件拆开了：
   `pre_compact.py:5-20`）。
 - **异步支路**在一个 `BudgetGate` 之下运行 `core.consolidate.run_consolidation`，
   其中 `_BUDGET_TOTAL_S = 240.0`、`_BUDGET_SAFETY_S = 8.0`
-  （`consolidate_async.py:59-60`），因此它启动的最后一次 LLM 调用会在
+  （`consolidate_async.py:61`），因此它启动的最后一次 LLM 调用会在
   `total_s - safety_s` = 232 秒之前完成，小于钩子自身的 300 秒超时——工作者绝不会
   在写入中途被杀。
 - 节奏由**间隔标记 + 锁**决定，而不是脆弱的 `session_count % N` 检查：
   `memory/.last_consolidation.json` 记录上一次成功运行时的会话计数，
   `memory/.consolidation.lock` 防止工作者重叠（比 `_STALE_LOCK_S = 360.0`
-  更旧的锁会被回收，见 `consolidate_async.py:64`）。这对并发的同步支路是
+  更旧的锁会被回收，见 `consolidate_async.py:65`）。这对并发的同步支路是
   竞态免疫的——计数上 ±1 的漂移既不会导致重复运行，也不会导致漏跑
   （`consolidate_async.py:19-28`）。
 
@@ -247,8 +252,8 @@ PostToolUse 12 对 8、UserPromptSubmit 12 对 8）。现在提高一个超时�
 `core.plan.capture_exit_plan_mode` / `apply_todowrite_sync` 而不是经由钩子，所以
 测试套件从来抓不到它。
 
-`_apply_plan_integration`（`post_tool_use.py:77`）现在跑在闸门**之上**
-（在 `post_tool_use.py:163` 调用），`should_observe` 只包住 `insert_observation`
+`_apply_plan_integration`（`post_tool_use.py:82`）现在跑在闸门**之上**
+（在 `post_tool_use.py:82` 调用），`should_observe` 只包住 `insert_observation`
 那一块。按模式实测（code / research / writing）：`ExitPlanMode` → `plan_active`
 行数 `0/0/0` → `1/1/1`；`Edit` → `edits_since_last_guardian` `1/0/1` → `1/1/1`；
 Bash `git push`（1 次编辑 + 20）`21/20/1` → `21/21/21`。
@@ -287,19 +292,19 @@ SQLite 表（定义在 [`cc_memory/core/db.py`](../cc_memory/core/db.py)），�
 
 此外还有 `memories_fts`——一个建立在 `memories` 之上的 FTS5 虚拟表
 （`core/db.py:328`），由三个触发器保持同步（`core/db.py:332-350`，迁移 `v2_fts5` 在
-`db.py:161`）。它只在本地 SQLite 构建带 FTS5 时才会创建；否则
-`db.search_fts`（`core/db.py:1203`）回退到 `LIKE ? ESCAPE '\'`
+`db.py:1271`）。它只在本地 SQLite 构建带 FTS5 时才会创建；否则
+`db.search_fts`（`core/db.py:1271`）回退到 `LIKE ? ESCAPE '\'`
 （`core/db.py:1216-1226`）。FTS5 在 `.claude-plugin/plugin.json:4` 与 `:12` 中被
 宣传，`/cc-mem status` 会报告当前实际走哪条路径（`cli/mem.py` 的 `cmd_status`）。
 
 `memories` 上的 `supersedes_id` 列（迁移 `v3_supersedes`，`db.py:180`）把反补丁的
 取代链显式化：当 `upsert_smart` 判定一条新记忆取代了一条旧记忆时，新行会回链到旧行
-的 ID（旧行被归档）。通过 `db.get_supersede_chain(memory_id)`（`db.py:524`）走一遍
-链条，就能看到完整的更新历史。`content_hash`（迁移 `v2_content_hash`，`db.py:124`）
+的 ID（旧行被归档）。通过 `db.get_supersede_chain(memory_id)`（`db.py:592`）走一遍
+链条，就能看到完整的更新历史。`content_hash`（迁移 `v2_content_hash`，`db.py:817`）
 是归一化内容的 `sha256[:16]`，用于廉价的精确重复检查（`db.compute_content_hash` 在
-`db.py:749`，`db.find_by_hash` 在 `db.py:762`）。
+`db.py:830`，`db.find_by_hash` 在 `db.py:830`）。
 
-迁移按 `_MIGRATIONS` 列表（`db.py:119`）的顺序应用，并记录在 `_migrations` 中。目前
+迁移按 `_MIGRATIONS` 列表（`db.py:120`）的顺序应用，并记录在 `_migrations` 中。目前
 已交付的层级：**v1**（topic 列 + 索引）、**v2**（content_hash、observations、
 session_summaries、项目模式、FTS5、哈希回填）、**v3**（反补丁 + 强制交接：
 `supersedes_id`、`progress`）、**v4**（`plan_active`）、**v5**（会话标注：
@@ -342,7 +347,7 @@ llm.memory_writer.upsert_smart(db, project_id, session_id, category, content,
   ├─ 2. 找出最相似的 ACTIVE 记忆（字符三元组上的 Jaccard）。
   │      范围：当设置了 topic 且该扫描能给出候选时，取同一 topic 内的记忆；
   │      否则按类别扫描最近更新的 50 条（memory_writer._find_similar,
-  │      memory_writer.py:63-92）
+  │      memory_writer.py:102-131）
   │      │
   │      ├─ sim >= 0.80 → MERGE_IN_PLACE (db.update_memory)
   │      │                  不新增行、不堆叠；importance = max(new, old)；
@@ -362,8 +367,8 @@ regenerate_memory_index(db, project_id, memory_dir)   ← MEMORY.md 刷新
 `upsert_smart` 本身**不会**重新生成 `MEMORY.md`。刷新是调用方的责任，且只有两种
 形态：
 
-- `upsert_batch`（`memory_writer.py:161-196`）逐条循环调用 `upsert_smart`，并在最后
-  重新生成**一次**，但仅当传入了 `memory_dir` 时才会（`memory_writer.py:190-194`）。
+- `upsert_batch`（`memory_writer.py:200-235`）逐条循环调用 `upsert_smart`，并在最后
+  重新生成**一次**，但仅当传入了 `memory_dir` 时才会（`memory_writer.py:200-235`）。
   所有钩子调用方都会传（`pre_compact.py:435`、`stop.py:166`、
   `session_start.py:722`）；同步 PreCompact 支路还会在其余状态变更之后再刷一次
   （`pre_compact.py:509`）。
@@ -373,11 +378,11 @@ regenerate_memory_index(db, project_id, memory_dir)   ← MEMORY.md 刷新
   `hooks/consolidate_async.py:188` 也会在维护之后刷新它。
 
 （合并前的示意图把重新生成画成 `upsert_smart` 的无条件步骤，并省略了 `db` 参数；
-上面已依据 `memory_writer.py:95, 190, 199` 对两者做了修正。调用方清单同样是在
+上面已依据 `memory_writer.py:200, 190, 199` 对两者做了修正。调用方清单同样是在
 `cc_memory/` 内 grep `upsert_smart|upsert_batch` 得到的完整集合。）
 
 阈值只存在于一个地方——`memory_writer.HIGH_SIM = 0.80`、`MID_SIM = 0.50`、
-`MIN_CONTENT_LEN = 10`、`MAX_CANDIDATES_TO_SCAN = 50`（`memory_writer.py:44-47`）。
+`MIN_CONTENT_LEN = 10`、`MAX_CANDIDATES_TO_SCAN = 50`（`memory_writer.py:86-86`）。
 `config.json` 里那个只作信息展示的 `writer` 块没有任何读取者，已在 v2.5 删除——
 一个惰性的可调项比没有可调项更糟。完整契约见
 [docs/CONTRACTS.md](CONTRACTS.md#anti-patch-contract)。
@@ -460,7 +465,7 @@ SessionStart：
 ```
 
 上面的调用签名都是真实的：`write_progress_md(db, project_id, memory_dir)`
-（`core/progress.py:239`；调用点 `pre_compact.py:501`、`stop.py:213`、
+（`core/progress.py:323`；调用点 `pre_compact.py:501`、`stop.py:213`、
 `user_prompt.py:133`、`session_start.py:680`、`mcp/server.py:243`、
 `cli/mem.py:648`）。PROGRESS.md 的结构规格见
 [docs/CONTRACTS.md](CONTRACTS.md#handoff-contract)。
@@ -498,10 +503,10 @@ slug 约定是：把 `[A-Za-z0-9]` 之外的**每一个**字符替换成 `-`。c
    —— 后者此前逐字复制了旧解析器，连模糊分支一起。
 2. 模糊兜底被**删除**。未命中返回 `None`。调用方必须把它当作「没有 transcript」，
    绝不能当成可以猜的许可。
-3. 归属改为正向校验。`_transcript_belongs_to`（`session_start.py:478`）读取
+3. 归属改为正向校验。`_transcript_belongs_to`（`session_start.py:524`）读取
    transcript 自身记录携带的 `cwd`，并且是**失败闭合**的 —— 没有 `cwd` 就不摄取 ——
    它在有界窗口加载之后为 `retroactive_save` 把关。第 3 级挖掘则使用故意更弱的
-   `_transcript_is_foreign`（`session_start.py:498`）：缺失 `cwd` 放行，`cwd`
+   `_transcript_is_foreign`（`session_start.py:544`）：缺失 `cwd` 放行，`cwd`
    **不同**才拒绝。两者的差异是刻意的 —— 追溯保存会把 LLM 抽取的记忆永久落库，
    理应要求证明；而第 3 级还必须对 `tests/smoke_test.py:266-278` 构造的那种没有
    `cwd` 的 transcript 形态继续可用。
@@ -540,12 +545,12 @@ PENDING REFINEMENT 横幅加逐字原文开头，并把更旧的结构化计划�
 ## 6. LLM 后端与认证
 
 `llm.ccl_backend.call_llm` 调用 Anthropic Haiku（模型
-`claude-haiku-4-5-20251001`，`ccl_backend.py:27`）。调用方先用
+`claude-haiku-4-5-20251001`，`ccl_backend.py:164`）。调用方先用
 `core.auth.get_api_key()` 解析出一份凭据并传进来；`call_llm` 会**先**尝试这一份，
 当某一支失败时再**逐级回退**到 `core.auth.get_api_candidates()` 的其余条目——总共
 限制为 2 条 Anthropic 支路（`ccl_backend.py:149`），这样最坏情况的墙钟时间对整理的
 BudgetGate 来说仍是已知量。候选顺序与传输格式（`core/auth.py:20-57`、`_wire_for`
-位于 `core/auth.py:8-17`、`_call_haiku` 的请求头位于 `ccl_backend.py:62-72`）：
+位于 `core/auth.py:8-17`、`_call_haiku` 的请求头位于 `ccl_backend.py:97-127`）：
 
 1. `ANTHROPIC_API_KEY` 环境变量 → `x-api-key` 请求头
 2. `~/.claude/.credentials.json` 中的 Claude Code OAuth 令牌（自动检测，按
@@ -569,7 +574,7 @@ Ollama，每一批整理都要冷加载一个 5.9 GB 的本地模型（`core/aut
 `ccl_backend.py:10-12`）。
 
 本地 Ollama 兜底是**按需开启、默认关闭**的（`cc_memory/config.json:63` 的
-`ccl.enabled: false`；`ccl_backend.py:33` 的 `_DEFAULT_OLLAMA_ENABLED = False`，
+`ccl.enabled: false`；`ccl_backend.py:34` 的 `_DEFAULT_OLLAMA_ENABLED = False`，
 因此缺少该键也读作 False），与之并列的还有 `ccl.ollama_url` / `ccl.local_model`。
 当它被禁用时，这条支路被跳过，只记录一个原因字符串
 `"ollama: disabled (config ccl.enabled=false)"`（`ccl_backend.py:169-170`），因此
@@ -577,7 +582,7 @@ Ollama，每一批整理都要冷加载一个 5.9 GB 的本地模型（`core/aut
 
 ### 给墙钟设界：`fallback_timeout` 与 `deadline`
 
-`call_llm`（`ccl_backend.py:123`）提供两条互相独立的界限。
+`call_llm`（`ccl_backend.py:164`）提供两条互相独立的界限。
 
 `fallback_timeout` 为 Ollama 支路设定上界。当它为 `None` 时默认取
 `min(timeout*3, 120)`。于是一次调用的最坏包络是
@@ -651,8 +656,8 @@ v2.4.2 才成立：`_extract_via_llm` 的 `except` 元组此前不包含 `Runtim
 ```
 
 写入方，便于溯源：`MEMORY.md` ← `memory_writer.regenerate_memory_index`
-（`memory_writer.py:199`）；`PROGRESS.md` ← `core.progress.write_progress_md`
-（`progress.py:239, 366`）；`PLAN.md` ← `core.plan.write_plan_md`
+（`memory_writer.py:238`）；`PROGRESS.md` ← `core.progress.write_progress_md`
+（`progress.py:323, 366`）；`PLAN.md` ← `core.plan.write_plan_md`
 （`plan.py:310`）；`.plan_history/` ← `plan.py:437`；`.last_save.json` ←
 `pre_compact.py:526, 556`；`.last_inject.json` ← `session_start.py:291-309`
 （临时文件 + `os.replace`，是真正原子的，不同于 `.last_save.json` 用的普通写）；
@@ -679,13 +684,13 @@ SQL 真相来源（PROGRESS.md 对应 `progress`，PLAN.md 对应 `plan_active`�
 
 旧的 v2.0 `SESSION_HANDOFF.md` 文件会在 v2.1 下的首次 PreCompact 时被重命名为
 `SESSION_HANDOFF.md.v2.bak`（一次性迁移 `core.progress.migrate_legacy_handoff`，
-`progress.py:383`）。
+`progress.py:514`）。
 
 ---
 
 ## 8. 安装布局
 
-`cli/mem.py` 的 `_detect_install_layouts`（`cc_memory/cli/mem.py:103-188`）识别三种
+`cli/mem.py` 的 `_detect_install_layouts`（`cc_memory/cli/mem.py:272-349`）识别三种
 布局。一台机器上可以同时存在多种（例如一个开发检出加上一条过期的市场缓存条目），
 因此 `/cc-mem status` 会逐一报告：
 
@@ -698,8 +703,8 @@ SQL 真相来源（PROGRESS.md 对应 `progress`，PLAN.md 对应 `plan_active`�
   `installPath`（`mem.py:144-174`）。一个已记录但已不存在的 `installPath` 会被
   报告为损坏布局，而不是被跳过（`mem.py:158-170`）。
 - **legacy / 独立安装**——`~/.claude/hooks/cc-memory/`（`mem.py:176-187`），由
-  PyInstaller 安装器写入（`ui/installer.py:33` 的 `TARGET_DIR`）。这里的钩子由
-  `_merge_into_settings`（`installer.py:127+`）直接注册进
+  PyInstaller 安装器写入（`ui/installer.py:56` 的 `TARGET_DIR`）。这里的钩子由
+  `_merge_into_settings`（`installer.py:866+`）直接注册进
   `~/.claude/settings.json`，而不是通过插件清单。
 
 在市场类布局下，`~/.claude/hooks/cc-memory/` 只保留 `logs/`（`core.logger` 的输出
@@ -723,7 +728,7 @@ SQL 真相来源（PROGRESS.md 对应 `progress`，PLAN.md 对应 `plan_active`�
 ```
 
 **独立安装器（扁平）**——`_copy_subpackages(TARGET_DIR)` 把每一个 `SUBPACKAGE_FILES`
-键（`installer.py:61`）直接写到 `TARGET_DIR`（`installer.py:56`）之下，
+键（`installer.py:56`）直接写到 `TARGET_DIR`（`installer.py:56`）之下，
 **没有 `cc_memory/` 这一段**，并且 `_make_hooks_config` 把命令构造成
 `python "<TARGET_DIR>/hooks/<name>.py"`：
 
@@ -775,7 +780,7 @@ SQL 真相来源（PROGRESS.md 对应 `progress`，PLAN.md 对应 `plan_active`�
 
 ### settings.json 在任何复制之前就被校验（v2.5）
 
-`_read_settings`（`installer.py:508`）返回 `(dict, None)` 或 `(None, error)`，绝不
+`_read_settings`（`installer.py:673`）返回 `(dict, None)` 或 `(None, error)`，绝不
 抛异常；`cli_install` 在第 **[0/3]** 步调用它，解析失败时以 1 退出并打印
 `Nothing has been installed.`。一直到 v2.4.3 为止，解析发生在复制**之后**，所以一份
 安装器读不懂的 `settings.json` 会留下 32 个文件在盘上、**零个钩子被注册** —— 卸载器
@@ -792,8 +797,8 @@ SQL 真相来源（PROGRESS.md 对应 `progress`，PLAN.md 对应 `plan_active`�
 
 检测同时接受两种形态：`mem.py:181` 测试
 `(legacy / "cc_memory").exists() or (legacy / "core" / "db.py").exists()`。检查此前
-与它自相矛盾：`_inspect_layout`（`mem.py:251`）把 `_REQUIRED_PLUGIN_FILES`
-（`mem.py:133`）中每一条带 `cc_memory/…` 前缀的条目都以布局**根目录**为基准解析，
+与它自相矛盾：`_inspect_layout`（`mem.py:138`）把 `_REQUIRED_PLUGIN_FILES`
+（`mem.py:138`）中每一条带 `cc_memory/…` 前缀的条目都以布局**根目录**为基准解析，
 于是一个健康的扁平安装被报成 22 个文件全缺、打印 `[FAIL]`——而且因为
 `/cc-mem status` 只对「完全可用」的布局跑 API key 检查，那项检查被整个跳过。
 
@@ -804,7 +809,7 @@ SQL 真相来源（PROGRESS.md 对应 `progress`，PLAN.md 对应 `plan_active`�
 `pkg_dir` 插进 `sys.path`，而不是硬编码的 `root/"cc_memory"`。
 
 安装器自己的安装后说明此前打印 `TARGET_DIR/cc_memory/cli/mem.py`——一条它从不创建的
-路径；现在打印的是确实存在的 `TARGET_DIR/cli/mem.py`（`installer.py:1087`）。
+路径；现在打印的是确实存在的 `TARGET_DIR/cli/mem.py`（`installer.py:56`）。
 
 ### 解释器要求
 
@@ -858,7 +863,7 @@ PATH” + “py launcher”，或者把 `python3` 别名到 `python`。否则钩
   的记忆也可以是任意语言。见
   [§1 “设计上就是双语的”](#设计上就是双语的记忆内容与语言无关)。
   **不要**把那些检测器削减为只识别英文——那会破坏设计的第 3 条
-  （“内容可以是任意语言”）。具体的受守卫位置是 `core/extractor.py:35-69`
+  （“内容可以是任意语言”）。具体的受守卫位置是 `core/extractor.py:73-77`
   （`_PATTERNS`）、`core/extractor.py:73-77`（`_IMPORTANCE_BOOST`）、
   `hooks/session_start.py` 里 RESUME PROTOCOL 的 token 行，以及
   `hooks/user_prompt.py` 里的 `resume_signals`；后两者必须彼此保持同步，因为
@@ -960,8 +965,8 @@ NO-MARKER（一个 FAIL 状态），而不是无声地把该翻译当作有效�
 
 `tools/i18n_check.py` 是纯 stdlib 的，并且刻意位于 `cc_memory` 包之外——它是一个
 dev/CI 工具，被有意排除在 `ui/installer.py` 的 `SUBPACKAGE_FILES`
-（`installer.py:37-48`）、`build_exe.py` 以及 `cli/mem.py` 的
-`_REQUIRED_PLUGIN_FILES`（`mem.py:77-100`）之外，因此打包后的插件不受它影响。
+（`installer.py:61-73`）、`build_exe.py` 以及 `cli/mem.py` 的
+`_REQUIRED_PLUGIN_FILES`（`mem.py:138-162`）之外，因此打包后的插件不受它影响。
 
 ```bash
 python tools/i18n_check.py            # 检查每一份被跟踪的文档

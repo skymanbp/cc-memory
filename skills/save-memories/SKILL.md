@@ -66,7 +66,14 @@ def _find_pkg_dir():
     s = Path.home() / '.claude' / 'settings.json'
     if s.exists():
         try:
-            mk = json.loads(s.read_text(encoding='utf-8')).get('extraKnownMarketplaces', {}).get('cc-memory') or {}
+            # utf-8-sig, not utf-8: PowerShell's > and Out-File write a UTF-8 BOM
+            # by default, and json.loads rejects it. Reading this file as plain
+            # utf-8 made THIS skill print 'cannot locate the cc-memory package
+            # tree' on a healthy marketplace install while /ccm-load reported
+            # ACTIVATED on the SAME machine - only the encoding differed.
+            # ui/installer.py:_read_settings and skills/ccm-load/SKILL.md both
+            # already use utf-8-sig, with the same comment.
+            mk = json.loads(s.read_text(encoding='utf-8-sig')).get('extraKnownMarketplaces', {}).get('cc-memory') or {}
             cand.append((mk.get('source') or {}).get('path'))
         except (json.JSONDecodeError, OSError):
             # why: a malformed settings.json must not abort resolution -- the

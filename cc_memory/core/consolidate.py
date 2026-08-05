@@ -136,6 +136,14 @@ def _worst_call_cost(haiku_s: int, fallback_s: int) -> float:
 
 
 # ── 1. Garbage cleanup ─────────────────────────────────────────────────────
+# NOT a security control, and the `system-reminder|antml` entry below must not
+# be read as one. These patterns delete low-value transcript NOISE during
+# consolidation; they are anchored at position 0, so one leading word evades
+# every one of them. The marker defence is core.privacy.neutralize_markers,
+# applied on the write path (clean_for_storage) and again on every render path.
+# Do not "harden" this list in place of that: an unanchored regex here would
+# silently DELETE memories that legitimately quote a tag, which is the opposite
+# of what the escape-don't-delete design is for.
 _GARBAGE_PATTERNS = [
     r"^<ide_opened_file>",
     r"^</?(ide_opened_file|system-reminder|antml)",

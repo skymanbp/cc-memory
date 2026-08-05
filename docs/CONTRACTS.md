@@ -21,14 +21,16 @@ This document supersedes the pre-2.4.3 trio `docs/MEMORY_RULES.md`,
 `docs/HANDOFF_PROTOCOL.md` and `docs/PLAN_PROTOCOL.md`; the canonical version
 string is `cc_memory/core/version.py`.
 
-**On `file:line` citations.** Nothing enforces them, and they rot on every
-refactor. The v2.5.1 documentation pass re-derived the `core/plan.py` citations
-in the plan contract and fact-checked every prose claim against the code, but
-citations into `cc_memory/hooks/*`, `cli/mem.py` and `ui/installer.py` were
-deliberately NOT re-derived — those files were being rewritten in the same
-round, so any number written for them would have been stale on landing. Treat a
-line number here as a hint and the **symbol name** as the fact:
-`grep -n "def <symbol>" <file>` is authoritative.
+**On `file:line` citations.** They are now enforced, by
+`tools/citation_check.py` (v2.5.2), which runs inside `tests/smoke_test.py`: for
+each citation it resolves the symbols named in the surrounding prose with `ast`
+and asserts the cited range covers that symbol's definition, or at least
+mentions it. Its first run found **163 of 594 citations stale** and repaired
+them mechanically. A citation whose sentence names no uniquely resolvable
+function, class or ALL_CAPS constant is reported SKIP and is **not** checked, so
+treat a line number here as a hint and the **symbol name** as the fact:
+`grep -n "def <symbol>" <file>` is authoritative, and
+`python tools/citation_check.py --fix` is how you repair a number.
 
 ## Contents
 
@@ -81,7 +83,7 @@ Inputs: `content`, `topic`, `category`, `importance`, `tags`, `session_id`
 (`llm/memory_writer.py:95-158`).
 
 ```
-0. content = clean_for_storage(content.strip()).           (memory_writer.py:109)
+0. content = clean_for_storage(content.strip()).           (memory_writer.py:85)
    SKIP (reason: too_short) if len < MIN_CONTENT_LEN (10).      (:110-111)
    Coerce category outside {decision,result,config,bug,task,arch,note}
      → "note".                                                  (:113-114)
@@ -89,13 +91,13 @@ Inputs: `content`, `topic`, `category`, `importance`, `tags`, `session_id`
 
 1. Compute content_hash = sha256(content.strip().lower())[:16].
                                                      (db.compute_content_hash,
-                                                      core/db.py:722-724)
+                                                      core/db.py:817-819)
    If db.find_by_hash(project_id, content_hash):                (:120-124)
        → SKIP. Action: "skipped". Reason: hash_match.
        Rationale: exact text duplicate.
 
 2. Search for the most similar ACTIVE memory in scope
-   (_find_similar, memory_writer.py:63-92):
+   (_find_similar, memory_writer.py:102-131):
        primary scope:   topic == new_topic  (db.get_memories_by_topic)
        fallback scope:  category == new_category, is_active = 1,
                         ORDER BY updated_at DESC LIMIT 50
@@ -125,7 +127,7 @@ Inputs: `content`, `topic`, `category`, `importance`, `tags`, `session_id`
                                      importance=max(new_imp, existing_imp),
                                      tags=new_tags ∪ {"supersedes"},
                                      topic=new_topic or existing_topic)
-       # archives existing.id internally (db.py:510) — the writer never
+       # archives existing.id internally (db.py:723) — the writer never
        # calls db.archive_memory itself
        Action: "superseded".
        Rationale: refined / consolidated version of the same fact;
@@ -146,13 +148,13 @@ Inputs: `content`, `topic`, `category`, `importance`, `tags`, `session_id`
 
 `upsert_smart` returns
 `{"action": "skipped"|"merged"|"superseded"|"inserted", "id": ..., "similarity": ..., "old_id": ...}`
-(`memory_writer.py:105-107`); the skip paths add a `"reason"` of `too_short` or
+(`memory_writer.py:200-235`); the skip paths add a `"reason"` of `too_short` or
 `hash_match`. `upsert_batch` aggregates those into per-action counts plus a
-`results` list (`memory_writer.py:174-196`).
+`results` list (`memory_writer.py:200-235`).
 
 ### Thresholds and constants
 
-`HIGH_SIM` / `MID_SIM` are module constants in `cc_memory/llm/memory_writer.py:44-45`
+`HIGH_SIM` / `MID_SIM` are module constants in `cc_memory/llm/memory_writer.py:83-83`
 (0.80 / 0.50), alongside `MIN_CONTENT_LEN` (10) and `MAX_CANDIDATES_TO_SCAN` (50)
 at `:46-47`. The mirrored `writer.*` keys in `cc_memory/config.json:12-18` (the
 four numeric keys at `:13-16`) are NOT read by any code path — `memory_writer.py`
@@ -175,7 +177,7 @@ bypassing `upsert_smart`:
 2. **Patch updates without history.** If a fact genuinely changes ("we
    switched from lr=3e-4 to lr=1e-4 because…"), the supersede path
    preserves the old fact as `is_active=0` linked via `supersedes_id`.
-   `db.get_supersede_chain(id)` (`core/db.py:513`) walks the history. No
+   `db.get_supersede_chain(id)` (`core/db.py:592`) walks the history. No
    "git blame for memories" hack needed.
 
 3. **MEMORY.md staleness.** Auto-regeneration after every batch write
@@ -195,8 +197,8 @@ bypassing `upsert_smart`:
 
 Every caller of `llm/memory_writer` in the tree, and the exact entry it uses.
 There are no remaining direct `db.insert_memory` callers outside the writer
-itself (`core/db.py:450` documents it as migration/bulk-load only; the only
-other in-tree call is `db.supersede_memory`'s own insert at `core/db.py:505`).
+itself (`core/db.py:576` documents it as migration/bulk-load only; the only
+other in-tree call is `db.supersede_memory`'s own insert at `core/db.py:576`).
 
 | Save path | Entry function |
 |-----------|---------------|
@@ -205,7 +207,7 @@ other in-tree call is `db.supersede_memory`'s own insert at `core/db.py:505`).
 | `SessionStart` retroactive save | `upsert_batch(db, pid, sid, memories, memory_dir=memory_dir)` — un-saved prior sessions (`hooks/session_start.py:722`) |
 | `/save-memories` skill | `upsert_batch(db, pid, None, memories, memory_dir=Path(project) / 'memory')` (`skills/save-memories/SKILL.md:100`) |
 | `mem.py add` CLI | `upsert_smart(...)` + `regenerate_memory_index(...)` (`cli/mem.py:516,524`) |
-| `mcp/server.py handle_memory_add` | `upsert_smart(...)` + `regenerate_memory_index(...)` (`mcp/server.py:182,192`) |
+| `mcp/server.py handle_memory_add` | `upsert_smart(...)` + `regenerate_memory_index(...)` (`mcp/server.py:520,192`) |
 | Dashboard UI "Add Memory" | `upsert_smart(...)` + `regenerate_memory_index(...)` — routed since v2.2 (`ui/dashboard.py:949,956`). `ui/dashboard.py` contains no `db.insert_memory` call. |
 | Dashboard UI "Save Session" | `upsert_batch(...)` (`ui/dashboard.py:1444`) |
 | Dashboard UI "Init Project" scan | `upsert_batch(db, pid, None, batch, memory_dir=memory_dir)` (`ui/dashboard.py:1575`) |
@@ -222,9 +224,9 @@ backstop, not a save path, and it operates on memories that ALREADY exist:
   `db.update_memory` + `db.archive_obsolete` directly. They never create
   user-facing content from scratch — a survivor row already exists; losers are
   archived (`is_active=0`) with a forward `supersedes_id` link
-  (`db.archive_obsolete`, `core/db.py:670-698`) so the lineage stays traceable
+  (`db.archive_obsolete`, `core/db.py:765-793`) so the lineage stays traceable
   and recoverable. Unlike `upsert_smart`, `semantic_dedup` *does* union the
-  survivor's existing tags before writing (`consolidate.py:391-400`).
+  survivor's existing tags before writing (`consolidate.py:663-696`).
 - `decay_and_archive` (reference-aware staleness net, `consolidate.py:655-689`)
   archives ONLY very old + low-importance + never-injected rows — a
   zero-false-archive safety net. Effective age is
@@ -236,8 +238,8 @@ backstop, not a save path, and it operates on memories that ALREADY exist:
   `cli/mem.py:581`) is the one exception: it hard-DELETEs rows under 20 chars
   (`_MIN_CONTENT_LEN`, `:155`) or matching the garbage regexes (`_GARBAGE_RE`,
   `:154`) through `db.delete_memories` → `DELETE FROM memories WHERE id IN (...)`
-  (`core/db.py:646-651`). `merge_near_duplicates` (`:188-220`) archives via
-  `bulk_archive` (`core/db.py:635-644`), i.e. reversibly but WITHOUT a
+  (`core/db.py:741-746`). `merge_near_duplicates` (`:188-220`) archives via
+  `bulk_archive` (`core/db.py:730-739`), i.e. reversibly but WITHOUT a
   `supersedes_id` link.
 
 This is intentional and bounded; it does not loosen the rule for SAVE paths.
@@ -248,8 +250,8 @@ This is intentional and bounded; it does not loosen the rule for SAVE paths.
   exposed for migration / bulk-load, but not for everyday writes —
   `core/db.py:450`.)
 - Don't roll your own `"SELECT content FROM memories ..."` dedup. That's
-  what `db.find_by_hash` (`core/db.py:735`) and the writer's `_find_similar`
-  (`llm/memory_writer.py:63`) are for. (There is no `db.find_similar`; the
+  what `db.find_by_hash` (`core/db.py:830`) and the writer's `_find_similar`
+  (`llm/memory_writer.py:102`) are for. (There is no `db.find_similar`; the
   matcher lives in the writer, private by design.)
 - Don't "patch" MEMORY.md by hand or expect another path to refresh it. Call
   `regenerate_memory_index` after any non-trivial state change. The generated
@@ -273,7 +275,7 @@ In a project with cc-memory installed:
 each root tries the NESTED layout `<root>/cc_memory/cli/mem.py` (marketplace /
 dev checkout) before the FLAT one `<root>/cli/mem.py`. The standalone installer
 copies each subpackage straight into `TARGET_DIR/<subdir>/`
-(`cc_memory/ui/installer.py:33` `TARGET_DIR`, `:37-48` `SUBPACKAGE_FILES`,
+(`cc_memory/ui/installer.py:61` `TARGET_DIR`, `:37-48` `SUBPACKAGE_FILES`,
 `:74` `_copy_subpackages`), so a standalone install has **no** `cc_memory/`
 path segment — its CLI is `~/.claude/hooks/cc-memory/cli/mem.py`. Under a
 marketplace install that tree holds only `logs/` (verified on this machine),
@@ -302,7 +304,7 @@ v2.1 fixed this with **PROGRESS.md** (always-full-rewrite from a SQL row) +
 a **forced `<system-reminder>` injection at SessionStart**. The legacy
 `SESSION_HANDOFF.md` is renamed to `SESSION_HANDOFF.md.v2.bak` on the first
 PreCompact under v2.1+ (one-shot migration `migrate_legacy_handoff`,
-`core/progress.py:383-397`, called from `hooks/pre_compact.py:346`).
+`core/progress.py:514-528`, called from `hooks/pre_compact.py:346`).
 
 ### PROGRESS.md is the SOT
 
@@ -310,24 +312,24 @@ PreCompact under v2.1+ (one-shot migration `migrate_legacy_handoff`,
 from the `progress` SQL row. Schema (`cc_memory/core/db.py:_MIGRATIONS:v3_progress`
 at `db.py:176-190`, plus the two v5 session-annotation columns at `db.py:219-222`).
 §0 additionally reads the `sessions` / `session_summaries` tables via
-`db.get_recent_sessions` (`core/progress.py:210`; `core/db.py:971-993`):
+`db.get_recent_sessions` (`core/progress.py:210`; `core/db.py:1081-1103`):
 
 | Column | Type | Primary source · Fallbacks |
 |--------|------|---------------------------|
 | `project_id` | INTEGER PK | `upsert_project` |
-| `current_request` | TEXT | UserPromptSubmit turn 1 (`user_prompt.py:132`) → PreCompact `_first_user_request(window.head)` (`pre_compact.py:456`) — scans up to 200 records past the leading `queue-operation` / `attachment` meta rows and skips empty-content user rows (`pre_compact.py:254-278`, v2.4.2) → `session_summaries.request` (`progress.py:143`) |
-| `status_done` | TEXT | `session_summaries.completed` (`progress.py:137`), which PreCompact fills with `", ".join(<observed Edit/Write/MultiEdit paths>[:10])` (`pre_compact.py:450-475`) — so §2 "Done" renders a FILE LIST, not prose. SessionStart fills it if empty (`session_start.py:589-590`) |
+| `current_request` | TEXT | UserPromptSubmit turn 1 (`user_prompt.py:132`) → PreCompact `_first_user_request(window.head)` (`pre_compact.py:315`) — scans up to 200 records past the leading `queue-operation` / `attachment` meta rows and skips empty-content user rows (`pre_compact.py:315-357`, v2.4.2) → `session_summaries.request` (`progress.py:143`) |
+| `status_done` | TEXT | `session_summaries.completed` (`progress.py:137`), which PreCompact fills with `", ".join(<observed Edit/Write/MultiEdit paths>[:10])` (`pre_compact.py:315-357`) — so §2 "Done" renders a FILE LIST, not prose. SessionStart fills it if empty (`session_start.py:589-590`) |
 | `status_in_flight` | TEXT | `session_summaries.learned` — NOTE: PreCompact writes this field EMPTY (`pre_compact.py:474`), so it is inert today; §2 "In-flight" always renders `*(none active)*` |
-| `status_blocked` | TEXT | Explicit `patch_progress(status_blocked=...)` — no in-tree caller does this today; it is an API for external tooling. A repo-wide grep finds only the schema default (`core/db.py:182,853`), the empty seed (`core/progress.py:146`) and the read (`core/progress.py:288`) |
+| `status_blocked` | TEXT | Explicit `patch_progress(status_blocked=...)` — no in-tree caller does this today; it is an API for external tooling. A repo-wide grep finds only the schema default (`core/db.py:1028,853`), the empty seed (`core/progress.py:146`) and the read (`core/progress.py:288`) |
 | `open_todos` | JSON | PreCompact `extract_latest_todo_state(window)` via `ext["latest_todos"]` (`core/extractor.py:352,558`; `pre_compact.py:462,488`) → SessionStart tier-3 prior-transcript mine (`session_start.py:641-652`) → LAST RESORT `session_summary.next_steps` split by `;` (`session_start.py:663-674`). Only non-`completed` todos are kept (`progress.py:116-125`) |
 | `plan` | TEXT | `session_summaries.next_steps` — sourced from the latest TodoWrite pending items if any, else from LLM-extracted `task` memories (`pre_compact.py:462-468`); propagated at `progress.py:148`, filled-if-empty at `session_start.py:593-594` |
 | `critical_context` | JSON | Top 10 memories with importance ≥ 4, content truncated to 200 chars (`progress.py:107-113`; `session_start.py:571-579`) |
 | `files_touched` | JSON | `observations` table (`pre_compact.py:446-453` → `progress.py:128-134`; Stop per-turn patch `stop.py:193-211`; SessionStart tier-2C `session_start.py:596-612`) → tier-3 prior-transcript `extract_file_changes` (`session_start.py:653-659`) |
 | `transcript_ptr` | TEXT | PreCompact `transcript_path` resolved absolute (`pre_compact.py:491`) → tier-3 `find_latest_transcript(cwd, exclude_session_id=...)` (`session_start.py:630-633`) |
-| `updated_at` | TEXT | ISO timestamp, stamped by `upsert_progress` / `patch_progress` (`db.py:884-898`, `:937-943`) |
-| `trigger_type` | TEXT | "auto" \| "manual" (PreCompact passes the host's own trigger string through — `pre_compact.py:332,492`; `"precompact"` is only `collect_progress_state`'s default kwarg at `progress.py:99` and is always overridden) \| "stop" (`stop.py:211`) \| "user_prompt" \| "resume_request" (`user_prompt.py:131-132`) \| "session_start_refresh" (`session_start.py:677`) |
+| `updated_at` | TEXT | ISO timestamp, stamped by `upsert_progress` / `patch_progress` (`db.py:948-1008`, `:937-943`) |
+| `trigger_type` | TEXT | "auto" \| "manual" (PreCompact passes the host's own trigger string through — `pre_compact.py:332,492`; `"precompact"` is only `collect_progress_state`'s default kwarg at `progress.py:126` and is always overridden) \| "stop" (`stop.py:211`) \| "user_prompt" \| "resume_request" (`user_prompt.py:131-132`) \| "session_start_refresh" (`session_start.py:677`) |
 | `current_session_id` | TEXT | `db.tag_progress_session` only (`db.py:945-969`) — tagged by PreCompact (`pre_compact.py:499`), Stop (`stop.py:254`), SessionStart (`session_start.py:565`), UserPromptSubmit (`user_prompt.py:117`) |
-| `session_started_at` | TEXT | `db.tag_progress_session` — reset only when the stored sid changes; `upsert_progress` preserves both across a full rewrite (`db.py:868-876`) |
+| `session_started_at` | TEXT | `db.tag_progress_session` — reset only when the stored sid changes; `upsert_progress` preserves both across a full rewrite (`db.py:948-1008`) |
 
 The rendered Markdown (sections 0-7 in
 [`cc_memory/core/progress.py`](../cc_memory/core/progress.py)) is generated
@@ -376,7 +378,7 @@ whitespace-flattened and truncated at 100 chars (`:210-234`).
      `extracted_memories + observations + session_summaries`
      (`progress.py:92-153`).
    - `db.tag_progress_session(...)` runs FIRST so the tag survives
-     (`pre_compact.py:499`; see the preservation logic at `db.py:866-876`).
+     (`pre_compact.py:499`; see the preservation logic at `db.py:1055-1079`).
    - `db.upsert_progress(**all_fields)` overwrites the row (`pre_compact.py:500`).
    - `write_progress_md(db, pid, memory_dir)` rewrites the file (`:501`).
 
@@ -402,7 +404,7 @@ whitespace-flattened and truncated at 100 chars (`:210-234`).
 
 4. **SessionStart refresh** (every session start, tier-2/3 fallback):
    - `_refresh_progress_row(db, pid, memory_dir, current_session_id)`
-     (`session_start.py:531-683`).
+     (`session_start.py:684-850`).
    - Fill-only-empty: never overwrites a non-empty field upstream wrote
      (contract stated at `session_start.py:555-557`).
    - Sources, in order: DB critical_memories / session_summary / observations,
@@ -563,7 +565,7 @@ unstable.
 
 Both share the same SQLite database (`plan_active` and `progress` tables
 respectively) so they cannot drift out of sync with their source of truth.
-`write_plan_md` (`core/plan.py:310-325`) is a full rewrite from the row, and
+`write_plan_md` (`core/plan.py:473-492`) is a full rewrite from the row, and
 the generated file carries a DO-NOT-EDIT banner naming the SQL table and the
 three legitimate edit entries (`core/plan.py:257-260`).
 
@@ -674,7 +676,7 @@ Single row per project. Schema (v4 migration, `core/db.py:198-211`):
 ```
 
 Valid `status` values: `pending`, `in_progress`, `done`, `blocked`, `skipped`
-(`core/plan.py:67`). `normalize_structured` (`core/plan.py:89-134`) is
+(`core/plan.py:132`). `normalize_structured` (`core/plan.py:89-134`) is
 defensive: it tolerates common LLM status aliases (`todo`→`pending`,
 `wip`/`doing`→`in_progress`, `complete`/`completed`→`done`), drops step entries
 with no title, and renumbers missing `id`s from their position.
@@ -690,13 +692,13 @@ plan for audit (`core/plan.py:105-111`).
 ### Sync algorithm (TodoWrite ↔ steps)
 
 When `TodoWrite` is observed, `core.plan.sync_todos_to_steps`
-(`core/plan.py:184-229`, matcher at `:139-170`):
+(`core/plan.py:235-280`, matcher at `:139-170`):
 
 1. For each todo, compute trigram-Jaccard similarity to every step's title.
 2. Pick the best-matching step IF similarity ≥ `MATCH_THRESHOLD` (0.35,
-   `core/plan.py:62`).
+   `core/plan.py:105`).
 3. Update the step's status from the todo's status, using
-   (`_TODO_TO_STEP_STATUS`, `core/plan.py:174-181`):
+   (`_TODO_TO_STEP_STATUS`, `core/plan.py:225-232`):
    - `completed` → `done`
    - `in_progress` → `in_progress`
    - `pending` → `pending`
@@ -712,7 +714,7 @@ When `TodoWrite` is observed, `core.plan.sync_todos_to_steps`
    is (`:215-223`).
 
 The whole path is mechanical — no LLM. `apply_todowrite_sync`
-(`core/plan.py:544-564`) persists the updated plan and rewrites PLAN.md, but
+(`core/plan.py:757-777`) persists the updated plan and rewrites PLAN.md, but
 returns `{"skipped": "no_active_plan"}` without touching anything if there is no
 row or the stored `structured` is not schema-valid (`:551-554`).
 
@@ -800,7 +802,7 @@ Then re-pipe the JSON through `/cc-mem plan-set --from-refiner`.
 
 #### Door 2 — CLEAR (`/cc-mem plan-clear`)
 
-`cmd_plan_clear` (`cli/mem.py:778-807`) refuses with exit 1 when
+`cmd_plan_clear` (`cli/mem.py:1225-1254`) refuses with exit 1 when
 `unfinished_steps(row["structured"])` is non-empty and no `--reason` was given
 (`:788-798`):
 
@@ -820,7 +822,7 @@ command archive, `db.clear_plan_active(pid)`, and delete `memory/PLAN.md` +
 #### Backstop — append-only plan history
 
 Every outgoing plan — even a cleanly-dispositioned one — is archived by
-`archive_plan` (`core/plan.py:542-575`) to
+`archive_plan` (`core/plan.py:599-655`) to
 
 ```
 memory/.plan_history/plan_<YYYYmmddTHHMMSS>_<replace|clear>.json
@@ -842,7 +844,7 @@ denial-of-service on planning.
 
 ### Nudge thresholds
 
-Hardcoded defaults in `core/plan.py:702-704` (`turn_threshold=8`,
+Hardcoded defaults in `core/plan.py:782-798` (`turn_threshold=8`,
 `edit_threshold=12`); the Stop hook calls `should_nudge_guardian(plan_row)` with
 no overrides (`hooks/stop.py`). There is NO `config.json` key for these —
 change the signature defaults, or pass explicit kwargs. The `+20` sensitive-call
@@ -918,7 +920,7 @@ if no raw text is stored (`:815-817`).
 
 ### Sensitive-tool list
 
-`core.plan.is_sensitive_tool_call` (`core/plan.py:729-745`) flags these Bash
+`core.plan.is_sensitive_tool_call` (`core/plan.py:809-826`) flags these Bash
 patterns — case-insensitive substring match on the `command` input, `Bash` tool
 only — for an immediate guardian-nudge bump (+20 edits):
 

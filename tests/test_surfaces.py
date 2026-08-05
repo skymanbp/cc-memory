@@ -101,12 +101,15 @@ def _cleanup_sandbox():
     """Close every sqlite handle this process opened, then REMOVE the sandbox.
 
     Every connection alive in this process was opened by this suite, so closing
-    them all is exactly "close your own handles". It is needed because
-    `MemoryDB._connect()` is consumed as `with self._connect() as conn:`
-    throughout the package and sqlite3's context manager COMMITS BUT DOES NOT
-    CLOSE; the connection then survives inside its own statement-cache
-    reference cycle and keeps memory.db open, which on Windows is a hard
-    PermissionError [WinError 32] on rmtree.
+    them all is exactly "close your own handles".
+
+    NARROWED in v2.5.2: `MemoryDB._connect()` is now a context manager that
+    closes in its `finally`, so it no longer leaks one handle per operation
+    (sqlite3's own context manager COMMITS BUT DOES NOT CLOSE, and the handle
+    then survived inside its statement-cache reference cycle, keeping memory.db
+    open — a hard PermissionError [WinError 32] on rmtree under Windows). The
+    sweep is KEPT for `cli/mem.py:_require_db`, whose raw sqlite3.connect() no
+    caller closes, and for handles a test opens directly.
 
     Measured before this existed: every SUCCESSFUL run left one
     `%TEMP%\\cc-memory-surfaces-*\\tmp\\ccm-web-served-*\\memory\\memory.db`
@@ -209,14 +212,17 @@ class McpProc:
     instead of blocking for a full buffer.
     """
 
-    def __init__(self, cwd, env_extra=None):
+    def __init__(self, cwd, env_extra=None, server_py=None):
+        # server_py: §5 drives a COPY of the package so it can rewrite that
+        # copy's config.json; the repo's own config.json is the live plugin on
+        # a dev checkout and must never be written to by a test.
         env = dict(os.environ)
         env.pop("PYTHONIOENCODING", None)
         env.pop("PYTHONUTF8", None)
         if env_extra:
             env.update(env_extra)
         self.proc = subprocess.Popen(
-            [sys.executable, str(MCP_SERVER_PY)], cwd=str(cwd),
+            [sys.executable, str(server_py or MCP_SERVER_PY)], cwd=str(cwd),
             stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=subprocess.PIPE, env=env, bufsize=0)
         self.frames = []                 # list[bytes], one per LF-terminated line
@@ -1365,6 +1371,158 @@ def test_excluded_projects():
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+# §5  config.json parser shapes + the MCP surface of the same opt-out
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# §4 above drives the six hooks against a WELL-FORMED config written with
+# json.dumps + encoding="utf-8" and one well-formed entry. That is exactly the
+# shape two v2.5.1 defects escaped through, and it is why they survived a green
+# suite: a UTF-8 BOM (PowerShell's Out-File default on the primary platform)
+# made json.load raise into a bare `except Exception: return False`, and one
+# `~user` entry raised RuntimeError — caught by neither OSError nor ValueError —
+# out of the loop, disabling every entry after it. Both failed OPEN and silently.
+#
+# The MCP server is in this section rather than §4 because it is the SEVENTH
+# call site of the same control and the one v2.5.1 missed entirely: it is loaded
+# by default from the shipped manifest and every call is model-initiated, so the
+# user is in the loop for none of them.
+
+def _write_pkg_config(pkg, obj=None, *, bom=False, raw=None):
+    """Write a fixture package COPY's config.json. Never the repo's."""
+    assert REPO not in pkg.parents and pkg != REPO / "cc_memory", \
+        "refusing to write the repo's own config.json"
+    if raw is None:
+        raw = json.dumps(obj, indent=2, ensure_ascii=False).encode("utf-8")
+    (pkg / "config.json").write_bytes((b"\xef\xbb\xbf" if bom else b"") + raw)
+
+
+def _mcp_verdict(pkg, cwd, project):
+    """(search_is_error, add_is_error, rows_after) for one project via MCP."""
+    mcp = McpProc(cwd, server_py=pkg / "mcp" / "server.py")
+    mcp.send({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
+    _call(mcp, 2, "memory_search", {"query": "canary", "project": str(project)})
+    # category/content/importance are all REQUIRED by memory_add's inputSchema
+    # (v2.5.0 validates against it and answers -32602 instead of coercing), so
+    # an incomplete call here would fail for the wrong reason and mask a
+    # regression in the control arm.
+    _call(mcp, 3, "memory_add",
+          {"category": "note", "importance": 3,
+           "content": "an MCP write that must not reach an excluded project",
+           "project": str(project)})
+    mcp.settle()
+    rc, err, frames = mcp.finish()
+    assert rc == 0, f"MCP server exited {rc}"
+    assert err == b"", f"MCP server wrote to stderr: {err[:200]!r}"
+    by_id = _by_id(frames)
+
+    def is_err(rid):
+        msg = by_id.get(rid) or {}
+        return bool((msg.get("result") or {}).get("isError")) or "error" in msg
+
+    db = MemoryDB(project / "memory" / "memory.db")
+    with db._connect() as conn:
+        rows = conn.execute("SELECT COUNT(*) FROM memories").fetchone()[0]
+    joined = "\n".join(frames)
+    return is_err(2), is_err(3), rows, joined
+
+
+def test_config_shapes_and_mcp_optout():
+    print("\n--- §5 config.json shapes + the MCP opt-out -------------------")
+    pkg = Path(tempfile.mkdtemp(prefix="ccm-cfg-pkg-")) / "cc_memory"
+    shutil.copytree(REPO / "cc_memory", pkg,
+                    ignore=shutil.ignore_patterns("__pycache__", "*.pyc",
+                                                  "projects.json"))
+    assert REPO not in pkg.parents, "the fixture package must be a COPY"
+    shipped = json.loads((pkg / "config.json").read_text(encoding="utf-8"))
+
+    work = Path(tempfile.mkdtemp(prefix="ccm-cfg-work-"))
+    transcript = work / "t.jsonl"
+    transcript.write_text(json.dumps(
+        {"type": "user", "message": {"role": "user", "content": "do the work"}})
+        + "\n", encoding="utf-8")
+
+    def fresh(tag):
+        d = work / tag
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    def drive(cwd, sid):
+        """All six hooks; returns what actually stuck on disk."""
+        for hook in _HOOK_ORDER:
+            rc, out, err = _run_hook(pkg, hook, cwd, sid, transcript)
+            assert rc == 0 and err == "", \
+                f"{sid}: {hook} rc={rc} stderr={err[:300]!r}"
+        return _memory_names(cwd / "memory")
+
+    # ── D1 · a UTF-8 BOM must not switch the control off ───────────────────
+    bom_proj = fresh("bom-project")
+    _write_pkg_config(pkg, dict(shipped, excluded_projects=[str(bom_proj)]),
+                      bom=True)
+    got = drive(bom_proj, "cfg-bom-000001")
+    assert got == set(), \
+        f"a BOM'd config.json disabled the opt-out; artifacts created: {sorted(got)}"
+
+    # ── D2 · an unexpandable ~user entry must not void the entries after it ─
+    tilde_proj = fresh("tilde-project")
+    _write_pkg_config(pkg, dict(shipped, excluded_projects=[
+        "~nosuchuser999999/nowhere", str(tilde_proj)]))
+    got = drive(tilde_proj, "cfg-tilde-00001")
+    assert got == set(), \
+        (f"a ~user entry FIRST voided the entries after it; artifacts "
+         f"created: {sorted(got)}")
+
+    # ── fail-CLOSED · a config that exists and cannot be parsed ────────────
+    # Not symmetric with fail-open: guessing "not excluded" stores tool input
+    # and output to disk and, with a credential present, ships it to the API.
+    broken_proj = fresh("broken-cfg-project")          # deliberately NOT listed
+    _write_pkg_config(pkg, raw=b'{"excluded_projects": [,,,}')
+    got = drive(broken_proj, "cfg-broken-00001")
+    assert got == set(), \
+        (f"an unparseable config.json failed OPEN; artifacts created: "
+         f"{sorted(got)}")
+
+    # ── ABSENT or EMPTY is NOT that case: no list exists, nothing excluded ──
+    (pkg / "config.json").unlink()
+    open_proj = fresh("no-config-project")
+    got = drive(open_proj, "cfg-absent-00001")
+    assert "memory.db" in got, \
+        (f"an ABSENT config.json was treated as fail-closed and suspended the "
+         f"plugin; artifacts: {sorted(got)}")
+
+    # ── the MCP server: the seventh call site of the same control ──────────
+    excluded = fresh("mcp-excluded")
+    control = fresh("mcp-control")
+    for p in (excluded, control):
+        (p / "memory").mkdir(parents=True, exist_ok=True)
+        d = MemoryDB(p / "memory" / "memory.db")
+        d.insert_memory(d.upsert_project(str(p)), None, "note",
+                        "canary row seeded before the project was listed",
+                        importance=5, topic="ops", tags=["manual"])
+    _write_pkg_config(pkg, dict(shipped, excluded_projects=[str(excluded)]))
+
+    s_err, a_err, rows, frames = _mcp_verdict(pkg, excluded, excluded)
+    assert s_err and a_err, \
+        (f"MCP served an excluded project (search isError={s_err}, "
+         f"add isError={a_err})")
+    assert rows == 1, f"MCP wrote into an excluded project ({rows} rows, seeded 1)"
+    assert "canary row seeded" not in frames, \
+        "MCP leaked stored content from an excluded project"
+    assert not (excluded / "memory" / "PROGRESS.md").exists(), \
+        "MCP created PROGRESS.md in an excluded project"
+
+    s_err, a_err, rows, frames = _mcp_verdict(pkg, control, control)
+    assert not s_err and not a_err, \
+        (f"MCP refused a project that is NOT excluded (search isError="
+         f"{s_err}, add isError={a_err}) -- the opt-out must be exact")
+    assert rows == 2, f"MCP failed to write to a normal project ({rows} rows)"
+
+    print("[OK] config.json shapes: BOM'd config, a ~user entry FIRST and an "
+          "unparseable config all keep the opt-out ON (fail-closed); an ABSENT "
+          "config keeps the plugin ON; MCP refuses an excluded project for "
+          "read AND write while serving an identical control project")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 
 def main():
     print(f"Sandbox root: {_SANDBOX}")
@@ -1374,6 +1532,7 @@ def main():
     test_web()
     test_installer()
     test_excluded_projects()
+    test_config_shapes_and_mcp_optout()
     # Teardown is a GATE, not a courtesy: this suite creates ~475 KB of SQLite
     # per run under the real %TEMP% and used to hide its own failure to remove
     # it behind ignore_errors=True.
