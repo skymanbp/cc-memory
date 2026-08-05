@@ -1925,6 +1925,107 @@ def main():
           "PLAN.md, and an armed topic NAME cannot forge a block or a heading "
           "into MEMORY.md — while both stay readable")
 
+    # ── v2.5.3 · ONE atomic writer, and it never truncates ──────────────────
+    # v2.5.2 shipped three `_atomic_write*` functions and called them
+    # "deliberate literal twins". They were not twins: core/progress.py retried
+    # and re-raised, while core/plan.py and llm/memory_writer.py had no retry
+    # and fell back to the plain TRUNCATING write — reintroducing, for that
+    # call, the exact torn-read defect the function existed to remove. That
+    # fallback was the residual this release closes.
+    from core.atomic import write_atomic as _aw
+    import core.progress as _prog_mod
+    import core.plan as _plan_mod
+    import llm.memory_writer as _mw_mod
+    for _aw_where, _aw_fn in (("core.progress._atomic_write",
+                               _prog_mod._atomic_write),
+                              ("core.plan._atomic_write_text",
+                               _plan_mod._atomic_write_text),
+                              ("llm.memory_writer._atomic_write_text",
+                               _mw_mod._atomic_write_text)):
+        assert _aw_fn is _aw, \
+            (f"{_aw_where} is no longer core.atomic.write_atomic — a private "
+             f"copy has come back, which is how the three diverged before")
+    # and no module may re-grow one
+    for _aw_rel in ("cc_memory/core/progress.py", "cc_memory/core/plan.py",
+                    "cc_memory/llm/memory_writer.py"):
+        _aw_src = (_REPO / _aw_rel).read_text(encoding="utf-8")
+        assert "def _atomic_write" not in _aw_src, \
+            (f"{_aw_rel} defines its own atomic writer again; import "
+             f"core.atomic.write_atomic instead")
+    # the contract: replace completely, or raise. NEVER truncate.
+    _aw_dir = Path(tempfile.mkdtemp(prefix="cc-memory-atomic-"))
+    _aw_target = _aw_dir / "artifact.md"
+    _aw_target.write_text("PREVIOUS COMPLETE CONTENT", encoding="utf-8")
+    _aw_real_replace = os.replace
+
+    def _aw_always_fails(*a, **kw):
+        raise PermissionError(13, "simulated sharing violation")
+
+    os.replace = _aw_always_fails
+    try:
+        _aw_raised = False
+        try:
+            _aw(_aw_target, "NEW CONTENT")
+        except PermissionError:
+            # why: raising IS the contract being asserted — the caller decides
+            # what to do, and the previous complete file must still be there.
+            _aw_raised = True
+    finally:
+        os.replace = _aw_real_replace
+    assert _aw_raised, "write_atomic swallowed a replace failure"
+    assert _aw_target.read_text(encoding="utf-8") == "PREVIOUS COMPLETE CONTENT", \
+        ("write_atomic fell back to a truncating write — that fallback is the "
+         "torn-read defect, not a safety net")
+    assert not list(_aw_dir.glob("*.tmp")), \
+        f"write_atomic leaked a temp file: {[p.name for p in _aw_dir.iterdir()]}"
+    _aw(_aw_target, "NEW CONTENT")
+    assert _aw_target.read_text(encoding="utf-8") == "NEW CONTENT"
+    shutil.rmtree(_aw_dir, ignore_errors=True)
+    print("[OK] v2.5.3 atomic writes: all 3 artifact writers ARE "
+          "core.atomic.write_atomic, none has re-grown a private copy, and a "
+          "refused replace raises with the previous COMPLETE file intact "
+          "(v2.5.2 silently truncated it)")
+
+    # ── v2.5.3 · the plan mutators cannot be called unscoped ────────────────
+    # `plans.id` is global to the DB FILE, so an unscoped UPDATE/DELETE hits
+    # whatever row owns that id — including another project's. Through v2.5.2
+    # `project_id` merely DEFAULTED to None; README and CLAUDE.md both carried
+    # it as a known unfixed limit for two releases. All 11 call sites already
+    # passed it by keyword, so requiring it cost nothing.
+    _pm_root = Path(tempfile.mkdtemp(prefix="cc-memory-planscope-"))
+    (_pm_root / "memory").mkdir(parents=True)
+    _pm_db = MemoryDB(_pm_root / "memory" / "memory.db")
+    _pm_a = _pm_db.upsert_project(str(_pm_root / "proj-a"))
+    _pm_b = _pm_db.upsert_project(str(_pm_root / "proj-b"))
+    _pm_id = _pm_db.add_plan(_pm_b, "b's plan content", exec_order=1)
+    for _pm_name, _pm_call in (
+            ("update_plan_status",
+             lambda: _pm_db.update_plan_status(_pm_id, "done")),
+            ("delete_plan", lambda: _pm_db.delete_plan(_pm_id)),
+            ("update_plan_content",
+             lambda: _pm_db.update_plan_content(_pm_id, "x"))):
+        try:
+            _pm_call()
+            raise AssertionError(
+                f"MemoryDB.{_pm_name} still accepts an UNSCOPED call; "
+                f"project_id must be required and keyword-only")
+        except TypeError:
+            # why: the TypeError IS the assertion — the signature now refuses
+            # a call that cannot name its project.
+            pass
+    # scoped to the WRONG project must match nothing, not cross over
+    assert _pm_db.update_plan_status(_pm_id, "done", project_id=_pm_a) == 0
+    assert _pm_db.update_plan_content(_pm_id, "hacked", project_id=_pm_a) == 0
+    assert _pm_db.delete_plan(_pm_id, project_id=_pm_a) == 0
+    _pm_rows = _pm_db.get_plans(_pm_b)
+    assert len(_pm_rows) == 1 and _pm_rows[0]["content"] == "b's plan content", \
+        f"a foreign-scoped call reached another project's plan: {_pm_rows}"
+    assert _pm_db.delete_plan(_pm_id, project_id=_pm_b) == 1
+    shutil.rmtree(_pm_root, ignore_errors=True)
+    print("[OK] v2.5.3 plan scoping: update_plan_status / delete_plan / "
+          "update_plan_content REFUSE an unscoped call (TypeError) and match "
+          "0 rows when scoped to the wrong project")
+
     print("\nProduced files:")
     for f in sorted(mem_dir.rglob("*")):
         if f.is_file():

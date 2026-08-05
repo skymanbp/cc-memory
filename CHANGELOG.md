@@ -7,6 +7,109 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [2.5.3] — 2026-08-05
+
+**The "Known limits" section of v2.5.2, cleared.** No new audit: this release
+takes the six residuals that release recorded rather than fixed, and closes
+five of them outright. The sixth — the installer's `settings.json` TOCTOU —
+could not be closed by locking, so it is closed by *detection* instead.
+
+Two of the six turned out to be worse than they were written up as.
+
+### Fixed — the residual that was really a defect
+
+- **The three "deliberate literal twins" were not twins, and two of them still
+  truncated.** v2.5.2 shipped `_atomic_write` in `core/progress.py` and
+  `_atomic_write_text` in `core/plan.py` and `llm/memory_writer.py`, documented
+  on both sides as intentional copies. The progress one retried `os.replace`
+  five times and re-raised; the other two had **no retry** and, on failure, fell
+  back to the plain truncating `write_text` — reintroducing, for that call,
+  precisely the torn-read defect the function existed to remove. That fallback
+  *was* the "20 empty reads in 28,141 samples" residual.
+
+  `core/atomic.py` is now the single implementation, and its contract is
+  explicit: **replace completely, or raise. Never truncate, never silently fall
+  back.** `core` may be imported by `llm`, so the split never had a dependency
+  reason in the first place. The two derived artifacts (PLAN.md, MEMORY.md)
+  catch the raise, log it and keep the previous *complete* file — a stale
+  artifact beats a torn one, and both regenerate on the next write. PROGRESS.md
+  still raises, because it is the handoff contract rather than a projection.
+  `core/plan.py` also gained the logger it had never had, which is why every
+  failure in it previously had to be either raised or swallowed.
+
+- **`update_plan_status` / `delete_plan` / `update_plan_content` still accepted
+  an unscoped call.** `plans.id` is global to the DB *file*, so an unscoped
+  UPDATE or DELETE hits whatever row owns that id — including another project's.
+  v2.5.2 recorded this as a known limit on the grounds that "the pre-v2.5
+  signature stays callable". All **11** call sites in the tree already passed
+  `project_id` as a keyword, so requiring it cost nothing: it is now mandatory
+  and keyword-only, and the `WHERE` clause is unconditional. A caller that
+  cannot name its project fails at the call instead of in someone else's data.
+
+### Fixed — the residuals that were real limits
+
+- **A fail-closed `config.json` is now visible.** Suspending the plugin on an
+  unusable config is right for a privacy control, but v2.5.2's only trace was a
+  line in `~/.claude/hooks/cc-memory/logs/` — a file nobody reads until they
+  already suspect something. A merge-conflicted `config.json`, the exact
+  accident that file's own note warns about, therefore presented as "cc-memory
+  quietly stopped working". `core.modes.config_fault()` reports *why*, and
+  SessionStart prints one line naming it. A project the user genuinely **listed**
+  stays completely silent — that silence is the feature — and `test_surfaces.py`
+  §5 asserts both halves.
+
+- **The installer's `settings.json` lost update is now detected.** v2.5.2
+  narrowed the window from the whole install (~0.5 s) to one dict merge and
+  shipped the rest as unfixable without a lock protocol both sides honour.
+  Narrowing is not detecting: the read now takes a content digest, the write
+  **refuses to rename** if the file no longer matches it, and the whole
+  read-merge-write is retried on the newer contents (bounded at 4). A concurrent
+  writer can no longer be clobbered — it can only make the installer redo the
+  merge. Uninstall is protected identically: discarding a concurrent
+  `/permissions` approval is no better on the way out than on the way in.
+
+- **The exes are now RUN, not just inspected.** Every release so far asserted
+  the subsystem from the PyInstaller flag and the PE optional header and shipped
+  without the binary having been executed once. A 12-check harness now installs
+  from the real `cc-memory-installer.exe` into a sandboxed HOME, verifies the
+  flat tree imports, and uninstalls — 12/12.
+
+  It immediately found something: **`main()` silently ignored unrecognised
+  arguments.** `--project D:\repo` performed a plain install and did *not*
+  initialise that project; a typo'd `--unistall` performed an **install** — the
+  opposite of what was typed — and exited 0. Unknown arguments are now refused
+  with the usage text and rc=2.
+
+- **Doc citation coverage nearly doubled.** `tools/citation_check.py` could only
+  anchor a citation when the symbol was defined in the *cited* file, so the most
+  common shape in these docs — a call site, `` `db.tag_progress_session(...)`
+  (`user_prompt.py:117`) `` — went unchecked: 370 of 594, 62 %. It now anchors
+  cross-file citations on the text of the cited range, and **341 of 594 are
+  checked** (was 224).
+
+  Getting there needed two of its own bugs fixed, both found by measurement
+  rather than review: the anchor first matched any English word ≥6 characters
+  that occurred in the file (the word *guardian* appears at five lines of
+  `core/plan.py`, so a correct citation that missed those was reported as rot) —
+  candidates must now be real symbols somewhere in the tree; and `--fix` used
+  substring replacement, which turned `memory_writer.py:83-83` into
+  `memory_writer.py:55-83`, a range that never existed. It splices by character
+  offset, right to left, so a line carrying four citations repairs correctly.
+
+### Known limits (what is left, honestly)
+
+- 253 of 594 citations still cannot be anchored to any symbol and are unchecked.
+  `--fix` repairs a stale cross-file citation to the occurrence **nearest** the
+  stale number — a stated assumption (a citation was right when written; the
+  file grew above it), not a proof.
+- The `settings.json` CAS still has a microsecond window between its final
+  digest check and the rename. That is inherent without OS locking; what changed
+  is that a lost update is now *detected and redone* rather than silent.
+- `write_atomic` raising means PLAN.md / MEMORY.md can be one write stale under
+  sustained contention. That is the deliberate trade against a torn file.
+- The dashboard exe is still only PE-header-verified; only the installer exe is
+  executed by the harness.
+
 ## [2.5.2] — 2026-08-05
 
 **A third audit, on angles the first two never used: time, concurrency,

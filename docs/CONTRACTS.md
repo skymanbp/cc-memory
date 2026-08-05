@@ -83,7 +83,7 @@ Inputs: `content`, `topic`, `category`, `importance`, `tags`, `session_id`
 (`llm/memory_writer.py:95-158`).
 
 ```
-0. content = clean_for_storage(content.strip()).           (memory_writer.py:85)
+0. content = clean_for_storage(content.strip()).           (memory_writer.py:57)
    SKIP (reason: too_short) if len < MIN_CONTENT_LEN (10).      (:110-111)
    Coerce category outside {decision,result,config,bug,task,arch,note}
      → "note".                                                  (:113-114)
@@ -142,7 +142,7 @@ Inputs: `content`, `topic`, `category`, `importance`, `tags`, `session_id`
 6. After the loop, `upsert_batch` calls
    regenerate_memory_index(db, project_id, memory_dir) to keep memory/MEMORY.md
    in sync — unconditionally (even if every item was skipped), but ONLY when a
-   `memory_dir` was passed (memory_writer.py:190-193). `upsert_smart` called on
+   `memory_dir` was passed (memory_writer.py:106-169). `upsert_smart` called on
    its own never regenerates. NEVER let MEMORY.md drift.
 ```
 
@@ -154,7 +154,7 @@ Inputs: `content`, `topic`, `category`, `importance`, `tags`, `session_id`
 
 ### Thresholds and constants
 
-`HIGH_SIM` / `MID_SIM` are module constants in `cc_memory/llm/memory_writer.py:83-83`
+`HIGH_SIM` / `MID_SIM` are module constants in `cc_memory/llm/memory_writer.py:55-56`
 (0.80 / 0.50), alongside `MIN_CONTENT_LEN` (10) and `MAX_CANDIDATES_TO_SCAN` (50)
 at `:46-47`. The mirrored `writer.*` keys in `cc_memory/config.json:12-18` (the
 four numeric keys at `:13-16`) are NOT read by any code path — `memory_writer.py`
@@ -202,16 +202,16 @@ other in-tree call is `db.supersede_memory`'s own insert at `core/db.py:576`).
 
 | Save path | Entry function |
 |-----------|---------------|
-| `PreCompact` hook | `upsert_batch(db, pid, sid, extracted_list, memory_dir)` (`hooks/pre_compact.py:435`) |
-| `Stop` observer | `upsert_batch(db, pid, None, observer_list, memory_dir)` (`hooks/stop.py:166`) |
-| `SessionStart` retroactive save | `upsert_batch(db, pid, sid, memories, memory_dir=memory_dir)` — un-saved prior sessions (`hooks/session_start.py:722`) |
+| `PreCompact` hook | `upsert_batch(db, pid, sid, extracted_list, memory_dir)` (`hooks/pre_compact.py:603`) |
+| `Stop` observer | `upsert_batch(db, pid, None, observer_list, memory_dir)` (`hooks/stop.py:256`) |
+| `SessionStart` retroactive save | `upsert_batch(db, pid, sid, memories, memory_dir=memory_dir)` — un-saved prior sessions (`hooks/session_start.py:972`) |
 | `/save-memories` skill | `upsert_batch(db, pid, None, memories, memory_dir=Path(project) / 'memory')` (`skills/save-memories/SKILL.md:100`) |
-| `mem.py add` CLI | `upsert_smart(...)` + `regenerate_memory_index(...)` (`cli/mem.py:516,524`) |
+| `mem.py add` CLI | `upsert_smart(...)` + `regenerate_memory_index(...)` (`cli/mem.py:849,524`) |
 | `mcp/server.py handle_memory_add` | `upsert_smart(...)` + `regenerate_memory_index(...)` (`mcp/server.py:520,192`) |
-| Dashboard UI "Add Memory" | `upsert_smart(...)` + `regenerate_memory_index(...)` — routed since v2.2 (`ui/dashboard.py:949,956`). `ui/dashboard.py` contains no `db.insert_memory` call. |
-| Dashboard UI "Save Session" | `upsert_batch(...)` (`ui/dashboard.py:1444`) |
-| Dashboard UI "Init Project" scan | `upsert_batch(db, pid, None, batch, memory_dir=memory_dir)` (`ui/dashboard.py:1575`) |
-| web_viewer POST `/api/memory` | `upsert_smart(...)` + `regenerate_memory_index(...)` (`ui/web_viewer.py:311-325`) |
+| Dashboard UI "Add Memory" | `upsert_smart(...)` + `regenerate_memory_index(...)` — routed since v2.2 (`ui/dashboard.py:1540,956`). `ui/dashboard.py` contains no `db.insert_memory` call. |
+| Dashboard UI "Save Session" | `upsert_batch(...)` (`ui/dashboard.py:2122`) |
+| Dashboard UI "Init Project" scan | `upsert_batch(db, pid, None, batch, memory_dir=memory_dir)` (`ui/dashboard.py:2122`) |
+| web_viewer POST `/api/memory` | `upsert_smart(...)` + `regenerate_memory_index(...)` (`ui/web_viewer.py:64`) |
 
 ### Consolidation backstop exception (v2.3)
 
@@ -235,7 +235,7 @@ backstop, not a save path, and it operates on memories that ALREADY exist:
 - Every consolidation stage EXCEPT `cleanup_garbage` is reversible
   (`is_active=0`, never `DELETE`). `cleanup_garbage` (`consolidate.py:158-171`,
   stage 1 of `run_consolidation` at `:857`, also `/cc-mem cleanup` via
-  `cli/mem.py:581`) is the one exception: it hard-DELETEs rows under 20 chars
+  `cli/mem.py:925`) is the one exception: it hard-DELETEs rows under 20 chars
   (`_MIN_CONTENT_LEN`, `:155`) or matching the garbage regexes (`_GARBAGE_RE`,
   `:154`) through `db.delete_memories` → `DELETE FROM memories WHERE id IN (...)`
   (`core/db.py:741-746`). `merge_near_duplicates` (`:188-220`) archives via
@@ -275,7 +275,7 @@ In a project with cc-memory installed:
 each root tries the NESTED layout `<root>/cc_memory/cli/mem.py` (marketplace /
 dev checkout) before the FLAT one `<root>/cli/mem.py`. The standalone installer
 copies each subpackage straight into `TARGET_DIR/<subdir>/`
-(`cc_memory/ui/installer.py:61` `TARGET_DIR`, `:37-48` `SUBPACKAGE_FILES`,
+(`cc_memory/ui/installer.py:63` `TARGET_DIR`, `:37-48` `SUBPACKAGE_FILES`,
 `:74` `_copy_subpackages`), so a standalone install has **no** `cc_memory/`
 path segment — its CLI is `~/.claude/hooks/cc-memory/cli/mem.py`. Under a
 marketplace install that tree holds only `logs/` (verified on this machine),
@@ -304,7 +304,7 @@ v2.1 fixed this with **PROGRESS.md** (always-full-rewrite from a SQL row) +
 a **forced `<system-reminder>` injection at SessionStart**. The legacy
 `SESSION_HANDOFF.md` is renamed to `SESSION_HANDOFF.md.v2.bak` on the first
 PreCompact under v2.1+ (one-shot migration `migrate_legacy_handoff`,
-`core/progress.py:514-528`, called from `hooks/pre_compact.py:346`).
+`core/progress.py:485-499`, called from `hooks/pre_compact.py:498`).
 
 ### PROGRESS.md is the SOT
 
@@ -312,23 +312,23 @@ PreCompact under v2.1+ (one-shot migration `migrate_legacy_handoff`,
 from the `progress` SQL row. Schema (`cc_memory/core/db.py:_MIGRATIONS:v3_progress`
 at `db.py:176-190`, plus the two v5 session-annotation columns at `db.py:219-222`).
 §0 additionally reads the `sessions` / `session_summaries` tables via
-`db.get_recent_sessions` (`core/progress.py:210`; `core/db.py:1081-1103`):
+`db.get_recent_sessions` (`core/progress.py:228`; `core/db.py:1081-1103`):
 
 | Column | Type | Primary source · Fallbacks |
 |--------|------|---------------------------|
 | `project_id` | INTEGER PK | `upsert_project` |
-| `current_request` | TEXT | UserPromptSubmit turn 1 (`user_prompt.py:132`) → PreCompact `_first_user_request(window.head)` (`pre_compact.py:315`) — scans up to 200 records past the leading `queue-operation` / `attachment` meta rows and skips empty-content user rows (`pre_compact.py:315-357`, v2.4.2) → `session_summaries.request` (`progress.py:143`) |
+| `current_request` | TEXT | UserPromptSubmit turn 1 (`user_prompt.py:176`) → PreCompact `_first_user_request(window.head)` (`pre_compact.py:315`) — scans up to 200 records past the leading `queue-operation` / `attachment` meta rows and skips empty-content user rows (`pre_compact.py:315-357`, v2.4.2) → `session_summaries.request` (`progress.py:143`) |
 | `status_done` | TEXT | `session_summaries.completed` (`progress.py:137`), which PreCompact fills with `", ".join(<observed Edit/Write/MultiEdit paths>[:10])` (`pre_compact.py:315-357`) — so §2 "Done" renders a FILE LIST, not prose. SessionStart fills it if empty (`session_start.py:589-590`) |
 | `status_in_flight` | TEXT | `session_summaries.learned` — NOTE: PreCompact writes this field EMPTY (`pre_compact.py:474`), so it is inert today; §2 "In-flight" always renders `*(none active)*` |
-| `status_blocked` | TEXT | Explicit `patch_progress(status_blocked=...)` — no in-tree caller does this today; it is an API for external tooling. A repo-wide grep finds only the schema default (`core/db.py:1028,853`), the empty seed (`core/progress.py:146`) and the read (`core/progress.py:288`) |
-| `open_todos` | JSON | PreCompact `extract_latest_todo_state(window)` via `ext["latest_todos"]` (`core/extractor.py:352,558`; `pre_compact.py:462,488`) → SessionStart tier-3 prior-transcript mine (`session_start.py:641-652`) → LAST RESORT `session_summary.next_steps` split by `;` (`session_start.py:663-674`). Only non-`completed` todos are kept (`progress.py:116-125`) |
-| `plan` | TEXT | `session_summaries.next_steps` — sourced from the latest TodoWrite pending items if any, else from LLM-extracted `task` memories (`pre_compact.py:462-468`); propagated at `progress.py:148`, filled-if-empty at `session_start.py:593-594` |
-| `critical_context` | JSON | Top 10 memories with importance ≥ 4, content truncated to 200 chars (`progress.py:107-113`; `session_start.py:571-579`) |
-| `files_touched` | JSON | `observations` table (`pre_compact.py:446-453` → `progress.py:128-134`; Stop per-turn patch `stop.py:193-211`; SessionStart tier-2C `session_start.py:596-612`) → tier-3 prior-transcript `extract_file_changes` (`session_start.py:653-659`) |
-| `transcript_ptr` | TEXT | PreCompact `transcript_path` resolved absolute (`pre_compact.py:491`) → tier-3 `find_latest_transcript(cwd, exclude_session_id=...)` (`session_start.py:630-633`) |
+| `status_blocked` | TEXT | Explicit `patch_progress(status_blocked=...)` — no in-tree caller does this today; it is an API for external tooling. A repo-wide grep finds only the schema default (`core/db.py:1028,853`), the empty seed (`core/progress.py:180`) and the read (`core/progress.py:180`) |
+| `open_todos` | JSON | PreCompact `extract_latest_todo_state(window)` via `ext["latest_todos"]` (`core/extractor.py:352,558`; `pre_compact.py:462,488`) → SessionStart tier-3 prior-transcript mine (`session_start.py:702`) → LAST RESORT `session_summary.next_steps` split by `;` (`session_start.py:702`). Only non-`completed` todos are kept (`progress.py:180`) |
+| `plan` | TEXT | `session_summaries.next_steps` — sourced from the latest TodoWrite pending items if any, else from LLM-extracted `task` memories (`pre_compact.py:462-468`); propagated at `progress.py:148`, filled-if-empty at `session_start.py:702` |
+| `critical_context` | JSON | Top 10 memories with importance ≥ 4, content truncated to 200 chars (`progress.py:107-113`; `session_start.py:703`) |
+| `files_touched` | JSON | `observations` table (`pre_compact.py:446-453` → `progress.py:128-134`; Stop per-turn patch `stop.py:193-211`; SessionStart tier-2C `session_start.py:703`) → tier-3 prior-transcript `extract_file_changes` (`session_start.py:703`) |
+| `transcript_ptr` | TEXT | PreCompact `transcript_path` resolved absolute (`pre_compact.py:662`) → tier-3 `find_latest_transcript(cwd, exclude_session_id=...)` (`session_start.py:780`) |
 | `updated_at` | TEXT | ISO timestamp, stamped by `upsert_progress` / `patch_progress` (`db.py:948-1008`, `:937-943`) |
-| `trigger_type` | TEXT | "auto" \| "manual" (PreCompact passes the host's own trigger string through — `pre_compact.py:332,492`; `"precompact"` is only `collect_progress_state`'s default kwarg at `progress.py:126` and is always overridden) \| "stop" (`stop.py:211`) \| "user_prompt" \| "resume_request" (`user_prompt.py:131-132`) \| "session_start_refresh" (`session_start.py:677`) |
-| `current_session_id` | TEXT | `db.tag_progress_session` only (`db.py:945-969`) — tagged by PreCompact (`pre_compact.py:499`), Stop (`stop.py:254`), SessionStart (`session_start.py:565`), UserPromptSubmit (`user_prompt.py:117`) |
+| `trigger_type` | TEXT | "auto" \| "manual" (PreCompact passes the host's own trigger string through — `pre_compact.py:667,492`; `"precompact"` is only `collect_progress_state`'s default kwarg at `progress.py:127` and is always overridden) \| "stop" (`stop.py:367`) \| "user_prompt" \| "resume_request" (`user_prompt.py:181`) \| "session_start_refresh" (`session_start.py:718`) |
+| `current_session_id` | TEXT | `db.tag_progress_session` only (`db.py:945-969`) — tagged by PreCompact (`pre_compact.py:667`), Stop (`stop.py:367`), SessionStart (`session_start.py:718`), UserPromptSubmit (`user_prompt.py:181`) |
 | `session_started_at` | TEXT | `db.tag_progress_session` — reset only when the stored sid changes; `upsert_progress` preserves both across a full rewrite (`db.py:948-1008`) |
 
 The rendered Markdown (sections 0-7 in
@@ -336,9 +336,9 @@ The rendered Markdown (sections 0-7 in
 from this row. Hand-editing PROGRESS.md is pointless: any of the four automatic
 update paths (PreCompact / Stop / UserPromptSubmit / SessionStart refresh) —
 plus the two manual regenerators, `/cc-mem progress` (`cli/mem.py:648`) and the
-MCP `progress_regenerate` tool (`mcp/server.py:236-244`) — will overwrite it.
-All six `write_progress_md` call sites: `pre_compact.py:501`, `stop.py:213`,
-`user_prompt.py:133`, `session_start.py:680`, `cli/mem.py:648`,
+MCP `progress_regenerate` tool (`mcp/server.py:588`) — will overwrite it.
+All six `write_progress_md` call sites: `pre_compact.py:669`, `stop.py:303`,
+`user_prompt.py:174`, `session_start.py:847`, `cli/mem.py:1017`,
 `mcp/server.py:243`.
 
 ### Rendered layout (§0-§7)
@@ -376,22 +376,22 @@ whitespace-flattened and truncated at 100 chars (`:210-234`).
    - Triggered: Claude Code's automatic compaction OR manual `/compact`.
    - `collect_progress_state(...)` builds the full state from
      `extracted_memories + observations + session_summaries`
-     (`progress.py:92-153`).
+     (`progress.py:259`).
    - `db.tag_progress_session(...)` runs FIRST so the tag survives
-     (`pre_compact.py:499`; see the preservation logic at `db.py:1055-1079`).
-   - `db.upsert_progress(**all_fields)` overwrites the row (`pre_compact.py:500`).
+     (`pre_compact.py:667`; see the preservation logic at `db.py:1055-1079`).
+   - `db.upsert_progress(**all_fields)` overwrites the row (`pre_compact.py:662`).
    - `write_progress_md(db, pid, memory_dir)` rewrites the file (`:501`).
 
 2. **Stop** (partial update, every turn):
    - `db.tag_progress_session(...)` then
      `db.patch_progress(files_touched=<from observations>, trigger_type="stop")`
-     (`stop.py:254`, `:211`).
+     (`stop.py:283`, `:211`).
    - `write_progress_md(...)` rewrites the file with the patched state (`:213`).
    - This keeps "Files Touched This Session" current without waiting for the
      next compaction.
 
 3. **UserPromptSubmit** (turn 1 only):
-   - `db.tag_progress_session(...)` (`user_prompt.py:117`) then
+   - `db.tag_progress_session(...)` (`user_prompt.py:181`) then
      `db.patch_progress(current_request=<prompt>, trigger_type="user_prompt" | "resume_request")`
      (`:132`).
    - `write_progress_md(...)` rewrites (`:133`).
@@ -696,9 +696,9 @@ When `TodoWrite` is observed, `core.plan.sync_todos_to_steps`
 
 1. For each todo, compute trigram-Jaccard similarity to every step's title.
 2. Pick the best-matching step IF similarity ≥ `MATCH_THRESHOLD` (0.35,
-   `core/plan.py:105`).
+   `core/plan.py:85`).
 3. Update the step's status from the todo's status, using
-   (`_TODO_TO_STEP_STATUS`, `core/plan.py:225-232`):
+   (`_TODO_TO_STEP_STATUS`, `core/plan.py:205-212`):
    - `completed` → `done`
    - `in_progress` → `in_progress`
    - `pending` → `pending`
@@ -817,7 +817,7 @@ Then re-pipe the JSON through `/cc-mem plan-set --from-refiner`.
 Resolve by re-running with `--reason "<why>"`. The reason is not decoration —
 it is written into the archive payload. Only after the gate passes does the
 command archive, `db.clear_plan_active(pid)`, and delete `memory/PLAN.md` +
-`memory/.plan_raw.md` (`cli/mem.py:799-807`).
+`memory/.plan_raw.md` (`cli/mem.py:1248`).
 
 #### Backstop — append-only plan history
 

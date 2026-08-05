@@ -42,47 +42,27 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+from core.atomic import write_atomic
+from core.logger import get_logger
 # Render-path marker defence. PLAN.md is read by Claude as the live plan
 # anchor, and every field it renders originates outside the plugin.
 from core.privacy import neutralize_block, neutralize_inline
 
+# This module had no logger through v2.5.2, which is why every failure inside
+# it had to be either raised or silently swallowed. File-only by contract —
+# hooks must never write to stderr.
+_log = get_logger("plan")
+
 
 # ── Atomic artifact write ───────────────────────────────────────────────────
-
-def _atomic_write_text(path: Path, text: str) -> None:
-    """Write `text` to `path` without ever exposing a truncated file.
-
-    ``Path.write_text`` truncates before it writes, so a reader landing in that
-    window gets 0 bytes — measured 456 empty reads in 13,594 samples with ONE
-    writer and one reader. PLAN.md is a live anchor another window's Claude
-    reads at will, and an empty read is indistinguishable from "no active
-    plan": silent, no error, wrong. ``os.replace`` is atomic on POSIX and
-    Windows alike; it is already the idiom used for the smaller state files
-    (hooks/session_start.py:310, hooks/pre_compact.py:_write_attempt).
-
-    DELIBERATE literal twin in llm/memory_writer.py (which writes MEMORY.md):
-    the two live in different subpackages and `core` must not depend on `llm`,
-    so a private copy on each side is cheaper than the cross-package import.
-    Same convention as the memory/.gitignore literals noted in CLAUDE.md — if
-    you change one, change the other.
-    """
-    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
-    try:
-        tmp.write_text(text, encoding="utf-8")
-        os.replace(str(tmp), str(path))
-        return
-    except OSError:
-        try:
-            tmp.unlink()
-        except OSError:
-            # why: removing our own temp file is best-effort — memory/.gitignore
-            # already carries `*.tmp`, so a leftover never reaches a user's repo
-            pass
-    # why no re-raise: on Windows os.replace onto a destination another process
-    # currently holds open fails with ERROR_SHARING_VIOLATION. Falling back to
-    # the plain truncating write preserves the pre-v2.5.2 guarantee that the
-    # artifact is ALWAYS written; it forfeits atomicity for that one call only.
-    path.write_text(text, encoding="utf-8")
+# Was a private copy through v2.5.2, documented as a "deliberate literal twin"
+# of llm/memory_writer.py's. It was not a twin of core/progress.py's, which
+# retried and re-raised: this one had no retry and fell back to the plain
+# TRUNCATING write, reintroducing the torn-read defect for that call. That
+# fallback was the whole residual (20 empty reads in 28,141 samples). One
+# implementation now — `core` may be imported by `llm`, so the split never had
+# a dependency reason.
+_atomic_write_text = write_atomic
 
 
 # ── Similarity (re-uses the trigram-Jaccard from memory_writer) ─────────────
@@ -471,7 +451,21 @@ def render_plan_md(structured: Dict, active_step_id: int = 0,
 
 
 def write_plan_md(db, project_id: int, memory_dir: Path) -> Path:
-    """Full-rewrite memory/PLAN.md from the plan_active row. Returns the path."""
+    """Full-rewrite memory/PLAN.md from the plan_active row. Returns the path.
+
+    Never raises on a write failure, and that is a deliberate asymmetry with
+    `core.progress.write_progress_md`, which does. PLAN.md is a PROJECTION of
+    the `plan_active` row, which is already committed by the time this runs, and
+    three of its five call sites (`capture_raw_plan`, `apply_todowrite_sync`,
+    `bump_guardian_counters`) sit on the PostToolUse path where an escaping
+    exception would be caught and logged anyway. PROGRESS.md is different: it
+    IS the handoff contract, so its failure must be reported, not absorbed.
+
+    v2.5.2 got this "for free" by having its private writer fall back to a
+    plain truncating write — i.e. it kept the artifact by making it torn, which
+    is the defect the atomic write exists to remove. Now the previous COMPLETE
+    PLAN.md stays on disk and the next write regenerates it.
+    """
     row = db.get_plan_active(project_id) or {}
     structured = row.get("structured") or {}
     active_step_id = row.get("active_step", 0)
@@ -488,7 +482,14 @@ def write_plan_md(db, project_id: int, memory_dir: Path) -> Path:
     text = render_plan_md(structured, active_step_id=active_step_id, meta=meta)
     memory_dir.mkdir(parents=True, exist_ok=True)
     out = memory_dir / "PLAN.md"
-    _atomic_write_text(out, text)
+    try:
+        _atomic_write_text(out, text)
+    except OSError as e:
+        # why: see the docstring — a projection of committed state must not
+        # take down the operation that committed it, and the alternative the
+        # old code chose (fall back to a truncating write) is worse than a
+        # stale-but-complete artifact.
+        _log.error(f"PLAN.md not rewritten ({e}); previous file left intact")
     return out
 
 

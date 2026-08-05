@@ -2,7 +2,7 @@
 
 # cc-memory
 
-**Claude Code persistent memory plugin (v2.5.2)** — anti-patch reconcile-on-write
+**Claude Code persistent memory plugin (v2.5.3)** — anti-patch reconcile-on-write
 with LLM-judged semantic de-duplication, forced PROGRESS.md handoff, live PLAN.md
 anchor with plan-refiner / plan-guardian subagents and a mandatory carryover
 gate, bounded transcript reads, injection observability, FTS5 search, AI-judged
@@ -16,6 +16,30 @@ disappear. Conversations that end normally (terminal closed) also lose context.
 
 cc-memory captures structured memories at every conversation boundary AND
 **forces the next session to read a handoff document** before it starts work.
+
+## What's new in v2.5.3
+
+**v2.5.2's "Known limits" section, cleared.** No new audit — this release takes
+the six residuals that release recorded rather than fixed. Two of them turned
+out to be worse than they were written up as:
+
+- **The three "deliberate literal twins" were not twins.** `core/progress.py`
+  retried and re-raised; `core/plan.py` and `llm/memory_writer.py` had no retry
+  and fell back to a plain **truncating** write — reintroducing the torn-read
+  defect they existed to remove. That fallback *was* the residual. One
+  implementation now (`core/atomic.py`), with an explicit contract: replace
+  completely, or raise. Never truncate.
+- **The plan mutators still accepted an unscoped call.** `plans.id` is global to
+  the DB file, so an unscoped `UPDATE`/`DELETE` reaches another project's row.
+  All 11 call sites already passed `project_id` by keyword, so requiring it cost
+  nothing — it is now mandatory and keyword-only.
+
+The rest: a fail-closed `config.json` now says so on SessionStart instead of
+only in a log file; the installer **detects** a concurrent `settings.json` write
+and re-merges instead of clobbering it; the installer exe is now actually **run**
+(12/12) rather than PE-header-inspected — which immediately found that unknown
+arguments were silently ignored, so a typo'd `--unistall` performed an *install*
+and exited 0; and doc citation coverage went from 224 to 341 of 594 checked.
 
 ## What's new in v2.5.2
 

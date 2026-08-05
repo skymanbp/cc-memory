@@ -1,7 +1,7 @@
-<!-- i18n-source: ARCHITECTURE.md | sha256: 2b16623a67756e1e | version: 2.5.2 | translated: 2026-08-05 -->
+<!-- i18n-source: ARCHITECTURE.md | sha256: 53a9c27f02c1e311 | version: 2.5.3 | translated: 2026-08-05 -->
 > [English](ARCHITECTURE.md) · **简体中文**
 
-# cc-memory — 架构（v2.5.2）
+# cc-memory — 架构（v2.5.3）
 
 cc-memory 是一个 Claude Code 插件，为 Claude 提供**跨压缩、跨会话的持久化结构化
 记忆**。本文档是总览：这个插件用来做什么、仓库如何布局、哪些钩子在何时触发、数据库
@@ -84,7 +84,7 @@ PROTOCOL）都是**有意**同时匹配中文和英文的，存储的记忆也�
 ```
 cc-memory/
 ├── .claude-plugin/
-│   ├── plugin.json              ← 插件清单（v2.5.2）
+│   ├── plugin.json              ← 插件清单（v2.5.3）
 │   └── marketplace.json         ← /plugin marketplace add 条目
 ├── hooks/hooks.json             ← 钩子声明（6 条命令 / 5 个事件）
 ├── skills/                      ← 技能的唯一规范位置
@@ -297,7 +297,7 @@ SQLite 表（定义在 [`cc_memory/core/db.py`](../cc_memory/core/db.py)），�
 （`core/db.py:1216-1226`）。FTS5 在 `.claude-plugin/plugin.json:4` 与 `:12` 中被
 宣传，`/cc-mem status` 会报告当前实际走哪条路径（`cli/mem.py` 的 `cmd_status`）。
 
-`memories` 上的 `supersedes_id` 列（迁移 `v3_supersedes`，`db.py:180`）把反补丁的
+`memories` 上的 `supersedes_id` 列（迁移 `v3_supersedes`，`db.py:167`）把反补丁的
 取代链显式化：当 `upsert_smart` 判定一条新记忆取代了一条旧记忆时，新行会回链到旧行
 的 ID（旧行被归档）。通过 `db.get_supersede_chain(memory_id)`（`db.py:592`）走一遍
 链条，就能看到完整的更新历史。`content_hash`（迁移 `v2_content_hash`，`db.py:817`）
@@ -371,9 +371,9 @@ regenerate_memory_index(db, project_id, memory_dir)   ← MEMORY.md 刷新
   重新生成**一次**，但仅当传入了 `memory_dir` 时才会（`memory_writer.py:200-235`）。
   所有钩子调用方都会传（`pre_compact.py:435`、`stop.py:166`、
   `session_start.py:722`）；同步 PreCompact 支路还会在其余状态变更之后再刷一次
-  （`pre_compact.py:509`）。
-- 单发调用方显式调用 `regenerate_memory_index`：`cli/mem.py:524` 与 `:584`、
-  `mcp/server.py:192`、`ui/dashboard.py:956`、`ui/web_viewer.py:325`，外加
+  （`pre_compact.py:684`）。
+- 单发调用方显式调用 `regenerate_memory_index`：`cli/mem.py:849` 与 `:584`、
+  `mcp/server.py:525`、`ui/dashboard.py:1540`、`ui/web_viewer.py:64`，外加
   `skills/ccm-load` 的内联脚本（`SKILL.md:127, 137`）。`core/idle.py:94` 与
   `hooks/consolidate_async.py:188` 也会在维护之后刷新它。
 
@@ -382,7 +382,7 @@ regenerate_memory_index(db, project_id, memory_dir)   ← MEMORY.md 刷新
 `cc_memory/` 内 grep `upsert_smart|upsert_batch` 得到的完整集合。）
 
 阈值只存在于一个地方——`memory_writer.HIGH_SIM = 0.80`、`MID_SIM = 0.50`、
-`MIN_CONTENT_LEN = 10`、`MAX_CANDIDATES_TO_SCAN = 50`（`memory_writer.py:86-86`）。
+`MIN_CONTENT_LEN = 10`、`MAX_CANDIDATES_TO_SCAN = 50`（`memory_writer.py:58-86`）。
 `config.json` 里那个只作信息展示的 `writer` 块没有任何读取者，已在 v2.5 删除——
 一个惰性的可调项比没有可调项更糟。完整契约见
 [docs/CONTRACTS.md](CONTRACTS.md#anti-patch-contract)。
@@ -465,7 +465,7 @@ SessionStart：
 ```
 
 上面的调用签名都是真实的：`write_progress_md(db, project_id, memory_dir)`
-（`core/progress.py:323`；调用点 `pre_compact.py:501`、`stop.py:213`、
+（`core/progress.py:323`；调用点 `pre_compact.py:669`、`stop.py:303`、
 `user_prompt.py:133`、`session_start.py:680`、`mcp/server.py:243`、
 `cli/mem.py:648`）。PROGRESS.md 的结构规格见
 [docs/CONTRACTS.md](CONTRACTS.md#handoff-contract)。
@@ -548,7 +548,7 @@ PENDING REFINEMENT 横幅加逐字原文开头，并把更旧的结构化计划�
 `claude-haiku-4-5-20251001`，`ccl_backend.py:164`）。调用方先用
 `core.auth.get_api_key()` 解析出一份凭据并传进来；`call_llm` 会**先**尝试这一份，
 当某一支失败时再**逐级回退**到 `core.auth.get_api_candidates()` 的其余条目——总共
-限制为 2 条 Anthropic 支路（`ccl_backend.py:149`），这样最坏情况的墙钟时间对整理的
+限制为 2 条 Anthropic 支路（`ccl_backend.py:170`），这样最坏情况的墙钟时间对整理的
 BudgetGate 来说仍是已知量。候选顺序与传输格式（`core/auth.py:20-57`、`_wire_for`
 位于 `core/auth.py:8-17`、`_call_haiku` 的请求头位于 `ccl_backend.py:97-127`）：
 
@@ -564,8 +564,8 @@ BudgetGate 来说仍是已知量。候选顺序与传输格式（`core/auth.py:2
 `get_api_key()` 是同一份候选列表的单凭据向后兼容视图（它不重试，
 `core/auth.py:60-93`）；它同时承载 `oauth_expired` 信号，支撑 SessionStart 的
 “[WARNING: OAuth expired — LLM extraction disabled]” 页脚
-（`session_start.py:214-219`）。钩子调用方用它来*提供*传给 `call_llm` 的凭据：
-`pre_compact.py:146 → :166`、`stop.py:93`、`session_start.py:490`、
+（`session_start.py:443`）。钩子调用方用它来*提供*传给 `call_llm` 的凭据：
+`pre_compact.py:79 → :166`、`stop.py:73`、`session_start.py:443`、
 `core/consolidate.py:355, 549, 724`。
 
 逐级回退是 v2.3.4 为一个具体故障加入的：一个失效的环境变量密钥（例如额度为零 →
@@ -591,7 +591,7 @@ Ollama，每一批整理都要冷加载一个 5.9 GB 的本地模型（`core/aut
 2 * timeout  +  (启用 ccl 时的 fallback_timeout，否则 0)
 ```
 
-因为 Anthropic 候选被限制在 2 个（`ccl_backend.py:149`）。正是这套算术让整理的
+因为 Anthropic 候选被限制在 2 个（`ccl_backend.py:185`）。正是这套算术让整理的
 `BudgetGate` 能保证按时完成——见 `core.consolidate._worst_call_cost`。
 
 **`deadline` 是更强的那条界限，也是钩子必须使用的那条。** 它是一个绝对的
@@ -684,7 +684,7 @@ SQL 真相来源（PROGRESS.md 对应 `progress`，PLAN.md 对应 `plan_active`�
 
 旧的 v2.0 `SESSION_HANDOFF.md` 文件会在 v2.1 下的首次 PreCompact 时被重命名为
 `SESSION_HANDOFF.md.v2.bak`（一次性迁移 `core.progress.migrate_legacy_handoff`，
-`progress.py:514`）。
+`progress.py:485`）。
 
 ---
 
@@ -702,9 +702,9 @@ SQL 真相来源（PROGRESS.md 对应 `progress`，PLAN.md 对应 `plan_active`�
 - **marketplace-cache**——来自 `~/.claude/plugins/installed_plugins.json` 的
   `installPath`（`mem.py:144-174`）。一个已记录但已不存在的 `installPath` 会被
   报告为损坏布局，而不是被跳过（`mem.py:158-170`）。
-- **legacy / 独立安装**——`~/.claude/hooks/cc-memory/`（`mem.py:176-187`），由
-  PyInstaller 安装器写入（`ui/installer.py:56` 的 `TARGET_DIR`）。这里的钩子由
-  `_merge_into_settings`（`installer.py:866+`）直接注册进
+- **legacy / 独立安装**——`~/.claude/hooks/cc-memory/`（`mem.py:42`），由
+  PyInstaller 安装器写入（`ui/installer.py:58` 的 `TARGET_DIR`）。这里的钩子由
+  `_merge_into_settings`（`installer.py:901+`）直接注册进
   `~/.claude/settings.json`，而不是通过插件清单。
 
 在市场类布局下，`~/.claude/hooks/cc-memory/` 只保留 `logs/`（`core.logger` 的输出
@@ -728,12 +728,12 @@ SQL 真相来源（PROGRESS.md 对应 `progress`，PLAN.md 对应 `plan_active`�
 ```
 
 **独立安装器（扁平）**——`_copy_subpackages(TARGET_DIR)` 把每一个 `SUBPACKAGE_FILES`
-键（`installer.py:56`）直接写到 `TARGET_DIR`（`installer.py:56`）之下，
+键（`installer.py:58`）直接写到 `TARGET_DIR`（`installer.py:58`）之下，
 **没有 `cc_memory/` 这一段**，并且 `_make_hooks_config` 把命令构造成
 `python "<TARGET_DIR>/hooks/<name>.py"`：
 
 ```
-~/.claude/hooks/cc-memory/           ← ui/installer.py:56 TARGET_DIR
+~/.claude/hooks/cc-memory/           ← ui/installer.py:58 TARGET_DIR
 ├── __init__.py
 ├── config.json
 ├── installed_surfaces.json  ← 写进了 ~/.claude 的东西（v2.5）
@@ -765,11 +765,11 @@ SQL 真相来源（PROGRESS.md 对应 `progress`，PLAN.md 对应 `plan_active`�
 —— 没有 `/cc-mem` 命令、没有 `plan-refiner` / `plan-guardian` 子代理、没有技能。
 用户真正会去交互的东西全都缺失。
 
-`SURFACE_FILES`（`installer.py:79`）恰好点名五条路径 —— `commands/cc-mem.md`、
+`SURFACE_FILES`（`installer.py:81`）恰好点名五条路径 —— `commands/cc-mem.md`、
 `agents/plan-refiner.md`、`agents/plan-guardian.md`、`skills/ccm-load/SKILL.md`、
 `skills/save-memories/SKILL.md` —— 而 `_copy_surfaces` 在安装的第 [2/3] 步把它们写进
 `~/.claude/`，并把写了什么记录进 `installed_surfaces.json`（`SURFACE_MANIFEST`，
-`installer.py:58`）。
+`installer.py:60`）。
 
 卸载是**按名字**进行的，绝不 `rmtree`：`~/.claude/{commands,agents,skills}` 里放着
 用户自己的文件。`_remove_surfaces` 只删除被记录的那些路径，会
@@ -780,7 +780,7 @@ SQL 真相来源（PROGRESS.md 对应 `progress`，PLAN.md 对应 `plan_active`�
 
 ### settings.json 在任何复制之前就被校验（v2.5）
 
-`_read_settings`（`installer.py:673`）返回 `(dict, None)` 或 `(None, error)`，绝不
+`_read_settings`（`installer.py:675`）返回 `(dict, None)` 或 `(None, error)`，绝不
 抛异常；`cli_install` 在第 **[0/3]** 步调用它，解析失败时以 1 退出并打印
 `Nothing has been installed.`。一直到 v2.4.3 为止，解析发生在复制**之后**，所以一份
 安装器读不懂的 `settings.json` 会留下 32 个文件在盘上、**零个钩子被注册** —— 卸载器
@@ -809,7 +809,7 @@ SQL 真相来源（PROGRESS.md 对应 `progress`，PLAN.md 对应 `plan_active`�
 `pkg_dir` 插进 `sys.path`，而不是硬编码的 `root/"cc_memory"`。
 
 安装器自己的安装后说明此前打印 `TARGET_DIR/cc_memory/cli/mem.py`——一条它从不创建的
-路径；现在打印的是确实存在的 `TARGET_DIR/cli/mem.py`（`installer.py:56`）。
+路径；现在打印的是确实存在的 `TARGET_DIR/cli/mem.py`（`installer.py:58`）。
 
 ### 解释器要求
 

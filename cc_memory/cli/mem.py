@@ -138,6 +138,7 @@ def _table(headers, rows):
 _REQUIRED_PLUGIN_FILES = [
     "cc_memory/__init__.py",
     "cc_memory/config.json",
+    "cc_memory/core/atomic.py",
     "cc_memory/core/db.py",
     "cc_memory/core/logger.py",
     "cc_memory/core/version.py",

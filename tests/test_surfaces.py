@@ -1480,6 +1480,25 @@ def test_config_shapes_and_mcp_optout():
     assert got == set(), \
         (f"an unparseable config.json failed OPEN; artifacts created: "
          f"{sorted(got)}")
+    # ...and the user must be TOLD. v2.5.2 made a broken config suspend the
+    # plugin globally — correct for a privacy control — but its only trace was
+    # a log file nobody reads, so a merge-conflicted config.json (the exact
+    # accident config.json's own note warns about) presented as "cc-memory
+    # quietly stopped working". SessionStart says so once, on the one surface
+    # the user actually sees.
+    rc, out, err = _run_hook(pkg, "session_start", broken_proj,
+                             "cfg-broken-00002", transcript)
+    assert rc == 0 and err == "", f"rc={rc} stderr={err[:200]!r}"
+    assert "cc-memory" in out and "SUSPENDED" in out and "config.json" in out, \
+        (f"a fail-closed config.json produced no visible notice; "
+         f"SessionStart said: {out[:300]!r}")
+    # a project that is genuinely LISTED must stay completely silent — that
+    # silence is the feature, and §4 above asserts it for all six hooks.
+    _write_pkg_config(pkg, dict(shipped, excluded_projects=[str(broken_proj)]))
+    rc, out, err = _run_hook(pkg, "session_start", broken_proj,
+                             "cfg-listed-00001", transcript)
+    assert rc == 0 and err == "" and out == "", \
+        (f"a genuinely listed project must produce NO output; got {out[:200]!r}")
 
     # ── ABSENT or EMPTY is NOT that case: no list exists, nothing excluded ──
     (pkg / "config.json").unlink()
@@ -1517,9 +1536,84 @@ def test_config_shapes_and_mcp_optout():
     assert rows == 2, f"MCP failed to write to a normal project ({rows} rows)"
 
     print("[OK] config.json shapes: BOM'd config, a ~user entry FIRST and an "
-          "unparseable config all keep the opt-out ON (fail-closed); an ABSENT "
-          "config keeps the plugin ON; MCP refuses an excluded project for "
-          "read AND write while serving an identical control project")
+          "unparseable config all keep the opt-out ON (fail-closed) and the "
+          "fail-closed case is VISIBLE while a genuine listing stays silent; "
+          "an ABSENT config keeps the plugin ON; MCP refuses an excluded "
+          "project for read AND write while serving an identical control")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# §6  settings.json compare-and-swap (lost-update detection)
+# ═══════════════════════════════════════════════════════════════════════════
+
+def test_settings_cas():
+    print("\n--- §6 settings.json compare-and-swap -----------------------")
+    # mutates the module-level `inst` in place and returns the .claude dir
+    _point_installer_at("cas")
+
+    # A write that lands between the installer's READ and its RENAME used to be
+    # discarded with rc=0 and "installation complete!". v2.5.2 narrowed that
+    # window from the whole install (~0.5 s) to one dict merge and shipped the
+    # rest as a known limit; v2.5.3 DETECTS it: the read takes a content digest,
+    # the write refuses to rename if the file no longer matches, and the merge
+    # is redone on the newer contents.
+    inst.SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    inst.SETTINGS_PATH.write_text(json.dumps({"model": "opusplan"}, indent=2),
+                                  encoding="utf-8")
+
+    # Simulate the concurrent writer by mutating the file from INSIDE the
+    # window: patch the fingerprint check's file so the first attempt sees a
+    # changed digest, exactly as a real peer write would produce.
+    real_write = inst._write_settings_json
+    fired = {"n": 0}
+
+    def _racing_write(settings, log_fn=print, expect=None):
+        if fired["n"] == 0:
+            fired["n"] = 1
+            # a peer persists something new, after our read
+            cur = json.loads(inst.SETTINGS_PATH.read_text(encoding="utf-8-sig"))
+            cur["permissions"] = {"allow": ["Bash(git status)"]}
+            inst.SETTINGS_PATH.write_text(json.dumps(cur, indent=2),
+                                          encoding="utf-8")
+        return real_write(settings, log_fn, expect)
+
+    inst._write_settings_json = _racing_write
+    try:
+        ok = _quiet(inst._merge_into_settings, inst._make_hooks_config(inst.TARGET_DIR))
+    finally:
+        inst._write_settings_json = real_write
+    assert ok, "the installer gave up instead of re-merging onto the newer file"
+
+    got = json.loads(inst.SETTINGS_PATH.read_text(encoding="utf-8-sig"))
+    assert got.get("permissions", {}).get("allow") == ["Bash(git status)"], \
+        (f"the concurrent write was CLOBBERED — this is the lost update the "
+         f"compare-and-swap exists to stop. settings.json: {got}")
+    assert got.get("model") == "opusplan", "pre-existing settings were lost"
+    events = sorted(e for e, groups in got.get("hooks", {}).items()
+                    if any(inst._is_ccm_group(g) for g in groups))
+    assert len(events) >= 5, f"hooks were not registered after the retry: {events}"
+    assert fired["n"] == 1, "the racing write never fired — test is vacuous"
+
+    # and a NON-racing install must not pay for it: exactly one write, no retry
+    inst.SETTINGS_PATH.write_text(json.dumps({"model": "opusplan"}, indent=2),
+                                  encoding="utf-8")
+    calls = {"n": 0}
+
+    def _counting_write(settings, log_fn=print, expect=None):
+        calls["n"] += 1
+        return real_write(settings, log_fn, expect)
+
+    inst._write_settings_json = _counting_write
+    try:
+        ok = _quiet(inst._merge_into_settings, inst._make_hooks_config(inst.TARGET_DIR))
+    finally:
+        inst._write_settings_json = real_write
+    assert ok and calls["n"] == 1, \
+        f"an uncontended install took {calls['n']} write attempts, expected 1"
+
+    print("[OK] settings.json CAS: a write landing inside the install window "
+          "is DETECTED and re-merged (the peer's change survives, our hooks "
+          "still register), and an uncontended install still writes once")
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1533,6 +1627,7 @@ def main():
     test_installer()
     test_excluded_projects()
     test_config_shapes_and_mcp_optout()
+    test_settings_cas()
     # Teardown is a GATE, not a courtesy: this suite creates ~475 KB of SQLite
     # per run under the real %TEMP% and used to hide its own failure to remove
     # it behind ignore_errors=True.

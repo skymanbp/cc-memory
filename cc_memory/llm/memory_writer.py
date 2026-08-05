@@ -36,47 +36,19 @@ if str(_PKG_ROOT) not in sys.path:
     sys.path.insert(0, str(_PKG_ROOT))
 
 from core.db import MemoryDB
+from core.atomic import write_atomic
 from core.privacy import clean_for_storage, neutralize_inline
 from core.logger import get_logger
 
 _log = get_logger("memory_writer")
 
 
-def _atomic_write_text(path: Path, text: str) -> None:
-    """Write `text` to `path` without ever exposing a truncated file.
-
-    ``Path.write_text`` truncates before it writes, so a reader landing in that
-    window gets 0 bytes — measured 456 empty reads in 13,594 samples with ONE
-    writer and one reader. MEMORY.md is rewritten after EVERY batch upsert and
-    on every Stop-hook idle reorg, i.e. constantly, while another window's
-    Claude may be reading it; an empty read looks like "this project has no
-    memories": silent, no error, wrong. ``os.replace`` is atomic on POSIX and
-    Windows alike, and is already the idiom used for the smaller state files
-    (hooks/session_start.py:310, hooks/pre_compact.py:_write_attempt).
-
-    DELIBERATE literal twin in core/plan.py (which writes PLAN.md): the two
-    live in different subpackages and `core` must not depend on `llm`, so a
-    private copy on each side is cheaper than the cross-package import. Same
-    convention as the memory/.gitignore literals noted in CLAUDE.md — if you
-    change one, change the other.
-    """
-    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
-    try:
-        tmp.write_text(text, encoding="utf-8")
-        os.replace(str(tmp), str(path))
-        return
-    except OSError:
-        try:
-            tmp.unlink()
-        except OSError:
-            # why: removing our own temp file is best-effort — memory/.gitignore
-            # already carries `*.tmp`, so a leftover never reaches a user's repo
-            pass
-    # why no re-raise: on Windows os.replace onto a destination another process
-    # currently holds open fails with ERROR_SHARING_VIOLATION. Falling back to
-    # the plain truncating write preserves the pre-v2.5.2 guarantee that the
-    # artifact is ALWAYS written; it forfeits atomicity for that one call only.
-    path.write_text(text, encoding="utf-8")
+# Was a private copy through v2.5.2, documented as a "deliberate literal twin"
+# of core/plan.py's. Neither was a twin of core/progress.py's, which retried and
+# re-raised; these two had no retry and fell back to the plain TRUNCATING write,
+# reintroducing the torn-read defect for that call. `core` may be imported by
+# `llm` — the split never had a dependency reason. See core/atomic.py.
+_atomic_write_text = write_atomic
 
 
 # Similarity thresholds (tuned: 0.8 demands "essentially same sentence")
@@ -330,4 +302,14 @@ def regenerate_memory_index(db: MemoryDB, project_id: int, memory_dir: Path) -> 
         "*Consolidate:  `python -m cc_memory.cli.mem --project <path> consolidate`*",
         "*Anti-patch contract:  see `docs/CONTRACTS.md#anti-patch-contract`*",
     ]
-    _atomic_write_text(memory_dir / "MEMORY.md", "\n".join(lines))
+    try:
+        _atomic_write_text(memory_dir / "MEMORY.md", "\n".join(lines))
+    except OSError as e:
+        # why: MEMORY.md is a projection of the DB, which is already committed
+        # when this runs, and this function is called from the Stop-hook idle
+        # reorg, PreCompact and every batch upsert. A raise here would abort a
+        # save whose rows are already stored. v2.5.2 got the same effect by
+        # falling back to a truncating write — i.e. it kept the artifact by
+        # making it torn. The previous COMPLETE file stays instead, and the
+        # next upsert regenerates it. See core/atomic.py.
+        _log.error(f"MEMORY.md not regenerated ({e}); previous file intact")

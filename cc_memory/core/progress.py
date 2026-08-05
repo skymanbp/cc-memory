@@ -86,6 +86,7 @@ _PKG_ROOT = Path(__file__).resolve().parent.parent
 if str(_PKG_ROOT) not in sys.path:
     sys.path.insert(0, str(_PKG_ROOT))
 
+from core.atomic import write_atomic
 from core.db import MemoryDB
 from core.logger import get_logger
 from core.privacy import neutralize_block, neutralize_inline, neutralize_markers
@@ -202,43 +203,13 @@ def _short_ts(ts: str) -> str:
     return s.replace("T", " ")[:16]
 
 
-def _atomic_write(path: Path, text: str) -> None:
-    """Write `text` to `path` so a concurrent reader never sees a partial file.
-
-    `Path.write_text` truncates first and writes second; a reader landing in
-    that window gets 0 bytes. Measured on PROGRESS.md with one writer and one
-    reader: 558 torn/empty reads in 21782 samples. PROGRESS.md is the handoff
-    contract that the SessionStart `<system-reminder>` ORDERS the next Claude to
-    Read FIRST, so an empty read silently voids the exact guarantee the plugin
-    exists to provide. tempfile + os.replace is the idiom already used for
-    `.last_inject.json` (session_start.py) and `.pre_compact_attempt.json`
-    (pre_compact.py); the `*.tmp` name is already in MEMORY_GITIGNORE_LINES.
-
-    `errors="replace"` because a lone surrogate — reachable from a
-    `surrogateescape`-decoded filename that lands in `files_touched` — would
-    otherwise raise UnicodeEncodeError and take the whole rewrite with it.
-    """
-    fd, tmp = tempfile.mkstemp(dir=str(path.parent),
-                               prefix="." + path.name + ".", suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8", errors="replace") as fh:
-            fh.write(text)
-        last_err = None
-        for attempt in range(5):
-            try:
-                os.replace(tmp, str(path))
-                return
-            except PermissionError as e:
-                # why: Windows-only sharing violation — a concurrent reader
-                # holding the target open without FILE_SHARE_DELETE blocks the
-                # rename for microseconds. Retry briefly rather than fall back
-                # to a truncating write, which IS the torn-read defect above.
-                last_err = e
-                time.sleep(0.01 * (attempt + 1))
-        raise last_err
-    finally:
-        if os.path.exists(tmp):
-            os.remove(tmp)
+# Moved to core.atomic in v2.5.3. This module's copy was the STRONGEST of the
+# three that v2.5.2 shipped (it retried and re-raised); the other two fell back
+# to a truncating write, which is the defect the function exists to remove.
+# One implementation now, for exactly the reason `is_excluded` and the
+# .gitignore line list each had to be unified after they drifted. Bound to the
+# old private name so this module's call site is unchanged.
+_atomic_write = write_atomic
 
 
 # Moved to core.privacy in v2.5.2 — core/plan.py needs the identical escaping

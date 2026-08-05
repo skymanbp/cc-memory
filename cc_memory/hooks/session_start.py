@@ -1039,7 +1039,25 @@ def main():
     # PostToolUse) because SessionStart fires once per session and a silently
     # empty injection is otherwise unexplainable.
     if is_excluded(cwd):
-        _log.info(f"skipped: {cwd} is in config.json excluded_projects")
+        # A project the user LISTED stays completely silent — that silence is
+        # the feature. But an unusable config.json also excludes everything
+        # (fail-closed, v2.5.2), and through v2.5.2 that was indistinguishable
+        # from the plugin quietly breaking: the only trace was a log file
+        # nobody reads until they already suspect something. A merge-conflicted
+        # config.json is the documented way to land here by accident, so say so
+        # ONCE, on the one surface the user actually reads.
+        fault = None
+        try:
+            from core.modes import config_fault
+            fault = config_fault()
+        except Exception:
+            # why: a diagnostic must never be what breaks the hook it explains
+            fault = None
+        if fault:
+            _log.error(f"skipped: {fault}")
+            print(f"[cc-memory] {fault}")
+        else:
+            _log.info(f"skipped: {cwd} is in config.json excluded_projects")
         sys.exit(0)
 
     try:

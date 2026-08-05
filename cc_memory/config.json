@@ -1,5 +1,5 @@
 {
-  "version": "2.5.2",
+  "version": "2.5.3",
   "consolidation": {
     "auto_interval_sessions": 5
   },

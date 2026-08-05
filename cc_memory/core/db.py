@@ -1414,8 +1414,8 @@ class MemoryDB:
         return self.get_plans(project_id,
                               statuses=["draft", "evaluating", "ready", "executing"])
 
-    def update_plan_status(self, plan_id, status, notes=None, field="feasibility",
-                           project_id=None):
+    def update_plan_status(self, plan_id, status, notes=None,
+                           field="feasibility", *, project_id):
         """Set a plan's status (and optionally one notes column).
 
         Returns cur.rowcount: 0 means the UPDATE matched nothing. Callers MUST
@@ -1423,37 +1423,39 @@ class MemoryDB:
         "Plan #9999 -> done: ghost" and exit 0 because this method discarded
         the rowcount.
 
-        Pass `project_id` to scope the UPDATE. `plans.id` is global to the DB
-        FILE, not to a project, and one memory.db can hold several projects
-        (ui/dashboard.py switches between them via get_all_projects), so an
-        unscoped call rewrites whatever row owns that id — including another
-        project's status and result columns. With the predicate a foreign or
-        typo'd id simply matches nothing, and the 0 rowcount callers already
-        check reads as a clean "not found" instead of a silent cross-project
-        write. The argument defaults to None only so the pre-v2.5 signature
-        stays callable; every caller that knows its project SHOULD pass it.
+        `project_id` is REQUIRED and KEYWORD-ONLY as of v2.5.3. `plans.id` is
+        global to the DB FILE, not to a project, and one memory.db can hold
+        several projects (ui/dashboard.py switches between them via
+        get_all_projects), so an unscoped call rewrites whatever row owns that
+        id — including another project's status and result columns. Through
+        v2.5.2 it merely *defaulted* to None "so the pre-v2.5 signature stays
+        callable", which meant the cross-project write stayed one forgotten
+        argument away and no test could catch it; README and CLAUDE.md both
+        recorded that as a known unfixed limit for two releases. Every one of
+        the 11 call sites in the tree already passed it as a keyword, so making
+        it mandatory cost nothing and closed the hole: a caller that does not
+        know its project now fails loudly at the call, not silently in another
+        project's data.
 
         `field` names a column and so cannot be a bound parameter; it is
         whitelisted rather than interpolated blind. `project_id` is a bound
-        parameter — only the presence of the clause is decided in Python.
+        parameter.
         """
         if field not in ("feasibility", "result"):
             field = "feasibility"
         now = self._now()
-        scope = " AND project_id = ?" if project_id is not None else ""
-        ident = [plan_id] + ([project_id] if project_id is not None else [])
         with self._connect() as conn:
             if notes is not None:
                 cur = conn.execute(
                     f"UPDATE plans SET status = ?, {field} = ?, updated_at = ? "
-                    f"WHERE id = ?{scope}",
-                    [status, notes, now] + ident
+                    f"WHERE id = ? AND project_id = ?",
+                    [status, notes, now, plan_id, project_id]
                 )
             else:
                 cur = conn.execute(
-                    f"UPDATE plans SET status = ?, updated_at = ? "
-                    f"WHERE id = ?{scope}",
-                    [status, now] + ident
+                    "UPDATE plans SET status = ?, updated_at = ? "
+                    "WHERE id = ? AND project_id = ?",
+                    [status, now, plan_id, project_id]
                 )
             return cur.rowcount
 
@@ -1475,35 +1477,31 @@ class MemoryDB:
             )
             return cur.rowcount
 
-    def delete_plan(self, plan_id, project_id=None):
+    def delete_plan(self, plan_id, *, project_id):
         """Delete one plan row. Returns cur.rowcount (0 = matched nothing).
 
-        `project_id` scopes the DELETE, for the same reason as
-        `update_plan_status`: `plans.id` is global to the DB FILE, not to a
+        `project_id` is REQUIRED and KEYWORD-ONLY (v2.5.3), for the same reason
+        as `update_plan_status`: `plans.id` is global to the DB FILE, not to a
         project, and one memory.db can hold several projects (ui/dashboard.py
         switches between them via get_all_projects). Unscoped, a stale or
         typo'd id deletes whatever row owns it — including another project's.
+        This is a DELETE, so that loss is unrecoverable.
         """
-        sql = "DELETE FROM plans WHERE id = ?"
-        params = [plan_id]
-        if project_id is not None:
-            sql += " AND project_id = ?"
-            params.append(project_id)
         with self._connect() as conn:
-            return conn.execute(sql, params).rowcount
+            return conn.execute(
+                "DELETE FROM plans WHERE id = ? AND project_id = ?",
+                [plan_id, project_id]).rowcount
 
-    def update_plan_content(self, plan_id, content, project_id=None):
+    def update_plan_content(self, plan_id, content, *, project_id):
         """Rewrite one plan's content. Returns cur.rowcount (0 = no match).
 
-        `project_id` scopes the UPDATE — see `delete_plan` for why.
+        `project_id` is REQUIRED and KEYWORD-ONLY (v2.5.3) — see `delete_plan`.
         """
-        sql = "UPDATE plans SET content = ?, updated_at = ? WHERE id = ?"
-        params = [content, self._now(), plan_id]
-        if project_id is not None:
-            sql += " AND project_id = ?"
-            params.append(project_id)
         with self._connect() as conn:
-            return conn.execute(sql, params).rowcount
+            return conn.execute(
+                "UPDATE plans SET content = ?, updated_at = ? "
+                "WHERE id = ? AND project_id = ?",
+                [content, self._now(), plan_id, project_id]).rowcount
 
     def reorder_plans(self, project_id, plan_ids):
         """Renumber exec_order to match the given id sequence.

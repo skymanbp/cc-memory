@@ -2,7 +2,7 @@
 
 ## Project: cc-memory
 
-**Claude Code persistent memory plugin (v2.5.2)** — anti-patch reconcile-on-write
+**Claude Code persistent memory plugin (v2.5.3)** — anti-patch reconcile-on-write
 + LLM-judged semantic de-duplication, forced PROGRESS.md handoff with
 per-session annotation, live PLAN.md anchor with plan-refiner / plan-guardian
 subagents + mandatory carryover gate, bounded transcript reads, injection
@@ -10,9 +10,50 @@ observability, FTS5 search, AI-judged extraction with Haiku (optional local
 Ollama fallback).
 
 - **Language**: Python 3.8+ (pure stdlib, zero pip dependencies at runtime)
-- **Version**: 2.5.2
+- **Version**: 2.5.3
 - **License**: MIT
 - **Platform**: Windows-primary, cross-platform compatible (Tkinter required for GUI)
+
+## What changed in v2.5.3 (over v2.5.2)
+
+**v2.5.2's "Known limits" section, cleared.** Detail in `CHANGELOG.md`. The
+invariants a future change must not break:
+
+1. **`core/atomic.py:write_atomic` is THE artifact writer.** One
+   implementation, consumed by `core/progress.py`, `core/plan.py` and
+   `llm/memory_writer.py` under their old private names. Its contract:
+   **replace completely, or raise — never truncate, never fall back.** v2.5.2's
+   three copies were documented as "deliberate literal twins" and were not:
+   two had no retry and fell back to a truncating `write_text`, which was the
+   whole residual. Do not re-add a private copy; `smoke_test.py` asserts all
+   three names ARE that function and that no module defines `_atomic_write*`.
+   PROGRESS.md's writer propagates the raise (it is the handoff contract);
+   PLAN.md's and MEMORY.md's catch it and keep the previous COMPLETE file (they
+   are projections of already-committed state).
+
+2. **`project_id` is REQUIRED and keyword-only** on `update_plan_status`,
+   `delete_plan` and `update_plan_content`. `plans.id` is global to the DB
+   file. Do not restore the `=None` default "for compatibility" — all 11 call
+   sites already pass it, and the default was the entire hole.
+
+3. **A fail-closed `config.json` must stay VISIBLE.** `core.modes.config_fault()`
+   reports why the plugin suspended itself and `hooks/session_start.py` prints
+   one line. A project the user genuinely LISTED must stay completely silent —
+   §5 of `tests/test_surfaces.py` asserts both halves, and conflating them
+   destroys either the opt-out's silence or the accident's diagnosability.
+
+4. **The installer's `settings.json` write is a compare-and-swap.** Read takes a
+   digest, write refuses to rename if the file changed, `_merge_into_settings`
+   retries the whole merge (bounded by `_MERGE_ATTEMPTS`). Install and uninstall
+   both. Do not "simplify" it back to read-then-write.
+
+5. **The installer refuses unknown arguments** (`_KNOWN_FLAGS`). It used to
+   ignore them, so `--unistall` performed an install and exited 0.
+
+6. **Verify the exes by RUNNING them.** `scratchpad/verify_exe.py`-style
+   install/uninstall against a sandboxed HOME. A PE-header check tells you how
+   the binary was linked, not whether it works — and reading the header is what
+   let the argument-handling defect above ship three times.
 
 ## What changed in v2.5.2 (over v2.5.1)
 
@@ -593,7 +634,7 @@ The `plan_active` table (one row per project) backs PLAN.md. Lifecycle:
   only `plan.apply_refined_plan` may clear `needs_refine`.
 
 **All of the `PostToolUse` legs above run in EVERY mode, above the
-`should_observe` gate** (`hooks/post_tool_use.py:163`). They shipped below it
+`should_observe` gate** (`hooks/post_tool_use.py:165`). They shipped below it
 from v2.2 through v2.4.3, which made the entire anchor dead through its own
 hook — `TodoWrite` is in every mode's `skip_tools` and `ExitPlanMode` is in no
 mode's `observe_tools`. Plan control is not observation: mode selects what is
@@ -727,9 +768,13 @@ verdict. First run measured **163 of 594 citations stale** — the cost of three
 releases with no gate.
 
 Two limits to know before trusting a green result: a citation whose sentence
-names no *uniquely* resolvable function / class / ALL_CAPS constant is reported
-**SKIP**, not OK (370 of 594 today), and `--fix` rewrites to the **definition**
-site, which is not always the call site a sentence meant. Ordinary variable
+names no resolvable symbol at all is reported **SKIP**, not OK (253 of 594
+today, down from 370 once v2.5.3 taught it to anchor CROSS-FILE citations on the
+text of the cited range — the `` `db.tag_progress_session(...)`
+(`user_prompt.py:181`) `` shape, which is the commonest in these docs). `--fix`
+rewrites a same-file citation to the **definition** site and a cross-file one to
+the occurrence NEAREST the stale number — a stated assumption (it was right when
+written; the file grew above it), not a proof. Ordinary variable
 assignments are deliberately not indexed — indexing them made the checker anchor
 prose words like `db`, `pid` and `plan` onto unrelated locals and report ~40
 correct citations as rot, which is the failure mode that makes a gate worthless.

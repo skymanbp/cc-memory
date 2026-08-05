@@ -1,9 +1,9 @@
-<!-- i18n-source: README.md | sha256: 2e0233ea080f686c | version: 2.5.2 | translated: 2026-08-05 -->
+<!-- i18n-source: README.md | sha256: d98aa0845e16e4a6 | version: 2.5.3 | translated: 2026-08-05 -->
 > [English](README.md) · **简体中文**
 
 # cc-memory
 
-**Claude Code 持久化记忆插件（v2.5.2）**——反补丁式的写入即归并（reconcile-on-write）、
+**Claude Code 持久化记忆插件（v2.5.3）**——反补丁式的写入即归并（reconcile-on-write）、
 LLM 判定的语义去重、强制 PROGRESS.md 交接、带 plan-refiner / plan-guardian 子代理与
 强制结转闸门的实时 PLAN.md 锚点、有界 transcript 读取、注入可观测性、FTS5 搜索，
 以及以 Haiku 为主（本地 Ollama 兜底可选）的 AI 判定式抽取。
@@ -15,6 +15,25 @@ LLM 判定的语义去重、强制 PROGRESS.md 交接、带 plan-refiner / plan-
 
 cc-memory 在每一个对话边界捕获结构化记忆，并且**强制下一次会话在开始工作之前先阅读
 一份交接文档**。
+
+## v2.5.3 有什么新变化
+
+**把 v2.5.2 的"已知残留"清单清掉。** 这一版没有新审计——它只处理上一版记录下来但
+没修的六条残留。其中两条实际比当初写下的更严重：
+
+- **那三份"刻意保留的字面孪生"根本不是孪生。** `core/progress.py` 会重试并重新抛出；
+  `core/plan.py` 和 `llm/memory_writer.py` 没有重试，失败时**回退到会截断的普通写**
+  ——把它们本来要消除的撕裂读缺陷又装了回去。那个回退**就是**那条残留本身。现在只有
+  一份实现（`core/atomic.py`），契约写死：要么整体替换，要么抛出，绝不截断。
+- **计划修改函数仍然接受不带作用域的调用。** `plans.id` 在整个数据库文件里是全局的，
+  所以不带作用域的 `UPDATE`/`DELETE` 会打到别的项目的行上。树内全部 11 个调用点本来
+  就是用关键字传 `project_id` 的，所以把它改成必填零成本——现在是必填且仅限关键字。
+
+其余四条：配置取保守侧时现在会在 SessionStart 说明原因，而不再只写进日志文件；
+安装器现在能**检测**到并发写 `settings.json` 并重做合并，而不是把对方覆盖掉；
+安装器 exe 现在是真的被**运行**（12/12），而不是只看 PE 头——这一跑立刻发现它会静默
+忽略无法识别的参数，于是打错的 `--unistall` 会执行一次*安装*并以 0 退出；文档引用的
+受检比例从 594 条里的 224 条提高到 341 条。
 
 ## v2.5.2 有什么新变化
 

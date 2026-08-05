@@ -1,6 +1,6 @@
 > **English** · [简体中文](ARCHITECTURE.zh.md)
 
-# cc-memory — Architecture (v2.5.2)
+# cc-memory — Architecture (v2.5.3)
 
 cc-memory is a Claude Code plugin that gives Claude **persistent, structured
 memory across compactions and sessions**. This document is the overview: what
@@ -97,7 +97,7 @@ must NOT be reduced to English-only. See
 ```
 cc-memory/
 ├── .claude-plugin/
-│   ├── plugin.json              ← Plugin manifest (v2.5.2)
+│   ├── plugin.json              ← Plugin manifest (v2.5.3)
 │   └── marketplace.json         ← /plugin marketplace add entry
 ├── hooks/hooks.json             ← Hook declarations (6 commands / 5 events)
 ├── skills/                      ← THE canonical skills location
@@ -328,7 +328,7 @@ and `:12`, and `/cc-mem status` reports which path is live (`cli/mem.py`,
 `cmd_status`).
 
 The `supersedes_id` column on `memories` (migration `v3_supersedes`,
-`db.py:180`) makes the anti-patch chain explicit: when `upsert_smart` decides a
+`db.py:167`) makes the anti-patch chain explicit: when `upsert_smart` decides a
 new memory supersedes an old one, the new row links back to the old row's ID
 (and the old row is archived). Walking the chain via
 `db.get_supersede_chain(memory_id)` (`db.py:592`) shows the full update
@@ -408,9 +408,9 @@ caller's responsibility, and there are exactly two shapes:
   (`memory_writer.py:190-194`). All hook callers pass it
   (`pre_compact.py:435`, `stop.py:166`, `session_start.py:722`); the sync
   PreCompact leg additionally touches it again after the rest of its state
-  changes (`pre_compact.py:509`).
+  changes (`pre_compact.py:684`).
 - Single-shot callers call `regenerate_memory_index` explicitly:
-  `cli/mem.py:524` and `:584`, `mcp/server.py:192`, `ui/dashboard.py:956`,
+  `cli/mem.py:849` and `:584`, `mcp/server.py:525`, `ui/dashboard.py:1540`,
   `ui/web_viewer.py:325`, plus the `skills/ccm-load` inline script
   (`SKILL.md:127, 137`). `core/idle.py:94` and
   `hooks/consolidate_async.py:188` also refresh it after maintenance.
@@ -422,7 +422,7 @@ by grepping `upsert_smart|upsert_batch` across `cc_memory/`.)
 
 Thresholds live in ONE place — `memory_writer.HIGH_SIM = 0.80`,
 `MID_SIM = 0.50`, `MIN_CONTENT_LEN = 10`, `MAX_CANDIDATES_TO_SCAN = 50`
-(`memory_writer.py:86`). They are no longer mirrored in `config.json`: that
+(`memory_writer.py:58`). They are no longer mirrored in `config.json`: that
 `writer` block was read by nothing and was deleted in v2.5, because an inert
 tunable is worse than no tunable. See
 [docs/CONTRACTS.md](CONTRACTS.md#anti-patch-contract) for the full contract.
@@ -511,7 +511,7 @@ SessionStart:
 ```
 
 Call signatures above are the real ones: `write_progress_md(db, project_id,
-memory_dir)` (`core/progress.py:323`; call sites `pre_compact.py:501`,
+memory_dir)` (`core/progress.py:323`; call sites `pre_compact.py:669`,
 `stop.py:213`, `user_prompt.py:133`, `session_start.py:680`, `mcp/server.py:243`,
 `cli/mem.py:648`). See
 [docs/CONTRACTS.md](CONTRACTS.md#handoff-contract) for the PROGRESS.md
@@ -608,7 +608,7 @@ the raw text, because plan-mode output routinely contains code fences.
 credential up front with `core.auth.get_api_key()` and pass it in; `call_llm`
 tries that one FIRST, then FALLS THROUGH to the remaining
 `core.auth.get_api_candidates()` entries when a leg fails — bounded to 2
-Anthropic legs total (`ccl_backend.py:149`), so the worst-case wall-clock stays
+Anthropic legs total (`ccl_backend.py:170`), so the worst-case wall-clock stays
 a known quantity for the consolidation BudgetGate. Candidate order and wire
 format (`core/auth.py:20-57`, `_wire_for` at `core/auth.py:8-17`,
 `_call_haiku` headers at `ccl_backend.py:97-127`):
@@ -625,9 +625,9 @@ while the same token via Bearer + beta gets HTTP 200 (`core/auth.py:14-15`).
 `get_api_key()` is the single-credential back-compat view of that same list (it
 does not retry, `core/auth.py:60-93`); it also carries the `oauth_expired`
 signal behind SessionStart's "[WARNING: OAuth expired — LLM extraction
-disabled]" footer (`session_start.py:214-219`). Hook callers use it to *supply*
-the credential passed into `call_llm`: `pre_compact.py:146 → :166`,
-`stop.py:93`, `session_start.py:490`, `core/consolidate.py:355, 549, 724`.
+disabled]" footer (`session_start.py:443`). Hook callers use it to *supply*
+the credential passed into `call_llm`: `pre_compact.py:79 → :166`,
+`stop.py:73`, `session_start.py:443`, `core/consolidate.py:326, 549, 724`.
 
 Fall-through was added in v2.3.4 for a concrete failure: a dead env key (e.g.
 zero credit → HTTP 400) used to blackhole the healthy subscription token behind
@@ -653,7 +653,7 @@ local fallback at all.
 2 * timeout  +  (fallback_timeout if ccl.enabled else 0)
 ```
 
-because the Anthropic candidates are bounded at 2 (`ccl_backend.py:149`). That
+because the Anthropic candidates are bounded at 2 (`ccl_backend.py:180`). That
 arithmetic is what lets the consolidation `BudgetGate` guarantee completion —
 see `core.consolidate._worst_call_cost`.
 
@@ -758,7 +758,7 @@ exist because they cannot import this module and must be kept in sync:
 
 Old v2.0 `SESSION_HANDOFF.md` files are renamed to `SESSION_HANDOFF.md.v2.bak`
 on first PreCompact under v2.1 (one-shot migration
-`core.progress.migrate_legacy_handoff`, `progress.py:514`).
+`core.progress.migrate_legacy_handoff`, `progress.py:485`).
 
 ---
 
@@ -780,9 +780,9 @@ reports on each:
   `installPath` that no longer exists is reported as a broken layout rather
   than skipped (`mem.py:158-170`).
 - **legacy / standalone install** — `~/.claude/hooks/cc-memory/`
-  (`mem.py:176-187`), written by the PyInstaller installer
-  (`ui/installer.py:56` `TARGET_DIR`). Hooks here are registered directly in
-  `~/.claude/settings.json` by `_merge_into_settings` (`installer.py:866+`),
+  (`mem.py:42`), written by the PyInstaller installer
+  (`ui/installer.py:58` `TARGET_DIR`). Hooks here are registered directly in
+  `~/.claude/settings.json` by `_merge_into_settings` (`installer.py:901+`),
   not via a plugin manifest.
 
 Under the marketplace layouts `~/.claude/hooks/cc-memory/` holds only `logs/`
@@ -808,13 +808,13 @@ shapes do not share a `cc_memory/` path segment.
 ```
 
 **Standalone installer (FLAT)** — `_copy_subpackages(TARGET_DIR)`
-(`installer.py:61`) writes each `SUBPACKAGE_FILES` key (`installer.py:61`)
-directly under `TARGET_DIR` (`installer.py:56`), with **no `cc_memory/`
-segment**, and `_make_hooks_config` (`installer.py:648`) builds commands as
+(`installer.py:63`) writes each `SUBPACKAGE_FILES` key (`installer.py:63`)
+directly under `TARGET_DIR` (`installer.py:58`), with **no `cc_memory/`
+segment**, and `_make_hooks_config` (`installer.py:650`) builds commands as
 `python "<TARGET_DIR>/hooks/<name>.py"`:
 
 ```
-~/.claude/hooks/cc-memory/           ← ui/installer.py:56 TARGET_DIR
+~/.claude/hooks/cc-memory/           ← ui/installer.py:58 TARGET_DIR
 ├── __init__.py
 ├── config.json
 ├── installed_surfaces.json  ← what was written into ~/.claude (v2.5)
@@ -849,14 +849,14 @@ install contained `hooks/` and `settings.json` and nothing else — no `/cc-mem`
 command, no `plan-refiner` / `plan-guardian` agents, no skills. Everything the
 user actually interacts with was missing.
 
-`SURFACE_FILES` (`installer.py:79`) names exactly five paths —
+`SURFACE_FILES` (`installer.py:81`) names exactly five paths —
 `commands/cc-mem.md`, `agents/plan-refiner.md`, `agents/plan-guardian.md`,
 `skills/ccm-load/SKILL.md`, `skills/save-memories/SKILL.md` — and `_copy_surfaces`
-(`installer.py:451`) writes them into `~/.claude/` at install step [2/3],
+(`installer.py:453`) writes them into `~/.claude/` at install step [2/3],
 recording what it wrote in `installed_surfaces.json` (`installer.py:58`).
 
 Uninstall is **by name**, never `rmtree`: `~/.claude/{commands,agents,skills}`
-hold the user's own files. `_remove_surfaces` (`installer.py:488`) deletes only
+hold the user's own files. `_remove_surfaces` (`installer.py:490`) deletes only
 the recorded paths, removes an emptied `skills/<name>/` but never `commands/` or
 `agents/` themselves, and distinguishes "no manifest" (fall back to this build's
 `SURFACE_FILES`) from "a manifest recording nothing" (delete nothing, and say
@@ -865,7 +865,7 @@ seeded leaves exactly those two files behind.
 
 ### settings.json is validated before anything is copied (v2.5)
 
-`_read_settings` (`installer.py:673`) returns `(dict, None)` or `(None, error)`
+`_read_settings` (`installer.py:675`) returns `(dict, None)` or `(None, error)`
 and never raises; `cli_install` calls it at step **[0/3]** and returns 1 with
 `Nothing has been installed.` on a parse failure. Through v2.4.3 the parse
 happened *after* the copy, so a `settings.json` the installer could not read
@@ -886,7 +886,7 @@ mentions "cc-memory" without running one of this build's six hook scripts is
 
 Detection accepts both shapes: `mem.py:181` tests
 `(legacy / "cc_memory").exists() or (legacy / "core" / "db.py").exists()`.
-Inspection used to disagree with it. `_inspect_layout` (`mem.py:352`) resolved
+Inspection used to disagree with it. `_inspect_layout` (`mem.py:353`) resolved
 every `cc_memory/…`-prefixed entry of `_REQUIRED_PLUGIN_FILES` (`mem.py:138`)
 against the layout **root**, so a healthy flat install reported all 22 files
 missing, printed `[FAIL]`, and — because `/cc-mem status` only runs the API-key
@@ -902,7 +902,7 @@ of a hardcoded `root/"cc_memory"`.
 
 The installer's own post-install instructions printed
 `TARGET_DIR/cc_memory/cli/mem.py`, a path it never creates; they now print
-`TARGET_DIR/cli/mem.py` (`installer.py:56`), which exists.
+`TARGET_DIR/cli/mem.py` (`installer.py:58`), which exists.
 
 ### Interpreter requirement
 
@@ -915,7 +915,7 @@ plugin. Otherwise hooks fail silently (logged to
 missing command).
 
 The standalone installer sidesteps this by **running** each candidate rather
-than probing for its existence: `_detect_python_cmd` (`installer.py:583`)
+than probing for its existence: `_detect_python_cmd` (`installer.py:585`)
 executes `<cand> -c "import sys;print(sys.version_info[0])"` with a 15 s timeout
 and takes the first that answers `3`. `shutil.which("python3")` was not enough —
 on Windows it resolves to a 0-byte App Execution Alias when Store Python is not

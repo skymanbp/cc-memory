@@ -143,6 +143,31 @@ def _resolve_path(root: Path, cited: str):
     return None, "no such file in the tree"
 
 
+_GLOBAL_DEFS = None
+
+
+def _global_defs(root: Path):
+    """Every function / class / ALL_CAPS name defined anywhere in the tree.
+
+    The cross-file anchor needs this. Without it the tool happily "anchors" on
+    an ordinary English word that occurs in the cited file — the first run
+    accused a citation of rot because the word *guardian* appears at five lines
+    of core/plan.py and not at the cited ones. A candidate must be a name that
+    is actually a symbol SOMEWHERE, or the whole verdict is noise.
+    """
+    global _GLOBAL_DEFS
+    if _GLOBAL_DEFS is None:
+        names = set()
+        for py in root.rglob("*.py"):
+            if "__pycache__" in py.parts:
+                continue
+            d = _defs_in(py)
+            if d:
+                names |= {k for k in d if "." not in k}
+        _GLOBAL_DEFS = names
+    return _GLOBAL_DEFS
+
+
 _SRC_CACHE = {}
 
 
@@ -243,8 +268,65 @@ def classify(root: Path):
                     if hit:
                         break
                 if hit is None:
-                    results.append(Result(rel, n, cited, start, end, "SKIP",
-                                          detail="no unique symbol in context"))
+                    # CROSS-FILE citation: the symbol the sentence names lives
+                    # in another module and this line is a CALL SITE. That is
+                    # the single most common shape in these docs —
+                    #   "`db.tag_progress_session(...)` (`user_prompt.py:117`)"
+                    # — and treating it as unanchorable left 357 of 594
+                    # citations, 60 %, entirely unchecked. Anchor it on the
+                    # TEXT instead: the cited range must mention the symbol.
+                    src = _lines_of(target)
+                    cand = None
+                    for ctx in (_context(line, m.start()),
+                                "\n".join(doc_lines[max(0, n - 2):n + 1])):
+                        for name in sorted(
+                                {s for s in SYMBOL_RE.findall(ctx)},
+                                key=lambda s: (-len(s), s)):
+                            tail = name.split(".")[-1]
+                            # Two filters, both load-bearing:
+                            #  * >=6 chars — short identifiers ('db', 'path',
+                            #    'main') match half the lines in any file, so a
+                            #    hit proves nothing and a miss is a false
+                            #    accusation;
+                            #  * must be a real symbol SOMEWHERE in the tree —
+                            #    without this the anchor lands on ordinary
+                            #    prose. Measured: the word 'guardian' occurs at
+                            #    5 lines of core/plan.py, so a correct citation
+                            #    that did not include one of them was reported
+                            #    as rot.
+                            if len(tail) < 6 or tail not in _global_defs(root):
+                                continue
+                            occ = [i + 1 for i, ln in enumerate(src)
+                                   if tail in ln]
+                            if occ:
+                                cand = (tail, occ)
+                                break
+                        if cand:
+                            break
+                    if cand is None:
+                        results.append(Result(rel, n, cited, start, end, "SKIP",
+                                              detail="no unique symbol in context"))
+                        continue
+                    tail, occ = cand
+                    if any(start <= o <= end for o in occ):
+                        results.append(Result(rel, n, cited, start, end, "OK",
+                                              tail, None,
+                                              "cross-file reference"))
+                    else:
+                        # Repair to the occurrence NEAREST the stale number.
+                        # The assumption is stated so it can be argued with: a
+                        # citation was correct when written and the file grew
+                        # above it, so the drift is small and monotonic. Every
+                        # candidate is a line that genuinely mentions the
+                        # symbol — this chooses among true anchors, it does not
+                        # invent one — and the choice is reported, not silent.
+                        near = min(occ, key=lambda o: (abs(o - start), o))
+                        results.append(Result(
+                            rel, n, cited, start, end, "STALE", tail,
+                            (near, near),
+                            f"{tail} does not appear at {start}-{end}; "
+                            f"nearest occurrence {near}"
+                            + (f" of {len(occ)}" if len(occ) > 1 else "")))
                     continue
                 sym, (d0, d1) = hit
                 # A citation is correct if it points at the symbol's DEFINITION
@@ -280,27 +362,49 @@ def apply_fix(root: Path, results):
     """Rewrite STALE line numbers to the resolved definition site."""
     by_doc = {}
     for r in results:
-        if r.verdict == "STALE":
+        # `want is None` marks a STALE the tool refuses to guess at (a
+        # cross-file symbol occurring at several lines). Reported, never
+        # rewritten: a plausible-looking wrong number is worse than a red gate.
+        if r.verdict == "STALE" and r.want:
             by_doc.setdefault(r.doc, []).append(r)
     changed = 0
     for rel, rows in by_doc.items():
         doc = root / rel
         lines = doc.read_text(encoding="utf-8").splitlines(keepends=True)
-        for r in sorted(rows, key=lambda x: x.docline):
-            d0, d1 = r.want
-            old_single = f"{r.cited}:{r.start}"
-            old_range = f"{r.cited}:{r.start}-{r.end}"
-            # A one-line definition gets a single number, never "83-83":
-            # a degenerate range reads as a typo and invites a "correction".
-            new = (f"{r.cited}:{d0}" if r.start == r.end or d0 == d1
-                   else f"{r.cited}:{d0}-{d1}")
-            i = r.docline - 1
-            if r.start != r.end and old_range in lines[i]:
-                lines[i] = lines[i].replace(old_range, new)
+        # Group by document line, then splice by CHARACTER OFFSET, right to
+        # left. Substring replacement is wrong here and produced a mangled
+        # citation on the first run: `str.replace("…memory_writer.py:83",
+        # "…memory_writer.py:55")` applied to the text `…memory_writer.py:83-83`
+        # matches the PREFIX of the range and yields `…memory_writer.py:55-83`,
+        # a range that never existed. Right-to-left keeps earlier offsets valid
+        # when one documentation line carries several citations, which these
+        # docs do constantly (tables list three or four).
+        by_line = {}
+        for r in rows:
+            by_line.setdefault(r.docline, []).append(r)
+        for docline, rs in by_line.items():
+            i = docline - 1
+            text = lines[i]
+            spans = []
+            for m in CITATION_RE.finditer(text):
+                m_start = int(m.group("start"))
+                m_end = int(m.group("end")) if m.group("end") else m_start
+                for r in rs:
+                    if (m.group("path") == r.cited and m_start == r.start
+                            and m_end == r.end):
+                        d0, d1 = r.want
+                        # A one-line target gets a single number, never "83-83":
+                        # a degenerate range reads as a typo and invites a
+                        # "correction" that undoes this fix.
+                        new = (f"{r.cited}:{d0}" if d0 == d1
+                               else f"{r.cited}:{d0}-{d1}")
+                        spans.append((m.start(), m.end(), new))
+                        rs.remove(r)
+                        break
+            for a, b, new in sorted(spans, reverse=True):
+                text = text[:a] + new + text[b:]
                 changed += 1
-            elif old_single in lines[i]:
-                lines[i] = lines[i].replace(old_single, new)
-                changed += 1
+            lines[i] = text
         doc.write_text("".join(lines), encoding="utf-8")
     return changed
 

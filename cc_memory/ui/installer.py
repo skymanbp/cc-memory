@@ -23,12 +23,14 @@ Output is deliberately ASCII-only: this is a stdlib-only bootstrap that runs
 before the package (and core.encoding_setup) is importable, on consoles whose
 codec we do not control.
 """
+import hashlib
 import json
 import re
 import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 # ── Resolve bundled / source roots ────────────────────────────────────────
@@ -60,7 +62,7 @@ SURFACE_MANIFEST = TARGET_DIR / "installed_surfaces.json"
 # Subdirectory contents (relative to cc_memory/ on disk OR cc_memory_files/ in exe)
 SUBPACKAGE_FILES = {
     "":      ["__init__.py", "config.json"],
-    "core":  ["__init__.py", "auth.py", "consolidate.py", "db.py",
+    "core":  ["__init__.py", "atomic.py", "auth.py", "consolidate.py", "db.py",
               "encoding_setup.py", "extractor.py", "idle.py", "logger.py",
               "modes.py", "plan.py", "privacy.py", "progress.py",
               "version.py"],
@@ -787,8 +789,33 @@ def _marketplace_warning_lines(key):
     ]
 
 
-def _write_settings_json(settings, log_fn=print):
+def _settings_fingerprint():
+    """Exact identity of settings.json on disk right now, or None if absent.
+
+    A content digest, not (mtime, size): both are too coarse to detect a
+    concurrent write that happens to preserve the length, and NTFS mtime
+    granularity is worse than the window being guarded.
+    """
+    try:
+        return hashlib.sha256(SETTINGS_PATH.read_bytes()).hexdigest()
+    except FileNotFoundError:
+        return None
+    except OSError:
+        # why: unreadable is not "unchanged" — returning a sentinel that can
+        # never equal a real digest makes the caller treat it as a conflict,
+        # which is the safe direction.
+        return "<unreadable>"
+
+
+def _write_settings_json(settings, log_fn=print, expect=None):
     """Replace settings.json ATOMICALLY, keeping a backup of what was there.
+
+    `expect` is the digest the caller saw when it READ the file. If the file on
+    disk no longer matches it, someone wrote in between and this write would
+    silently discard their change — so it is refused with a `False` return and
+    the caller re-merges onto the newer content. This is a compare-and-swap,
+    and it needs no cooperation from the other writer, which matters because
+    Claude Code takes no lock on this file and neither can we.
 
     This is the user's GLOBAL Claude Code config. Both write paths used to call
     SETTINGS_PATH.write_text(), which TRUNCATES before writing a byte: a watcher
@@ -834,6 +861,14 @@ def _write_settings_json(settings, log_fn=print):
                 prefix=SETTINGS_PATH.name + ".", suffix=".tmp") as fh:
             tmp = Path(fh.name)
             fh.write(payload)
+        if expect is not None and _settings_fingerprint() != expect:
+            # why: someone wrote settings.json between our read and this
+            # moment. Renaming now would discard their edit with rc=0 and
+            # "installation complete!" — the exact lost update this parameter
+            # exists to stop. Refuse; the caller re-reads and re-merges.
+            log_fn(f"  [WARN] {SETTINGS_PATH.name} changed underneath us; "
+                   f"re-merging onto the newer contents")
+            return False
         last = None
         for _attempt in range(5):
             try:
@@ -875,15 +910,42 @@ def _merge_into_settings(hooks_config, log_fn=print):
     trials lost the concurrent edit.
 
     Re-reading narrows the window to the microseconds between the read below
-    and the rename inside _write_settings_json. It does NOT close it - nothing
-    locks settings.json and Claude Code takes no lock either - but it is the
-    difference between "the entire install" and "one dict merge". Do not
-    reintroduce a caller-supplied settings dict.
+    and the rename inside _write_settings_json. Do not reintroduce a
+    caller-supplied settings dict.
+
+    v2.5.3 closes what re-reading left open. Narrowing a lost-update window is
+    not the same as detecting one, and v2.5.2 shipped the residual as a known
+    limit. The read now takes a content digest, `_write_settings_json` refuses
+    to rename if the file no longer matches it, and this function RETRIES the
+    whole read-merge-write on the newer contents. A concurrent writer therefore
+    cannot be silently clobbered; it can only make us do the merge again.
+    Bounded at `_MERGE_ATTEMPTS` because a writer looping faster than we can
+    merge is a broken peer, not a race to win — and this runs inside an
+    installer a human is watching.
     """
+    for attempt in range(_MERGE_ATTEMPTS):
+        ok, retry = _merge_once(hooks_config, log_fn)
+        if not retry:
+            return ok
+        if attempt + 1 < _MERGE_ATTEMPTS:
+            time.sleep(0.05 * (attempt + 1))
+    log_fn(f"[ERR] {SETTINGS_PATH.name} kept changing underneath the installer "
+           f"({_MERGE_ATTEMPTS} attempts). Close whatever is writing it "
+           f"(another installer? Claude Code mid-write?) and re-run.")
+    return False
+
+
+# Bounded on purpose — see _merge_into_settings.
+_MERGE_ATTEMPTS = 4
+
+
+def _merge_once(hooks_config, log_fn=print):
+    """One read-merge-write cycle. Returns (ok, should_retry)."""
+    before = _settings_fingerprint()
     settings, err = _read_settings()
     if err is not None:
         log_fn(f"[ERR] {SETTINGS_PATH} {err}")
-        return False
+        return False, False
 
     hooks = settings.get("hooks")
     if not isinstance(hooks, dict):
@@ -916,18 +978,42 @@ def _merge_into_settings(hooks_config, log_fn=print):
         log_fn(f"  {event}: {len(kept)} kept + {len(hook_list)} cc-memory")
     _warn_ambiguous(ambiguous, log_fn)
 
-    return _write_settings_json(settings, log_fn)
+    if _write_settings_json(settings, log_fn, expect=before):
+        return True, False
+    # Distinguish "someone else wrote it" (worth redoing) from a real write
+    # failure (already reported by _write_settings_json, and redoing it would
+    # just print the same error again).
+    return False, _settings_fingerprint() != before
 
 
 def _uninstall_settings(log_fn=print):
-    """Remove cc-memory entries from settings.json. Returns True on success."""
+    """Remove cc-memory entries from settings.json. Returns True on success.
+
+    Compare-and-swap protected exactly like the install path (v2.5.3): an
+    uninstall that discards a concurrent /permissions approval is no better
+    than an install that does.
+    """
+    for attempt in range(_MERGE_ATTEMPTS):
+        ok, retry = _uninstall_settings_once(log_fn)
+        if not retry:
+            return ok
+        if attempt + 1 < _MERGE_ATTEMPTS:
+            time.sleep(0.05 * (attempt + 1))
+    log_fn(f"[ERR] {SETTINGS_PATH.name} kept changing underneath the "
+           f"uninstaller; close whatever is writing it and re-run.")
+    return False
+
+
+def _uninstall_settings_once(log_fn=print):
+    """One read-merge-write cycle of the uninstall. Returns (ok, should_retry)."""
     if not SETTINGS_PATH.exists():
         log_fn("[  ] settings.json not found - nothing to remove")
-        return True
+        return True, False
+    before = _settings_fingerprint()
     settings, err = _read_settings()
     if err is not None:
         log_fn(f"[ERR] {SETTINGS_PATH} {err}; manual cleanup needed")
-        return False
+        return False, False
 
     hooks = settings.get("hooks")
     if isinstance(hooks, dict):
@@ -975,8 +1061,8 @@ def _uninstall_settings(log_fn=print):
     # Same atomic-with-backup write as install: an uninstall that truncates the
     # user's global config and then dies is not a better failure than an
     # install that does.
-    if not _write_settings_json(settings, log_fn):
-        return False
+    if not _write_settings_json(settings, log_fn, expect=before):
+        return False, _settings_fingerprint() != before
     log_fn("[OK] Removed cc-memory entries from settings.json")
 
     key = _marketplace_registration(settings)
@@ -984,7 +1070,7 @@ def _uninstall_settings(log_fn=print):
         log_fn(f'[NOTE] settings.json still has enabledPlugins["{key}"] = true.')
         log_fn("       That is the marketplace/dev-checkout install, which this")
         log_fn("       uninstaller does not manage - disable it with /plugin.")
-    return True
+    return True, False
 
 
 def _init_project(project_path, log_fn=print):
@@ -1377,8 +1463,23 @@ def _usage():
     return 0
 
 
+_KNOWN_FLAGS = ("--help", "-h", "--cli", "--force", "--uninstall")
+
+
 def main():
     argv = sys.argv[1:]
+    # Unknown arguments are REFUSED, not ignored (v2.5.3). Every branch below
+    # is a membership test, so anything unrecognised used to fall through to a
+    # plain install: `--project D:\repo` performed an install and silently did
+    # NOT initialise that project, and a typo'd `--unistall` performed an
+    # INSTALL — the opposite of what was typed — and exited 0. Found by
+    # actually running the built exe rather than reading its PE header.
+    unknown = [a for a in argv if a not in _KNOWN_FLAGS]
+    if unknown:
+        print(f"cc-memory installer: unrecognised argument(s): "
+              f"{' '.join(unknown)}\n")
+        _usage()
+        sys.exit(2)
     if "--help" in argv or "-h" in argv:
         rc = _usage()
     elif "--uninstall" in argv:

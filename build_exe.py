@@ -41,7 +41,7 @@ BUILD = ROOT / "build"
 # Subpackage files to bundle. Mirrors ui/installer.py SUBPACKAGE_FILES.
 SUBPACKAGE_FILES = {
     "":      ["__init__.py", "config.json"],
-    "core":  ["__init__.py", "auth.py", "consolidate.py", "db.py",
+    "core":  ["__init__.py", "atomic.py", "auth.py", "consolidate.py", "db.py",
               "encoding_setup.py", "extractor.py", "idle.py", "logger.py",
               "modes.py", "plan.py", "privacy.py", "progress.py",
               "version.py"],

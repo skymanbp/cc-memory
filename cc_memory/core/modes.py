@@ -205,6 +205,7 @@ def is_excluded(cwd) -> bool:
                         f"FAIL-CLOSED: treating every project as excluded "
                         f"until it is a list")
             return True
+        # (a genuine listing follows; `config_fault()` reports None for it)
         target = _norm_path(cwd)
         skipped = []
         for entry in entries:
@@ -240,6 +241,48 @@ def is_excluded(cwd) -> bool:
                                 "treating the project as NOT excluded")
         return False
     return False
+
+
+def config_fault():
+    """Why `is_excluded` is failing CLOSED right now — or None if it is not.
+
+    Returns a short, user-actionable sentence when config.json EXISTS and
+    cannot be used, and ``None`` in every other case (absent, empty, valid —
+    including a valid config that genuinely lists the project).
+
+    This exists so the fail-closed decision can be SEEN. v2.5.2 made an
+    unusable config suspend the plugin globally, which is the right call for a
+    privacy control, but its only trace was a line in
+    ``~/.claude/hooks/cc-memory/logs/`` — a file nobody reads until they
+    already suspect something. A merge-conflicted config.json (the exact
+    scenario config.json's own note warns about, since a marketplace checkout
+    keeps it under git) would therefore present as "the plugin quietly stopped
+    working", which is indistinguishable from a bug and is how a user ends up
+    reinstalling instead of fixing one line.
+
+    `hooks/session_start.py` is the only consumer: it prints ONE line when this
+    is non-None. A project that is genuinely listed stays completely silent,
+    because that silence is the feature.
+    """
+    try:
+        cfg, note = read_config()
+        if cfg is None:
+            return (f"cc-memory is SUSPENDED: cc_memory/config.json {note}. "
+                    f"No memory is being recorded for any project until it "
+                    f"parses. This is fail-closed by design — the privacy "
+                    f"opt-out lives in that file.")
+        entries = cfg.get("excluded_projects")
+        if entries and not isinstance(entries, (list, str)):
+            return (f"cc-memory is SUSPENDED: cc_memory/config.json "
+                    f"'excluded_projects' is a {type(entries).__name__}, not a "
+                    f"list of paths. No memory is being recorded for any "
+                    f"project until it is a list.")
+    except Exception:
+        # why: this is a diagnostic accessory to a hook. It must never be the
+        # thing that breaks one, and "no fault to report" is the safe answer —
+        # is_excluded has already made the actual decision.
+        return None
+    return None
 
 
 MODES = {
