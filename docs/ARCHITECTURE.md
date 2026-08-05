@@ -1,6 +1,6 @@
 > **English** · [简体中文](ARCHITECTURE.zh.md)
 
-# cc-memory — Architecture (v2.5.3)
+# cc-memory — Architecture (v2.5.4)
 
 cc-memory is a Claude Code plugin that gives Claude **persistent, structured
 memory across compactions and sessions**. This document is the overview: what
@@ -97,7 +97,7 @@ must NOT be reduced to English-only. See
 ```
 cc-memory/
 ├── .claude-plugin/
-│   ├── plugin.json              ← Plugin manifest (v2.5.3)
+│   ├── plugin.json              ← Plugin manifest (v2.5.4)
 │   └── marketplace.json         ← /plugin marketplace add entry
 ├── hooks/hooks.json             ← Hook declarations (6 commands / 5 events)
 ├── skills/                      ← THE canonical skills location
@@ -305,12 +305,12 @@ project-local at `<project>/memory/memory.db`, WAL mode:
 
 | Table | Purpose |
 |-------|---------|
-| `projects` | One row per project path (`db.py:36`); carries `mode` since migration `v2_project_mode` (`db.py:158`) |
-| `sessions` | One row per compaction event (`db.py:44`) |
-| `memories` | Extracted facts (category, importance, topic, content_hash, **supersedes_id**, last_referenced_at) (`db.py:55`) |
-| `topics` | Consolidated summaries per topic name (versioned) (`db.py:69`) |
-| `keywords` | Auto-detected project vocabulary (`db.py:79`) |
-| `plans` | Plan queue (draft → ready → done) (`db.py:88`) |
+| `projects` | One row per project path (`db.py:37`); carries `mode` since migration `v2_project_mode` (`db.py:159`) |
+| `sessions` | One row per compaction event (`db.py:45`) |
+| `memories` | Extracted facts (category, importance, topic, content_hash, **supersedes_id**, last_referenced_at) (`db.py:56`) |
+| `topics` | Consolidated summaries per topic name (versioned) (`db.py:70`) |
+| `keywords` | Auto-detected project vocabulary (`db.py:80`) |
+| `plans` | Plan queue (draft → ready → done) (`db.py:89`) |
 | `observations` | Raw PostToolUse events, cleaned up after extraction (`db.py:129`) |
 | `session_summaries` | 6-field structured summary per session (request / investigated / learned / completed / next_steps / notes) + files_read/files_modified (`db.py:143`) |
 | **`progress`** | NEW in v2.1 — single row per project. SOT for `memory/PROGRESS.md` (`db.py:188`). |
@@ -406,7 +406,7 @@ caller's responsibility, and there are exactly two shapes:
 - `upsert_batch` (`memory_writer.py:200-235`) loops `upsert_smart` per item and
   regenerates ONCE at the end, but only when a `memory_dir` is passed
   (`memory_writer.py:190-194`). All hook callers pass it
-  (`pre_compact.py:435`, `stop.py:166`, `session_start.py:722`); the sync
+  (`pre_compact.py:435`, `stop.py:166`, `session_start.py:972`); the sync
   PreCompact leg additionally touches it again after the rest of its state
   changes (`pre_compact.py:684`).
 - Single-shot callers call `regenerate_memory_index` explicitly:
@@ -524,7 +524,7 @@ A `PreCompact` killed by the host timeout dies on `TerminateProcess`: no
 successful run and the failure is invisible. The sync leg therefore writes
 `memory/.pre_compact_attempt.json` **before** the transcript load
 (`pre_compact.py:359-368`) and removes it only on a completed run
-(`pre_compact.py:536`) — including on its own error path (`pre_compact.py:571`),
+(`pre_compact.py:536`) — including on its own error path (`pre_compact.py:731`),
 so an *errored* run is never reported as a *killed* one. `SessionStart` reports
 a surviving marker, but only once it is at least 10 minutes old, so a run still
 in flight is never mislabelled (`session_start.py:187-206`).
@@ -582,10 +582,10 @@ normalises it to JSON, written back via `/cc-mem plan-set --from-refiner`;
 LLM); `Edit`/`Write`/`MultiEdit`/`NotebookEdit` bump
 `edits_since_last_guardian`, and sensitive Bash calls (`git push`, `rm -rf`,
 `DROP TABLE`, `npm publish`, `kubectl apply`, `terraform apply`, … —
-`core.plan.is_sensitive_tool_call`, `plan.py:729`) bump it by 20. The Stop hook
+`core.plan.is_sensitive_tool_call`, `plan.py:810-827`) bump it by 20. The Stop hook
 emits the guardian advisory once `turns_since_last_guardian >= 8` OR
 `edits_since_last_guardian >= 12` (`core.plan.should_nudge_guardian`,
-`plan.py:702`), and rate-limits the refiner nudge to once every 5 turns per
+`plan.py:783-799`), and rate-limits the refiner nudge to once every 5 turns per
 session. Hooks never spawn subagents themselves — they only nudge. Full spec:
 [docs/CONTRACTS.md](CONTRACTS.md#plan-contract). Every branch above runs in
 every mode since v2.5 — see
@@ -593,7 +593,7 @@ every mode since v2.5 — see
 for what used to shadow them.
 
 A raw plan that has not been refined yet is no longer invisible:
-`core.plan.raw_pending_refinement` (`plan.py:262`) is the shared predicate, and
+`core.plan.raw_pending_refinement` (`plan.py:285-314`) is the shared predicate, and
 both `write_plan_md` and `/cc-mem plan-status` lead with a PENDING REFINEMENT
 banner plus the verbatim raw text, labelling any older structured plan as
 superseded. The verbatim block's fence widens past the longest backtick run in
@@ -728,13 +728,13 @@ Per-project state lives at `<project>/memory/`:
 Writers, for traceability: `MEMORY.md` ← `memory_writer.regenerate_memory_index`
 (`memory_writer.py:238`); `PROGRESS.md` ← `core.progress.write_progress_md`
 (`progress.py:323, 366`); `PLAN.md` ← `core.plan.write_plan_md`
-(`plan.py:310`); `.plan_history/` ← `plan.py:437`; `.last_save.json` ←
+(`plan.py:453-493`); `.plan_history/` ← `plan.py:453-493`; `.last_save.json` ←
 `pre_compact.py:526, 556`; `.last_inject.json` ← `session_start.py:291-309`
 (tempfile + `os.replace`, genuinely atomic, unlike the plain write used for
 `.last_save.json`); `.last_consolidation.json` / `.consolidation.lock` ←
-`consolidate_async.py:155-156`; `.pre_compact_attempt.json` ←
+`consolidate_async.py:112-128`; `.pre_compact_attempt.json` ←
 `pre_compact.py:284-311`. `sessions/` and `topics/` are created by whichever
-path touches the project first — `user_prompt.py:44-45` on auto-init, or
+path touches the project first — `user_prompt.py:57-63` on auto-init, or
 `pre_compact.py:342-343`.
 
 `memory/PROGRESS.md`, `memory/MEMORY.md`, and `memory/PLAN.md` are **generated
@@ -782,7 +782,7 @@ reports on each:
 - **legacy / standalone install** — `~/.claude/hooks/cc-memory/`
   (`mem.py:42`), written by the PyInstaller installer
   (`ui/installer.py:58` `TARGET_DIR`). Hooks here are registered directly in
-  `~/.claude/settings.json` by `_merge_into_settings` (`installer.py:901+`),
+  `~/.claude/settings.json` by `_merge_into_settings` (`installer.py:916-950+`),
   not via a plugin manifest.
 
 Under the marketplace layouts `~/.claude/hooks/cc-memory/` holds only `logs/`

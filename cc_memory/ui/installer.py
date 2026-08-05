@@ -884,6 +884,21 @@ def _write_settings_json(settings, log_fn=print, expect=None):
                    f"{SETTINGS_PATH.name} ({last}); writing in place instead - "
                    f"{bak.name} holds the previous contents")
             SETTINGS_PATH.write_text(payload, encoding="utf-8")
+        if expect is not None:
+            # POST-write verification closes what the pre-write check cannot.
+            # Between the digest check above and the rename there is a window
+            # no user-space check can cover, and no lock helps because Claude
+            # Code takes none. So verify the OUTCOME: read the file back and
+            # confirm it is byte-for-byte what we just wrote. If it is not,
+            # someone landed a write inside that window and OUR change is the
+            # one that lost — report it so the caller re-merges. Together with
+            # the pre-check, a lost update in EITHER direction is now detected;
+            # neither side can be clobbered in silence.
+            after = SETTINGS_PATH.read_text(encoding="utf-8-sig")
+            if after != payload:
+                log_fn(f"  [WARN] {SETTINGS_PATH.name} was rewritten during our "
+                       f"write; re-merging onto the newer contents")
+                return False
     except OSError as e:
         log_fn(f"[ERR] Could not write {SETTINGS_PATH}: {e}")
         return False

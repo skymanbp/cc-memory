@@ -1575,7 +1575,18 @@ def test_settings_cas():
             cur["permissions"] = {"allow": ["Bash(git status)"]}
             inst.SETTINGS_PATH.write_text(json.dumps(cur, indent=2),
                                           encoding="utf-8")
-        return real_write(settings, log_fn, expect)
+        ok = real_write(settings, log_fn, expect)
+        # v2.5.3: a peer landing AFTER the rename is caught by the POST-write
+        # verification, which is the half the pre-write digest check cannot
+        # cover. Without it that write is lost with rc=0.
+        if ok and fired.get("post", 0) == 0:
+            fired["post"] = 1
+            cur = json.loads(inst.SETTINGS_PATH.read_text(encoding="utf-8-sig"))
+            cur["env"] = {"PEER": "1"}
+            inst.SETTINGS_PATH.write_text(json.dumps(cur, indent=2),
+                                          encoding="utf-8")
+            return real_write(settings, log_fn, expect)
+        return ok
 
     inst._write_settings_json = _racing_write
     try:
@@ -1589,10 +1600,13 @@ def test_settings_cas():
         (f"the concurrent write was CLOBBERED — this is the lost update the "
          f"compare-and-swap exists to stop. settings.json: {got}")
     assert got.get("model") == "opusplan", "pre-existing settings were lost"
+    assert got.get("env", {}).get("PEER") == "1",         ("a peer write landing AFTER our rename was lost — the post-write "
+         "verification is what catches that half")
     events = sorted(e for e, groups in got.get("hooks", {}).items()
                     if any(inst._is_ccm_group(g) for g in groups))
     assert len(events) >= 5, f"hooks were not registered after the retry: {events}"
-    assert fired["n"] == 1, "the racing write never fired — test is vacuous"
+    assert fired["n"] == 1 and fired.get("post") == 1, (
+        f"a racing write never fired - test is vacuous: {fired}")
 
     # and a NON-racing install must not pay for it: exactly one write, no retry
     inst.SETTINGS_PATH.write_text(json.dumps({"model": "opusplan"}, indent=2),

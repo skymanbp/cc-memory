@@ -2,7 +2,7 @@
 
 # cc-memory
 
-**Claude Code persistent memory plugin (v2.5.3)** — anti-patch reconcile-on-write
+**Claude Code persistent memory plugin (v2.5.4)** — anti-patch reconcile-on-write
 with LLM-judged semantic de-duplication, forced PROGRESS.md handoff, live PLAN.md
 anchor with plan-refiner / plan-guardian subagents and a mandatory carryover
 gate, bounded transcript reads, injection observability, FTS5 search, AI-judged
@@ -16,6 +16,25 @@ disappear. Conversations that end normally (terminal closed) also lose context.
 
 cc-memory captures structured memories at every conversation boundary AND
 **forces the next session to read a handoff document** before it starts work.
+
+## What's new in v2.5.4
+
+**Zero known limits.** v2.5.3 closed five of six residuals and recorded four new
+ones; this release closes all four, and adds a gate for each.
+
+- **Every citation is checked — 0 unchecked, down from 253.** A citation naming
+  no symbol is now bounds-checked (inside the file, not blank), and an ambiguous
+  bare filename is disambiguated by symbol. The bounds check alone found **34
+  stale citations** pointing past EOF or at blank lines, which every previous
+  release shipped.
+- **The `settings.json` lost update is closed in both directions.** v2.5.3
+  checked the digest *before* the rename; there is now a post-write
+  verification, so a peer write landing *after* it is detected too.
+- **PLAN.md and MEMORY.md no longer go stale.** A retry *count* was the wrong
+  shape — the file is unavailable for a *duration*. With a 3 s wall-clock
+  budget: 0 stale renders in 150 rounds against three 100 %-duty readers, where
+  12 fixed tries lost 2.
+- **The dashboard exe is executed too**, not just PE-header inspected.
 
 ## What's new in v2.5.3
 

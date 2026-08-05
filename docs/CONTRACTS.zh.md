@@ -1,4 +1,4 @@
-<!-- i18n-source: CONTRACTS.md | sha256: 116509178a42099a | version: 2.5.3 | translated: 2026-08-05 -->
+<!-- i18n-source: CONTRACTS.md | sha256: 9e9cccdc614ebdc5 | version: 2.5.4 | translated: 2026-08-05 -->
 > [English](CONTRACTS.md) · **简体中文**
 
 # cc-memory — 契约（Contracts）
@@ -293,7 +293,7 @@ SQL 行生成。Schema 见 `cc_memory/core/db.py:_MIGRATIONS:v3_progress`（`db.
 | `status_done` | TEXT | `session_summaries.completed`（`progress.py:137`），PreCompact 用 `", ".join(<观察到的 Edit/Write/MultiEdit 路径>[:10])` 填充它（`pre_compact.py:315-357`）—— 所以 §2 的 “Done” 渲染出来是一份**文件列表**，而不是散文。若为空，SessionStart 会补上（`session_start.py:589-590`） |
 | `status_in_flight` | TEXT | `session_summaries.learned` —— 注意：PreCompact 把这个字段写成**空**（`pre_compact.py:474`），因此它今天是惰性的；§2 的 “In-flight” 永远渲染成 `*(none active)*` |
 | `status_blocked` | TEXT | 显式的 `patch_progress(status_blocked=...)` —— 今天树内没有任何调用方这样做；它是留给外部工具的 API。全仓库 grep 只能找到 schema 默认值（`core/db.py:1028,853`）、空播种（`core/progress.py:180`）和读取处（`core/progress.py:180`） |
-| `open_todos` | JSON | PreCompact 经 `ext["latest_todos"]` 调用 `extract_latest_todo_state(window)`（`core/extractor.py:352,558`；`pre_compact.py:462,488`）→ SessionStart 第 3 级：挖掘上一次会话的 transcript（`session_start.py:702`）→ **最后手段**：把 `session_summary.next_steps` 按 `;` 切分（`session_start.py:702`）。只保留非 `completed` 的 todo（`progress.py:180`） |
+| `open_todos` | JSON | PreCompact 经 `ext["latest_todos"]` 调用 `extract_latest_todo_state(window)`（`core/extractor.py:352,558`；`pre_compact.py:630,656`）→ SessionStart 第 3 级：挖掘上一次会话的 transcript（`session_start.py:702`）→ **最后手段**：把 `session_summary.next_steps` 按 `;` 切分（`session_start.py:702`）。只保留非 `completed` 的 todo（`progress.py:180`） |
 | `plan` | TEXT | `session_summaries.next_steps` —— 若有最新 TodoWrite 的 pending 项则取自它，否则取自 LLM 抽取出的 `task` 类记忆（`pre_compact.py:462-468`）；在 `progress.py:148` 传播，在 `session_start.py:702` 按“空则填”补齐 |
 | `critical_context` | JSON | importance ≥ 4 的前 10 条记忆，内容截断到 200 字符（`progress.py:107-113`；`session_start.py:703`） |
 | `files_touched` | JSON | `observations` 表（`pre_compact.py:446-453` → `progress.py:128-134`；Stop 每回合打补丁 `stop.py:193-211`；SessionStart 第 2C 级 `session_start.py:703`）→ 第 3 级：对上一次会话 transcript 跑 `extract_file_changes`（`session_start.py:703`） |
@@ -559,7 +559,7 @@ cc-memory 的**实时计划锚点**：每个项目一份 `memory/PLAN.md`，它�
    → sync_todos_to_steps()         → 累加 edits_since_last_guardian
    → 重写 PLAN.md                  （敏感工具一次加 20）
    （没有活动计划行时两者都是空操作：post_tool_use.py:126,132；
-    todo 同步还额外要求一个 schema 合法的结构化计划：plan.py:551-554）
+    todo 同步还额外要求一个 schema 合法的结构化计划：core/plan.py:551-556）
               │                                     │
               └─────────────────┬───────────────────┘
                                 ▼

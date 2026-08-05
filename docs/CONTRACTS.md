@@ -321,7 +321,7 @@ at `db.py:176-190`, plus the two v5 session-annotation columns at `db.py:219-222
 | `status_done` | TEXT | `session_summaries.completed` (`progress.py:137`), which PreCompact fills with `", ".join(<observed Edit/Write/MultiEdit paths>[:10])` (`pre_compact.py:315-357`) — so §2 "Done" renders a FILE LIST, not prose. SessionStart fills it if empty (`session_start.py:589-590`) |
 | `status_in_flight` | TEXT | `session_summaries.learned` — NOTE: PreCompact writes this field EMPTY (`pre_compact.py:474`), so it is inert today; §2 "In-flight" always renders `*(none active)*` |
 | `status_blocked` | TEXT | Explicit `patch_progress(status_blocked=...)` — no in-tree caller does this today; it is an API for external tooling. A repo-wide grep finds only the schema default (`core/db.py:1028,853`), the empty seed (`core/progress.py:180`) and the read (`core/progress.py:180`) |
-| `open_todos` | JSON | PreCompact `extract_latest_todo_state(window)` via `ext["latest_todos"]` (`core/extractor.py:352,558`; `pre_compact.py:462,488`) → SessionStart tier-3 prior-transcript mine (`session_start.py:702`) → LAST RESORT `session_summary.next_steps` split by `;` (`session_start.py:702`). Only non-`completed` todos are kept (`progress.py:180`) |
+| `open_todos` | JSON | PreCompact `extract_latest_todo_state(window)` via `ext["latest_todos"]` (`core/extractor.py:352,558`; `pre_compact.py:630,656`) → SessionStart tier-3 prior-transcript mine (`session_start.py:702`) → LAST RESORT `session_summary.next_steps` split by `;` (`session_start.py:702`). Only non-`completed` todos are kept (`progress.py:180`) |
 | `plan` | TEXT | `session_summaries.next_steps` — sourced from the latest TodoWrite pending items if any, else from LLM-extracted `task` memories (`pre_compact.py:462-468`); propagated at `progress.py:148`, filled-if-empty at `session_start.py:702` |
 | `critical_context` | JSON | Top 10 memories with importance ≥ 4, content truncated to 200 chars (`progress.py:107-113`; `session_start.py:703`) |
 | `files_touched` | JSON | `observations` table (`pre_compact.py:446-453` → `progress.py:128-134`; Stop per-turn patch `stop.py:193-211`; SessionStart tier-2C `session_start.py:703`) → tier-3 prior-transcript `extract_file_changes` (`session_start.py:703`) |
@@ -609,7 +609,7 @@ three legitimate edit entries (`core/plan.py:257-260`).
    → sync_todos_to_steps()         → bump edits_since_last_guardian
    → rewrite PLAN.md               (sensitive tools bump by 20)
    (both no-op without an active plan row: post_tool_use.py:126,132;
-    the todo sync also needs a schema-valid structured plan: plan.py:551-554)
+    the todo sync also needs a schema-valid structured plan: core/plan.py:551-556)
               │                                     │
               └─────────────────┬───────────────────┘
                                 ▼

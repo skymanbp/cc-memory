@@ -24,6 +24,7 @@ import shutil
 import sqlite3
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 # ── sandbox: must be installed BEFORE importing anything from cc_memory ─────
@@ -1009,10 +1010,23 @@ def main():
         f"`python tools/citation_check.py --fix`:\n  "
         + "\n  ".join(f"{r.doc}:{r.docline} -> {r.cited}:{r.start} ({r.detail})"
                       for r in _rot[:8]))
+    # v2.5.3: EVERY citation is checked. One that names no resolvable symbol is
+    # still bounds-checked (in-file, non-blank), which is how 23 citations
+    # pointing past EOF or at blank lines were found. "Unchecked" is not an
+    # acceptable state for a gate — if a shape cannot be anchored, teach the
+    # checker that shape rather than letting it opt out.
+    _cit_skip = [r for r in _cit if r.verdict == "SKIP"]
+    assert not _cit_skip, (
+        f"{len(_cit_skip)} citation(s) are UNCHECKED — extend "
+        f"tools/citation_check.py to cover them:\n  "
+        + "\n  ".join(f"{r.doc}:{r.docline} -> {r.cited}:{r.start} ({r.detail})"
+                      for r in _cit_skip[:8]))
     _cit_ok = sum(1 for r in _cit if r.verdict == "OK")
-    print(f"[OK] v2.5.2 doc citations: {len(_cit)} `file.py:LINE` references "
-          f"checked against ast definition sites — {_cit_ok} anchored and "
-          f"correct, {len(_cit) - _cit_ok} unanchorable, 0 stale")
+    _cit_bnd = sum(1 for r in _cit if r.verdict == "BOUNDS")
+    print(f"[OK] v2.5.3 doc citations: ALL {len(_cit)} `file.py:LINE` "
+          f"references checked — {_cit_ok} anchored to a symbol's ast "
+          f"definition or reference, {_cit_bnd} bounds-checked, 0 unchecked, "
+          f"0 stale")
 
     # === v2.4.2: bounded transcript window (hook-safe) =======================
     # An unbounded transcript read is what killed PreCompact on large projects:
@@ -1980,6 +1994,35 @@ def main():
         f"write_atomic leaked a temp file: {[p.name for p in _aw_dir.iterdir()]}"
     _aw(_aw_target, "NEW CONTENT")
     assert _aw_target.read_text(encoding="utf-8") == "NEW CONTENT"
+
+    # v2.5.3: the DERIVED artifacts retry against a wall-clock BUDGET, because
+    # the destination is unavailable for as long as someone holds it open —
+    # that is a duration, not a number of tries. 12 fixed tries lost 2 of 150
+    # renames under three 100 %-duty readers; a 3 s budget lost none.
+    from core.atomic import _DERIVED_BUDGET_S as _aw_budget
+    assert _aw_budget >= 1.0, f"derived write budget too small: {_aw_budget}"
+    for _aw_rel, _aw_needle in (
+            ("cc_memory/core/plan.py", "budget_s=_DERIVED_BUDGET_S"),
+            ("cc_memory/llm/memory_writer.py", "budget_s=_DERIVED_BUDGET_S")):
+        assert _aw_needle in (_REPO / _aw_rel).read_text(encoding="utf-8"), \
+            (f"{_aw_rel} no longer passes a wall-clock budget to the atomic "
+             f"write; its artifact will go stale on a refused rename")
+    _aw_t0 = time.monotonic()
+    os.replace = _aw_always_fails
+    try:
+        try:
+            _aw(_aw_target, "X", budget_s=0.25)
+        except PermissionError:
+            # why: the raise is expected — what is asserted is that the retry
+            # loop RESPECTED the budget instead of spinning or giving up early.
+            pass
+    finally:
+        os.replace = _aw_real_replace
+    _aw_spent = time.monotonic() - _aw_t0
+    assert 0.20 <= _aw_spent <= 3.0, \
+        f"budget_s=0.25 spent {_aw_spent:.2f}s — the deadline is not honoured"
+    assert _aw_target.read_text(encoding="utf-8") == "NEW CONTENT", \
+        "a budgeted write that failed still damaged the file"
     shutil.rmtree(_aw_dir, ignore_errors=True)
     print("[OK] v2.5.3 atomic writes: all 3 artifact writers ARE "
           "core.atomic.write_atomic, none has re-grown a private copy, and a "

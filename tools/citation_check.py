@@ -221,6 +221,21 @@ def classify(root: Path):
                 start = int(m.group("start"))
                 end = int(m.group("end")) if m.group("end") else start
                 target, note = _resolve_path(root, cited)
+                if target is None and note and "ambiguous" in note:
+                    # Disambiguate by SYMBOL rather than giving up. This repo
+                    # has both cli/plan.py and core/plan.py, and 13 citations
+                    # said only `plan.py`; the sentence around each names a
+                    # symbol that exists in exactly one of them.
+                    cands = [p for p in root.rglob(cited.split("/")[-1])
+                             if "__pycache__" not in p.parts and p.is_file()
+                             and p.as_posix().endswith(cited)]
+                    ctx_all = "\n".join(doc_lines[max(0, n - 2):n + 1])
+                    names = {s.split(".")[-1]
+                             for s in SYMBOL_RE.findall(ctx_all)}
+                    owning = [p for p in cands
+                              if (_defs_in(p) or {}).keys() & names]
+                    if len(owning) == 1:
+                        target, note = owning[0], None
                 if target is None:
                     # An ambiguous bare filename is NOT rot — the citation may
                     # be exactly right and this tool simply cannot tell which
@@ -304,8 +319,30 @@ def classify(root: Path):
                         if cand:
                             break
                     if cand is None:
-                        results.append(Result(rel, n, cited, start, end, "SKIP",
-                                              detail="no unique symbol in context"))
+                        # LAST RESORT — never "unchecked". A citation whose
+                        # sentence names no symbol at all can still be WRONG in
+                        # a way that is mechanically decidable: it can point
+                        # past the end of the file, or at nothing but blank
+                        # lines. 23 of the 253 previously-unanchored citations
+                        # were exactly that. This is a weaker check than the
+                        # symbol anchor, so it is reported separately (BOUNDS)
+                        # rather than being counted as a full verdict — but the
+                        # number of citations NOTHING checks is now zero.
+                        _n_lines = len(src)
+                        _live = [i for i in range(start, min(end, _n_lines) + 1)
+                                 if i >= 1 and src[i - 1].strip()]
+                        if end > _n_lines:
+                            results.append(Result(
+                                rel, n, cited, start, end, "STALE", None, None,
+                                f"cites line {end} of a {_n_lines}-line file"))
+                        elif not _live:
+                            results.append(Result(
+                                rel, n, cited, start, end, "STALE", None, None,
+                                f"lines {start}-{end} are blank"))
+                        else:
+                            results.append(Result(
+                                rel, n, cited, start, end, "BOUNDS", None, None,
+                                "in range, no symbol to anchor on"))
                         continue
                     tail, occ = cand
                     if any(start <= o <= end for o in occ):
@@ -430,7 +467,7 @@ def main():
         counts[r.verdict] = counts.get(r.verdict, 0) + 1
     for r in results:
         if r.verdict in ("STALE", "MISSING") or args.list:
-            tag = {"OK": "[OK]   ", "SKIP": "[SKIP] ",
+            tag = {"OK": "[OK]   ", "SKIP": "[SKIP] ", "BOUNDS": "[BNDS] ",
                    "STALE": "[STALE]", "MISSING": "[FAIL] "}[r.verdict]
             span = r.start if r.start == r.end else f"{r.start}-{r.end}"
             print(f"{tag} {r.doc}:{r.docline}  ->  {r.cited}:{span}"
@@ -439,7 +476,10 @@ def main():
     total = len(results)
     print(f"\nSummary: {total} citations — "
           + ", ".join(f"{counts.get(k, 0)} {k.lower()}"
-                      for k in ("OK", "SKIP", "STALE", "MISSING")))
+                      for k in ("OK", "BOUNDS", "SKIP", "STALE", "MISSING")))
+    print(f"         checked: {total - counts.get('SKIP', 0)} of {total} "
+          f"({counts.get('OK', 0)} symbol-anchored, "
+          f"{counts.get('BOUNDS', 0)} bounds-only)")
     bad = counts.get("STALE", 0) + counts.get("MISSING", 0)
     print("Result: " + ("OK (no rot detectable)" if not bad
                         else f"FAIL ({bad} citation(s) do not cover their "

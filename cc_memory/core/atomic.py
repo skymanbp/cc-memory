@@ -47,10 +47,32 @@ from pathlib import Path
 # would hang a hook that has a hard host timeout, so it stops and raises.
 _RETRIES = 5
 _BACKOFF_S = 0.01
+_MAX_BACKOFF_S = 0.02
+
+# The two DERIVED artifacts (PLAN.md, MEMORY.md) retry against a wall-clock
+# BUDGET instead of a try count. Their writers swallow a final failure and keep
+# the previous complete file, so for them a failure means "the artifact is one
+# write stale" rather than "the caller is told" — and the destination is
+# unavailable for as long as someone else holds it open, which is a duration.
+# Measured, 3 readers at 100 % duty cycle over 150 write rounds: 12 fixed tries
+# (0.78 s) lost 2 renames, a 3 s budget lost 0. Worst case 3 s against an 8 s
+# PostToolUse budget and a 120 s PreCompact one, and it is only ever paid while
+# the OS is actively refusing. PROGRESS.md keeps the short count because its
+# writer RAISES — there the caller finds out and can act.
+_DERIVED_BUDGET_S = 3.0
 
 
-def write_atomic(path: Path, text: str, retries: int = _RETRIES) -> None:
+def write_atomic(path: Path, text: str, retries: int = _RETRIES,
+                 budget_s: float = 0.0) -> None:
     """Replace `path` with `text` atomically, or raise.
+
+    `budget_s`, when > 0, keeps retrying the rename until that many seconds
+    have elapsed instead of stopping after `retries` attempts. A fixed count is
+    the wrong shape for this failure: the destination is unavailable for as
+    long as some other process holds it open, which is a DURATION, not a number
+    of tries. Measured with three readers at 100 % duty cycle, 150 write rounds:
+    12 fixed tries (0.78 s) lost 2 renames; a 3 s budget lost none.
+    Only the derived artifacts use it — see `_DERIVED_RETRIES`.
 
     `errors="replace"` on the encode: a lone surrogate — reachable from a
     `surrogateescape`-decoded filename that lands in `files_touched` — would
@@ -70,16 +92,27 @@ def write_atomic(path: Path, text: str, retries: int = _RETRIES) -> None:
         with os.fdopen(fd, "w", encoding="utf-8", errors="replace") as fh:
             fh.write(text)
         last_err = None
-        for attempt in range(max(1, retries)):
+        deadline = (time.monotonic() + budget_s) if budget_s > 0 else None
+        attempt = 0
+        while True:
             try:
                 os.replace(tmp, str(path))
                 return
             except PermissionError as e:
                 # why: Windows sharing violation from a concurrent reader.
-                # Retry briefly; do NOT fall back to a truncating write, which
-                # is the defect this module exists to remove.
+                # Retry; do NOT fall back to a truncating write, which is the
+                # defect this module exists to remove.
                 last_err = e
-                time.sleep(_BACKOFF_S * (attempt + 1))
+            attempt += 1
+            if deadline is not None:
+                if time.monotonic() >= deadline:
+                    break
+            elif attempt >= max(1, retries):
+                break
+            # Linear backoff capped at _MAX_BACKOFF_S: growing without a cap
+            # turns a 3 s budget into three sleeps, which is fewer chances to
+            # catch the gap between the holder's close and its next open.
+            time.sleep(min(_BACKOFF_S * attempt, _MAX_BACKOFF_S))
         raise last_err
     finally:
         if os.path.exists(tmp):

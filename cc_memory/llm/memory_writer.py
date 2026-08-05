@@ -36,7 +36,7 @@ if str(_PKG_ROOT) not in sys.path:
     sys.path.insert(0, str(_PKG_ROOT))
 
 from core.db import MemoryDB
-from core.atomic import write_atomic
+from core.atomic import write_atomic, _DERIVED_BUDGET_S
 from core.privacy import clean_for_storage, neutralize_inline
 from core.logger import get_logger
 
@@ -303,7 +303,11 @@ def regenerate_memory_index(db: MemoryDB, project_id: int, memory_dir: Path) -> 
         "*Anti-patch contract:  see `docs/CONTRACTS.md#anti-patch-contract`*",
     ]
     try:
-        _atomic_write_text(memory_dir / "MEMORY.md", "\n".join(lines))
+        # A wall-clock budget, not the default try count: a failure here is
+        # swallowed below, so it costs a STALE MEMORY.md rather than an error
+        # the caller sees. See core/atomic.py:_DERIVED_BUDGET_S.
+        _atomic_write_text(memory_dir / "MEMORY.md", "\n".join(lines),
+                           budget_s=_DERIVED_BUDGET_S)
     except OSError as e:
         # why: MEMORY.md is a projection of the DB, which is already committed
         # when this runs, and this function is called from the Stop-hook idle

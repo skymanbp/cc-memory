@@ -42,7 +42,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-from core.atomic import write_atomic
+from core.atomic import write_atomic, _DERIVED_BUDGET_S
 from core.logger import get_logger
 # Render-path marker defence. PLAN.md is read by Claude as the live plan
 # anchor, and every field it renders originates outside the plugin.
@@ -483,7 +483,10 @@ def write_plan_md(db, project_id: int, memory_dir: Path) -> Path:
     memory_dir.mkdir(parents=True, exist_ok=True)
     out = memory_dir / "PLAN.md"
     try:
-        _atomic_write_text(out, text)
+        # A wall-clock budget, not the default try count: a failure here is
+        # swallowed below, so it costs a STALE PLAN.md rather than an error
+        # the caller sees. See core/atomic.py:_DERIVED_BUDGET_S.
+        _atomic_write_text(out, text, budget_s=_DERIVED_BUDGET_S)
     except OSError as e:
         # why: see the docstring — a projection of committed state must not
         # take down the operation that committed it, and the alternative the

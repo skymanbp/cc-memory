@@ -1,7 +1,7 @@
-<!-- i18n-source: ARCHITECTURE.md | sha256: 53a9c27f02c1e311 | version: 2.5.3 | translated: 2026-08-05 -->
+<!-- i18n-source: ARCHITECTURE.md | sha256: da6715a1700b1353 | version: 2.5.4 | translated: 2026-08-05 -->
 > [English](ARCHITECTURE.md) · **简体中文**
 
-# cc-memory — 架构（v2.5.3）
+# cc-memory — 架构（v2.5.4）
 
 cc-memory 是一个 Claude Code 插件，为 Claude 提供**跨压缩、跨会话的持久化结构化
 记忆**。本文档是总览：这个插件用来做什么、仓库如何布局、哪些钩子在何时触发、数据库
@@ -84,7 +84,7 @@ PROTOCOL）都是**有意**同时匹配中文和英文的，存储的记忆也�
 ```
 cc-memory/
 ├── .claude-plugin/
-│   ├── plugin.json              ← 插件清单（v2.5.3）
+│   ├── plugin.json              ← 插件清单（v2.5.4）
 │   └── marketplace.json         ← /plugin marketplace add 条目
 ├── hooks/hooks.json             ← 钩子声明（6 条命令 / 5 个事件）
 ├── skills/                      ← 技能的唯一规范位置
@@ -276,12 +276,12 @@ SQLite 表（定义在 [`cc_memory/core/db.py`](../cc_memory/core/db.py)），�
 
 | 表 | 用途 |
 |-------|---------|
-| `projects` | 每个项目路径一行（`db.py:36`）；自迁移 `v2_project_mode` 起带有 `mode`（`db.py:158`） |
-| `sessions` | 每次压缩事件一行（`db.py:44`） |
-| `memories` | 抽取出的事实（category、importance、topic、content_hash、**supersedes_id**、last_referenced_at）（`db.py:55`） |
-| `topics` | 按主题名的整理摘要（带版本）（`db.py:69`） |
-| `keywords` | 自动检测的项目词汇（`db.py:79`） |
-| `plans` | 计划队列（draft → ready → done）（`db.py:88`） |
+| `projects` | 每个项目路径一行（`db.py:36`）；自迁移 `v2_project_mode` 起带有 `mode`（`db.py:130`） |
+| `sessions` | 每次压缩事件一行（`db.py:45`） |
+| `memories` | 抽取出的事实（category、importance、topic、content_hash、**supersedes_id**、last_referenced_at）（`db.py:56`） |
+| `topics` | 按主题名的整理摘要（带版本）（`db.py:70`） |
+| `keywords` | 自动检测的项目词汇（`db.py:80`） |
+| `plans` | 计划队列（draft → ready → done）（`db.py:89`） |
 | `observations` | 原始 PostToolUse 事件，抽取后清理（`db.py:129`） |
 | `session_summaries` | 每会话 6 字段结构化摘要（request / investigated / learned / completed / next_steps / notes）+ files_read/files_modified（`db.py:143`） |
 | **`progress`** | v2.1 新增——每项目一行。`memory/PROGRESS.md` 的唯一真相来源（`db.py:188`）。 |
@@ -370,7 +370,7 @@ regenerate_memory_index(db, project_id, memory_dir)   ← MEMORY.md 刷新
 - `upsert_batch`（`memory_writer.py:200-235`）逐条循环调用 `upsert_smart`，并在最后
   重新生成**一次**，但仅当传入了 `memory_dir` 时才会（`memory_writer.py:200-235`）。
   所有钩子调用方都会传（`pre_compact.py:435`、`stop.py:166`、
-  `session_start.py:722`）；同步 PreCompact 支路还会在其余状态变更之后再刷一次
+  `session_start.py:972`）；同步 PreCompact 支路还会在其余状态变更之后再刷一次
   （`pre_compact.py:684`）。
 - 单发调用方显式调用 `regenerate_memory_index`：`cli/mem.py:849` 与 `:584`、
   `mcp/server.py:525`、`ui/dashboard.py:1540`、`ui/web_viewer.py:64`，外加
@@ -477,7 +477,7 @@ SessionStart：
 为此，同步支路会在加载 transcript **之前**写入
 `memory/.pre_compact_attempt.json`（`pre_compact.py:359-368`），并且只在运行完整
 结束时才移除它（`pre_compact.py:536`）——包括在它自己的错误路径上
-（`pre_compact.py:571`），这样一次*报错*的运行绝不会被报告成一次*被杀*的运行。
+（`pre_compact.py:731`），这样一次*报错*的运行绝不会被报告成一次*被杀*的运行。
 `SessionStart` 会报告残留的标记，但只在它至少已存在 10 分钟之后才报，因此一次仍在
 进行中的运行绝不会被误标（`session_start.py:187-206`）。
 
@@ -526,16 +526,16 @@ transcript 得到 0 条腿、0 条记忆。第 3 级从
 机械地同步步骤状态（不调用 LLM）；`Edit`/`Write`/`MultiEdit`/`NotebookEdit` 会累加
 `edits_since_last_guardian`，而敏感的 Bash 调用（`git push`、`rm -rf`、
 `DROP TABLE`、`npm publish`、`kubectl apply`、`terraform apply`……见
-`core.plan.is_sensitive_tool_call`，`plan.py:729`）一次加 20。一旦
+`core.plan.is_sensitive_tool_call`，`plan.py:810-827`）一次加 20。一旦
 `turns_since_last_guardian >= 8` 或 `edits_since_last_guardian >= 12`，Stop 钩子
-就发出 guardian 建议（`core.plan.should_nudge_guardian`，`plan.py:702`），并把
+就发出 guardian 建议（`core.plan.should_nudge_guardian`，`plan.py:783-799`），并把
 refiner 提示限速为每会话每 5 个回合至多一次。钩子自己绝不派生子代理——它们只提示。
 完整规格见 [docs/CONTRACTS.md](CONTRACTS.md#plan-contract)。**自 v2.5 起，上面的
 每一条分支在每种模式下都会运行**——此前遮蔽它们的是什么，见
 [observation 闸门](#observation-闸门不再遮蔽计划分支v25-已修)。
 
 尚未精炼的原始计划也不再是隐形的：`core.plan.raw_pending_refinement`
-（`plan.py:262`）是共享判据，`write_plan_md` 与 `/cc-mem plan-status` 都会以一条
+（`plan.py:453-493`）是共享判据，`write_plan_md` 与 `/cc-mem plan-status` 都会以一条
 PENDING REFINEMENT 横幅加逐字原文开头，并把更旧的结构化计划明确标注为已被取代。
 那段逐字块的围栏宽度会超过原始文本里最长的一串反引号，因为计划模式的输出里经常
 带有代码围栏。
@@ -658,13 +658,13 @@ v2.4.2 才成立：`_extract_via_llm` 的 `except` 元组此前不包含 `Runtim
 写入方，便于溯源：`MEMORY.md` ← `memory_writer.regenerate_memory_index`
 （`memory_writer.py:238`）；`PROGRESS.md` ← `core.progress.write_progress_md`
 （`progress.py:323, 366`）；`PLAN.md` ← `core.plan.write_plan_md`
-（`plan.py:310`）；`.plan_history/` ← `plan.py:437`；`.last_save.json` ←
+（`plan.py:453-493`）；`.plan_history/` ← `plan.py:453-493`；`.last_save.json` ←
 `pre_compact.py:526, 556`；`.last_inject.json` ← `session_start.py:291-309`
 （临时文件 + `os.replace`，是真正原子的，不同于 `.last_save.json` 用的普通写）；
 `.last_consolidation.json` / `.consolidation.lock` ←
-`consolidate_async.py:155-156`；`.pre_compact_attempt.json` ←
+`consolidate_async.py:112-128`；`.pre_compact_attempt.json` ←
 `pre_compact.py:284-311`。`sessions/` 与 `topics/` 由最先接触该项目的那条路径创建
-——自动初始化时是 `user_prompt.py:44-45`，否则是 `pre_compact.py:342-343`。
+——自动初始化时是 `user_prompt.py:57-63`，否则是 `pre_compact.py:342-343`。
 
 `memory/PROGRESS.md`、`memory/MEMORY.md` 和 `memory/PLAN.md` 都是**生成产物**。请改
 SQL 真相来源（PROGRESS.md 对应 `progress`，PLAN.md 对应 `plan_active`，MEMORY.md
@@ -704,7 +704,7 @@ SQL 真相来源（PROGRESS.md 对应 `progress`，PLAN.md 对应 `plan_active`�
   报告为损坏布局，而不是被跳过（`mem.py:158-170`）。
 - **legacy / 独立安装**——`~/.claude/hooks/cc-memory/`（`mem.py:42`），由
   PyInstaller 安装器写入（`ui/installer.py:58` 的 `TARGET_DIR`）。这里的钩子由
-  `_merge_into_settings`（`installer.py:901+`）直接注册进
+  `_merge_into_settings`（`installer.py:916-950+`）直接注册进
   `~/.claude/settings.json`，而不是通过插件清单。
 
 在市场类布局下，`~/.claude/hooks/cc-memory/` 只保留 `logs/`（`core.logger` 的输出

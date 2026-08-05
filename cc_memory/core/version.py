@@ -22,4 +22,4 @@ Bump this together with the non-importable manifests, which cannot read it:
     pyproject.toml                 [project] version
 `tests/smoke_test.py` asserts all of them agree with this value.
 """
-__version__ = "2.5.3"
+__version__ = "2.5.4"

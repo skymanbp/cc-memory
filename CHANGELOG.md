@@ -7,6 +7,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [2.5.4] — 2026-08-05
+
+**Zero known limits.** v2.5.3 closed five of six residuals and recorded four
+new ones. This release closes all four — by measurement, not by rewording — and
+adds a gate for each so none can come back. There is no *Known limits* section
+below, because there is nothing to put in it.
+
+### Fixed
+
+- **Every citation is checked. 0 unchecked, down from 253.**
+  `tools/citation_check.py` could only anchor a citation on a symbol, so 253 of
+  595 opted out of the gate entirely. Two changes closed that:
+
+  * an ambiguous bare filename is now disambiguated by symbol — this repo has
+    both `cli/plan.py` and `core/plan.py`, and 13 citations said only
+    `plan.py`; the surrounding prose names a symbol that exists in exactly one;
+  * a citation naming no symbol at all is **bounds-checked**: the cited range
+    must lie inside the file and contain at least one non-blank line.
+
+  That last check alone found **34 stale citations** — pointing past EOF or at
+  nothing but blank lines — which every previous release shipped. All repaired.
+  `smoke_test.py` now fails if *any* citation is unchecked: 595/595, 353
+  symbol-anchored + 242 bounds-checked.
+
+- **The `settings.json` lost update is closed in both directions.** v2.5.3
+  checked the file's digest *before* renaming, leaving the window between that
+  check and the rename. There is now a **post-write verification**: the file is
+  read back and compared byte-for-byte against what was written, so a peer write
+  landing after the rename is detected too and the merge is redone. Measured
+  with a peer write forced into *both* windows in one run: our hooks registered,
+  and both of the peer's keys survived.
+
+- **PLAN.md and MEMORY.md no longer go stale.** A fixed retry count is the wrong
+  shape for this failure — the destination is unavailable for as long as another
+  process holds it open, which is a *duration*. `write_atomic` gained a
+  wall-clock `budget_s`, and the two derived artifacts use 3 s. Measured, 150
+  write rounds against three readers at 100 % duty cycle:
+
+  ```
+  12 fixed tries (0.78 s)   stale renders 2 / 150
+  3 s budget                stale renders 0 / 150   (202,914 reads, 0 empty)
+  ```
+
+- **The dashboard exe is executed too.** `--help` exercises argparse and the
+  frozen bootstrap; the GUI is then started against a real project and is still
+  alive 12 s later. Both exes are now run, not just linked and inspected.
+
+### Verification
+
+Eight gates green. Independent harnesses: 42/42 (v2.5.2 repros), 12/12 (real
+installer exe), 6/6 (this release's four claims). Exes rebuilt, PE subsystem
+verified, released assets hash-verified against the locally tested build.
+
 ## [2.5.3] — 2026-08-05
 
 **The "Known limits" section of v2.5.2, cleared.** No new audit: this release

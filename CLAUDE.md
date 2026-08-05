@@ -2,7 +2,7 @@
 
 ## Project: cc-memory
 
-**Claude Code persistent memory plugin (v2.5.3)** — anti-patch reconcile-on-write
+**Claude Code persistent memory plugin (v2.5.4)** — anti-patch reconcile-on-write
 + LLM-judged semantic de-duplication, forced PROGRESS.md handoff with
 per-session annotation, live PLAN.md anchor with plan-refiner / plan-guardian
 subagents + mandatory carryover gate, bounded transcript reads, injection
@@ -10,9 +10,33 @@ observability, FTS5 search, AI-judged extraction with Haiku (optional local
 Ollama fallback).
 
 - **Language**: Python 3.8+ (pure stdlib, zero pip dependencies at runtime)
-- **Version**: 2.5.3
+- **Version**: 2.5.4
 - **License**: MIT
 - **Platform**: Windows-primary, cross-platform compatible (Tkinter required for GUI)
+
+## What changed in v2.5.4 (over v2.5.3)
+
+**Zero known limits.** v2.5.3's four residuals, closed by measurement. The
+invariants:
+
+1. **No citation may be UNCHECKED.** `tools/citation_check.py` anchors on a
+   symbol where it can and BOUNDS-checks (inside the file, non-blank) where it
+   cannot; `smoke_test.py` fails on any `SKIP`. If a new citation shape cannot
+   be anchored, teach the checker that shape — do not let it opt out. The bounds
+   check found 34 stale citations on its first run.
+
+2. **The installer verifies its `settings.json` write BOTH before and after the
+   rename.** The pre-check cannot cover the window between itself and the
+   rename; the post-check reads the file back and compares it byte-for-byte.
+   Removing either half reopens a lost update in one direction.
+
+3. **Derived artifacts retry against a wall-clock BUDGET**
+   (`core/atomic.py:_DERIVED_BUDGET_S`), not a try count: the destination is
+   unavailable for a duration, not for a number of attempts. 12 fixed tries lost
+   2 of 150 renames under three 100 %-duty readers; a 3 s budget lost 0.
+   PROGRESS.md keeps the short count because its writer RAISES.
+
+4. **Both exes are RUN before release**, not just PE-header inspected.
 
 ## What changed in v2.5.3 (over v2.5.2)
 
@@ -151,7 +175,7 @@ were closed too. Nine things that were silently wrong in shipped code:
    docstring now forbids re-inverting this. Per mode: ExitPlanMode → plan rows
    0/0/0 → 1/1/1; Edit counter 1/0/1 → 1/1/1; `git push` 21/20/1 → 21/21/21.
    A raw plan awaiting refinement is also no longer invisible:
-   `core.plan.raw_pending_refinement` (`plan.py:262`) makes PLAN.md and
+   `core.plan.raw_pending_refinement` (`plan.py:285-314`) makes PLAN.md and
    `plan-status` lead with a PENDING REFINEMENT banner + the raw text.
 
 3. **`core/privacy.py` failed OPEN.** `strip_private` was a non-greedy `re.sub`
@@ -692,7 +716,7 @@ standalone installs.
     `ui/dashboard.py:2125` (Save Session)
   - `["regex","manual"]` — `ui/dashboard.py:2151` (Save Session, regex leg)
   - `["metric","manual"]` — `ui/dashboard.py:2156` (Save Session, metric leg)
-  - `["auto-detected","init"]` — `ui/dashboard.py:2278` (new-project init)
+  - `["auto-detected","init"]` — `ui/dashboard.py:2301` (new-project init)
   - `["web"]` — `ui/web_viewer.py`
   - `["llm-dedup","merged"]` — `core/consolidate.py`
 
