@@ -2,7 +2,7 @@
 
 # cc-memory
 
-**Claude Code persistent memory plugin (v2.5.0)** — anti-patch reconcile-on-write
+**Claude Code persistent memory plugin (v2.5.1)** — anti-patch reconcile-on-write
 with LLM-judged semantic de-duplication, forced PROGRESS.md handoff, live PLAN.md
 anchor with plan-refiner / plan-guardian subagents and a mandatory carryover
 gate, bounded transcript reads, injection observability, FTS5 search, AI-judged
@@ -175,10 +175,15 @@ and skips a leg that cannot finish. Stop: 25.45 s → 15.99 s. PreCompact: ~144 
   missing and the API-key check was skipped entirely.
 - **`config.json` no longer lies.** Two audits found 34 of 51 leaf keys with no
   reader; every inert key is deleted, and the surviving ones cite their reader
-  in-file. The one new key, `excluded_projects`, is a real opt-out: a listed
-  directory and everything beneath it gets no `memory/`, no DB, no extraction.
+  in-file. `excluded_projects` is **not** a new key — it shipped in v2.4.3 with
+  an empty default and no reader anywhere — but it is now a real opt-out: a
+  listed directory and everything beneath it gets no `memory/`, no DB, no
+  observations, no extraction and no PROGRESS.md, because **all six hooks**
+  check it before doing anything else.
 - **`/cc-mem sql` is read-only for real.** `DROP TABLE topics` used to exit 0
-  and drop the table. The dashboard's SQL console now requires a confirmation
+  and drop the table. The guard also refuses the `PRAGMA name(value)` setter
+  form, which SQLite accepts as an equivalent of `PRAGMA name = value` and an
+  `=`-only test let through. The dashboard's SQL console requires a confirmation
   naming the statement before any write, and reports the rowcount.
 - **The dashboard stopped destroying data**: bulk delete became bulk *archive*
   (no more dangling `supersedes_id` rows), `MEMORY.md` is regenerated after a
@@ -211,9 +216,21 @@ Recorded honestly, because each was measured rather than assumed:
   `update_plan_content`) all accept `project_id` and every shipped caller now
   passes it, but none of them *requires* it — an unscoped raw call from new code
   would still cross projects, because `plans.id` is global to the DB file.
-- `excluded_projects` has no coverage in either pre-existing gate.
 - Searching for a bare `%` or `_` now returns 0 rows instead of the whole table.
   That is the fix, but it is a visible result change.
+- **Doc `file:line` citations are unenforced and partly stale.** They are
+  hand-maintained; `docs/ARCHITECTURE.md` and `docs/CONTRACTS.md` still carry
+  citations that point at the line a symbol *used* to be on. A mechanical
+  definition-site check finds them (for each `path:lines` citation, resolve the
+  symbols named in the same sentence and assert the range covers their unique
+  definition) and belongs in CI next to `tools/i18n_check.py`. Nothing enforces
+  them today, so re-derive a citation before you trust it. Prose claims in these
+  docs were fact-checked against the code; the line numbers were not all
+  re-derived.
+- `tools/i18n_check.py` compares content hashes only. It cannot see a
+  translation whose *body* has drifted from its English source — including a
+  dead in-document anchor, which is how 22 of them survived in the Chinese docs
+  until v2.5.1.
 
 ## What's new in v2.4.2
 
@@ -500,7 +517,10 @@ translation convention. See [docs/ARCHITECTURE.md#9-documentation-language-conve
 marketplace install):
 
 ```bash
-M="python ~/.claude/hooks/cc-memory/cli/mem.py --project ."
+# NOTE: $HOME, not ~. Bash expands a tilde BEFORE parameter expansion and does
+# not rescan the result, so a ~ stored inside a variable stays a literal
+# character and `$M status` dies with `can't open file '.../~/.claude/...'`.
+M="python $HOME/.claude/hooks/cc-memory/cli/mem.py --project ."
 $M status
 $M search "auth flow"
 # ... same subcommands as above
@@ -615,8 +635,10 @@ Task planning system using the same SQLite DB. This is the plan **queue**
 ```bash
 # Console script, if you installed the package with pip:
 P="cc-memory-plan --project ."
-# Or run the module from a standalone install (FLAT — no cc_memory/ segment):
-P="python ~/.claude/hooks/cc-memory/cli/plan.py --project ."
+# Or run the module from a standalone install (FLAT — no cc_memory/ segment).
+# Use $HOME, not ~: bash expands a tilde before parameter expansion and does not
+# rescan the result, so a ~ inside a variable is never expanded on use.
+P="python $HOME/.claude/hooks/cc-memory/cli/plan.py --project ."
 
 $P add "Task A" "Task B" "Task C"
 $P list
@@ -653,8 +675,14 @@ because editing it looks like it does something. What remains:
   Anthropic legs are the only backends.
 - `excluded_projects` — absolute paths that opt OUT of cc-memory entirely. A
   listed directory *and everything beneath it* gets no `memory/` directory, no
-  DB, no extraction and no PROGRESS.md: the two hooks that would create them
-  exit immediately. Matching is on the resolved absolute path, case-insensitive
+  DB, no observations, no extraction and no PROGRESS.md: **all six hooks** call
+  `core.modes.is_excluded(cwd)` as their first act after resolving `cwd` and
+  exit 0. That is one shared implementation, not a copy per hook — v2.5.0
+  shipped it as two private copies in the only two hooks that *create*
+  `memory/`, which left a project that was initialised BEFORE it was listed
+  fully instrumented: observations kept accumulating, PROGRESS.md kept naming
+  its files, and with a live credential the Stop observer kept POSTing them to
+  the Anthropic API. Matching is on the resolved absolute path, case-insensitive
   on Windows. This is the only opt-out.
 - `notes` — in-file documentation, including which module owns each value that
   used to live here.

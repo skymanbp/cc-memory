@@ -43,6 +43,7 @@ enable_utf8_io()
 from core.db import MemoryDB
 from core.extractor import load_transcript_window, mangle_project_path
 from core.logger import get_logger
+from core.modes import is_excluded
 from core.progress import write_progress_md
 from llm.memory_writer import upsert_batch
 
@@ -804,6 +805,39 @@ def _refresh_progress_row(db, project_id, memory_dir, current_session_id=None):
         _log.info(f"refreshed empty progress fields: {sorted(k for k in patch if k != 'trigger_type')}")
 
 
+# ── Cost model for load_transcript_window (v2.5.1) ─────────────────────────
+# _RETRO_DEADLINE_S used to be enforced in exactly two places: the top of the
+# per-file loop below, and inside call_llm. load_transcript_window ran BETWEEN
+# them with no time bound of its own, so a file could be STARTED just under the
+# deadline and then load for seconds. Measured on the reference repro (three
+# unsaved prior transcripts, the oldest 4 GiB, a healthy-but-slow backend):
+# `wall=17.12s` against a 15s host timeout. Real transcripts are big enough to
+# do it on their own — 2.11 GiB loads in 3.37s and such a file exists on this
+# machine, while the loop reaches its last check at ~12.6s.
+#
+# The kill is TerminateProcess: no `except`, no `finally`, nothing committed.
+# A file that yields no memories also writes no `sessions` row, so the SAME
+# files are re-scanned and re-killed at every SessionStart, forever.
+#
+# The load is two linear passes (see core.extractor.load_transcript_window):
+#   * a JSON decode of at most a 32 MiB tail window (~25 MiB/s), and
+#   * a raw record scan of the WHOLE file to keep total_records exact (~1 GiB/s).
+# Predicted vs measured: 2.11 GiB -> 3.39s / 3.37s; 1.49 GiB -> 2.77s / 2.36s;
+# 4 GiB synthetic -> 5.28s / 3.67s. The model never under-predicted; _LOAD_SAFETY
+# on top covers a cold page cache and a contended disk.
+_WINDOW_TAIL_BYTES = 32 << 20   # keep in sync with extractor._DEFAULT_TAIL_BYTES
+_DECODE_BYTES_S = 25 << 20
+_SCAN_BYTES_S = 1 << 30
+_LOAD_SAFETY = 1.5
+
+
+def _estimate_load_s(size_bytes):
+    """Seconds load_transcript_window is expected to need for `size_bytes`."""
+    decode = min(size_bytes, _WINDOW_TAIL_BYTES) / _DECODE_BYTES_S
+    scan = size_bytes / _SCAN_BYTES_S
+    return (decode + scan) * _LOAD_SAFETY
+
+
 def retroactive_save(cwd, db, project_id, current_session_id="", deadline=None):
     """Best-effort: LLM-extract memories from prior, never-compacted transcripts.
 
@@ -815,9 +849,12 @@ def retroactive_save(cwd, db, project_id, current_session_id="", deadline=None):
       2. Every candidate .jsonl must additionally NAME this project in its own
          `cwd` field (`_transcript_belongs_to`, fail-closed).
 
-    `deadline` is a `time.monotonic()` instant after which no NEW transcript is
-    started. Each file is committed as it completes, so hitting the deadline
-    keeps everything already saved; only the remaining files are skipped.
+    `deadline` is a `time.monotonic()` instant by which this function must be
+    DONE — not merely the instant after which no new file is started. Three
+    checks enforce it: before the file (loop top), before the file's window load
+    (whose cost is charged UP FRONT from its size, see _estimate_load_s), and
+    again immediately after that load. Each file is committed as it completes,
+    so stopping keeps everything already saved; only the rest are skipped.
     """
     transcript_dir = _find_transcript_dir(cwd)
     if not transcript_dir:
@@ -839,11 +876,32 @@ def retroactive_save(cwd, db, project_id, current_session_id="", deadline=None):
             continue
         if session_uuid in saved_ids:
             continue
-        if jsonl.stat().st_size < 1024:
+        size = jsonl.stat().st_size
+        if size < 1024:
             continue
+        # Charge the window load to the budget BEFORE starting it. `continue`
+        # rather than `break`: the list is newest-first, so a later file may
+        # still be small enough to afford.
+        if deadline is not None:
+            est = _estimate_load_s(size)
+            left = deadline - time.monotonic()
+            if est >= left:
+                _log.info(
+                    f"retroactive save: skipping {jsonl.name} — {size/1024**2:.0f} "
+                    f"MiB needs ~{est:.1f}s, only {left:.1f}s of budget left"
+                )
+                continue
         try:
             window = load_transcript_window(str(jsonl))
             messages = window.messages
+            # The estimate is a model; the clock is the truth. If the load
+            # actually ran past the deadline, stop: call_llm would skip every
+            # leg anyway, _retroactive_extract would return None, and no
+            # `sessions` row would be written — pure budget burn.
+            if deadline is not None and time.monotonic() >= deadline:
+                _log.info(f"retroactive save: budget spent loading "
+                          f"{jsonl.name}, stopping")
+                break
             if not messages or len(messages) < 5:
                 continue
             if not _transcript_belongs_to(messages, cwd):
@@ -915,9 +973,28 @@ def main():
                    f"({type(data).__name__}) — nothing to do")
         sys.exit(0)
 
+    # FIELD types, not just the container type. The guard above only makes
+    # `.get()` legal; a non-string cwd/session_id still flows into Path() and
+    # into the DB from inside the try below. This hook already survives them
+    # (its body sits in a broad try), but the guard belongs with the parse, not
+    # with the recovery.
     cwd = data.get("cwd", "")
     session_id = data.get("session_id", "")
-    if not cwd:
+    if not isinstance(cwd, str) or not cwd:
+        sys.exit(0)
+    if not isinstance(session_id, str):
+        session_id = ""
+
+    # Project opt-out — the FIRST act after resolving cwd, before the DB is
+    # opened. Gating on memory/memory.db existing is not an opt-out: for a
+    # project initialised before the user listed it, this hook would otherwise
+    # still print that project's memories and PROGRESS.md preview into the next
+    # session's context, still write memory/.last_inject.json, and still run
+    # retroactive LLM extraction over its transcripts. Logged (unlike Stop /
+    # PostToolUse) because SessionStart fires once per session and a silently
+    # empty injection is otherwise unexplainable.
+    if is_excluded(cwd):
+        _log.info(f"skipped: {cwd} is in config.json excluded_projects")
         sys.exit(0)
 
     try:

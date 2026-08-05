@@ -18,9 +18,17 @@ returns nothing, so run both. `tests/test_surfaces.py` (v2.5) covers the
 shipped surfaces these contracts are reached through.
 
 This document supersedes the pre-2.4.3 trio `docs/MEMORY_RULES.md`,
-`docs/HANDOFF_PROTOCOL.md` and `docs/PLAN_PROTOCOL.md`. Line references are
-against the current tree; the canonical version string is
-`cc_memory/core/version.py`.
+`docs/HANDOFF_PROTOCOL.md` and `docs/PLAN_PROTOCOL.md`; the canonical version
+string is `cc_memory/core/version.py`.
+
+**On `file:line` citations.** Nothing enforces them, and they rot on every
+refactor. The v2.5.1 documentation pass re-derived the `core/plan.py` citations
+in the plan contract and fact-checked every prose claim against the code, but
+citations into `cc_memory/hooks/*`, `cli/mem.py` and `ui/installer.py` were
+deliberately NOT re-derived — those files were being rewritten in the same
+round, so any number written for them would have been stale on landing. Treat a
+line number here as a hint and the **symbol name** as the fact:
+`grep -n "def <symbol>" <file>` is authoritative.
 
 ## Contents
 
@@ -713,23 +721,23 @@ row or the stored `structured` is not schema-valid (`:551-554`).
 `plan_active` is a SINGLE slot, so replacing a plan is the one moment staged
 work can silently vanish. This was a real, documented loss (the SELF-ITER S1-S3
 sink: ratified follow-up phases that never re-entered any plan and were gone the
-moment the next round's plan overwrote the slot — `core/plan.py:330-343`). Both
+moment the next round's plan overwrote the slot — `core/plan.py:443-458`). Both
 doors into that slot are gated, and there is deliberately **no force flag**
-(`core/plan.py:340-341`, restated inside the error text at `:514`): a drop
+(`core/plan.py:455-456`, restated inside the error text at `:647`): a drop
 without a recorded reason is exactly the failure mode this gate exists to kill.
 `plan-set` accordingly accepts only `--raw / --raw-file / --from-refiner`
-(`cli/mem.py:1044-1048`) — there is nothing to pass to bypass it.
+(`cli/mem.py`, `cmd_plan_set`) — there is nothing to pass to bypass it.
 
 #### Door 1 — REPLACE (`/cc-mem plan-set --from-refiner` → `core.plan.apply_refined_plan`)
 
-`check_carryover(old_structured, new_plan)` (`core/plan.py:367-424`) collects
+`check_carryover(old_structured, new_plan)` (`core/plan.py:482-539`) collects
 the outgoing plan's unfinished steps — status in `pending | in_progress |
-blocked` (`_UNFINISHED_STATUSES`, `:346`; selector `unfinished_steps` at
-`:350-356`) — and requires each one to be either
+blocked` (`_UNFINISHED_STATUSES`, `:461`; selector `unfinished_steps` at
+`:465-472`) — and requires each one to be either
 
-  (a) **auto-carried**: trigram-Jaccard ≥ `CARRYOVER_MATCH_THRESHOLD = 0.5` (`:345`)
+  (a) **auto-carried**: trigram-Jaccard ≥ `CARRYOVER_MATCH_THRESHOLD = 0.5` (`:460`)
       against a new step's bare `title` OR its `title + notes` (both are
-      candidates since v2.4.1, `:383-391` — comparing against `title+notes`
+      candidates since v2.4.1, `:492-506` — comparing against `title+notes`
       alone let a long notes field dilute an identical title below the
       threshold, found on the gate's second real replacement, R610; the
       `title+notes` candidate stays so a step folded into another step's notes
@@ -737,18 +745,18 @@ blocked` (`_UNFINISHED_STATUSES`, `:346`; selector `unfinished_steps` at
   (b) **dispositioned**: a top-level `"dispositions"` entry whose `old_title`
       matches at ≥ 0.5, with `action` in `done | dropped | merged | carried`
       and a NON-EMPTY `reason` — `detail` is accepted as a synonym for `reason`
-      (`:392-423`, synonym at `:413-414`).
+      (`:507-538`, synonym at `:528-529`).
 
 The dispositions are read from the **RAW refiner dict**, before normalisation
-(`apply_refined_plan` passes `structured`, not `normalised`, at `:502-504`;
-rationale in the `check_carryover` docstring at `:370-373`): the schema stays
+(`apply_refined_plan` passes `structured`, not `normalised`, at `:635-637`;
+rationale in the `check_carryover` docstring at `:485-487`): the schema stays
 additive, so an older refiner's output still works on plans with no unfinished
 steps.
 
-Any violation raises `ValueError` (`core/plan.py:505-514`). `plan-set
+Any violation raises `ValueError` (`core/plan.py:639-647`). `plan-set
 --from-refiner` catches it, prints `[FAIL] refined plan rejected: …` and exits 1
-(`cli/mem.py:757-759`). Nothing is written — the old plan stays exactly as it
-was.
+(`cli/mem.py`, `cmd_plan_set`). Nothing is written — the old plan stays exactly
+as it was.
 
 A refusal looks like this to the user:
 
@@ -764,7 +772,7 @@ title similarity) or be listed in the new JSON's top-level "dispositions":
 There is no force flag by design.
 ```
 
-The three violation shapes, verbatim from `core/plan.py:407-423`:
+The three violation shapes, verbatim from `core/plan.py:522-538`:
 
 | Condition | Message |
 |-----------|---------|
@@ -812,32 +820,33 @@ command archive, `db.clear_plan_active(pid)`, and delete `memory/PLAN.md` +
 #### Backstop — append-only plan history
 
 Every outgoing plan — even a cleanly-dispositioned one — is archived by
-`archive_plan` (`core/plan.py:427-460`) to
+`archive_plan` (`core/plan.py:542-575`) to
 
 ```
 memory/.plan_history/plan_<YYYYmmddTHHMMSS>_<replace|clear>.json
 ```
 
 with `archived_at`, `event`, `reason`, the `structured` form, the `raw` text and
-`active_step` (`:441-448`). Called at `core/plan.py:515` (replace, no reason
-string) and `cli/mem.py:799` (clear, with the user's `--reason`). Rows with
-neither `structured` nor a non-blank `raw` are skipped (`:434-435`).
+`active_step` (`:556-563`). Called at `core/plan.py:648` (replace, no reason
+string) and from `cmd_plan_clear` in `cli/mem.py` (clear, with the user's
+`--reason`). Rows with neither `structured` nor a non-blank `raw` are skipped
+(`:549-550`).
 
 An archive-write failure is **non-blocking**: it prints
 `[WARN] plan history archive failed (<err>) — proceeding; the carryover gate
 already enforced accounting` to stderr and returns `None`
-(`core/plan.py:452-460`). The reasoning is explicit in the code: the gate's
+(`core/plan.py:567-575`). The reasoning is explicit in the code: the gate's
 dispositions are the primary anti-loss guarantee, so blocking every plan
 operation on an archive-disk hiccup would turn a backstop into a
 denial-of-service on planning.
 
 ### Nudge thresholds
 
-Hardcoded defaults in `core/plan.py:569-571` (`turn_threshold=8`,
+Hardcoded defaults in `core/plan.py:702-704` (`turn_threshold=8`,
 `edit_threshold=12`); the Stop hook calls `should_nudge_guardian(plan_row)` with
-no overrides (`hooks/stop.py:286`). There is NO `config.json` key for these —
+no overrides (`hooks/stop.py`). There is NO `config.json` key for these —
 change the signature defaults, or pass explicit kwargs. The `+20` sensitive-call
-bump is likewise hardcoded (`hooks/post_tool_use.py:141`):
+bump is likewise hardcoded (`hooks/post_tool_use.py`):
 
 | Trigger                                  | Threshold      | What gets emitted |
 |------------------------------------------|----------------|-------------------|
@@ -848,7 +857,7 @@ bump is likewise hardcoded (`hooks/post_tool_use.py:141`):
 
 `should_nudge_guardian` returns `(False, "no_active_plan")` without a
 schema-valid plan and `(False, "needs_refine_first")` while a raw plan is
-awaiting refinement, so the two nudges never collide (`core/plan.py:574-578`).
+awaiting refinement, so the two nudges never collide (`core/plan.py:708-711`).
 
 The Stop hook NEVER emits a `<system-reminder>` for plans — only a soft
 advisory status line (`hooks/stop.py:270-272`). Use `/cc-mem plan-check` to
@@ -909,7 +918,7 @@ if no raw text is stored (`:815-817`).
 
 ### Sensitive-tool list
 
-`core.plan.is_sensitive_tool_call` (`core/plan.py:596-613`) flags these Bash
+`core.plan.is_sensitive_tool_call` (`core/plan.py:729-745`) flags these Bash
 patterns — case-insensitive substring match on the `command` input, `Bash` tool
 only — for an immediate guardian-nudge bump (+20 edits):
 
@@ -918,11 +927,10 @@ only — for an immediate guardian-nudge bump (+20 edits):
 - `npm publish`, `cargo publish`, `pypi-upload`, `twine upload`
 - `kubectl apply`, `terraform apply`, `ansible-playbook`
 
-The semantics of the +20 are stated at `hooks/post_tool_use.py:135-138`: "this
-single act carries the same drift risk as ~20 ordinary edits", so the next Stop
-hook surfaces a guardian recommendation immediately. cc-memory does NOT block
-these calls; it only flags (`core/plan.py:590-593`). The bump, like the ordinary
-edit bump, is a no-op when there is no active plan row
-(`hooks/post_tool_use.py:140`).
+The semantics of the +20 are stated in `hooks/post_tool_use.py`: "this single act
+carries the same drift risk as ~20 ordinary edits", so the next Stop hook
+surfaces a guardian recommendation immediately. cc-memory does NOT block these
+calls; it only flags (`core/plan.py:721-726`). The bump, like the ordinary edit
+bump, is a no-op when there is no active plan row.
 
 Extend the list in `cc_memory/core/plan.py:is_sensitive_tool_call` as needed.

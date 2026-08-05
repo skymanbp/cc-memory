@@ -900,8 +900,17 @@ class DashboardApp:
                 cat_clause = "AND category = ?"
                 params.append(cat)
             if search:
-                search_clause = "AND content LIKE ?"
-                params.append(f"%{search}%")
+                # Same LIKE contract as every other search surface. Unescaped,
+                # this box over-matched on any query containing a LIKE
+                # metacharacter: `50%` also returned "500 units", `snake_case`
+                # also returned "snakeXcase", and a one-character `%` or `_`
+                # dumped every row in the project. core/db.py's `_like_escape`
+                # is THE implementation (search_fts pairs it with ESCAPE '\'
+                # at core/db.py:1216-1222, and CLI / MCP / web viewer all reach
+                # it through there) — a second copy here would be one more
+                # thing to keep in sync.
+                search_clause = "AND content LIKE ? ESCAPE '\\'"
+                params.append(f"%{MemoryDB._like_escape(search)}%")
 
             params.append(200)
             rows = conn.execute(
@@ -2031,6 +2040,19 @@ Output ONLY valid JSON array."""
                               "importance": max(1, min(int(imp), 5))})
             return valid if valid else None
         except Exception:
+            # why: deliberately broad, and `None` is a documented outcome, not a
+            # swallowed bug — this is the OPTIONAL leg of a two-leg extraction
+            # and the caller (`_save_current_session`, the `if api_key:` branch)
+            # reads None as "fall back to the regex extractor", which needs no
+            # credentials and always works. The failure surface genuinely is
+            # open-ended: ImportError on a partial install, urllib / ssl /
+            # socket errors and RuntimeError out of call_llm when every
+            # credential leg fails, ValueError from json.loads, and
+            # AttributeError / TypeError / ValueError from the model's own
+            # untrusted fields (`content` not a str, `importance` not a
+            # number). All of them mean one thing here — no LLM result — and
+            # raising instead would kill "Save Session" from inside a Tk
+            # callback, which the --windowed exe cannot show at all.
             return None
 
     def _save_current_session(self):
@@ -2505,7 +2527,13 @@ def _scan_project_deep(project: Path) -> dict:
                         break
                 if desc_lines:
                     readme_desc = " ".join(desc_lines)[:200]
-            except Exception:
+            except OSError:
+                # why: `read_text` is the ONLY statement in this block that can
+                # raise — `errors="ignore"` rules out UnicodeDecodeError and
+                # everything after it is pure str work — so OSError (permission
+                # denied, a directory named README.md, an offline share) is the
+                # whole surface. A README this scanner cannot read costs one
+                # suggested memory, not the scan.
                 pass
             break
 
@@ -2523,7 +2551,17 @@ def _scan_project_deep(project: Path) -> dict:
                 add_mem("config", f"Dependencies: {', '.join(deps)}", 2)
             if dev_deps:
                 add_mem("config", f"Dev dependencies: {', '.join(dev_deps)}", 1)
-        except Exception:
+        except (OSError, ValueError, AttributeError, RecursionError):
+            # why: this is a STRANGER'S manifest and each named class is one
+            # real way it defeats the block — OSError: unreadable file;
+            # ValueError: json.loads on malformed JSON, and its UnicodeDecodeError
+            # subclass on a non-UTF-8 file; RecursionError: json.loads on a
+            # deeply nested document (a RuntimeError, not a ValueError — the
+            # same pair `_process_line` catches in mcp/server.py:792);
+            # AttributeError: it parsed but is
+            # not the assumed shape, so `.get` / `.keys()` hit a list or a str.
+            # A manifest we cannot read costs a suggested memory; it must not
+            # abort a scan the user launched from an unguarded Tk callback.
             pass
     elif (project / "pyproject.toml").exists():
         try:
@@ -2533,7 +2571,11 @@ def _scan_project_deep(project: Path) -> dict:
                     pkg_name = line.split("=", 1)[1].strip().strip('"').strip("'")
                 elif line.strip().startswith("description") and "=" in line:
                     pkg_desc = line.split("=", 1)[1].strip().strip('"').strip("'")
-        except Exception:
+        except (OSError, UnicodeDecodeError):
+            # why: `read_text` is the only raiser — this is a text scan, not a
+            # TOML parse, and `"=" in line` already guarantees the split has an
+            # index 1. Unlike the README read above there is no errors="ignore",
+            # so a latin-1 pyproject.toml raises UnicodeDecodeError.
             pass
     elif (project / "requirements.txt").exists():
         try:
@@ -2543,7 +2585,10 @@ def _scan_project_deep(project: Path) -> dict:
                     if l.strip() and not l.startswith("#") and not l.startswith("-")][:15]
             if deps:
                 add_mem("config", f"Python dependencies: {', '.join(deps)}", 2)
-        except Exception:
+        except (OSError, UnicodeDecodeError):
+            # why: same two, same reason as the pyproject read above —
+            # `read_text` can fail on the file or on its encoding; the list
+            # comprehension after it is pure str splitting and cannot raise.
             pass
 
     # ── Build suggested memories ──

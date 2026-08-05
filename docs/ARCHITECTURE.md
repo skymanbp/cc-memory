@@ -1,6 +1,6 @@
 > **English** · [简体中文](ARCHITECTURE.zh.md)
 
-# cc-memory — Architecture (v2.5.0)
+# cc-memory — Architecture (v2.5.1)
 
 cc-memory is a Claude Code plugin that gives Claude **persistent, structured
 memory across compactions and sessions**. This document is the overview: what
@@ -12,6 +12,13 @@ convention that keeps the documentation translated without silent drift.
 The three hard contracts — anti-patch writes, forced handoff, and the live plan
 anchor — are specified in [docs/CONTRACTS.md](CONTRACTS.md). This file
 describes the machinery; that file describes the rules the machinery must obey.
+
+**On `file:line` citations.** Nothing enforces them, and they rot on every
+refactor. The v2.5.1 documentation pass re-derived §4's `core/db.py` citations
+and fact-checked the prose against the code, but citations into
+`cc_memory/hooks/*`, `cli/mem.py` and `ui/installer.py` were deliberately NOT
+re-derived — those files were being rewritten in the same round. Treat a line
+number as a hint and the **symbol name** as the fact.
 
 ## Contents
 
@@ -82,7 +89,7 @@ must NOT be reduced to English-only. See
 ```
 cc-memory/
 ├── .claude-plugin/
-│   ├── plugin.json              ← Plugin manifest (v2.5.0)
+│   ├── plugin.json              ← Plugin manifest (v2.5.1)
 │   └── marketplace.json         ← /plugin marketplace add entry
 ├── hooks/hooks.json             ← Hook declarations (6 commands / 5 events)
 ├── skills/                      ← THE canonical skills location
@@ -298,28 +305,29 @@ project-local at `<project>/memory/memory.db`, WAL mode:
 | `plans` | Plan queue (draft → ready → done) (`db.py:88`) |
 | `observations` | Raw PostToolUse events, cleaned up after extraction (`db.py:129`) |
 | `session_summaries` | 6-field structured summary per session (request / investigated / learned / completed / next_steps / notes) + files_read/files_modified (`db.py:143`) |
-| **`progress`** | NEW in v2.1 — single row per project. SOT for `memory/PROGRESS.md` (`db.py:177`). |
-| **`plan_active`** | NEW in v2.2 — single row per project. SOT for `memory/PLAN.md` (`db.py:199`). |
-| `_migrations` | Tracks applied migrations (`db.py:278`) |
+| **`progress`** | NEW in v2.1 — single row per project. SOT for `memory/PROGRESS.md` (`db.py:188`). |
+| **`plan_active`** | NEW in v2.2 — single row per project. SOT for `memory/PLAN.md` (`db.py:210`). |
+| `_migrations` | Tracks applied migrations (`db.py:289`) |
 
 Eleven tables, matching `CLAUDE.md` § "Database schema (11 tables)".
 
-Plus `memories_fts` — an FTS5 virtual table over `memories`, kept in sync by three
-triggers (`core/db.py:317-341`, migration `v2_fts5`). It is created only when the
-local SQLite build has FTS5; otherwise `db.search_fts` falls back to `LIKE`
-(`core/db.py:306-313`, `:1106`). FTS5 is advertised in
-`.claude-plugin/plugin.json:4` and `:12`, and `/cc-mem status` reports which
-path is live (`cli/mem.py:307-308`).
+Plus `memories_fts` — an FTS5 virtual table over `memories` (`core/db.py:328`),
+kept in sync by three triggers (`core/db.py:332-350`, migration `v2_fts5` at
+`db.py:161`). It is created only when the local SQLite build has FTS5; otherwise
+`db.search_fts` (`core/db.py:1203`) falls back to `LIKE ? ESCAPE '\'`
+(`core/db.py:1216-1226`). FTS5 is advertised in `.claude-plugin/plugin.json:4`
+and `:12`, and `/cc-mem status` reports which path is live (`cli/mem.py`,
+`cmd_status`).
 
 The `supersedes_id` column on `memories` (migration `v3_supersedes`,
-`db.py:169`) makes the anti-patch chain explicit: when `upsert_smart` decides a
+`db.py:180`) makes the anti-patch chain explicit: when `upsert_smart` decides a
 new memory supersedes an old one, the new row links back to the old row's ID
 (and the old row is archived). Walking the chain via
-`db.get_supersede_chain(memory_id)` (`db.py:513`) shows the full update
+`db.get_supersede_chain(memory_id)` (`db.py:524`) shows the full update
 history. `content_hash` (migration `v2_content_hash`, `db.py:124`) is
 `sha256[:16]` of the normalized content, used for the cheap exact-duplicate
-check (`db.compute_content_hash` at `db.py:722`, `db.find_by_hash` at
-`db.py:735`).
+check (`db.compute_content_hash` at `db.py:749`, `db.find_by_hash` at
+`db.py:762`).
 
 Migrations are applied in order from the `_MIGRATIONS` list (`db.py:119`) and
 recorded in `_migrations`. Levels shipped so far: **v1** (topic column +
@@ -328,18 +336,19 @@ FTS5, hash backfill), **v3** (anti-patch + forced handoff: `supersedes_id`,
 `progress`), **v4** (`plan_active`), **v5** (session annotation:
 `progress.current_session_id`, `progress.session_started_at` — so a
 multi-session workflow can tell from PROGRESS.md whether it is reading its own
-write, `db.py:219-222`), **v6** (reference-aware aging:
+write, `db.py:230-233`), **v6** (reference-aware aging:
 `memories.last_referenced_at`, set on injection, so effective age is
 `now - COALESCE(last_referenced_at, created_at)` and a referenced fact stays
-"young", `db.py:226-237`).
+"young", `db.py:244-248`).
 
 The `progress` row's user-facing fields are `current_request`, `status_done`,
 `status_in_flight`, `status_blocked`, `open_todos`, `plan`, `critical_context`,
-`files_touched`, `transcript_ptr`, `updated_at`, `trigger_type` (11, plus the
-two v5 session-annotation columns). The `plan_active` row holds `raw`,
-`structured`, `active_step`, `edits_since_last_guardian`,
-`turns_since_last_guardian`, `last_guardian_at`, `last_refined_at`,
-`needs_refine`, `created_at`, `updated_at` (`db.py:199-211`).
+`files_touched`, `transcript_ptr`, `updated_at`, `trigger_type` (11 —
+`db.py:188-201` — plus the two v5 session-annotation columns, 13 non-PK columns
+in all). The `plan_active` row holds `raw`, `structured`, `active_step`,
+`edits_since_last_guardian`, `turns_since_last_guardian`, `last_guardian_at`,
+`last_refined_at`, `needs_refine`, `created_at`, `updated_at`
+(`db.py:210-222`).
 
 All queries use parameterized statements; string-formatted SQL is prohibited.
 
@@ -917,12 +926,15 @@ languages are drift-tracked siblings tied to a hash of their English source.
 It is the English source-of-truth for the convention. The checker that enforces it
 is `tools/i18n_check.py` (pure stdlib, dev/CI only — not shipped in the plugin).
 
-> Merge note: this chapter was `docs/I18N.md` through v2.4.1. Every in-code
-> pointer was retargeted at the same time — the Tier-3 guard comments
-> (`core/extractor.py:32`, `:71`, `hooks/session_start.py:275`,
-> `hooks/user_prompt.py:196`) and `cc_memory/__init__.py:37` all cite
+> Merge note: this chapter was `docs/I18N.md` through v2.4.2, and was merged
+> here in v2.4.3. Every in-code pointer was retargeted in the same change — the
+> Tier-3 guard comments in `core/extractor.py` (`:32`, `:71`),
+> `hooks/session_start.py` and `hooks/user_prompt.py`, plus the module docstring
+> of `cc_memory/__init__.py`, all cite
 > `docs/ARCHITECTURE.md#9-documentation-language-convention-i18n §1`, and
-> `grep -rn I18N cc_memory/` returns nothing.
+> `grep -rn I18N cc_memory/` returns nothing. (The three hook/package line
+> numbers this note used to carry moved with unrelated edits; `grep -rn "i18n
+> Tier 3" cc_memory/` is the durable locator.)
 
 ### 9.1 The three-tier language model
 
@@ -932,7 +944,7 @@ The whole system rests on separating three different things people mean by
 | Tier | What | Rule | Where it lives |
 |------|------|------|----------------|
 | 1 — Skeleton | English canonical docs + all LLM-facing strings | English is authoritative; every translation needs an English source | `README.md`, `docs/*.md`; hook / CLI instruction strings |
-| 2 — Translation | Human-read docs in another language | `NAME.<lang>.md` sibling, drift-tracked, produced on demand | `README.zh.md` (the only translation that exists today; `docs/*.zh.md` on demand) |
+| 2 — Translation | Human-read docs in another language | `NAME.<lang>.md` sibling, drift-tracked, produced on demand | `README.zh.md`, `docs/ARCHITECTURE.zh.md`, `docs/CONTRACTS.zh.md` — since v2.5 all three tracked English docs have one |
 | 3 — Content | Memory content the user stores | Any language; bilingual detection is intentional | `extractor.py`, `user_prompt.py`, `session_start.py` |
 
 - **Tier 1 stays English on purpose.** Hook stdout and the `Claude:` CLI
@@ -946,10 +958,12 @@ The whole system rests on separating three different things people mean by
   Do **not** reduce those detectors to English-only — that would break clause 3 of
   the design ("内容可以是任意语言"). The concrete guarded sites are
   `core/extractor.py:35-69` (`_PATTERNS`), `core/extractor.py:73-77`
-  (`_IMPORTANCE_BOOST`), `hooks/session_start.py:269-273` (RESUME PROTOCOL
-  tokens) and `hooks/user_prompt.py:127-130` (`resume_signals`); the last two
-  must stay in sync with each other, since the forced reminder promises the
-  behavior that `user_prompt` types as `resume_request`.
+  (`_IMPORTANCE_BOOST`), the RESUME PROTOCOL token lines in
+  `hooks/session_start.py` and `resume_signals` in `hooks/user_prompt.py`; the
+  last two must stay in sync with each other, since the forced reminder promises
+  the behavior that `user_prompt` types as `resume_request`. All four carry an
+  `i18n Tier 3` comment — `grep -rn "i18n Tier 3" cc_memory/` locates them
+  without depending on line numbers that move.
 
 Only **Tier 2** — the human-facing docs — is what this convention version-controls.
 
@@ -957,7 +971,8 @@ Only **Tier 2** — the human-facing docs — is what this convention version-co
 
 - `NAME.md` — the canonical **English** source (the skeleton).
 - `NAME.<lang>.md` — a translation sibling. Today `<lang>` is `zh` (Simplified
-  Chinese); the only translation that currently exists is `README.zh.md`.
+  Chinese); the translations that exist are `README.zh.md`,
+  `docs/ARCHITECTURE.zh.md` and `docs/CONTRACTS.zh.md`.
 - Every translation MUST have a matching English source. A `NAME.zh.md` with no
   `NAME.md` is an **ORPHAN** (checker fails). There are no translation-only docs.
 

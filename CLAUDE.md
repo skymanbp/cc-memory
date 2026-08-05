@@ -2,7 +2,7 @@
 
 ## Project: cc-memory
 
-**Claude Code persistent memory plugin (v2.5.0)** — anti-patch reconcile-on-write
+**Claude Code persistent memory plugin (v2.5.1)** — anti-patch reconcile-on-write
 + LLM-judged semantic de-duplication, forced PROGRESS.md handoff with
 per-session annotation, live PLAN.md anchor with plan-refiner / plan-guardian
 subagents + mandatory carryover gate, bounded transcript reads, injection
@@ -10,7 +10,7 @@ observability, FTS5 search, AI-judged extraction with Haiku (optional local
 Ollama fallback).
 
 - **Language**: Python 3.8+ (pure stdlib, zero pip dependencies at runtime)
-- **Version**: 2.5.0
+- **Version**: 2.5.1
 - **License**: MIT
 - **Platform**: Windows-primary, cross-platform compatible (Tkinter required for GUI)
 
@@ -131,9 +131,17 @@ were closed too. Nine things that were silently wrong in shipped code:
 
 9. **`config.json` no longer lies, and `/cc-mem status` sees flat installs.**
    Two audits measured 34 of 51 leaf keys with no Python reader; every inert key
-   is deleted (86 → 29 lines) and the survivors cite their reader in-file. The
-   one addition, `excluded_projects`, is a real opt-out honoured by
-   `user_prompt.py` and `pre_compact.py` before either creates `memory/`.
+   is deleted (86 → 29 lines) and the survivors cite their reader in-file.
+   `excluded_projects` is **not** a new key — it shipped in v2.4.3 with an empty
+   default and zero readers repo-wide; v2.5.0 gave it readers, and it is now a
+   real opt-out enforced by **all six hooks** through the single implementation
+   `core.modes.is_excluded(cwd)`, called as each hook's first act after
+   resolving `cwd`. Do not re-copy that function into a hook: v2.5.0 shipped it
+   as two private copies in `user_prompt.py` + `pre_compact.py` (the only two
+   hooks that CREATE `memory/`), which left a project initialised BEFORE it was
+   listed fully instrumented — the other four gate only on `memory/memory.db`
+   existing, so observations, PROGRESS.md and the Stop observer's API calls all
+   kept running. `tests/test_surfaces.py` §4 now drives all six.
    Separately, `_inspect_layout` resolved `cc_memory/…`-prefixed paths against
    the layout root, so a healthy **flat** install reported 22 of 22 files
    missing and the API-key check was skipped; it now resolves `pkg_dir` once and
@@ -150,10 +158,14 @@ not be imported at all — `cli/plan.py` now has a `main()`.
 
 **Residual limits, recorded rather than papered over:**
 
-- `core/db.py`'s `delete_plan` / `update_plan_content` still take no
-  `project_id`; `update_plan_status` accepts one but does not require it, so an
-  unscoped raw call still crosses projects. `cli/plan.py` and `ui/dashboard.py`
-  pass it at every call site.
+- `core/db.py`'s three plan mutators — `update_plan_status` (`db.py:1349`),
+  `delete_plan` (`:1410`) and `update_plan_content` (`:1427`) — all accept
+  `project_id`, and `cli/plan.py` + `ui/dashboard.py` pass it at every call
+  site, but none of them *requires* it (it defaults to `None`). An unscoped raw
+  call from new code would therefore still cross projects, because `plans.id` is
+  global to the DB file. This is the wording `README.md` § "What is *not* fixed"
+  uses; the pre-v2.5.1 text here claimed `delete_plan` / `update_plan_content`
+  "take no `project_id`", which contradicted both the code and the README.
 - `ThreadingHTTPServer` has no worker cap — body reads are deadline-bounded, the
   thread count is not. Loopback-only. DNS rebinding was verified with forged
   `Host` headers, not real DNS; the SPA escaping hardening is defence-in-depth
@@ -165,8 +177,11 @@ not be imported at all — `cli/plan.py` now has a `main()`.
   import, to keep server boot lazy.
 - The installer's `--console` switch is asserted from the PyInstaller flag; the
   exes were not rebuilt, so the PE subsystem is unverified.
-- `excluded_projects` has no coverage in the two pre-existing gates.
 - Searching for a bare `%` or `_` now returns 0 rows instead of the whole table.
+- Doc `file:line` citations are hand-maintained and rot on every refactor;
+  `docs/ARCHITECTURE.md` and `docs/CONTRACTS.md` still carry stale ones (a
+  definition-site checker finds them mechanically — see the note under
+  § Tests). Nothing enforces them.
 
 ## What changed in v2.4.3 (over v2.4.2)
 
@@ -476,9 +491,13 @@ SUPERSEDE implementation, not a caller path.
 > SessionStart emits a `<system-reminder>` requiring the next Claude to Read
 > it BEFORE responding. See `docs/CONTRACTS.md#handoff-contract`.
 
-The `progress` row has 11 user-facing fields (`current_request`, `status_*`,
-`open_todos`, `plan`, `critical_context`, `files_touched`, `transcript_ptr`,
-`updated_at`, `trigger_type`). It is updated by four paths:
+The `progress` row has 11 user-facing fields (`current_request`, `status_done`,
+`status_in_flight`, `status_blocked`, `open_todos`, `plan`, `critical_context`,
+`files_touched`, `transcript_ptr`, `updated_at`, `trigger_type` —
+`core/db.py:188-201`), **plus** the two v5 session-annotation columns
+`current_session_id` / `session_started_at` (`core/db.py:230-233`). That is 13
+non-PK columns in the schema; "11" counts only the user-facing ones, and
+`docs/ARCHITECTURE.md` §4 states it the same way. It is updated by four paths:
 - `PreCompact` does a full overwrite (`upsert_progress`).
 - `Stop` patches `files_touched` per turn (`patch_progress`).
 - `UserPromptSubmit` patches `current_request` on turn 1 (`patch_progress`).
@@ -560,14 +579,26 @@ standalone installs.
 - Never delete or overwrite `memory.db` or archived sessions without asking.
 - Never fabricate extraction results or memory content.
 - Hooks must never block Claude Code — always exit cleanly (`sys.exit(0)`).
-- Tag memories with their extraction method for traceability. Tags actually
-  emitted today: `["observer","realtime"]` (`hooks/stop.py`), `["mcp"]`
-  (`mcp/server.py`), `["manual"]` (`cli/mem.py`), `["manual","dashboard"]`
-  and `["auto-detected","init"]` (`ui/dashboard.py`), `["web"]`
-  (`ui/web_viewer.py`), `["llm-dedup","merged"]` (`core/consolidate.py`);
-  the writer appends `"merged"` / `"supersedes"` on those paths. NOTE: the
-  PreCompact LLM path sets no `tags` key, so those rows store `[]` — do not
-  document a `["llm","auto"]` tag that no code emits.
+- Tag memories with their extraction method for traceability. The COMPLETE set
+  of tags any code emits today — verified by grepping every `"tags"` literal
+  under `cc_memory/`:
+  - `["observer","realtime"]` — `hooks/stop.py`
+  - `["mcp"]` — `mcp/server.py`
+  - `["manual"]` — `cli/mem.py`
+  - `["manual","dashboard"]` — `ui/dashboard.py:1599` (Add-Memory dialog)
+  - `[method, "manual"]` where `method` is `"llm"` or `"regex"` —
+    `ui/dashboard.py:2125` (Save Session)
+  - `["regex","manual"]` — `ui/dashboard.py:2151` (Save Session, regex leg)
+  - `["metric","manual"]` — `ui/dashboard.py:2156` (Save Session, metric leg)
+  - `["auto-detected","init"]` — `ui/dashboard.py:2278` (new-project init)
+  - `["web"]` — `ui/web_viewer.py`
+  - `["llm-dedup","merged"]` — `core/consolidate.py`
+
+  The writer appends `"merged"` / `"supersedes"` on top of whatever the caller
+  passed. NOTE: the PreCompact LLM path sets no `tags` key at all, so those rows
+  store `[]` — do not document a `["llm","auto"]` tag that no code emits. If you
+  add an emitter, add it to this list; the four `ui/dashboard.py` Save-Session /
+  init shapes were missing from it through v2.5.0.
 - `memory/PROGRESS.md` and `memory/MEMORY.md` are generated artifacts. Edit
   the SQL source of truth (`progress` table for PROGRESS.md, `memories`/
   `topics`/`keywords` for MEMORY.md) instead.
@@ -615,9 +646,19 @@ Tests MUST use `tempfile` directories only; installer work must redirect
 needs an explicit `encoding="utf-8"` — the default codec on this box is gbk and
 the CLI emits real UTF-8.
 
-**`excluded_projects` has no coverage in any suite yet.** It is a data-loss-
-adjacent opt-out (a listed directory gets no `memory/` at all); worth porting a
-regression block for.
+**`excluded_projects` is covered by `tests/test_surfaces.py` §4** — it drives
+all six hooks against a fresh excluded directory, a subdirectory of one, and a
+project that was initialised BEFORE it was listed (the case the two-copy v2.5.0
+implementation got wrong). Keep that block in step with any hook you add: a hook
+that does not call `core.modes.is_excluded` is a privacy regression, not a style
+nit.
+
+**Nothing gates doc `file:line` citations.** They are hand-maintained and rot on
+every refactor. A definition-site checker — for each `path:lines` citation,
+resolve the symbols named in the same sentence and assert the range covers their
+unique definition — finds them mechanically and would make a cheap CI gate
+alongside `tools/i18n_check.py`. Until one exists, re-derive a citation before
+you trust it.
 
 ## Interpreter requirement
 

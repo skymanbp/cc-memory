@@ -1,26 +1,31 @@
 # -*- coding: utf-8 -*-
-"""Process-level surface tests: MCP stdio server, web viewer, standalone installer.
+"""Process-level surface tests: MCP stdio server, web viewer, installer, hooks.
 
 Run:  python tests/test_surfaces.py
 
-These three surfaces are the ones both existing release gates miss entirely:
+These surfaces are the ones the other release gates miss entirely:
 `tests/smoke_test.py` never spawns `cc_memory/mcp/server.py`, never binds a
-socket, and only ever inspects the installer's hooks-config *dict* -- it never
-parses a settings.json. So none of the ~30 v2.5.0 fixes to those files is
-defended by a test today. This file is that defence.
+socket, only ever inspects the installer's hooks-config *dict* -- it never
+parses a settings.json -- and never runs a hook as a process. So none of the
+~30 v2.5.0 fixes to those files is defended by a test today. This file is
+that defence.
 
   §1 MCP        real subprocess, framed JSON-RPC over binary stdio pipes
   §2 web viewer real ephemeral-port server, RAW sockets (http.client cannot
                 express a malformed or drip-fed request)
   §3 installer  settings.json shape matrix, install AND uninstall, in-process
                 with every module path constant redirected into a sandbox
+  §4 hooks      `excluded_projects`, the only opt-out, driven through all SIX
+                hook entry points as real subprocesses against a COPY of the
+                package whose config.json names the fixture
 
 Hermetic by construction: HOME / USERPROFILE / HOMEDRIVE / HOMEPATH / TEMP /
 TMP / TMPDIR *and* `tempfile.tempdir` are redirected into one sandbox root
 BEFORE cc_memory is imported, because `core.logger` and `ui.installer` both
 resolve `Path.home()` at import time. The real ~/.claude is unreachable for the
 whole run (asserted below), and the uninstall temp sweep can only ever see the
-sandbox.
+sandbox. The sandbox is REMOVED at the end and a leak it cannot clean is a
+test failure -- see _cleanup_sandbox.
 
 Framing note (MCP): ONE reader thread over ONE buffer, frames split only on
 b"\\n". A fresh reader per readline() splits frames across readers and
@@ -43,10 +48,14 @@ DELIBERATELY NOT COVERED -- stated rather than silently dropped:
     tested (`_CCM_COMMAND_RE` matches on the script path, not the interpreter).
   * MCP `MemoryError` on a huge frame is not reproduced -- only the 1 MiB
     frame CAP is asserted. Trying to OOM the box is not a test.
+  * §4 runs each hook DIRECTLY. Whether Claude Code would have invoked it at
+    all (hooks/hooks.json wiring, `enabledPlugins`) is smoke_test's job; §4
+    asserts only what a hook does once it is handed a cwd.
 """
 from __future__ import annotations
 
 import contextlib
+import gc
 import hashlib
 import io
 import json
@@ -87,9 +96,67 @@ assert Path.home() == _HOME, (
     f"sandbox home not in effect (Path.home()={Path.home()}); refusing to run "
     f"against the real ~/.claude")
 
+
+def _cleanup_sandbox():
+    """Close every sqlite handle this process opened, then REMOVE the sandbox.
+
+    Every connection alive in this process was opened by this suite, so closing
+    them all is exactly "close your own handles". It is needed because
+    `MemoryDB._connect()` is consumed as `with self._connect() as conn:`
+    throughout the package and sqlite3's context manager COMMITS BUT DOES NOT
+    CLOSE; the connection then survives inside its own statement-cache
+    reference cycle and keeps memory.db open, which on Windows is a hard
+    PermissionError [WinError 32] on rmtree.
+
+    Measured before this existed: every SUCCESSFUL run left one
+    `%TEMP%\\cc-memory-surfaces-*\\tmp\\ccm-web-served-*\\memory\\memory.db`
+    of 475,136 B in the real %TEMP%, forever, because the teardown was
+    `shutil.rmtree(_SANDBOX, ignore_errors=True)`. A leak this cannot clean is
+    now REPORTED as a failure rather than swallowed.
+    """
+    for _conn in [o for o in gc.get_objects()
+                  if isinstance(o, sqlite3.Connection)]:
+        try:
+            _conn.close()
+        except sqlite3.Error:
+            # why: an already-closed or mid-statement handle. The only goal is
+            # releasing the OS file handle before rmtree, and one we cannot
+            # release is caught by the rmtree check below anyway.
+            pass
+    gc.collect()          # breaks the statement-cache cycles described above
+    # core.logger caches Logger objects in a module-level dict and each keeps an
+    # OPEN append handle on <home>/.claude/hooks/cc-memory/logs/cc-memory-*.log
+    # for the life of the process. That path is inside the sandbox home, so it
+    # blocks rmtree before it ever reaches the databases.
+    try:
+        from core import logger as _logger_mod
+        for _lg in list(getattr(_logger_mod, "_loggers", {}).values()):
+            _lg.close()
+    except ImportError:
+        # why: teardown must work even if the package never became importable
+        # (a failure during bootstrap) -- there is then nothing to close
+        pass
+    tempfile.tempdir = None
+    try:
+        shutil.rmtree(_SANDBOX)
+    except OSError as exc:
+        left = sorted(str(p) for p in _SANDBOX.rglob("*") if p.is_file())
+        raise AssertionError(
+            f"sandbox {_SANDBOX} survived cleanup ({exc}); {len(left)} file(s) "
+            f"leaked into the real %TEMP%: {left[:10]}")
+
+
 sys.path.insert(0, str(REPO / "cc_memory"))
 
-from core.db import MemoryDB                       # noqa: E402  -- why: imports must follow the sandbox + sys.path bootstrap above; repo tests run as plain scripts
+from core.encoding_setup import enable_utf8_io     # noqa: E402  -- why: imports must follow the sandbox + sys.path bootstrap above; repo tests run as plain scripts
+# Explicitly, BEFORE the first output line. This file's own section headers are
+# non-ASCII (§) and used to survive only because `from mcp import server` below
+# calls enable_utf8_io() at ITS module scope -- an import reorder would have
+# silently turned every header into locale-codec mojibake. smoke_test.py pins
+# this ordering for all three suites.
+enable_utf8_io()
+
+from core.db import MemoryDB                       # noqa: E402  -- why: same bootstrap ordering
 from llm.memory_writer import (                    # noqa: E402  -- why: same bootstrap ordering
     MIN_CONTENT_LEN, regenerate_memory_index)
 from mcp import server as mcp_server               # noqa: E402  -- why: same bootstrap ordering
@@ -316,13 +383,38 @@ def test_mcp():
     got = _by_id(mcp.wait_frames(2))
     assert got[1]["result"]["serverInfo"]["name"] == "cc-memory", got[1]
     assert got[1]["result"]["protocolVersion"] == "2025-06-18", \
-        f"protocolVersion is parroted, not negotiated: {got[1]}"
+        f"a SUPPORTED protocolVersion was not honoured: {got[1]}"
     listed = sorted(t["name"] for t in got[2]["result"]["tools"])
     assert listed == sorted(mcp_server._HANDLERS), \
         f"tools/list {listed} != handler table {sorted(mcp_server._HANDLERS)}"
     assert listed == sorted(t["name"] for t in mcp_server.TOOLS)
-    print(f"[OK] MCP handshake: version negotiated, tools/list == "
-          f"{len(listed)} handlers")
+
+    # Echoing a SUPPORTED version cannot tell negotiating from parroting: both
+    # return the string just sent. `_negotiate_protocol` exists to REFUSE what
+    # this server does not implement, so probe that branch directly -- an
+    # unsupported string AND a non-string must both come back as
+    # _PROTOCOL_DEFAULT. Without these two, mutating the guard to
+    # `if isinstance(requested, str): return requested` still passed, i.e. a
+    # client asking for a version the server cannot speak was told "yes".
+    assert "1999-01-01" not in mcp_server._PROTOCOL_SUPPORTED, "fixture check"
+    assert mcp_server._PROTOCOL_DEFAULT != "2025-06-18", \
+        ("the supported-version probe above must ask for something OTHER than "
+         "the fallback, or the two branches are indistinguishable again")
+    mcp.send({"jsonrpc": "2.0", "id": 3, "method": "initialize",
+              "params": {"protocolVersion": "1999-01-01"}})
+    mcp.send({"jsonrpc": "2.0", "id": 4, "method": "initialize",
+              "params": {"protocolVersion": 20250618}})
+    got = _by_id(mcp.wait_frames(4))
+    for _rid, _asked in ((3, "1999-01-01"), (4, 20250618)):
+        assert got[_rid]["result"]["protocolVersion"] \
+            == mcp_server._PROTOCOL_DEFAULT, \
+            (f"protocolVersion {_asked!r} is not supported but was parroted "
+             f"back instead of falling back to "
+             f"{mcp_server._PROTOCOL_DEFAULT!r}: {got[_rid]}")
+    print(f"[OK] MCP handshake: supported version honoured, unsupported "
+          f"string + non-string negotiated down to "
+          f"{mcp_server._PROTOCOL_DEFAULT}, tools/list == {len(listed)} "
+          f"handlers")
 
     # ── 1b. every id answered exactly once, on every method, for junk params ─
     methods = ["initialize", "tools/list", "tools/call", "ping",
@@ -330,6 +422,9 @@ def test_mcp():
                "resources/list"]
     junk = [None, [], "str", 7]
     sent_ids, rid = [], 100
+    # Read the handshake's frame count instead of hardcoding it: a literal here
+    # silently mis-slices the moment §1a gains or loses a probe.
+    before = mcp.n_frames()
     for method in methods:
         for params in junk:
             msg = {"jsonrpc": "2.0", "id": rid, "method": method,
@@ -340,7 +435,6 @@ def test_mcp():
         mcp.send({"jsonrpc": "2.0", "id": rid, "method": method})  # params omitted
         sent_ids.append(rid)
         rid += 1
-    before = 2
     frames = mcp.settle()
     got = _by_id(frames[before:])
     missing = [i for i in sent_ids if i not in got]
@@ -684,7 +778,6 @@ def test_web():
     regenerate_memory_index(bdb, bpid, by_mem)
 
     # constants first -- a regression here is invisible to every probe below
-    assert 0 < inst_free(mcp_free := None) if False else True  # placeholder removed
     from ui import web_viewer as wv                # noqa: E402  -- why: imported here so a syntax error in the viewer surfaces inside §2, not at test import
     for name in ("_BODY_STALL_S", "_BODY_DEADLINE_S", "_DRAIN_DEADLINE_S"):
         value = getattr(wv, name)
@@ -895,11 +988,6 @@ def test_web():
     print("[OK] web teardown: server stopped, stderr traceback-free")
 
 
-def inst_free(_x):
-    """Unused shim kept out of the assertion path."""
-    return True
-
-
 # ═══════════════════════════════════════════════════════════════════════════
 # §3  installer settings.json shape matrix
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1013,8 +1101,18 @@ def test_installer():
                 f"{tag}: cc-memory hooks survived uninstall: {settings.get('hooks')}"
             assert "hooks" not in settings or settings["hooks"], \
                 f'{tag}: uninstall left an empty "hooks": {{}}'
-            assert "permissions" not in settings or \
-                isinstance(settings["permissions"], (dict, str)), tag
+            # By VALUE, not by type. Uninstall clobbering "all" -> "" keeps the
+            # type and passed the old isinstance() check. The installer never
+            # CREATES `permissions` (_uninstall_settings only prunes an
+            # already-present additionalDirectories list), so anything other
+            # than an exact round-trip -- including inventing the key -- is a
+            # bug. Presence is compared too, hence the one-key dict.
+            perms_want = {"permissions": "all"} if tag == "permissions-str" else {}
+            perms_got = {k: settings[k] for k in ("permissions",) if k in settings}
+            assert perms_got == perms_want, \
+                (f"{tag}: the user's `permissions` value must round-trip "
+                 f"through install+uninstall: got {perms_got!r}, "
+                 f"expected {perms_want!r}")
             if tag in _MALFORMED_GROUP_TAGS:
                 assert settings["hooks"]["Stop"] == [json.loads(raw)["hooks"]["Stop"][0]], \
                     f"{tag}: uninstall did not restore the user's own group"
@@ -1087,6 +1185,186 @@ def test_installer():
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+# §4  excluded_projects -- the only opt-out, across all six hooks
+# ═══════════════════════════════════════════════════════════════════════════
+
+# The six hook entry points, in the order a real session fires them.
+# user_prompt and pre_compact are the two that CREATE memory/; the other four
+# gate on memory/memory.db merely EXISTING, which is why the fixture below is
+# a project that was initialised BEFORE it was excluded -- the case where
+# "gates on the DB existing" and "opts out" are not the same behaviour.
+_HOOK_ORDER = ["user_prompt", "post_tool_use", "stop", "pre_compact",
+               "session_start", "consolidate_async"]
+
+
+def _hook_payload(hook, cwd, session_id, transcript):
+    """The stdin object Claude Code hands this hook."""
+    data = {"cwd": str(cwd), "session_id": session_id}
+    if hook == "user_prompt":
+        data["prompt"] = "please write the exporter"
+    elif hook == "post_tool_use":
+        data.update(tool_name="Read", tool_input={"file_path": "notes.md"},
+                    tool_response="an entirely harmless tool response body")
+    elif hook == "pre_compact":
+        data.update(transcript_path=str(transcript), trigger="manual")
+    return data
+
+
+def _run_hook(pkg, hook, cwd, session_id, transcript):
+    """One hook, one real subprocess. Returns (rc, stdout, stderr)."""
+    env = dict(os.environ)
+    # No live credential may reach a hook here: the Stop observer and the
+    # SessionStart retroactive save would otherwise POST fixture text to the
+    # Anthropic API from a test run. Their LLM legs are expected to fail; the
+    # hook contract says that must still be rc=0 with an empty stderr.
+    for var in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN",
+                "CLAUDE_CODE_OAUTH_TOKEN"):
+        env.pop(var, None)
+    proc = subprocess.run(
+        [sys.executable, str(pkg / "hooks" / f"{hook}.py")], cwd=str(cwd),
+        input=json.dumps(_hook_payload(hook, cwd, session_id, transcript)),
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        env=env, timeout=180)
+    return proc.returncode, proc.stdout, proc.stderr
+
+
+def _seed_project(root, n_sessions=6):
+    """A project that already has memory/memory.db -- i.e. one the user
+    initialised and listed in excluded_projects AFTERWARDS, which is the
+    natural sequence (you reach for the control on realising a repo is
+    sensitive). n_sessions is >= config.json consolidation.auto_interval_
+    sessions so consolidate_async's interval gate is OPEN and the opt-out is
+    the only thing that can stop it."""
+    mem = root / "memory"
+    mem.mkdir(parents=True, exist_ok=True)
+    db = MemoryDB(mem / "memory.db")
+    pid = db.upsert_project(str(root))
+    for i in range(n_sessions):
+        db.insert_session(pid, f"pre-existing-{i}", "auto", 10, "", "")
+    return db, pid
+
+
+def _memory_names(mem_dir):
+    """Everything under memory/, minus SQLite's transient journal siblings."""
+    if not mem_dir.exists():
+        return set()
+    return {p.relative_to(mem_dir).as_posix()
+            for p in mem_dir.rglob("*")} - {"memory.db-wal", "memory.db-shm"}
+
+
+def test_excluded_projects():
+    print("\n--- §4 excluded_projects across all six hooks ----------------")
+    # A COPY of the package: the repo's own config.json must never be written
+    # to (it is the live plugin on this machine), and the fixture paths have to
+    # be listed literally because matching is on the resolved absolute path.
+    pkg = Path(tempfile.mkdtemp(prefix="ccm-excl-pkg-")) / "cc_memory"
+    shutil.copytree(REPO / "cc_memory", pkg,
+                    ignore=shutil.ignore_patterns("__pycache__", "*.pyc",
+                                                  "projects.json"))
+    assert REPO not in pkg.parents, "the fixture package must be a COPY"
+
+    work = Path(tempfile.mkdtemp(prefix="ccm-excl-work-"))
+    excluded = work / "excluded-project"
+    beneath = excluded / "vendor" / "nested-checkout"
+    control = work / "control-project"
+    fresh = work / "control-fresh"
+    for d in (excluded, beneath, control, fresh):
+        d.mkdir(parents=True, exist_ok=True)
+    cfg = json.loads((pkg / "config.json").read_text(encoding="utf-8"))
+    cfg["excluded_projects"] = [str(excluded)]
+    (pkg / "config.json").write_text(json.dumps(cfg, indent=2, ensure_ascii=False),
+                                     encoding="utf-8")
+    assert json.loads((pkg / "config.json").read_text(
+        encoding="utf-8"))["excluded_projects"] == [str(excluded)]
+
+    transcript = work / "transcript.jsonl"
+    transcript.write_text("\n".join(json.dumps(r) for r in (
+        {"type": "user",
+         "message": {"role": "user", "content": "build the exporter"}},
+        {"type": "assistant", "message": {"role": "assistant", "content": [
+            {"type": "tool_use", "name": "Edit",
+             "input": {"file_path": "src/exporter.py"}}]}},
+    )) + "\n", encoding="utf-8")
+
+    excl_db, excl_pid = _seed_project(excluded)
+    ctrl_db, ctrl_pid = _seed_project(control)
+    seeded = _memory_names(excluded / "memory")
+    assert seeded == {"memory.db"}, seeded
+    tmp_dir = Path(tempfile.gettempdir())
+
+    # ── the contract, asserted on OUTCOMES rather than on any one hook's
+    #    implementation: no memory/, no observations, no progress row, no
+    #    injection -- for the excluded directory AND for a directory beneath it.
+    for tag, cwd, sid in (
+            ("excluded root (memory.db ALREADY exists)", excluded,
+             "excl-root-000001"),
+            ("a directory BENEATH the excluded root", beneath,
+             "excl-deep-000001")):
+        for hook in _HOOK_ORDER:
+            rc, out, err = _run_hook(pkg, hook, cwd, sid, transcript)
+            assert rc == 0 and err == "", \
+                f"{tag}: {hook} rc={rc} stderr={err[:300]!r}"
+            assert out == "", \
+                (f"{tag}: {hook} wrote {len(out)} chars into the session "
+                 f"instead of staying silent: {out[:300]!r}")
+        assert not (tmp_dir / f"cc_mem_turns_{sid[:16]}").exists(), \
+            f"{tag}: a turn marker was written for an excluded project"
+
+    assert _memory_names(excluded / "memory") == seeded, \
+        (f"the excluded project gained artifacts: "
+         f"{sorted(_memory_names(excluded / 'memory') - seeded)}")
+    assert not (beneath / "memory").exists(), \
+        "memory/ was created in a directory BENEATH the excluded root"
+    assert excl_db.get_observation_count(excl_pid) == 0, \
+        "tool inputs/outputs were stored for an excluded project"
+    assert excl_db.get_progress(excl_pid) is None, \
+        "a progress row was created for an excluded project"
+    assert len(excl_db.get_all_active_memories(excl_pid)) == 0, \
+        "a memory was extracted for an excluded project"
+
+    # ── control: the SAME fixture, one directory over, NOT listed. Without it
+    #    every assertion above also passes for a hook that no-ops for an
+    #    unrelated reason (missing DB, closed interval gate, empty transcript).
+    ctrl_sid = "ctrl-seeded-0001"
+    ctrl_out, ctrl_obs = {}, {}
+    for hook in _HOOK_ORDER:
+        rc, out, err = _run_hook(pkg, hook, control, ctrl_sid, transcript)
+        assert rc == 0 and err == "", f"control: {hook} rc={rc} {err[:300]!r}"
+        ctrl_out[hook] = out
+        # sampled per hook: PreCompact CLEANS observations after extracting,
+        # so a count taken at the end would read 0 for a healthy run.
+        ctrl_obs[hook] = ctrl_db.get_observation_count(ctrl_pid)
+    assert ctrl_obs["post_tool_use"] >= 1, \
+        "control: PostToolUse stored no observation, so 'no observations' above proves nothing"
+    assert "[cc-memory]" in ctrl_out["session_start"], \
+        "control: SessionStart injected nothing, so 'no injection' above is vacuous"
+    assert "[cc-memory]" in ctrl_out["stop"], \
+        "control: Stop printed no status line"
+    assert ctrl_db.get_progress(ctrl_pid) is not None, \
+        "control: no progress row, so 'no progress row' above is vacuous"
+    assert (control / "memory" / "PROGRESS.md").is_file(), \
+        "control: PreCompact wrote no PROGRESS.md"
+    assert (tmp_dir / f"cc_mem_turns_{ctrl_sid[:16]}").is_file(), \
+        "control: UserPromptSubmit wrote no turn marker"
+
+    # ...and a NOT-excluded project with nothing yet still gets memory/ built,
+    # which is what makes the "directory beneath" assertion non-vacuous.
+    for hook in ("user_prompt", "pre_compact"):
+        rc, out, err = _run_hook(pkg, hook, fresh, "ctrl-fresh-00001",
+                                 transcript)
+        assert rc == 0 and err == "", \
+            f"control-fresh: {hook} rc={rc} {err[:300]!r}"
+    assert (fresh / "memory" / "memory.db").is_file(), \
+        "control-fresh: a NOT-excluded fresh project got no memory/memory.db"
+
+    print(f"[OK] excluded_projects: {len(_HOOK_ORDER)} hooks x (excluded root "
+          f"with memory.db ALREADY present + a directory beneath it) -> no "
+          f"memory/, no observations, no progress row, no injection, no turn "
+          f"marker; the same hooks against an identical NOT-excluded project "
+          f"produce all five")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 
 def main():
     print(f"Sandbox root: {_SANDBOX}")
@@ -1095,9 +1373,13 @@ def main():
     test_mcp()
     test_web()
     test_installer()
+    test_excluded_projects()
+    # Teardown is a GATE, not a courtesy: this suite creates ~475 KB of SQLite
+    # per run under the real %TEMP% and used to hide its own failure to remove
+    # it behind ignore_errors=True.
+    _cleanup_sandbox()
+    print("[OK] sandbox teardown: every sqlite handle closed, sandbox removed")
     print(f"\n===== ALL SURFACE TESTS PASSED ({time.monotonic() - started:.1f}s) =====")
-    tempfile.tempdir = None
-    shutil.rmtree(_SANDBOX, ignore_errors=True)
 
 
 if __name__ == "__main__":

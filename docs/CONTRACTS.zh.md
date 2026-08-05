@@ -1,4 +1,4 @@
-<!-- i18n-source: CONTRACTS.md | sha256: 38db0d8370e7e45e | version: 2.5.0 | translated: 2026-08-05 -->
+<!-- i18n-source: CONTRACTS.md | sha256: c2468e9e6e18309d | version: 2.5.1 | translated: 2026-08-05 -->
 > [English](CONTRACTS.md) · **简体中文**
 
 # cc-memory — 契约（Contracts）
@@ -16,18 +16,24 @@ PLAN.md）。**R610 结转门禁**由它自己的套件 `tests/test_plan_carryov
 发布表面。
 
 本文件取代 2.4.3 之前的三件套 `docs/MEMORY_RULES.md`、`docs/HANDOFF_PROTOCOL.md` 和
-`docs/PLAN_PROTOCOL.md`。行号引用都是相对当前代码树；版本字符串的权威来源是
-`cc_memory/core/version.py`。
+`docs/PLAN_PROTOCOL.md`；版本字符串的权威来源是 `cc_memory/core/version.py`。
+
+**关于 `file:line` 引用。** 没有任何东西强制它们，而且它们在每一次重构后都会腐化。
+v2.5.1 的文档整理重新推导了实时计划契约里 `core/plan.py` 的引用，并对着代码核查了
+全部散文式断言；但指向 `cc_memory/hooks/*`、`cli/mem.py` 和 `ui/installer.py` 的
+引用**刻意没有**重新推导 —— 那几个文件正在同一轮里被重写，此刻为它们写下的任何行号
+在落地时就已经陈旧。请把这里的行号当作线索，把**符号名**当作事实：
+`grep -n "def <symbol>" <file>` 才是权威。
 
 ## 目录
 
-1. [反补丁写入契约](#anti-patch-contract) —— 每一次记忆写入都会与已经存在的内容做
-   调和（`llm/memory_writer.py:upsert_smart`）。
-2. [强制交接契约](#handoff-contract) —— `memory/PROGRESS.md` 是单条 SQL 行的整篇
-   重写投影，而且下一次会话会被*强制*读取它（`core/progress.py`、
+1. [反补丁写入契约](#反补丁写入契约anti-patch-contract) —— 每一次记忆写入都会与已经
+   存在的内容做调和（`llm/memory_writer.py:upsert_smart`）。
+2. [强制交接契约](#强制交接契约handoff-contract) —— `memory/PROGRESS.md` 是单条 SQL
+   行的整篇重写投影，而且下一次会话会被*强制*读取它（`core/progress.py`、
    `hooks/session_start.py`）。
-3. [实时计划契约](#plan-contract) —— `memory/PLAN.md` 是实时任务锚点，替换或清除它
-   都不可能无声地丢掉未完成的步骤（`core/plan.py`、`cli/mem.py`）。
+3. [实时计划契约](#实时计划契约plan-contract) —— `memory/PLAN.md` 是实时任务锚点，
+   替换或清除它都不可能无声地丢掉未完成的步骤（`core/plan.py`、`cli/mem.py`）。
 
 架构总览、模块布局和 i18n 约定见 [ARCHITECTURE.zh.md](ARCHITECTURE.zh.md)。
 
@@ -45,7 +51,7 @@ PLAN.md）。**R610 结转门禁**由它自己的套件 `tests/test_plan_carryov
 
 这就是 `llm.memory_writer.upsert_smart` 实现所强制执行的规格。每一条保存路径都必须
 经由那一个函数路由。技能、CLI、MCP、钩子、GUI、web viewer——无一例外。完整的调用方
-清单见[保存路径表](#how-to-honor-this-from-each-save-path)；如果你新增一条保存路径，
+清单见[保存路径表](#各条保存路径如何遵守它)；如果你新增一条保存路径，
 它就要进那张表。
 
 ### 为什么
@@ -471,10 +477,10 @@ SessionStart、Stop、PostToolUse、UserPromptSubmit）——这条提醒依然�
 /cc-mem sql "SELECT current_request, trigger_type, updated_at FROM progress"
 ```
 
-`/cc-mem` 对两种安装布局都能解析出 CLI ——完整的解析顺序见[反补丁一节的验证说明](#verification)
+`/cc-mem` 对两种安装布局都能解析出 CLI ——完整的解析顺序见[反补丁一节的验证说明](#验证)
 （`commands/cc-mem.md:54-69`；市场 / 开发检出用嵌套的 `<root>/cc_memory/cli/mem.py`，
-独立安装器的产物用扁平的 `<root>/cli/mem.py`，见
-`cc_memory/ui/installer.py:33,37-48,74`）。在市场安装下，硬编码的
+独立安装器的产物用扁平的 `<root>/cli/mem.py`，见 `cc_memory/ui/installer.py` 的
+`TARGET_DIR` / `SUBPACKAGE_FILES` / `_copy_subpackages`）。在市场安装下，硬编码的
 `python ~/.claude/hooks/cc-memory/...` 调用是错的，因为那棵树只保留 `logs/`。
 
 一份健康的 PROGRESS.md 应当具备：
@@ -660,22 +666,22 @@ cc-memory 的**实时计划锚点**：每个项目一份 `memory/PLAN.md`，它�
 
 `plan_active` 是一个**单槽位**，因此替换计划正是已排布的工作可能无声消失的那个瞬间。
 这是一次真实的、有记录的损失（SELF-ITER 的 S1-S3 沉没事件：已经被批准的后续阶段从未
-重新进入任何计划，在下一轮计划覆盖该槽位的那一刻就消失了——`core/plan.py:330-343`）。
+重新进入任何计划，在下一轮计划覆盖该槽位的那一刻就消失了——`core/plan.py:443-458`）。
 通往那个槽位的两道门都设了闸，而且刻意**没有强制标志（force flag）**
-（`core/plan.py:340-341`，并在 `:514` 的错误文案里重申）：没有记录理由的丢弃，正是
+（`core/plan.py:455-456`，并在 `:647` 的错误文案里重申）：没有记录理由的丢弃，正是
 这道门禁存在的目的所要杀死的失效模式。因此 `plan-set` 只接受
-`--raw / --raw-file / --from-refiner`（`cli/mem.py:1044-1048`）——根本没有可以传进去
-绕过它的东西。
+`--raw / --raw-file / --from-refiner`（`cli/mem.py` 的 `cmd_plan_set`）——根本没有
+可以传进去绕过它的东西。
 
 #### 入口 1 —— REPLACE（`/cc-mem plan-set --from-refiner` → `core.plan.apply_refined_plan`）
 
-`check_carryover(old_structured, new_plan)`（`core/plan.py:367-424`）收集旧计划的
+`check_carryover(old_structured, new_plan)`（`core/plan.py:482-539`）收集旧计划的
 未完成步骤——状态属于 `pending | in_progress | blocked`（`_UNFINISHED_STATUSES`，
-`:346`；选择器 `unfinished_steps` 在 `:350-356`）——并要求其中每一个要么
+`:461`；选择器 `unfinished_steps` 在 `:465-472`）——并要求其中每一个要么
 
   (a) **被自动结转**：与新步骤的裸 `title`，或与其 `title + notes` 的三元组 Jaccard
-      相似度 ≥ `CARRYOVER_MATCH_THRESHOLD = 0.5`（`:345`）（自 v2.4.1 起两者都是
-      候选，`:383-391` —— 只与 `title+notes` 比较，会让一段很长的 notes 把一个完全
+      相似度 ≥ `CARRYOVER_MATCH_THRESHOLD = 0.5`（`:460`）（自 v2.4.1 起两者都是
+      候选，`:492-506` —— 只与 `title+notes` 比较，会让一段很长的 notes 把一个完全
       相同的 title 稀释到阈值以下，这是在该门禁的第二次真实替换 R610 中发现的；
       `title+notes` 这个候选被保留下来，是为了让一个被折叠进另一步骤 notes 里的步骤
       仍能被结转），要么
@@ -683,16 +689,16 @@ cc-memory 的**实时计划锚点**：每个项目一份 `memory/PLAN.md`，它�
   (b) **被 disposition 记录**：存在一条顶层 `"dispositions"` 条目，其 `old_title`
       以 ≥ 0.5 的相似度匹配上，`action` 属于 `done | dropped | merged | carried`，
       且 `reason` **非空**——`detail` 被接受为 `reason` 的同义词
-      （`:392-423`，同义词处理在 `:413-414`）。
+      （`:507-538`，同义词处理在 `:528-529`）。
 
 dispositions 是从**原始的 refiner 字典**里读的，在归一化之前（`apply_refined_plan`
-在 `:502-504` 传的是 `structured`，不是 `normalised`；理由见 `check_carryover` 的
-docstring，`:370-373`）：schema 保持只增不减，因此更老的 refiner 的输出在没有未完成
+在 `:635-637` 传的是 `structured`，不是 `normalised`；理由见 `check_carryover` 的
+docstring，`:485-487`）：schema 保持只增不减，因此更老的 refiner 的输出在没有未完成
 步骤的计划上仍然可用。
 
-任何违规都会抛出 `ValueError`（`core/plan.py:505-514`）。`plan-set --from-refiner`
+任何违规都会抛出 `ValueError`（`core/plan.py:639-647`）。`plan-set --from-refiner`
 会捕获它，打印 `[FAIL] refined plan rejected: …` 并以 1 退出
-（`cli/mem.py:757-759`）。什么都不会被写入——旧计划原封不动地留在那里。
+（`cli/mem.py` 的 `cmd_plan_set`）。什么都不会被写入——旧计划原封不动地留在那里。
 
 一次拒绝在用户看来是这样的：
 
@@ -708,7 +714,7 @@ title similarity) or be listed in the new JSON's top-level "dispositions":
 There is no force flag by design.
 ```
 
-三种违规形态，逐字取自 `core/plan.py:407-423`：
+三种违规形态，逐字取自 `core/plan.py:522-538`：
 
 | 条件 | 消息 |
 |-----------|---------|
@@ -753,30 +759,30 @@ There is no force flag by design.
 #### 兜底 —— 只追加的计划历史
 
 每一份被替换掉的计划——哪怕它的 disposition 记录得干干净净——都会由 `archive_plan`
-（`core/plan.py:427-460`）归档到
+（`core/plan.py:542-575`）归档到
 
 ```
 memory/.plan_history/plan_<YYYYmmddTHHMMSS>_<replace|clear>.json
 ```
 
 其中包含 `archived_at`、`event`、`reason`、`structured` 形式、`raw` 文本和
-`active_step`（`:441-448`）。调用点在 `core/plan.py:515`（替换，无理由字符串）与
-`cli/mem.py:799`（清除，带用户的 `--reason`）。既没有 `structured` 也没有非空白
-`raw` 的行会被跳过（`:434-435`）。
+`active_step`（`:556-563`）。调用点在 `core/plan.py:648`（替换，无理由字符串）与
+`cli/mem.py` 的 `cmd_plan_clear`（清除，带用户的 `--reason`）。既没有 `structured`
+也没有非空白 `raw` 的行会被跳过（`:549-550`）。
 
 归档写入失败是**非阻塞**的：它会向 stderr 打印
 `[WARN] plan history archive failed (<err>) — proceeding; the carryover gate
-already enforced accounting` 并返回 `None`（`core/plan.py:452-460`）。代码里把理由
+already enforced accounting` 并返回 `None`（`core/plan.py:567-575`）。代码里把理由
 说得很明白：门禁的 dispositions 才是首要的反丢失保证，因此让每一次计划操作都卡在
 一次归档磁盘打嗝上，等于把兜底机制变成对规划本身的拒绝服务。
 
 ### 提示阈值
 
-硬编码的默认值在 `core/plan.py:569-571`（`turn_threshold=8`、`edit_threshold=12`）；
+硬编码的默认值在 `core/plan.py:702-704`（`turn_threshold=8`、`edit_threshold=12`）；
 Stop 钩子调用 `should_nudge_guardian(plan_row)` 时不传任何覆盖值
-（`hooks/stop.py:286`）。这些**没有** `config.json` 键——要改就改函数签名的默认值，
+（`hooks/stop.py`）。这些**没有** `config.json` 键——要改就改函数签名的默认值，
 或者显式传关键字参数。敏感调用的 `+20` 加分同样是硬编码的
-（`hooks/post_tool_use.py:141`）：
+（`hooks/post_tool_use.py`）：
 
 | 触发                                      | 阈值           | 发出什么 |
 |------------------------------------------|----------------|-------------------|
@@ -787,7 +793,7 @@ Stop 钩子调用 `should_nudge_guardian(plan_row)` 时不传任何覆盖值
 
 在没有 schema 合法的计划时，`should_nudge_guardian` 返回
 `(False, "no_active_plan")`；当一份原始计划正等待精炼时返回
-`(False, "needs_refine_first")`，因此两种提示绝不会撞车（`core/plan.py:574-578`）。
+`(False, "needs_refine_first")`，因此两种提示绝不会撞车（`core/plan.py:708-711`）。
 
 Stop 钩子对计划**绝不**发出 `<system-reminder>`——只有一行软性的建议状态行
 （`hooks/stop.py:270-272`）。要显式请求一次 guardian 巡检，请用
@@ -842,7 +848,7 @@ Stop 钩子对计划**绝不**发出 `<system-reminder>`——只有一行软性
 
 ### 敏感工具清单
 
-`core.plan.is_sensitive_tool_call`（`core/plan.py:596-613`）会标记以下 Bash 模式
+`core.plan.is_sensitive_tool_call`（`core/plan.py:729-745`）会标记以下 Bash 模式
 ——对 `command` 输入做大小写不敏感的子串匹配，且仅限 `Bash` 工具——从而立即触发一次
 guardian 提示加分（+20 次编辑）：
 
@@ -851,9 +857,9 @@ guardian 提示加分（+20 次编辑）：
 - `npm publish`、`cargo publish`、`pypi-upload`、`twine upload`
 - `kubectl apply`、`terraform apply`、`ansible-playbook`
 
-+20 的语义写在 `hooks/post_tool_use.py:135-138`：“这一个动作携带的漂移风险相当于
++20 的语义写在 `hooks/post_tool_use.py` 里：“这一个动作携带的漂移风险相当于
 约 20 次普通编辑”，因此下一次 Stop 钩子会立刻浮出一条 guardian 建议。cc-memory
-**不会**阻断这些调用；它只做标记（`core/plan.py:590-593`）。这个加分和普通的编辑
-加分一样，在没有活动计划行时是空操作（`hooks/post_tool_use.py:140`）。
+**不会**阻断这些调用；它只做标记（`core/plan.py:721-726`）。这个加分和普通的编辑
+加分一样，在没有活动计划行时是空操作。
 
 需要时请在 `cc_memory/core/plan.py:is_sensitive_tool_call` 里扩充这份清单。

@@ -58,6 +58,31 @@ def _get_db(project):
     return db, pid, name
 
 
+def _prog():
+    """The name this process was actually invoked as, for every usage string.
+
+    This module has TWO honest names and the usage text has to be right under
+    both: the `cc-memory-plan` console script (`[project.scripts]` in
+    pyproject.toml, which is what README's Plan Queue walkthrough tells users
+    to run) and `python <install>/cli/plan.py`, which is what README documents
+    for a standalone install. A hardcoded `prog="plan.py"` named a file that is
+    not on a console-script user's PATH at all — `cc-memory-plan --help`
+    printed `usage: plan.py ...` and every argparse failure began
+    `plan.py: error:`.
+
+    argparse's own default, basename(sys.argv[0]), is correct for both, so
+    derive from that; the only adjustment is dropping the `.exe` that a Windows
+    console-script wrapper carries, because `cc-memory-plan` is what the user
+    types (PATHEXT supplies the suffix). `cli/mem.py:1291` solves the same
+    problem by hardcoding `prog="cc-memory"`, which is right for the console
+    script and wrong for `python .../cli/mem.py`.
+    """
+    name = Path(sys.argv[0]).name if sys.argv and sys.argv[0] else ""
+    if name.lower().endswith(".exe"):
+        name = name[:-4]
+    return name or "cc-memory-plan"
+
+
 def _die(msg):
     """Print an error and exit non-zero (CLI failure paths must not exit 0)."""
     print(msg)
@@ -216,7 +241,7 @@ def cmd_evaluate(args):
         print()
     print("=== END PLANS ===")
     print("\nClaude: Please evaluate each plan's feasibility, then update via:")
-    print(f"  python plan.py --project {args.project} set-eval <ID> <status> \"<notes>\"")
+    print(f"  {_prog()} --project {args.project} set-eval <ID> <status> \"<notes>\"")
 
 
 def cmd_set_eval(args):
@@ -240,9 +265,10 @@ def cmd_approve(args):
     elif args.ids:
         plans = _require_plans(db, pid, args.ids)
     else:
-        _die("Specify --all or plan IDs to approve.\n"
-             "  usage: plan.py --project <path> approve --all\n"
-             "         plan.py --project <path> approve 1 2 3")
+        prog = _prog()
+        _die(f"Specify --all or plan IDs to approve.\n"
+             f"  usage: {prog} --project <path> approve --all\n"
+             f"         {prog} --project <path> approve 1 2 3")
 
     for p in plans:
         _update_checked(db, pid, p["id"], "ready")
@@ -268,10 +294,11 @@ def cmd_exec(args):
     elif args.id is not None:
         plans = _require_plans(db, pid, [args.id], statuses=["ready"])
     else:
-        _die("Specify --next, --all, or a plan ID.\n"
-             "  usage: plan.py --project <path> exec --next\n"
-             "         plan.py --project <path> exec --all\n"
-             "         plan.py --project <path> exec 3")
+        prog = _prog()
+        _die(f"Specify --next, --all, or a plan ID.\n"
+             f"  usage: {prog} --project <path> exec --next\n"
+             f"         {prog} --project <path> exec --all\n"
+             f"         {prog} --project <path> exec 3")
 
     print(f"\n=== EXECUTE PLANS ({name}) ===\n")
     for p in plans:
@@ -281,7 +308,7 @@ def cmd_exec(args):
         print()
     print("=== END ===")
     print("\nClaude: Execute these plans in order, then mark done/failed via:")
-    print(f"  python plan.py --project {args.project} done <ID> \"<result>\"")
+    print(f"  {_prog()} --project {args.project} done <ID> \"<result>\"")
 
 
 def cmd_done(args):
@@ -335,19 +362,26 @@ def cmd_reorder(args):
 # ── Parser ───────────────────────────────────────────────────────────────────
 
 def make_parser():
+    # `prog=_prog()` instead of a hardcoded name, and `%(prog)s` in the epilog
+    # (argparse expands it there, RawDescriptionHelpFormatter included) so the
+    # workflow block names the command the reader actually ran. The subcommands
+    # are listed bare rather than repeated after the prog name, which keeps the
+    # comment column aligned whatever length that name turns out to be.
     p = argparse.ArgumentParser(
-        prog="plan.py", description="cc-memory Plan Queue",
+        prog=_prog(), description="cc-memory Plan Queue",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=textwrap.dedent("""
-            Workflow:
-              plan.py add "Task 1" "Task 2" "Task 3"   # Add plans
-              plan.py list                               # View plans
-              plan.py evaluate                           # Start evaluation
-              plan.py set-eval 1 ready "Looks feasible"  # Set eval result
-              plan.py approve --all                      # Approve all
-              plan.py exec --next                        # Execute next plan
-              plan.py done 1 "Completed successfully"    # Mark done
-              plan.py clear                              # Clean up
+            Workflow -- each line below runs as
+            `%(prog)s --project <path> <the line>`:
+
+              add "Task 1" "Task 2" "Task 3"     # Add plans
+              list                               # View plans
+              evaluate                           # Start evaluation
+              set-eval 1 ready "Looks feasible"  # Set eval result
+              approve --all                      # Approve all
+              exec --next                        # Execute next plan
+              done 1 "Completed successfully"    # Mark done
+              clear                              # Clean up
 
             This CLI owns the `plans` queue table only. The v2.2 live plan
             anchor (memory/PLAN.md, `plan_active`) is `/cc-mem plan-*`.

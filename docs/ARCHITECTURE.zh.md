@@ -1,7 +1,7 @@
-<!-- i18n-source: ARCHITECTURE.md | sha256: 47d2fa57845852be | version: 2.5.0 | translated: 2026-08-05 -->
+<!-- i18n-source: ARCHITECTURE.md | sha256: bcef4cdac790617b | version: 2.5.1 | translated: 2026-08-05 -->
 > [English](ARCHITECTURE.md) · **简体中文**
 
-# cc-memory — 架构（v2.5.0）
+# cc-memory — 架构（v2.5.1）
 
 cc-memory 是一个 Claude Code 插件，为 Claude 提供**跨压缩、跨会话的持久化结构化
 记忆**。本文档是总览：这个插件用来做什么、仓库如何布局、哪些钩子在何时触发、数据库
@@ -12,17 +12,23 @@ cc-memory 是一个 Claude Code 插件，为 Claude 提供**跨压缩、跨会�
 [docs/CONTRACTS.md](CONTRACTS.md) 中。本文件描述机器；那份文件描述机器必须遵守的
 规则。
 
+**关于 `file:line` 引用。** 没有任何东西强制它们，而且它们在每一次重构后都会腐化。
+v2.5.1 的文档整理重新推导了 §4 中 `core/db.py` 的引用，并对着代码核查了全部散文式
+断言；但指向 `cc_memory/hooks/*`、`cli/mem.py` 和 `ui/installer.py` 的引用**刻意
+没有**重新推导——那几个文件正在同一轮里被重写。请把行号当作线索，把**符号名**当作
+事实。
+
 ## 目录
 
-- [1. 总览 / 它解决什么问题](#1-overview--what-it-solves)
-- [2. 仓库布局](#2-repository-layout)
-- [3. 钩子（Hooks）](#3-hooks)
-- [4. 数据库 schema](#4-database-schema)
-- [5. 数据流](#5-data-flow)
-- [6. LLM 后端与认证](#6-llm-backends-and-auth)
-- [7. 按项目的状态（memory/）](#7-per-project-state-memory)
-- [8. 安装布局](#8-install-layouts)
-- [9. 文档语言约定（i18n）](#9-documentation-language-convention-i18n)
+- [1. 总览 / 它解决什么问题](#1-总览--它解决什么问题)
+- [2. 仓库布局](#2-仓库布局)
+- [3. 钩子（Hooks）](#3-钩子hooks)
+- [4. 数据库 schema](#4-数据库-schema)
+- [5. 数据流](#5-数据流)
+- [6. LLM 后端与认证](#6-llm-后端与认证)
+- [7. 按项目的状态（memory/）](#7-按项目的状态memory)
+- [8. 安装布局](#8-安装布局)
+- [9. 文档语言约定（i18n）](#9-文档语言约定i18n)
 
 ---
 
@@ -50,7 +56,7 @@ cc-memory 是一个 Claude Code 插件，为 Claude 提供**跨压缩、跨会�
    `core.logger` 把诊断信息写到 `~/.claude/hooks/cc-memory/logs/`，并且绝不写
    stderr（Claude Code 会把 stderr 渲染成错误）。延迟无上界的工作被彻底移出阻塞
    路径——这正是整理（consolidation）在 v2.3.2 中变成第二个 `async` PreCompact
-   钩子的原因（见 [§3](#3-hooks)）。
+   钩子的原因（见 [§3](#3-钩子hooks)）。
 
 5. **运行时纯 stdlib。** `sqlite3`、`json`、`pathlib`、`urllib`、`datetime`、
    `subprocess`、`tkinter`、`time`、`hashlib`、`re`、`http.server`。无 pip 依赖。
@@ -64,7 +70,7 @@ cc-memory 是一个 Claude Code 插件，为 Claude 提供**跨压缩、跨会�
 PROTOCOL）都是**有意**同时匹配中文和英文的，存储的记忆也可以是任意语言。这是文档
 语言模型中的 **Tier 3**——与英文骨架的*文档*约定（Tier 1）是分开的。那些检测器带有
 行内的 `i18n Tier 3` 注释，**不得**被削减为只识别英文。完整的三层模型见
-[§9.1](#91-the-three-tier-language-model)。
+[§9.1](#91-三层语言模型)。
 
 ---
 
@@ -73,7 +79,7 @@ PROTOCOL）都是**有意**同时匹配中文和英文的，存储的记忆也�
 ```
 cc-memory/
 ├── .claude-plugin/
-│   ├── plugin.json              ← 插件清单（v2.5.0）
+│   ├── plugin.json              ← 插件清单（v2.5.1）
 │   └── marketplace.json         ← /plugin marketplace add 条目
 ├── hooks/hooks.json             ← 钩子声明（6 条命令 / 5 个事件）
 ├── skills/                      ← 技能的唯一规范位置
@@ -85,14 +91,16 @@ cc-memory/
 ├── commands/
 │   └── cc-mem.md                ← /cc-mem 斜杠命令
 ├── docs/
-│   ├── ARCHITECTURE.md          ← 本文件（总览 + i18n 约定）
-│   └── CONTRACTS.md             ← 反补丁 + 强制交接 + 实时计划
+│   ├── ARCHITECTURE.md          ← 本文件的英文源（总览 + i18n 约定）
+│   ├── ARCHITECTURE.zh.md       ← 受漂移跟踪的翻译，即本文件（见 §9）
+│   ├── CONTRACTS.md             ← 反补丁 + 强制交接 + 实时计划
+│   └── CONTRACTS.zh.md          ← 受漂移跟踪的翻译（见 §9）
 ├── cc_memory/                   ← Python 包（已拆分子包）
 │   ├── __init__.py              (转出口 core/version.py 的 __version__)
 │   ├── config.json
 │   ├── core/                    ← 领域层：db, extractor, consolidate, idle,
 │   │                              progress, plan, privacy, modes, auth,
-│   │                              logger, encoding_setup
+│   │                              logger, encoding_setup, version
 │   ├── hooks/                   ← 钩子入口（6 个模块）
 │   ├── llm/                     ← ccl_backend（Haiku/Ollama）+ memory_writer
 │   ├── cli/                     ← mem.py, plan.py
@@ -111,9 +119,9 @@ cc-memory/
 ```
 
 `agents/`、`tests/` 和 `tools/` 是承重结构，不是附带品：
-`agents/plan-refiner.md` 由 `cc_memory/hooks/stop.py:279-284` 提示触发，
-`agents/plan-guardian.md` 由 `stop.py:286-296` 触发；`tools/i18n_check.py` 正是
-[§9](#9-documentation-language-convention-i18n) 所规定的对象，也是
+`agents/plan-refiner.md` 与 `agents/plan-guardian.md` 都由
+`cc_memory/hooks/stop.py` 提示触发；`tools/i18n_check.py` 正是
+[§9](#9-文档语言约定i18n) 所规定的对象，也是
 `tests/smoke_test.py:878-895` 作为漂移门禁导入的模块。
 
 ### 只有一个版本字符串（v2.5）
@@ -149,8 +157,8 @@ v2.4.3 把原本 5 份的 `docs/` 目录合并为 2 份。全部 79 处仓库内
 | `docs/MEMORY_RULES.md` | [CONTRACTS.md § Anti-patch contract](CONTRACTS.md#anti-patch-contract) |
 | `docs/HANDOFF_PROTOCOL.md` | [CONTRACTS.md § Handoff contract](CONTRACTS.md#handoff-contract) |
 | `docs/PLAN_PROTOCOL.md` | [CONTRACTS.md § Plan contract](CONTRACTS.md#plan-contract) |
-| `docs/I18N.md` | [本文件 §9](#9-documentation-language-convention-i18n) |
-| `docs/ARCHITECTURE.md §3`（schema） | [本文件 §4](#4-database-schema)——合并前的文件没有编号章节，所以文件名没变但编号变了 |
+| `docs/I18N.md` | [本文件 §9](#9-文档语言约定i18n) |
+| `docs/ARCHITECTURE.md §3`（schema） | [本文件 §4](#4-数据库-schema)——合并前的文件没有编号章节，所以文件名没变但编号变了 |
 
 `CHANGELOG.md` 刻意在历史条目里保留旧文件名：那些条目描述的是当时的目录状态，
 改写它们等于伪造记录。
@@ -169,7 +177,7 @@ v2.4.3 把原本 5 份的 `docs/` 目录合并为 2 份。全部 79 处仓库内
 | `PreCompact`（异步） | [`cc_memory/hooks/consolidate_async.py`](../cc_memory/hooks/consolidate_async.py) | 300s，`async: true` | 每 N 次会话一次的 LLM 整理，在 v2.3.2 中被移出阻塞式压缩路径（间隔标记 + 锁，受预算门约束）。 |
 | `SessionStart` | [`cc_memory/hooks/session_start.py`](../cc_memory/hooks/session_start.py) | 15s | 注入分层上下文（主题 / 关键项 / 时间线 / PROGRESS 预览 / 页脚）；发出强制的 `<system-reminder>`，要求 Read `PROGRESS.md` + `MEMORY.md`；追溯保存未保存的 JSONL。 |
 | `Stop` | [`cc_memory/hooks/stop.py`](../cc_memory/hooks/stop.py) | 22s | 观察者：经 Haiku 从上一回合的 observations 抽取；每回合 `patch_progress(files_touched, ...)`；每 5 个回合运行 `idle.maybe_run_idle`（清理 + 重新生成 MEMORY.md）；当有活动计划时，累加其回合计数器并发出**一行**建议——若计划仍未精炼则是 plan-refiner 提示，否则在漂移阈值触发后给出 guardian 检查提示。 |
-| `PostToolUse` | [`cc_memory/hooks/post_tool_use.py`](../cc_memory/hooks/post_tool_use.py) | 8s | 为每一次被观察的工具调用向 `observations` 插入一行（模式白名单 / 跳过列表——`core.modes.should_observe`）；外加实时计划捕获：`ExitPlanMode` → `plan_active.raw`，`TodoWrite` → 机械式步骤同步，`Edit`/`Write`/`MultiEdit`/`NotebookEdit` → 漂移计数器 +1，敏感 Bash 调用 → +20。不调用 LLM。 |
+| `PostToolUse` | [`cc_memory/hooks/post_tool_use.py`](../cc_memory/hooks/post_tool_use.py) | 8s | **先**做实时计划集成，且所有模式一视同仁：`ExitPlanMode` → `plan_active.raw`，`TodoWrite` → 机械式步骤同步，`Edit`/`Write`/`MultiEdit`/`NotebookEdit` → 漂移计数器 +1，敏感 Bash 调用 → +20。**然后**才为被观测的工具调用向 `observations` 插入一行（模式白名单 / 跳过列表——`core.modes.should_observe`）。不调用 LLM。端到端实测约 180-290 ms，其中约 75-120 ms 是解释器启动。 |
 | `UserPromptSubmit` | [`cc_memory/hooks/user_prompt.py`](../cc_memory/hooks/user_prompt.py) | 8s | 首次接触时自动初始化 `memory/`；跟踪回合数；为 Stop 观察者保存提示；在第 1 回合给会话打标签并为 `progress.current_request` 播种（依据双语恢复信号白名单，把触发类型判定为 `resume_request` 还是 `user_prompt`）。 |
 
 ### 钩子 stdout 契约
@@ -206,12 +214,20 @@ v2.3.2 把这个事件拆开了：
 
 ### 超时被声明了两次，必须保持完全同步
 
-`hooks/hooks.json` 是市场 / 开发用的声明。`cc_memory/ui/installer.py` 的
-`HOOK_SCRIPTS`（`installer.py:55-61`）是独立安装的声明，它以一个**基础**超时表达，
-在 Windows 上乘以 1.5（`installer.py:101`）：PreCompact `80 × 1.5 = 120`、
-SessionStart `10 × 1.5 = 15`、Stop 22、PostToolUse 8、UserPromptSubmit 8。异步支路
-是单独追加的，采用**固定** 300 秒（`apply_mult=False`，`installer.py:122-123`），
-因为它是一个后台截止期限，而不是阻塞 UI 的预算。
+`hooks/hooks.json` 是市场 / 开发用的声明，也是唯一真相来源。
+`cc_memory/ui/installer.py` 的 `HOOK_SCRIPTS` / `ASYNC_HOOK`
+（`installer.py:92-102`）是独立安装的声明。自 v2.5 起，这些条目直接携带**最终上线
+值**——PreCompact 120（同步）/ 300（异步）、SessionStart 15、Stop 22、
+PostToolUse 8、UserPromptSubmit 8——并且只要 `hooks/hooks.json` 可用（开发检出，
+或冻结构建内的 `cc_memory_meta/hooks.json`），`installer.py` 的
+`_declared_hook_timeouts()` 就会去**读**它；只有在那个文件缺席的扁平 / 冻结安装
+下，才回退到那张字面量表。
+
+那个基于 `platform`、把上述值表达成“基础超时”的 **× 1.5 Windows 乘数已被删除**。
+它曾让独立安装在五个事件中的三个上与市场安装不一致（Stop 33 对 22、
+PostToolUse 12 对 8、UserPromptSubmit 12 对 8）。现在提高一个超时，意味着必须同时
+改 `hooks/hooks.json` **和**那张兜底表；`tests/test_surfaces.py` 会断言两者在数值
+上一致。
 
 ### observation 闸门不再遮蔽计划分支（v2.5 已修）
 
@@ -263,41 +279,43 @@ SQLite 表（定义在 [`cc_memory/core/db.py`](../cc_memory/core/db.py)），�
 | `plans` | 计划队列（draft → ready → done）（`db.py:88`） |
 | `observations` | 原始 PostToolUse 事件，抽取后清理（`db.py:129`） |
 | `session_summaries` | 每会话 6 字段结构化摘要（request / investigated / learned / completed / next_steps / notes）+ files_read/files_modified（`db.py:143`） |
-| **`progress`** | v2.1 新增——每项目一行。`memory/PROGRESS.md` 的唯一真相来源（`db.py:177`）。 |
-| **`plan_active`** | v2.2 新增——每项目一行。`memory/PLAN.md` 的唯一真相来源（`db.py:199`）。 |
-| `_migrations` | 记录已应用的迁移（`db.py:278`） |
+| **`progress`** | v2.1 新增——每项目一行。`memory/PROGRESS.md` 的唯一真相来源（`db.py:188`）。 |
+| **`plan_active`** | v2.2 新增——每项目一行。`memory/PLAN.md` 的唯一真相来源（`db.py:210`）。 |
+| `_migrations` | 记录已应用的迁移（`db.py:289`） |
 
 共十一张表，与 `CLAUDE.md` 的 §“Database schema (11 tables)” 一致。
 
-此外还有 `memories_fts`——一个建立在 `memories` 之上的 FTS5 虚拟表，由三个触发器保持
-同步（`core/db.py:317-341`，迁移 `v2_fts5`）。它只在本地 SQLite 构建带 FTS5 时才会
-创建；否则 `db.search_fts` 回退到 `LIKE`（`core/db.py:306-313`、`:1106`）。FTS5 在
-`.claude-plugin/plugin.json:4` 与 `:12` 中被宣传，`/cc-mem status` 会报告当前实际走
-哪条路径（`cli/mem.py:307-308`）。
+此外还有 `memories_fts`——一个建立在 `memories` 之上的 FTS5 虚拟表
+（`core/db.py:328`），由三个触发器保持同步（`core/db.py:332-350`，迁移 `v2_fts5` 在
+`db.py:161`）。它只在本地 SQLite 构建带 FTS5 时才会创建；否则
+`db.search_fts`（`core/db.py:1203`）回退到 `LIKE ? ESCAPE '\'`
+（`core/db.py:1216-1226`）。FTS5 在 `.claude-plugin/plugin.json:4` 与 `:12` 中被
+宣传，`/cc-mem status` 会报告当前实际走哪条路径（`cli/mem.py` 的 `cmd_status`）。
 
-`memories` 上的 `supersedes_id` 列（迁移 `v3_supersedes`，`db.py:169`）把反补丁的
+`memories` 上的 `supersedes_id` 列（迁移 `v3_supersedes`，`db.py:180`）把反补丁的
 取代链显式化：当 `upsert_smart` 判定一条新记忆取代了一条旧记忆时，新行会回链到旧行
-的 ID（旧行被归档）。通过 `db.get_supersede_chain(memory_id)`（`db.py:513`）走一遍
+的 ID（旧行被归档）。通过 `db.get_supersede_chain(memory_id)`（`db.py:524`）走一遍
 链条，就能看到完整的更新历史。`content_hash`（迁移 `v2_content_hash`，`db.py:124`）
 是归一化内容的 `sha256[:16]`，用于廉价的精确重复检查（`db.compute_content_hash` 在
-`db.py:722`，`db.find_by_hash` 在 `db.py:735`）。
+`db.py:749`，`db.find_by_hash` 在 `db.py:762`）。
 
 迁移按 `_MIGRATIONS` 列表（`db.py:119`）的顺序应用，并记录在 `_migrations` 中。目前
 已交付的层级：**v1**（topic 列 + 索引）、**v2**（content_hash、observations、
 session_summaries、项目模式、FTS5、哈希回填）、**v3**（反补丁 + 强制交接：
 `supersedes_id`、`progress`）、**v4**（`plan_active`）、**v5**（会话标注：
 `progress.current_session_id`、`progress.session_started_at`——这样多会话工作流就能
-从 PROGRESS.md 判断自己读到的是不是自己写的内容，`db.py:219-222`）、**v6**
+从 PROGRESS.md 判断自己读到的是不是自己写的内容，`db.py:230-233`）、**v6**
 （引用感知的老化：`memories.last_referenced_at`，在注入时设置，因此有效年龄是
 `now - COALESCE(last_referenced_at, created_at)`，被引用过的事实保持“年轻”，
-`db.py:226-237`）。
+`db.py:244-248`）。
 
 `progress` 行面向用户的字段是 `current_request`、`status_done`、
 `status_in_flight`、`status_blocked`、`open_todos`、`plan`、`critical_context`、
-`files_touched`、`transcript_ptr`、`updated_at`、`trigger_type`（共 11 个，外加 v5
-的两个会话标注列）。`plan_active` 行持有 `raw`、`structured`、`active_step`、
-`edits_since_last_guardian`、`turns_since_last_guardian`、`last_guardian_at`、
-`last_refined_at`、`needs_refine`、`created_at`、`updated_at`（`db.py:199-211`）。
+`files_touched`、`transcript_ptr`、`updated_at`、`trigger_type`（共 11 个 ——
+`db.py:188-201` —— 外加 v5 的两个会话标注列，合计 13 个非主键列）。`plan_active`
+行持有 `raw`、`structured`、`active_step`、`edits_since_last_guardian`、
+`turns_since_last_guardian`、`last_guardian_at`、`last_refined_at`、
+`needs_refine`、`created_at`、`updated_at`（`db.py:210-222`）。
 
 所有查询都使用参数化语句；禁止用字符串格式化拼 SQL。
 
@@ -503,12 +521,19 @@ transcript 得到 0 条腿、0 条记忆。第 3 级从
 机械地同步步骤状态（不调用 LLM）；`Edit`/`Write`/`MultiEdit`/`NotebookEdit` 会累加
 `edits_since_last_guardian`，而敏感的 Bash 调用（`git push`、`rm -rf`、
 `DROP TABLE`、`npm publish`、`kubectl apply`、`terraform apply`……见
-`core/plan.py:596-613`）一次加 20。一旦 `turns_since_last_guardian >= 8` 或
-`edits_since_last_guardian >= 12`，Stop 钩子就发出 guardian 建议
-（`core/plan.py:569-585`）。钩子自己绝不派生子代理——它们只提示。完整规格见
-[docs/CONTRACTS.md](CONTRACTS.md#plan-contract)。这些分支中哪些当前被 observation
-闸门遮蔽，见上文的
-[已知缺口](#known-gap-the-observation-gate-shadows-the-plan-branches)。
+`core.plan.is_sensitive_tool_call`，`plan.py:729`）一次加 20。一旦
+`turns_since_last_guardian >= 8` 或 `edits_since_last_guardian >= 12`，Stop 钩子
+就发出 guardian 建议（`core.plan.should_nudge_guardian`，`plan.py:702`），并把
+refiner 提示限速为每会话每 5 个回合至多一次。钩子自己绝不派生子代理——它们只提示。
+完整规格见 [docs/CONTRACTS.md](CONTRACTS.md#plan-contract)。**自 v2.5 起，上面的
+每一条分支在每种模式下都会运行**——此前遮蔽它们的是什么，见
+[observation 闸门](#observation-闸门不再遮蔽计划分支v25-已修)。
+
+尚未精炼的原始计划也不再是隐形的：`core.plan.raw_pending_refinement`
+（`plan.py:262`）是共享判据，`write_plan_md` 与 `/cc-mem plan-status` 都会以一条
+PENDING REFINEMENT 横幅加逐字原文开头，并把更旧的结构化计划明确标注为已被取代。
+那段逐字块的围栏宽度会超过原始文本里最长的一串反引号，因为计划模式的输出里经常
+带有代码围栏。
 
 ---
 
@@ -697,17 +722,19 @@ SQL 真相来源（PROGRESS.md 对应 `progress`，PLAN.md 对应 `plan_active`�
     ├── core/  hooks/  llm/  cli/  mcp/  ui/
 ```
 
-**独立安装器（扁平）**——`_copy_subpackages(TARGET_DIR)`（`installer.py:74-92`）把
-每一个 `SUBPACKAGE_FILES` 键（`installer.py:37-48`）直接写到 `TARGET_DIR` 下，
+**独立安装器（扁平）**——`_copy_subpackages(TARGET_DIR)` 把每一个 `SUBPACKAGE_FILES`
+键（`installer.py:61`）直接写到 `TARGET_DIR`（`installer.py:56`）之下，
 **没有 `cc_memory/` 这一段**，并且 `_make_hooks_config` 把命令构造成
-`python "<TARGET_DIR>/hooks/<name>.py"`（`installer.py:104-115`）：
+`python "<TARGET_DIR>/hooks/<name>.py"`：
 
 ```
-~/.claude/hooks/cc-memory/           ← ui/installer.py:33 TARGET_DIR
+~/.claude/hooks/cc-memory/           ← ui/installer.py:56 TARGET_DIR
 ├── __init__.py
 ├── config.json
+├── installed_surfaces.json  ← 写进了 ~/.claude 的东西（v2.5）
 ├── core/    auth.py consolidate.py db.py encoding_setup.py extractor.py
 │            idle.py logger.py modes.py plan.py privacy.py progress.py
+│            version.py
 ├── hooks/   consolidate_async.py post_tool_use.py pre_compact.py
 │            session_start.py stop.py user_prompt.py
 ├── llm/     ccl_backend.py memory_writer.py
@@ -718,10 +745,13 @@ SQL 真相来源（PROGRESS.md 对应 `progress`，PLAN.md 对应 `plan_active`�
 ```
 
 注意扁平树里*缺少*什么：没有 `hooks/hooks.json`（`SUBPACKAGE_FILES` 不包含它——
-注册改为写入 `~/.claude/settings.json`），也没有 `skills/`、`agents/`、
-`commands/`、`docs/`、`tests/` 或 `tools/`。尤其是 `tools/i18n_check.py`，它被刻意
-排除在 `SUBPACKAGE_FILES` 和 `build_exe.py` 之外；打包后的插件不受它影响
-（见 [§9.5](#95-the-checker)）。
+注册改为写入 `~/.claude/settings.json`），没有 `.claude-plugin/`，也没有 `docs/`、
+`tests/` 或 `tools/`。尤其是 `tools/i18n_check.py`，它被刻意排除在
+`SUBPACKAGE_FILES` 和 `build_exe.py` 之外；打包后的插件不受它影响
+（见 [§9.5](#95-检查器)）。由此有两个后果：扁平布局永远读不到 `plugin.json`，
+所以它的 **MCP 注册必须手工写**，指向 `<TARGET_DIR>/mcp/server.py`；以及
+`core/version.py` 必须被加进 `SUBPACKAGE_FILES["core"]`，否则每一个执行
+`from core.version import __version__` 的模块都会在扁平安装下退化。
 
 ### 五个用户界面是单独安装的（v2.5）
 
@@ -732,12 +762,12 @@ SQL 真相来源（PROGRESS.md 对应 `progress`，PLAN.md 对应 `plan_active`�
 
 `SURFACE_FILES`（`installer.py:79`）恰好点名五条路径 —— `commands/cc-mem.md`、
 `agents/plan-refiner.md`、`agents/plan-guardian.md`、`skills/ccm-load/SKILL.md`、
-`skills/save-memories/SKILL.md` —— 而 `_copy_surfaces`（`installer.py:286`）在安装的
-第 [2/3] 步把它们写进 `~/.claude/`，并把写了什么记录进 `installed_surfaces.json`
-（`installer.py:58`）。
+`skills/save-memories/SKILL.md` —— 而 `_copy_surfaces` 在安装的第 [2/3] 步把它们写进
+`~/.claude/`，并把写了什么记录进 `installed_surfaces.json`（`SURFACE_MANIFEST`，
+`installer.py:58`）。
 
 卸载是**按名字**进行的，绝不 `rmtree`：`~/.claude/{commands,agents,skills}` 里放着
-用户自己的文件。`_remove_surfaces`（`installer.py:323`）只删除被记录的那些路径，会
+用户自己的文件。`_remove_surfaces` 只删除被记录的那些路径，会
 移除被清空的 `skills/<name>/` 但绝不移除 `commands/` 或 `agents/` 本身，并且区分
 「没有清单」（回退到本次构建的 `SURFACE_FILES`）与「清单记录了零个文件」（什么都不
 删，并明说）。在预先放入用户自己的 `commands/my-own.md` 和 `agents/my-agent.md` 后
@@ -783,9 +813,15 @@ SQL 真相来源（PROGRESS.md 对应 `progress`，PLAN.md 对应 `plan_active`�
 启动器，但默认**不**提供 `python3.exe`——请在安装插件之前勾选“Add Python to
 PATH” + “py launcher”，或者把 `python3` 别名到 `python`。否则钩子会无声失败
 （会记录到 `~/.claude/hooks/cc-memory/logs/`，但 Claude Code 对命令缺失不显示任何
-错误 UI）。独立安装器通过探测规避了这一点：`_detect_python_cmd` 只有在
-`shutil.which("python3")` 找得到时才用 `python3`，否则用 `python`
-（`installer.py:95-96`）。
+错误 UI）。
+
+独立安装器绕开这一点的方式是**运行**每一个候选，而不是探测它是否存在：
+`_detect_python_cmd`（`cc_memory/ui/installer.py`）以 15 秒超时执行
+`<cand> -c "import sys;print(sys.version_info[0])"`，取第一个回答 `3` 的候选。
+`shutil.which("python3")` 不够用 —— 在没有安装 Store Python 的 Windows 上，它会解析
+到一个 0 字节的应用执行别名（App Execution Alias），由此生成的钩子命令会无声失败。
+（残留的代价：在那种机器上*执行*该别名可能弹出 Microsoft Store；那个超时给它设了
+上界。）
 
 ---
 
@@ -797,12 +833,13 @@ PATH” + “py launcher”，或者把 `python3` 别名到 `python`。否则钩
 它就是这套约定的英文真相来源。执行它的检查器是 `tools/i18n_check.py`（纯 stdlib，
 仅 dev/CI——不随插件分发）。
 
-> 合并说明：本章在 v2.4.1 之前是 `docs/I18N.md`。所有代码内指针在同一次改动中已一并
-> 改指——Tier-3 守卫注释（`core/extractor.py:32`、`:71`、
-> `hooks/session_start.py:275`、`hooks/user_prompt.py:196`）与
-> `cc_memory/__init__.py:37` 全都引用
+> 合并说明：本章在 v2.4.2 之前是 `docs/I18N.md`，在 v2.4.3 被并入这里。所有代码内
+> 指针在同一次改动中已一并改指——`core/extractor.py`（`:32`、`:71`）、
+> `hooks/session_start.py`、`hooks/user_prompt.py` 里的 Tier-3 守卫注释，以及
+> `cc_memory/__init__.py` 的模块 docstring，全都引用
 > `docs/ARCHITECTURE.md#9-documentation-language-convention-i18n §1`，而且
-> `grep -rn I18N cc_memory/` 没有任何输出。
+> `grep -rn I18N cc_memory/` 没有任何输出。（本条此前带的那三个钩子 / 包内行号已被
+> 无关改动挪动；`grep -rn "i18n Tier 3" cc_memory/` 才是稳定的定位方式。）
 
 ### 9.1 三层语言模型
 
@@ -811,7 +848,7 @@ PATH” + “py launcher”，或者把 `python3` 别名到 `python`。否则钩
 | 层 | 是什么 | 规则 | 位于何处 |
 |------|------|------|----------------|
 | 1 — 骨架 | 英文规范文档 + 所有面向 LLM 的字符串 | 英文具有权威性；每一份翻译都需要一个英文源 | `README.md`、`docs/*.md`；钩子 / CLI 指令字符串 |
-| 2 — 翻译 | 供人阅读的其他语言文档 | `NAME.<lang>.md` 兄弟文件，受漂移跟踪，按需产出 | `README.zh.md`（目前唯一存在的翻译；`docs/*.zh.md` 按需） |
+| 2 — 翻译 | 供人阅读的其他语言文档 | `NAME.<lang>.md` 兄弟文件，受漂移跟踪，按需产出 | `README.zh.md`、`docs/ARCHITECTURE.zh.md`、`docs/CONTRACTS.zh.md`（自 v2.5 起，三份被跟踪的英文文档全都有译文） |
 | 3 — 内容 | 用户存储的记忆内容 | 任意语言；双语检测是有意为之 | `extractor.py`、`user_prompt.py`、`session_start.py` |
 
 - **Tier 1 刻意保持英文。** 钩子 stdout 和 `Claude:` 开头的 CLI 指令输出是给模型读
@@ -819,31 +856,34 @@ PATH” + “py launcher”，或者把 `python3` 别名到 `python`。否则钩
   “英文规范”意味着这些内容永不翻译。
 - **Tier 3 在设计上与语言无关。** 抽取器模式与恢复信号集合同时匹配英文和中文，存储
   的记忆也可以是任意语言。见
-  [§1 “设计上就是双语的”](#bilingual-by-design--memory-content-is-language-agnostic)。
+  [§1 “设计上就是双语的”](#设计上就是双语的记忆内容与语言无关)。
   **不要**把那些检测器削减为只识别英文——那会破坏设计的第 3 条
   （“内容可以是任意语言”）。具体的受守卫位置是 `core/extractor.py:35-69`
   （`_PATTERNS`）、`core/extractor.py:73-77`（`_IMPORTANCE_BOOST`）、
-  `hooks/session_start.py:269-273`（RESUME PROTOCOL 的 token）和
-  `hooks/user_prompt.py:127-130`（`resume_signals`）；后两者必须彼此保持同步，因为
-  强制提醒承诺的正是 `user_prompt` 判定为 `resume_request` 的那个行为。
+  `hooks/session_start.py` 里 RESUME PROTOCOL 的 token 行，以及
+  `hooks/user_prompt.py` 里的 `resume_signals`；后两者必须彼此保持同步，因为
+  强制提醒承诺的正是 `user_prompt` 判定为 `resume_request` 的那个行为。这四处都带
+  `i18n Tier 3` 注释——`grep -rn "i18n Tier 3" cc_memory/` 可以在不依赖会移动的行号
+  的前提下定位它们。
 
 只有 **Tier 2**——面向人类的文档——才是这套约定所做版本控制的对象。
 
 ### 9.2 文件命名
 
 - `NAME.md` —— 规范的**英文**源（骨架）。
-- `NAME.<lang>.md` —— 翻译兄弟文件。目前 `<lang>` 是 `zh`（简体中文）；当前唯一
-  存在的翻译是 `README.zh.md`。
+- `NAME.<lang>.md` —— 翻译兄弟文件。目前 `<lang>` 是 `zh`（简体中文）；现存的翻译
+  是 `README.zh.md`、`docs/ARCHITECTURE.zh.md`（即本文件）和 `docs/CONTRACTS.zh.md`。
 - 每一份翻译**必须**有对应的英文源。有 `NAME.zh.md` 而没有 `NAME.md` 就是
   **ORPHAN**（检查器失败）。不存在只有翻译的文档。
 
 被跟踪集合（检查器看什么）：仓库根目录的 `README.md` 加上 `docs/*.md`，排除
 `*.zh.md`（`tools/i18n_check.py:146-157`）。翻译是 `README.zh.md` 和
-`docs/*.zh.md`，非递归（`tools/i18n_check.py:160-166`）。在 v2.4.2 的文档合并之后，
+`docs/*.zh.md`，非递归（`tools/i18n_check.py:160-166`）。在 v2.4.3 的文档合并之后，
 被跟踪的英文集合恰好是三个文件——`README.md`、`docs/ARCHITECTURE.md`、
-`docs/CONTRACTS.md`——而不是合并前的五个。`docs/ARCHITECTURE.md` 与
-`docs/CONTRACTS.md` 目前都没有 `.zh.md` 兄弟文件，即两者都是 MISSING-TRANSLATION，
-这是一个永远不会让构建失败的软警告。
+`docs/CONTRACTS.md`——而不是合并前的五个。自 v2.5 起**这三份全都有译文**，因此一次
+健康的运行报告 `3 in-sync`，也不再有任何 MISSING-TRANSLATION：对任何一份英文文档
+的编辑，只要没有跟上 [§9.7](#97-英文源变更之后的更新) 的第 2-4 步，就会同时让这个
+检查器和 `tests/smoke_test.py` 变红。
 
 ### 9.3 语言切换器
 
@@ -861,9 +901,14 @@ PATH” + “py launcher”，或者把 `python3` 别名到 `python`。否则钩
 指向 `docs/I18N.zh.md` 的切换器，而后者从未被写出来——在 GitHub 上就是一条死链，
 并且按设计 CI 也抓不到，因为 MISSING-TRANSLATION 不在 `FAIL_STATES` 里
 （`tools/i18n_check.py:68`）。添加切换器是 §9.6 中 5 步流程的第 2 步；第 3-5 步必须
-在同一次改动中跟上。**因此本文件在交付时不带切换器**：目前尚不存在
-`docs/ARCHITECTURE.zh.md`，所以在这里的第 1 行放一个切换器只会复现这次合并正要修掉
-的那条死链。等翻译真正写出来时，把它作为 §9.6 的第 2 步加上。
+在同一次改动中跟上。
+
+**本文件带切换器**（第 2 行，第 1 行是漂移标记），因为
+`docs/ARCHITECTURE.zh.md` 就是与添加该切换器同一次发布（v2.4.3）写出来的 —— §9.6
+的第 2-5 步是一起完成的，这正是上面 `I18N.md` 的前车之鉴所要求的做法。
+`docs/CONTRACTS.md` 的切换器是在 v2.5 加上的，与 `docs/CONTRACTS.zh.md` 同一次改动；
+在那之前它正确地没有切换器，因为没有目标的切换器就是这套约定要防的那条死链。现在三份
+被跟踪的英文文档全都带切换器，也全都有译文。
 
 ### 9.4 漂移标记
 

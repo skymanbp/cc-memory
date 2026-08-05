@@ -33,6 +33,11 @@ sys.path.insert(0, str(_PKG_ROOT))
 from core.encoding_setup import enable_utf8_io
 enable_utf8_io()
 
+# Module level, unlike `should_observe` below (imported lazily inside main's
+# try): the opt-out has to be evaluated BEFORE any project work, so it must not
+# depend on reaching a lazy import site.
+from core.modes import is_excluded
+
 _MAX_INPUT_CHARS = 2000
 _MAX_OUTPUT_CHARS = 1000
 _MAX_STDIN_BYTES = 1024 * 512
@@ -123,8 +128,21 @@ def main():
     if not isinstance(data, dict):
         sys.exit(0)
 
+    # FIELD types, not just the container type. The guard above only makes
+    # `.get()` legal; `Path(123)` still raises TypeError out here, outside any
+    # try — rc=1 plus a traceback on stderr, the exact pair of contract
+    # violations that guard was added to close. Verified before the fix:
+    # `echo '{"cwd":123}' | python post_tool_use.py` exited 1.
     cwd = data.get("cwd", "")
-    if not cwd:
+    if not isinstance(cwd, str) or not cwd:
+        sys.exit(0)
+
+    # Project opt-out — the FIRST act after resolving cwd, ahead of the DB
+    # probe. Gating on memory/memory.db existing is not an opt-out: a project
+    # initialised BEFORE the user listed it would otherwise keep storing every
+    # tool input and output. Deliberately silent: this hook fires after every
+    # single tool call, so a log line here would be a log line per call.
+    if is_excluded(cwd):
         sys.exit(0)
 
     db_path = Path(cwd) / "memory" / "memory.db"
@@ -132,8 +150,14 @@ def main():
         sys.exit(0)
 
     tool_name = data.get("tool_name", "")
-    if not tool_name:
+    if not isinstance(tool_name, str) or not tool_name:
         sys.exit(0)
+
+    # session_id is bound into a parameterized INSERT below; a list/dict would
+    # raise sqlite3.InterfaceError and lose the row. Normalise instead.
+    session_id = data.get("session_id", "")
+    if not isinstance(session_id, str):
+        session_id = ""
 
     tool_input = data.get("tool_input", {})
 
@@ -203,7 +227,7 @@ def main():
 
             db.insert_observation(
                 project_id=project_id,
-                session_id=data.get("session_id", ""),
+                session_id=session_id,
                 tool_name=tool_name,
                 tool_input=input_str,
                 tool_output=output_str,

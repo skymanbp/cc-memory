@@ -39,6 +39,7 @@ enable_utf8_io()
 
 from core.db import MemoryDB
 from core.logger import get_logger
+from core.modes import is_excluded
 from core.idle import maybe_run_idle
 from core.progress import write_progress_md
 from core import plan as plan_mod
@@ -308,9 +309,25 @@ def main():
     if not isinstance(data, dict):
         sys.exit(0)
 
+    # FIELD types, not just the container type. The guard above only makes
+    # `.get()` legal; `Path(123)` and `_safe_id(123)` (via _read_turn_count,
+    # which is NOT inside a try) both raise out here. Verified before the fix:
+    # `echo '{"cwd":123,"session_id":"s"}' | python stop.py` exited 1 with a
+    # traceback on stderr.
     cwd = data.get("cwd", "")
     session_id = data.get("session_id", "")
-    if not cwd or not session_id:
+    if not isinstance(cwd, str) or not cwd:
+        sys.exit(0)
+    if not isinstance(session_id, str) or not session_id:
+        sys.exit(0)
+
+    # Project opt-out — the FIRST act after resolving cwd. Gating on
+    # memory/memory.db existing is not an opt-out: for a project initialised
+    # before the user listed it, this hook would otherwise still POST its
+    # observations to the Anthropic API (the observer leg is unconditional),
+    # still write a progress row, and still rewrite PROGRESS.md with the file
+    # names it touched. Silent, like PostToolUse: Stop fires every turn.
+    if is_excluded(cwd):
         sys.exit(0)
 
     memory_dir = Path(cwd) / "memory"

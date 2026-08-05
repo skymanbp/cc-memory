@@ -49,6 +49,7 @@ enable_utf8_io()
 
 from core.db import MemoryDB
 from core.logger import get_logger
+from core.modes import is_excluded
 
 _log = get_logger("consolidate_async")
 
@@ -150,8 +151,21 @@ def main():
         _log.warn(f"stdin payload is {type(data).__name__}, not an object")
         sys.exit(0)
 
+    # FIELD types, not just the container type. The guard above only makes
+    # `.get()` legal; `Path(["a"])` still raises TypeError out here, outside any
+    # try — rc=1 plus a traceback on stderr. Verified before the fix:
+    # `echo '{"cwd":["a"]}' | python consolidate_async.py` exited 1.
     cwd = data.get("cwd", "")
-    if not cwd:
+    if not isinstance(cwd, str) or not cwd:
+        sys.exit(0)
+
+    # Project opt-out — the FIRST act after resolving cwd. Consolidation is the
+    # heaviest LLM leg in the plugin (semantic de-dup ships memory content to
+    # the Anthropic API); an excluded project must not reach it just because its
+    # memory/ predates the exclusion. Logged: this hook is rare, and a skipped
+    # consolidation is worth being able to explain afterwards.
+    if is_excluded(cwd):
+        _log.info(f"skipped: {cwd} is in config.json excluded_projects")
         sys.exit(0)
 
     memory_dir = Path(cwd) / "memory"

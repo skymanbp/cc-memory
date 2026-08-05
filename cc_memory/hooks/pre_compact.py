@@ -52,6 +52,11 @@ from core.db import MemoryDB
 from core.extractor import (build_extraction, load_transcript_window, group_sentences,
                             CATEGORY_ORDER, CATEGORY_LABELS)
 from core.logger import get_logger
+# Project opt-out. This USED to be a private literal copy in this file plus a
+# second byte-identical one in hooks/user_prompt.py; the other four hooks had no
+# check at all, so a project initialised BEFORE being listed stayed fully
+# captured. One implementation now, called by all six. See core/modes.py.
+from core.modes import is_excluded
 from core.progress import (write_progress_md, write_session_archive, collect_progress_state,
                            migrate_legacy_handoff, ensure_memory_gitignore)
 from llm.memory_writer import upsert_batch, regenerate_memory_index
@@ -321,51 +326,6 @@ def _first_user_request(messages, max_scan=200):
     return ""
 
 
-# ── Project opt-out (config.json `excluded_projects`) ──────────────────────
-# DELIBERATE literal copy: hooks/user_prompt.py carries the same function, and
-# those two hooks are the ONLY paths that create memory/ — so the check has to
-# exist in both. They are kept import-independent of each other on purpose: a
-# cross-hook import would make PreCompact die whenever UserPromptSubmit does,
-# and hook safety outranks DRY here (see CLAUDE.md, "Hook safety > anything
-# else"). Change one, change the other; there is no third copy.
-def _is_excluded(cwd):
-    """True when `cwd` is opted out of cc-memory via config.json.
-
-    Matching is on the RESOLVED absolute path, so symlinks, ".." and relative
-    entries all normalise to one form, and through ``os.path.normcase`` so
-    Windows compares case- and separator-insensitively while POSIX stays
-    case-sensitive.
-
-    A listed directory also excludes everything BENEATH it. Claude Code's cwd
-    is routinely a subdirectory of the project a user meant to exclude, and an
-    exact-match-only test would happily create memory/ there — the control
-    failing at the one job it has.
-    """
-    try:
-        with open(_PKG_ROOT / "config.json", encoding="utf-8") as f:
-            entries = json.load(f).get("excluded_projects") or []
-        if not isinstance(entries, list):
-            return False
-        target = os.path.normcase(str(Path(cwd).expanduser().resolve()))
-        for entry in entries:
-            if not isinstance(entry, str) or not entry.strip():
-                continue
-            try:
-                listed = os.path.normcase(str(Path(entry).expanduser().resolve()))
-            except (OSError, ValueError):
-                # why: one malformed entry must not disable the rest of the
-                # opt-out list — skip it and keep checking the others
-                continue
-            if target == listed or target.startswith(listed + os.sep):
-                return True
-    except Exception:
-        # why: an absent / malformed / unreadable config must never break the
-        # hook. "not excluded" is the behaviour that shipped before this
-        # control existed, so a broken config degrades to exactly that.
-        return False
-    return False
-
-
 _ATTEMPT_FILE = ".pre_compact_attempt.json"
 
 
@@ -439,7 +399,7 @@ def main():
     # which fires every message) because PreCompact is rare and a skipped
     # handoff is worth being able to explain afterwards. No stdout: an excluded
     # project must produce no artifact at all, including a status line.
-    if _is_excluded(cwd):
+    if is_excluded(cwd):
         _log.info(f"skipped: {cwd} is in config.json excluded_projects")
         sys.exit(0)
 

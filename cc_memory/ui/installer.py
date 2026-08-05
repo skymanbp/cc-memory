@@ -175,10 +175,171 @@ except ImportError:
     _HAS_TK = False
 
 
+# ── config.json preservation ───────────────────────────────────────────────
+#
+# config.json is the ONE payload file the user is meant to EDIT:
+# `excluded_projects` is the plugin's only privacy opt-out, and `ccl.*` is the
+# local-fallback switch. Before v2.5.1 a reinstall shutil.copy2'd the shipped
+# file straight over it, so running the installer again to upgrade silently
+# reset every setting to the defaults - no warning, no backup. It is now
+# MERGED: the shipped file supplies defaults, the user's values win, and keys a
+# new version introduces are added.
+#
+# Two top-level keys are PAYLOAD-owned and are refreshed on every install:
+#   version : cli/mem.py:64-70 and mcp/server.py:133-139 read it as the
+#             LAST-RESORT version for a flat standalone install - exactly the
+#             layout this installer writes. Preserving it would make /cc-mem
+#             report the version the user just upgraded away from.
+#   notes   : pure documentation (the readers table + removed_keys). A kept
+#             copy would describe the PREVIOUS release's code.
+_CONFIG_NAME = "config.json"
+_CONFIG_PAYLOAD_KEYS = ("version", "notes")
+
+
+def _read_json_config(path):
+    """Parse a config.json. Returns (dict, None) or (None, reason).
+
+    Same discipline as _read_settings: never raises, and the reason is a
+    sentence the user can act on.
+    """
+    try:
+        # utf-8-sig, not utf-8: a config.json re-saved from a PowerShell prompt
+        # carries a BOM, which plain json.loads rejects. The write path below
+        # still emits no BOM.
+        raw = path.read_text(encoding="utf-8-sig")
+    except OSError as e:
+        return None, f"cannot be read ({e})"
+    except UnicodeDecodeError as e:
+        return None, (f"is not UTF-8 text ({e}); re-save it with "
+                      f"'Set-Content -Encoding utf8' or a UTF-8 editor")
+    if not raw.strip():
+        return {}, None  # empty file: nothing to preserve
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as e:
+        return None, (f"is not valid JSON ({e}) - // comments and trailing "
+                      f"commas are not allowed")
+    if not isinstance(data, dict):
+        return None, (f"contains a top-level JSON {type(data).__name__}, not an "
+                      f"object")
+    return data, None
+
+
+def _deep_merge(shipped, existing):
+    """Shipped defaults UNDER the user's values.
+
+      key only in shipped        -> added (a new version's new tunable)
+      key in both, both dicts    -> merged recursively
+      key in both, anything else -> the USER's value wins
+      key only in existing       -> kept (an unrecognised key is not ours to
+                                    drop; it is reported instead)
+    """
+    out = dict(shipped)
+    for k, v in existing.items():
+        sv = out.get(k)
+        out[k] = (_deep_merge(sv, v)
+                  if isinstance(sv, dict) and isinstance(v, dict) else v)
+    return out
+
+
+def _merge_config(shipped, existing):
+    """_deep_merge, minus the payload-owned top-level keys (always shipped)."""
+    user = {k: v for k, v in existing.items() if k not in _CONFIG_PAYLOAD_KEYS}
+    return _deep_merge(shipped, user)
+
+
+def _config_leaves(obj, prefix=""):
+    """{dotted.path: value} for every LEAF of a nested config dict."""
+    out = {}
+    for k, v in obj.items():
+        p = f"{prefix}.{k}" if prefix else k
+        if isinstance(v, dict) and v:
+            out.update(_config_leaves(v, p))
+        else:
+            out[p] = v
+    return out
+
+
+def _brief_list(paths, limit=6):
+    paths = sorted(paths)
+    return ", ".join(paths[:limit]) + (
+        f", +{len(paths) - limit} more" if len(paths) > limit else "")
+
+
+def _install_config(src, dst, log_fn=print):
+    """Install config.json WITHOUT discarding the settings already there."""
+    if not dst.exists():
+        shutil.copy2(str(src), str(dst))
+        log_fn(f"  Copied: {_CONFIG_NAME}")
+        return
+
+    shipped, ship_err = _read_json_config(src)
+    if ship_err is not None:
+        # why: the PAYLOAD's own config is unreadable, so there is nothing to
+        # merge against - fall back to the byte copy this function replaced
+        log_fn(f"  [WARN] the bundled {_CONFIG_NAME} {ship_err}; copying it "
+               f"verbatim")
+        shutil.copy2(str(src), str(dst))
+        return
+
+    existing, err = _read_json_config(dst)
+    if err is not None:
+        bak = dst.with_name(dst.name + ".bak")
+        try:
+            shutil.copy2(str(dst), str(bak))
+            saved = f"saved as {bak.name}"
+        except OSError as e:
+            saved = f"NOT saved ({e})"
+        log_fn(f"  [WARN] your installed {_CONFIG_NAME} {err}")
+        log_fn(f"  [WARN] its settings could NOT be preserved - old file "
+               f"{saved}, defaults installed. Re-apply excluded_projects / "
+               f"ccl by hand.")
+        shutil.copy2(str(src), str(dst))
+        return
+
+    merged = _merge_config(shipped, existing)
+    if merged == shipped:
+        # nothing customised: keep the shipped bytes (comments, key order)
+        shutil.copy2(str(src), str(dst))
+        log_fn(f"  Copied: {_CONFIG_NAME}")
+        return
+    try:
+        dst.write_text(json.dumps(merged, indent=2, ensure_ascii=False) + "\n",
+                       encoding="utf-8")
+    except OSError as e:
+        # why: a failed write must leave the user's settings intact rather than
+        # half-write over them; the rest of the install is unaffected
+        log_fn(f"  [WARN] could not write the merged {_CONFIG_NAME} ({e}) - "
+               f"your existing file was left untouched")
+        return
+
+    ship_leaves = _config_leaves(shipped)
+    user_leaves = _config_leaves(existing)
+    kept = [p for p, v in _config_leaves(merged).items()
+            if p in ship_leaves and ship_leaves[p] != v]
+    added = [p for p in ship_leaves if p not in user_leaves
+             and p.split(".")[0] not in _CONFIG_PAYLOAD_KEYS]
+    stale = [p for p in user_leaves if p not in ship_leaves
+             and p.split(".")[0] not in _CONFIG_PAYLOAD_KEYS]
+    log_fn(f"  Merged: {_CONFIG_NAME} (your settings preserved)")
+    if kept:
+        log_fn(f"    kept {len(kept)} customised value(s): {_brief_list(kept)}")
+    if added:
+        log_fn(f"    added {len(added)} new key(s) from v{_VERSION}: "
+               f"{_brief_list(added)}")
+    if stale:
+        log_fn(f"    [WARN] kept {len(stale)} key(s) v{_VERSION} no longer "
+               f"reads: {_brief_list(stale)}")
+
+
 # ── Payload copy ───────────────────────────────────────────────────────────
 
 def _copy_subpackages(target_dir, log_fn=print):
-    """Copy each subpackage's files from BUNDLE_DIR into target_dir/<subdir>/."""
+    """Copy each subpackage's files from BUNDLE_DIR into target_dir/<subdir>/.
+
+    Every file is an overwrite EXCEPT config.json, which is merged so a
+    reinstall/upgrade cannot wipe the user's settings (see _install_config).
+    """
     n_copied = 0
     n_skipped = 0
     for subdir, files in SUBPACKAGE_FILES.items():
@@ -196,6 +357,10 @@ def _copy_subpackages(target_dir, log_fn=print):
             if dst.exists() and src.resolve() == dst.resolve():
                 # why: running the ALREADY-INSTALLED copy of this file would make
                 # shutil.copy2 raise SameFileError; it is already up to date
+                n_copied += 1
+                continue
+            if not subdir and f == _CONFIG_NAME:
+                _install_config(src, dst, log_fn)
                 n_copied += 1
                 continue
             shutil.copy2(str(src), str(dst))

@@ -1,9 +1,9 @@
-<!-- i18n-source: README.md | sha256: 75d264c9d23858e4 | version: 2.5.0 | translated: 2026-08-05 -->
+<!-- i18n-source: README.md | sha256: 15fcbdba707f7ef7 | version: 2.5.1 | translated: 2026-08-05 -->
 > [English](README.md) · **简体中文**
 
 # cc-memory
 
-**Claude Code 持久化记忆插件（v2.5.0）**——反补丁式的写入即归并（reconcile-on-write）、
+**Claude Code 持久化记忆插件（v2.5.1）**——反补丁式的写入即归并（reconcile-on-write）、
 LLM 判定的语义去重、强制 PROGRESS.md 交接、带 plan-refiner / plan-guardian 子代理与
 强制结转闸门的实时 PLAN.md 锚点、有界 transcript 读取、注入可观测性、FTS5 搜索，
 以及以 Haiku 为主（本地 Ollama 兜底可选）的 AI 判定式抽取。
@@ -148,11 +148,15 @@ guardian 的漂移计数还会随模式静默变化。计划控制不是观测�
   `cc_memory/` 路径段，于是一个健康的扁平安装被报成 22 个文件缺 22 个，API key
   检查也被整个跳过。
 - **`config.json` 不再说谎。** 两次审计发现 51 个叶子键里有 34 个没有任何读取者；
-  所有惰性键已删除，留下的都在文件内注明了它的读取者。唯一新增的键
-  `excluded_projects` 是一个真正的退出开关：被列出的目录及其下所有内容都不会得到
-  `memory/`、数据库或抽取。
+  所有惰性键已删除，留下的都在文件内注明了它的读取者。`excluded_projects` **不是**
+  新增的键——它在 v2.4.3 就已随包发布，默认值为空，且全仓库没有任何读取者——但它
+  现在是一个真正的退出开关：被列出的目录及其下的所有内容都不会得到 `memory/`、
+  数据库、observation、抽取和 PROGRESS.md，因为**全部六个钩子**都会先检查它，再做
+  别的任何事。
 - **`/cc-mem sql` 真的是只读了。** `DROP TABLE topics` 此前会以 0 退出并把表删掉。
-  面板的 SQL 控制台现在在任何写操作之前都要求一次点名该语句的确认，并报告 rowcount。
+  该守卫同样拒绝 `PRAGMA name(value)` 这种赋值写法——SQLite 把它当作
+  `PRAGMA name = value` 的等价形式，而只看 `=` 的检查会把它放过去。面板的 SQL
+  控制台在任何写操作之前都要求一次点名该语句的确认，并报告 rowcount。
 - **面板不再毁坏数据**：批量删除改为批量**归档**（不再留下悬空的 `supersedes_id`
   行），tidy 之后会重新生成 `MEMORY.md`，损坏的项目注册表在被覆盖前先备份，而且
   没有任何回调能在 windowed 构建里抛出异常。它还新增了一个只读的
@@ -179,9 +183,17 @@ guardian 的漂移计数还会随模式静默变化。计划控制不是观测�
   `update_plan_content`）都接受 `project_id`，且所有随包发布的调用方都已传入，但
   它们都不**强制要求**这个参数——新代码里一次未加限定的裸调用仍会跨项目，因为
   `plans.id` 在整个数据库文件范围内是全局的。
-- `excluded_projects` 在两个既有门禁里都没有覆盖。
 - 搜索一个裸的 `%` 或 `_` 现在返回 0 行而不是整张表。这正是修复本身，但它是一个
   用户可见的结果变化。
+- **文档里的 `file:line` 引用没有任何门禁，并且部分已经陈旧。** 它们靠手工维护；
+  `docs/ARCHITECTURE.md` 与 `docs/CONTRACTS.md` 中仍有一些引用指向某个符号**曾经**
+  所在的行。一个机械的“定义点”检查可以把它们找出来（对每一条 `path:lines` 引用，
+  解析同一句话里点名的符号，并断言该范围覆盖它们唯一的定义行），它理应和
+  `tools/i18n_check.py` 一起进 CI。今天没有任何东西强制它们，所以在信任一条引用
+  之前请自己重新推导一遍。这些文档中的散文式断言已对着代码做过事实核查，但行号
+  并未全部重新推导。
+- `tools/i18n_check.py` 只比较内容哈希。它看不见**正文**已经与英文源漂移的译文
+  ——包括失效的文档内锚点，正是这一点让 22 个死锚点在中文文档里一直存活到 v2.5.1。
 
 ## v2.4.2 有什么新变化
 
@@ -446,7 +458,10 @@ memory/
 **在 Claude Code 外部**（shell，下面展示的是独立安装路径——市场安装请自行调整）：
 
 ```bash
-M="python ~/.claude/hooks/cc-memory/cli/mem.py --project ."
+# 注意是 $HOME 而不是 ~：bash 的波浪号展开发生在参数展开**之前**，而且不会二次扫描
+# 结果，所以存进变量里的 ~ 仍是一个普通字符，`$M status` 会以
+# `can't open file '.../~/.claude/...'` 失败。
+M="python $HOME/.claude/hooks/cc-memory/cli/mem.py --project ."
 $M status
 $M search "auth flow"
 # ... 子命令与上面相同
@@ -550,8 +565,10 @@ Progress / Plan（PROGRESS.md 与 PLAN.md 背后 `progress` 和 `plan_active` �
 ```bash
 # 如果你用 pip 安装了这个包，可以直接用控制台脚本：
 P="cc-memory-plan --project ."
-# 或者从独立安装（扁平——没有 cc_memory/ 这一段）里跑模块：
-P="python ~/.claude/hooks/cc-memory/cli/plan.py --project ."
+# 或者从独立安装（扁平——没有 cc_memory/ 这一段）里跑模块。
+# 用 $HOME 而不是 ~：波浪号在参数展开之前就被处理掉了，而且结果不会被二次扫描，
+# 所以存进变量里的 ~ 在使用时永远不会被展开。
+P="python $HOME/.claude/hooks/cc-memory/cli/plan.py --project ."
 
 $P add "Task A" "Task B" "Task C"
 $P list
@@ -584,8 +601,13 @@ $P clear              # 丢弃 done/failed/skipped
 - `ccl.enabled` / `ccl.ollama_url` / `ccl.local_model` — 本地 Ollama 兜底。
   **需显式开启；`enabled` 默认为 `false`**，此时 Anthropic 那几条腿是唯一后端。
 - `excluded_projects` — 完全退出 cc-memory 的绝对路径。被列出的目录*及其下的一切*
-  都不会得到 `memory/` 目录、数据库、抽取和 PROGRESS.md：本会创建它们的两个钩子
-  会立即退出。匹配基于解析后的绝对路径，Windows 上不区分大小写。这是唯一的退出机制。
+  都不会得到 `memory/` 目录、数据库、observation、抽取和 PROGRESS.md：**全部六个
+  钩子**在解析出 `cwd` 之后的第一件事就是调用 `core.modes.is_excluded(cwd)` 并以 0
+  退出。那是**一份**共享实现，而不是每个钩子各抄一份——v2.5.0 曾把它作为两份私有
+  副本放进仅有的两个会*创建* `memory/` 的钩子里，结果是：一个在被列入名单**之前**
+  就已初始化过的项目仍被完整地埋点——observation 继续累积，PROGRESS.md 继续点名它
+  的文件，而在有可用凭据时，Stop 观察者会继续把这些内容 POST 给 Anthropic API。
+  匹配基于解析后的绝对路径，Windows 上不区分大小写。这是唯一的退出机制。
 - `notes` — 文件内文档，包括那些曾经住在这里的值现在归哪个模块所有。
 
 被移除的可调项现在是模块常量，请到那里改：反补丁阈值在 `llm/memory_writer.py`、

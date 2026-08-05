@@ -5,13 +5,106 @@ throwaway temp directory. Verifies the v3 migrations applied and the
 INSERT / MERGE / SUPERSEDE / SKIP decisions match the contract in
 docs/CONTRACTS.md#anti-patch-contract.
 
+Hermetic by construction, the same way tests/test_surfaces.py is: HOME /
+USERPROFILE / HOMEDRIVE / HOMEPATH / TEMP / TMP / TMPDIR *and*
+`tempfile.tempdir` are redirected into one sandbox root BEFORE cc_memory is
+imported, because `core.logger` resolves
+`Path.home()/".claude"/"hooks"/"cc-memory"/"logs"` at IMPORT time. Until this
+was added, a plain run appended to the MAINTAINER'S REAL ~/.claude log (the
+proof: with HOME redirected, that same file appears under the redirect) and
+left 14 `cc-mem*` directories behind in the real %TEMP%. The real ~/.claude is
+unreachable for the whole run, asserted below; the sandbox is removed at the
+end and a leak this cannot clean is a test failure, not a shrug.
+
 Usage:  python tests/smoke_test.py
 """
+import gc
+import os
+import shutil
+import sqlite3
 import sys
 import tempfile
 from pathlib import Path
 
+# ── sandbox: must be installed BEFORE importing anything from cc_memory ─────
+_SANDBOX = Path(tempfile.mkdtemp(prefix="cc-memory-smokebox-"))
+_HOME = _SANDBOX / "home"
+_TMP = _SANDBOX / "tmp"
+_HOME.mkdir(parents=True, exist_ok=True)
+_TMP.mkdir(parents=True, exist_ok=True)
+_drive, _rest = os.path.splitdrive(str(_HOME))
+os.environ.update({
+    "USERPROFILE": str(_HOME),      # ntpath.expanduser checks this first
+    "HOME": str(_HOME),             # posixpath.expanduser
+    "HOMEDRIVE": _drive or "",
+    "HOMEPATH": _rest or str(_HOME),
+    "TEMP": str(_TMP),
+    "TMP": str(_TMP),
+    "TMPDIR": str(_TMP),
+})
+# env alone is not enough in-process: tempfile caches gettempdir() on first use,
+# and mkdtemp() above already primed it with the REAL temp dir.
+tempfile.tempdir = str(_TMP)
+assert Path.home() == _HOME, (
+    f"sandbox home not in effect (Path.home()={Path.home()}); refusing to run "
+    f"against the real ~/.claude")
+
+
+def _cleanup_sandbox():
+    """Close every sqlite handle this process opened, then REMOVE the sandbox.
+
+    Every connection alive in this process was opened by this suite, so closing
+    them all is exactly "close your own handles". It is needed because
+    `MemoryDB._connect()` is consumed as `with self._connect() as conn:`
+    throughout the package and sqlite3's context manager COMMITS BUT DOES NOT
+    CLOSE; the connection then survives inside its own statement-cache
+    reference cycle and keeps memory.db open, which on Windows is a hard
+    PermissionError [WinError 32] on rmtree.
+
+    Deliberate literal twin of tests/test_surfaces.py:_cleanup_sandbox --
+    these two files are standalone scripts that cannot import each other, and
+    a shared helper module would have to live inside the package under test.
+    """
+    for _conn in [o for o in gc.get_objects()
+                  if isinstance(o, sqlite3.Connection)]:
+        try:
+            _conn.close()
+        except sqlite3.Error:
+            # why: an already-closed or mid-statement handle. The only goal is
+            # releasing the OS file handle before rmtree, and one we cannot
+            # release is caught by the rmtree check below anyway.
+            pass
+    gc.collect()          # breaks the statement-cache cycles described above
+    # core.logger caches Logger objects in a module-level dict and each keeps an
+    # OPEN append handle on <home>/.claude/hooks/cc-memory/logs/cc-memory-*.log
+    # for the life of the process. That path is inside the sandbox home, so it
+    # blocks rmtree before it ever reaches the databases.
+    try:
+        from core import logger as _logger_mod
+        for _lg in list(getattr(_logger_mod, "_loggers", {}).values()):
+            _lg.close()
+    except ImportError:
+        # why: teardown must work even if the package never became importable
+        # (a failure during bootstrap) -- there is then nothing to close
+        pass
+    tempfile.tempdir = None
+    try:
+        shutil.rmtree(_SANDBOX)
+    except OSError as exc:
+        left = sorted(str(p) for p in _SANDBOX.rglob("*") if p.is_file())
+        raise AssertionError(
+            f"sandbox {_SANDBOX} survived cleanup ({exc}); {len(left)} file(s) "
+            f"leaked into the real %TEMP%: {left[:10]}")
+
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "cc_memory"))
+
+from core.encoding_setup import enable_utf8_io
+# Explicitly, and BEFORE this file's first line of output -- the same rule this
+# suite pins on its two siblings further down. Keep the phrase "p r i n t ("
+# out of every line above this one: the checker compares code lines, and a
+# docstring mentioning it would read as output emitted before the call.
+enable_utf8_io()
 
 from core.db import MemoryDB
 from llm.memory_writer import upsert_smart, regenerate_memory_index
@@ -1575,34 +1668,51 @@ def main():
     finally:
         for _v5_n, _v5_s in _v5_saved_std.items():
             setattr(sys, _v5_n, _v5_s)
-    # ...and the sibling suite must actually CALL it before its first print, or
-    # its section headers ship as locale-codec bytes (gbk on this host) and read
-    # as mojibake in every UTF-8 terminal, log and CI capture.
-    # Compare CODE lines only. A naive src.index("print(") also matches the word
-    # "print()" inside the comment that explains this very ordering, which sits
-    # above the call and made the assertion fail on a correct file.
-    _v5_carry_lines = (_REPO / "tests" / "test_plan_carryover.py").read_text(
-        encoding="utf-8").splitlines()
-    _v5_call_at = next((i for i, ln in enumerate(_v5_carry_lines)
-                        if ln.split("#", 1)[0].strip() == "enable_utf8_io()"), None)
-    _v5_print_at = next((i for i, ln in enumerate(_v5_carry_lines)
-                         if "print(" in ln.split("#", 1)[0]), None)
-    assert _v5_call_at is not None, \
-        "tests/test_plan_carryover.py must CALL enable_utf8_io() — its section " \
-        "headers contain non-ASCII and ship as locale bytes without it"
-    assert _v5_print_at is None or _v5_call_at < _v5_print_at, \
-        (f"tests/test_plan_carryover.py calls enable_utf8_io() at line "
-         f"{_v5_call_at + 1}, after its first print() at line {_v5_print_at + 1}")
+    # ...and EVERY suite in tests/ must actually CALL it before its first line
+    # of output, or section headers ship as locale-codec bytes (gbk on this
+    # host) and read as mojibake in every UTF-8 terminal, log and CI capture.
+    # SELF-APPLYING: this file is on the list, and so is test_surfaces.py,
+    # which was UTF-8 only BY ACCIDENT until v2.5.1 — it never called
+    # enable_utf8_io() and inherited the reconfigure from `from mcp import
+    # server` at cc_memory/mcp/server.py, so an import reorder would have
+    # silently turned its § headers into mojibake.
+    # Compare CODE lines only. A naive src.index(...) probe also matches the
+    # bare word inside the comment that explains this very ordering, which
+    # sits above the call and made the assertion fail on a correct file.
+    for _v5_suite in ("test_plan_carryover.py", "smoke_test.py",
+                      "test_surfaces.py"):
+        _v5_lines = (_REPO / "tests" / _v5_suite).read_text(
+            encoding="utf-8").splitlines()
+        _v5_call_at = next(
+            (i for i, ln in enumerate(_v5_lines)
+             if ln.split("#", 1)[0].strip() == "enable_utf8_io()"), None)
+        _v5_print_at = next((i for i, ln in enumerate(_v5_lines)
+                             if "print(" in ln.split("#", 1)[0]), None)
+        assert _v5_call_at is not None, \
+            f"tests/{_v5_suite} must CALL enable_utf8_io() — its section " \
+            f"headers contain non-ASCII and ship as locale bytes without it"
+        assert _v5_print_at is None or _v5_call_at < _v5_print_at, \
+            (f"tests/{_v5_suite} calls enable_utf8_io() at line "
+             f"{_v5_call_at + 1}, after its first output line at line "
+             f"{_v5_print_at + 1}")
     print("[OK] v2.5.0 encoding_setup: stdin covered, stdout/stderr "
-          "line-buffered, reconfigure failure survivable")
+          "line-buffered, reconfigure failure survivable, and all 3 test "
+          "suites call it before their first output line")
 
-    print("\n===== ALL SMOKE TESTS PASSED =====")
-    print(f"Test project preserved at: {tmp}")
     print("\nProduced files:")
     for f in sorted(mem_dir.rglob("*")):
         if f.is_file():
             rel = f.relative_to(mem_dir).as_posix()
             print(f"  memory/{rel}  ({f.stat().st_size} bytes)")
+    print(f"\nTest project was: {tmp}")
+
+    # Teardown is a GATE, not a courtesy: every artifact of this run lives
+    # under the sandbox, and a handle we cannot release would otherwise leak a
+    # memory.db into the real %TEMP% on every single run.
+    _cleanup_sandbox()
+    print(f"Sandbox removed: {_SANDBOX}")
+
+    print("\n===== ALL SMOKE TESTS PASSED =====")
 
 
 if __name__ == "__main__":

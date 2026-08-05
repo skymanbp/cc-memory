@@ -15,11 +15,24 @@ This skill covers **activation and project bootstrap** — the things no other
 entry point does. Ongoing diagnostics belong to `/cc-mem status`; the two are
 deliberately disjoint (see the table at the end of this file).
 
-1. **Verify global plugin activation** — check `~/.claude/settings.json` for
-   `enabledPlugins["cc-memory@cc-memory"]=true` and a matching
-   `extraKnownMarketplaces.cc-memory` entry. If missing, print the exact
-   `/plugin install` commands the user needs to run. **This check exists
-   nowhere else** — not in `/cc-mem status`, not in the hooks.
+1. **Verify activation, PER INSTALL LAYOUT.** The two shipped layouts are
+   activated by *different* mechanisms, so one check cannot serve both:
+   - **marketplace / dev checkout** — `~/.claude/settings.json`
+     `enabledPlugins["cc-memory@cc-memory"]=true`, root from
+     `extraKnownMarketplaces.cc-memory` **or** `plugins/installed_plugins.json`
+     (a `/plugin marketplace add <github-repo>` install has no local path),
+     hooks declared by `<root>/hooks/hooks.json`.
+   - **standalone / `.exe` installer** — never appears in `enabledPlugins` at
+     all. `ui/installer.py:_merge_into_settings` writes **only** the `hooks`
+     key, so activation means `settings.json["hooks"]` registers cc-memory for
+     all five events; the tree it lays down is **flat**.
+
+   Either layout activated ⇒ **proceed to bootstrap**. Nothing activated ⇒
+   print the fix for the layout this machine actually has (never tell an
+   `.exe` user to add a marketplace — they have no repo). The rule is mirrored
+   from `cc_memory/cli/mem.py`'s `_detect_install_layouts` / `_inspect_layout`;
+   `/cc-mem status` reports the same layouts but never bootstraps, so this is
+   the only entry point that *gates project init* on the verdict.
 2. **Resolve the installed package tree** across both layouts (nested
    marketplace/dev checkout, flat standalone install) and fail loudly with
    actionable instructions if neither resolves.
@@ -41,36 +54,154 @@ python3 -c "
 import json, os, sys
 from pathlib import Path
 
-# ── (1) Global activation check ────────────────────────────────────────
-settings = Path.home() / '.claude' / 'settings.json'
-marketplace_path = None
-issues = []
-if settings.exists():
-    try:
-        s = json.loads(settings.read_text(encoding='utf-8'))
-        enabled = s.get('enabledPlugins', {}).get('cc-memory@cc-memory') is True
-        mk = s.get('extraKnownMarketplaces', {}).get('cc-memory')
-        if not enabled:
-            issues.append('enabledPlugins[\"cc-memory@cc-memory\"] is not true')
-        if not mk:
-            issues.append('extraKnownMarketplaces.cc-memory is missing')
-        else:
-            marketplace_path = (mk.get('source') or {}).get('path')
-    except Exception as e:
-        issues.append(f'settings.json unreadable: {e}')
-else:
-    issues.append('~/.claude/settings.json not found')
+HOME = Path.home()
+SETTINGS = HOME / '.claude' / 'settings.json'
+LEGACY = HOME / '.claude' / 'hooks' / 'cc-memory'
+EVENTS = ('PreCompact', 'SessionStart', 'Stop', 'PostToolUse', 'UserPromptSubmit')
+Q = chr(34)  # a literal double quote: this script is embedded in a shell dquote
 
-if issues:
-    print('=== cc-memory plugin NOT FULLY ACTIVATED ===')
-    for i in issues:
-        print(f'  - {i}')
+def _d(x):
+    return x if isinstance(x, dict) else {}
+
+def _l(x):
+    return x if isinstance(x, list) else []
+
+# ── (1) Activation check — PER LAYOUT ──────────────────────────────────
+# Two layouts ship and they are activated by DIFFERENT mechanisms. Gating
+# BOTH on enabledPlugins + extraKnownMarketplaces made this skill print
+# 'NOT FULLY ACTIVATED' on every standalone / .exe install — the layout the
+# README recommends to Windows users — and then skip bootstrap entirely,
+# while /cc-mem status on the same machine reported '5/5 registered'. Two
+# shipped surfaces, opposite verdicts on one healthy install.
+#   marketplace / dev checkout — enabledPlugins['cc-memory@cc-memory'] true;
+#       root from extraKnownMarketplaces.source.path or
+#       plugins/installed_plugins.json; hooks declared by
+#       <root>/hooks/hooks.json; tree is NESTED (<root>/cc_memory/core/db.py)
+#   standalone (ui/installer.py) — never appears in enabledPlugins at all:
+#       _merge_into_settings writes ONLY settings.json['hooks'], and
+#       _copy_subpackages writes TARGET_DIR/<subdir>/, a FLAT tree with no
+#       cc_memory/ segment (<root>/core/db.py)
+# Mirrors cc_memory/cli/mem.py:_detect_install_layouts / _inspect_layout —
+# see its enabled=True comment, 'legacy install does not gate on
+# enabledPlugins'.
+settings, settings_err = {}, None
+if SETTINGS.exists():
+    try:
+        # utf-8-sig: a settings.json ever saved from PowerShell carries a BOM.
+        settings = _d(json.loads(SETTINGS.read_text(encoding='utf-8-sig')))
+    except Exception as e:
+        settings_err = f'{SETTINGS} unreadable: {e}'
+else:
+    settings_err = f'{SETTINGS} not found'
+
+def _pkg_dir(root):
+    # The directory to put on sys.path, for EITHER on-disk shape, or None.
+    if not root:
+        return None
+    p = Path(root)
+    if (p / 'cc_memory' / 'core' / 'db.py').exists():
+        return p / 'cc_memory'
+    if (p / 'core' / 'db.py').exists():
+        return p
+    return None
+
+def _manifest_events(root):
+    hj = Path(root) / 'hooks' / 'hooks.json'
+    if not hj.exists():
+        return set()
+    try:
+        hooks = _d(json.loads(hj.read_text(encoding='utf-8'))).get('hooks', {})
+        return set(_d(hooks)) & set(EVENTS)
+    except Exception:
+        return set()  # why: malformed hooks.json is reported below as 0/5
+
+def _settings_events():
+    got = set()
+    blk = _d(settings.get('hooks'))
+    for ev in EVENTS:
+        for mg in _l(blk.get(ev)):
+            for h in _l(_d(mg).get('hooks')):
+                if 'cc-memory' in (_d(h).get('command') or ''):
+                    got.add(ev)
+    return got
+
+layouts = []
+mp_enabled = _d(settings.get('enabledPlugins')).get('cc-memory@cc-memory') is True
+mp_roots = []
+mp_src = _d(_d(_d(settings.get('extraKnownMarketplaces')).get('cc-memory')).get('source'))
+if mp_src.get('path'):
+    mp_roots.append(mp_src['path'])
+_inst = HOME / '.claude' / 'plugins' / 'installed_plugins.json'
+if _inst.exists():
+    try:
+        _plugs = _d(_d(json.loads(_inst.read_text(encoding='utf-8'))).get('plugins'))
+        for e in _l(_plugs.get('cc-memory@cc-memory')):
+            if _d(e).get('installPath'):
+                mp_roots.append(e['installPath'])
+    except Exception:
+        pass  # why: a corrupt plugin cache costs one root candidate, not the run
+for r in dict.fromkeys(mp_roots):
+    pd, evs, probs = _pkg_dir(r), _manifest_events(r), []
+    if pd is None:
+        probs.append(f'no cc-memory package tree under {r}')
+    if not mp_enabled:
+        probs.append('settings.json enabledPlugins[\"cc-memory@cc-memory\"] is not true')
+    if len(evs) < 5:
+        probs.append(f'{Path(r) / \"hooks\" / \"hooks.json\"} declares {len(evs)}/5 events')
+    layouts.append({'name': 'marketplace', 'root': Path(r), 'pkg': pd, 'n': len(evs),
+                    'via': 'hooks/hooks.json', 'probs': probs})
+
+if (LEGACY / 'cc_memory').exists() or (LEGACY / 'core' / 'db.py').exists():
+    pd, evs, probs = _pkg_dir(LEGACY), _settings_events(), []
+    if pd is None:
+        probs.append(f'incomplete package tree under {LEGACY} (no core/db.py)')
+    if len(evs) < 5:
+        probs.append('settings.json[\"hooks\"] registers ' + str(len(evs)) + '/5 events '
+                     '(missing: ' + ', '.join(e for e in EVENTS if e not in evs) + ')')
+    layouts.append({'name': 'standalone', 'root': LEGACY, 'pkg': pd, 'n': len(evs),
+                    'via': 'settings.json[hooks]', 'probs': probs})
+
+for L in layouts:
+    if L['pkg'] is None:
+        shape = 'no package tree'
+    elif L['pkg'] == L['root']:
+        shape = 'flat'
+    else:
+        shape = 'nested'
+    tag = 'OK  ' if not L['probs'] else 'WARN'
+    # ASCII-only from here down: these lines print BEFORE core.encoding_setup
+    # is importable, and a cp437 console cannot encode U+2014, which would
+    # abort the skill with UnicodeEncodeError instead of bootstrapping.
+    print(f'[{tag}] {L[\"name\"]} install at {L[\"root\"]} ({shape}) - '
+          f'hooks {L[\"n\"]}/5 via {L[\"via\"]}')
+    for p in L['probs']:
+        print(f'         - {p}')
+
+active = [L for L in layouts if not L['probs']]
+if not active:
     print()
-    print('To activate, run inside Claude Code:')
-    print('  /plugin marketplace add <path-to-cc-memory-repo>')
-    print('  /plugin install cc-memory@cc-memory')
+    print('=== cc-memory NOT FULLY ACTIVATED ===')
+    if settings_err:
+        print(f'  - {settings_err}')
+    if not layouts:
+        print('  No cc-memory install found. Checked:')
+        print(f'    marketplace  {SETTINGS} extraKnownMarketplaces, and')
+        print(f'                 {_inst}')
+        print(f'    standalone   {LEGACY}')
+    print()
+    print('Fix - pick exactly ONE (both at once registers every hook twice):')
+    if not layouts or any(L['name'] == 'standalone' for L in layouts):
+        print('  Standalone / .exe - no repo needed. Re-run the installer:')
+        print('    cc-memory-installer.exe          (add --cli for a console run)')
+        print('    or: python ' + Q + str(LEGACY / 'ui' / 'installer.py') + Q + ' --cli')
+    if not layouts or any(L['name'] == 'marketplace' for L in layouts):
+        print('  Plugin / dev checkout - needs the repo. Inside Claude Code:')
+        print('    /plugin marketplace add <path-to-cc-memory-repo>')
+        print('    /plugin install cc-memory@cc-memory')
     sys.exit(0)
-print('[OK] cc-memory plugin globally activated')
+
+best = active[0]
+print(f'[OK] cc-memory ACTIVATED ({best[\"name\"]} layout) - bootstrapping project')
 
 # ── (2) Project init ───────────────────────────────────────────────────
 project = Path('.').resolve()
@@ -95,42 +226,12 @@ if not db_path.exists():
         with open(gi, 'a', encoding='utf-8') as _f:
             _f.write('\n'.join(_miss) + '\n')
 
-# ── (3) Resolve plugin root (env > marketplace > standard install) ─────
+# ── (3) Resolve the package tree (env override > activated layout) ─────
 # why: hardcoding the maintainer's path breaks the skill on every other
-# machine. Try CLAUDE_PLUGIN_ROOT first (set by Claude Code when invoked
-# from a plugin context), then settings.json marketplace path, then the
-# v2.0-style standalone install location under ~/.claude/hooks/.
-# TWO layouts exist and both must be probed, otherwise a standalone install
-# is invisible: ui/installer.py copies each subpackage to TARGET_DIR/<subdir>/
-# directly, so it has NO cc_memory/ segment.
-#   nested - marketplace / dev checkout:  <root>/cc_memory/core/db.py
-#   flat   - standalone installer output: <root>/core/db.py
-# Returns the directory to put on sys.path (the package parent), not the root.
-def _pkg_dir(root):
-    if not root:
-        return None
-    p = Path(root)
-    if (p / 'cc_memory' / 'core' / 'db.py').exists():
-        return p / 'cc_memory'
-    if (p / 'core' / 'db.py').exists():
-        return p
-    return None
-
-def _find_pkg_dir():
-    for cand in (os.environ.get('CLAUDE_PLUGIN_ROOT'),
-                 marketplace_path,
-                 str(Path.home() / '.claude' / 'hooks' / 'cc-memory')):
-        d = _pkg_dir(cand)
-        if d:
-            return d
-    return None
-
-pkg_dir = _find_pkg_dir()
-if pkg_dir is None:
-    print('[error] cannot locate cc-memory package tree.')
-    print('  Set CLAUDE_PLUGIN_ROOT, or re-run /plugin install cc-memory.')
-    sys.exit(0)
-plugin_root = pkg_dir.parent if pkg_dir.name == 'cc_memory' else pkg_dir
+# machine. CLAUDE_PLUGIN_ROOT is set by Claude Code in a plugin context and
+# wins when it resolves; otherwise use the layout certified above, whose
+# pkg dir is already the correct one for its shape (flat or nested).
+pkg_dir = _pkg_dir(os.environ.get('CLAUDE_PLUGIN_ROOT')) or best['pkg']
 sys.path.insert(0, str(pkg_dir.resolve()))
 
 from core.db import MemoryDB
@@ -167,7 +268,10 @@ print('  - SessionStart:     inject context + FORCED <system-reminder> for read-
 ### Step 2 — Report
 
 Summarize to the user in 1-2 sentences:
-- If plugin not activated: "cc-memory is not fully wired up. Run `/plugin install cc-memory@cc-memory` in Claude Code, then re-run /ccm-load."
+- If not activated: relay the script's own **layout-appropriate** fix verbatim —
+  a standalone/`.exe` user re-runs `cc-memory-installer.exe`; a marketplace/dev
+  user runs `/plugin install cc-memory@cc-memory`. Do not offer the marketplace
+  route to a user who has no repo. Then: "…, then re-run /ccm-load."
 - If initialized fresh: "cc-memory loaded for {project_name}. PROGRESS.md and MEMORY.md generated; hooks will fire on subsequent activity."
 - If already initialized: "cc-memory active here — {n_memories} memories, {n_sessions} sessions, last update at {timestamp}. PROGRESS.md refreshed."
 

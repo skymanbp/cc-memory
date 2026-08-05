@@ -7,6 +7,133 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [2.5.1] — 2026-08-05
+
+**v2.5.0 was audited an hour after it shipped, and the audit found 23 defects.**
+Six read-only agents attacked it from angles the pre-release work had not used:
+regressions introduced *by* the fixes, a brand-new user installing from the
+released exe, every documentation claim re-checked against the code, all six
+hooks driven live, an audit of the ~1,650 lines of test code added in v2.5.0,
+and a whole-tree sweep of the project's own invariants.
+
+The uncomfortable part: **all seven release gates were green the entire time.**
+Three of the defects below are things a passing test suite cannot see.
+
+### Fixed — privacy
+
+- **`excluded_projects` was not an opt-out. It only blocked *creation*.** The
+  check existed in exactly two of the six hooks. A project that already had a
+  `memory/` directory and was listed *afterwards* — the natural sequence, since
+  you add a repo to the list precisely when you realise it is sensitive — kept
+  being captured in full: 4 tool calls → 4 observations stored with their inputs
+  and outputs, a `progress` row written, `PROGRESS.md` naming the secret files,
+  3,189 bytes injected into the next session. With a credential present the Stop
+  observer also POSTs those observations to the Anthropic API, and that leg was
+  unconditional. Every clause of the README's promise — "no `memory/`, no DB,
+  **no extraction and no PROGRESS.md**" — was false for a pre-existing project.
+  There is now **one** implementation (`core/modes.py:is_excluded`) called as the
+  first act of **all six** hooks. Measured after: 0 observations, 0 progress
+  rows, no `PROGRESS.md`, 0 bytes injected, 0 bytes of stdout — while a
+  non-excluded sibling project is unaffected.
+- **A standalone reinstall silently wiped `excluded_projects`.** `config.json`
+  was copied unconditionally, so re-running the installer — which is how you
+  install a patch release — reset the plugin's one privacy control to `[]` with
+  no warning and no backup. The installer now merges the shipped defaults *under*
+  the user's file, keeping their values and adding genuinely new keys.
+  (The marketplace layout has the same exposure by a different route: its
+  `config.json` is git-tracked, so `git pull` can revert your edit. Documented,
+  not yet solved.)
+
+### Fixed — the hook that runs on every session
+
+- **SessionStart could still blow its 15 s budget, and would do so forever.**
+  v2.5.0 added an absolute deadline to the LLM legs but left
+  `load_transcript_window` — which runs *after* the deadline check — unbounded in
+  time. Measured 17.00 s against a 15 s host budget. Real figures on the
+  reference machine: a 2.11 GiB transcript loads in 3.37 s and the loop reaches
+  its last check at ~12.6 s, so a single large prior transcript is enough, and
+  one exists on that box today. It repeated every session: a transcript that
+  yields no memories writes no `sessions` row, and a `TerminateProcess` kill
+  commits nothing, so the same files were re-scanned and re-killed at every
+  start. The loop now charges the predicted load cost to the budget *before*
+  starting it (a two-pass model validated against 1.49/2.11/4.0 GiB files; it
+  never under-predicted) and skips a file it cannot afford. Measured after:
+  **7.26 s** with a 2 GiB unsaved transcript, injection intact.
+
+### Fixed — surfaces
+
+- **`/ccm-load` was dead on every standalone / exe install** — the layout the
+  README recommends to Windows users. It hard-gated on `enabledPlugins`, which
+  the standalone installer never writes (it writes only `settings.json[hooks]`),
+  so it reported **"cc-memory plugin NOT FULLY ACTIVATED"** — false; all six
+  hooks were registered and working — then printed advice an exe user cannot
+  follow (`/plugin marketplace add <path-to-repo>`; they have no repo) and
+  returned without bootstrapping. Meanwhile `/cc-mem status` on the same machine
+  reported `5/5 registered`: two shipped surfaces, opposite verdicts on one
+  healthy install. The activation check is now per-layout and mirrors
+  `cli/mem.py`'s.
+- **`/cc-mem sql`'s "READ-ONLY" guard was bypassable.** It refused only
+  `PRAGMA name = value`; SQLite equally accepts `PRAGMA name(value)`, and several
+  pragmas write with no argument at all. `PRAGMA journal_mode(DELETE)` disabled
+  WAL, `PRAGMA optimize` created `sqlite_stat1`, `user_version(7)` and
+  `application_id(1234)` persisted — all `rc=0`, all under a banner that calls
+  the tool read-only, and all reachable by the model through `/cc-mem`
+  passthrough. The dashboard's twin guard had **already fixed this exact class**
+  in v2.5.0, naming `PRAGMA user_version(7)` and `PRAGMA optimize` verbatim in
+  its comment; the port to the CLI was never made. Both guards now agree on all
+  19 probe inputs.
+- `cmd_plan_check` briefed the plan-guardian on a **superseded** plan — it never
+  consulted `raw_pending_refinement`, so it printed the stale plan's goal and
+  progress while the `PLAN.md` it had just written said "pending refinement", and
+  it reset the drift counters for a plan that was not live.
+- Four hooks still violated the never-raise/never-stderr contract on a
+  non-string `cwd` or `session_id`; v2.5.0's guard typed only the container. A
+  162-case fuzz battery went from 10 failures to 3, all outside the changed
+  files.
+- MCP answered id-less notifications with `{"id": null, …}`, which its own new
+  docstring said it would not do and which JSON-RPC 2.0 forbids; the frame-length
+  cap was off by one; the dashboard's search box was the one search surface that
+  never got v2.5.0's LIKE-wildcard escaping; `cc-memory-plan --help` identified
+  itself as `plan.py`, a file not on the user's PATH.
+
+### Fixed — the tests, and the documentation
+
+- **Two assertions in the new suite were vacuous.** The `protocolVersion` check
+  sent a *supported* version, so "negotiates" and "parrots back" were
+  indistinguishable — mutating the negotiator to accept any string still passed.
+  Another was literally `assert True` via an operator-precedence trap
+  (`assert X if False else True`), together with a helper that existed only to
+  keep it importable. Both were debris from an agent that was killed mid-task.
+  The rest of the suite is load-bearing: an independent audit ran 53 mutants and
+  **51 went red at the intended assertion**.
+- **`tests/smoke_test.py` wrote into the real `~/.claude`** on every run and left
+  ~19 temp directories behind; `test_surfaces.py` leaked a sandbox into the real
+  `%TEMP%` on every *successful* run, hidden by `ignore_errors=True`. Both are
+  sandboxed now. Root cause of the leak, recorded for later: `MemoryDB._connect()`
+  is consumed as `with self._connect() as conn:` at all 27 call sites, and
+  sqlite3's context manager commits but never closes, so the file stays locked on
+  Windows.
+- **22 in-document anchors in the two Chinese docs pointed nowhere** — the
+  translations kept the English slugs while translating the headings, so both
+  tables of contents were entirely dead. The hash-based i18n checker cannot see
+  this by design.
+- Two README shell recipes could not work as written: `M="python ~/..."` then
+  `$M status` fails because bash expands `~` before parameter expansion and does
+  not rescan, so the tilde stays literal. Plus a set of stale claims: `CLAUDE.md`
+  contradicting the code on `project_id` scoping, an incomplete memory-tag
+  inventory, three CHANGELOG links to docs deleted in v2.4.3, and `config.json`
+  citing two functions that no longer exist.
+
+### Known, and stated rather than hidden
+
+`file:line` citations in `docs/` rot on every refactor and nothing enforces them.
+The v2.5.1 pass re-derived the `core/plan.py` citations and fact-checked every
+prose claim, but citations into `cc_memory/hooks/*`, `cli/mem.py` and
+`ui/installer.py` were deliberately **not** re-derived — those files were being
+rewritten in the same round, so any number written for them would have been stale
+on landing. `docs/ARCHITECTURE.md` and `docs/CONTRACTS.md` now say so at the top:
+treat a line number as a hint and the **symbol name** as the fact.
+
 ## [2.5.0] — 2026-08-05
 
 **A readiness audit of every shipped surface, and the repair of everything it
@@ -95,8 +222,8 @@ matched on a *substring* had been quietly importing other projects' memories.
   the arithmetic, because `urlopen(timeout=…)` is a *per-socket-operation*
   timeout covering neither DNS nor the TLS handshake — a **successful** leg was
   measured at **11.81 s against a nominal 8 s** (1.48×, in ~5 % of legs). Under
-  a simulated 1.48× stall on every leg the Stop hook went from **25.45 s → 16.05 s**
-  and PreCompact from **118.79 s → within budget**.
+  a simulated 1.48× stall on every leg the Stop hook went from **25.45 s → 15.99 s**
+  of its 22 s, and PreCompact from **~144 s → 74.39 s** of its 120 s.
 - **All six hooks exited 1 with a traceback on well-formed non-object stdin**
   (`null`, `42`, `"s"`, `[1,2]`, `true`) — 30 of 30 cells, two hook-contract
   violations at once. Guarded.
@@ -234,7 +361,9 @@ matched on a *substring* had been quietly importing other projects' memories.
   three had **zero** test coverage, which is precisely why these defects
   shipped.
 - **`cc_memory/core/version.py`** — the single source for the version string.
-  Twelve hardcoded literals across five files are gone. It lives under `core/`
+  The hardcoded literals in the CLI banners, the MCP server banners, the
+  installer banner/GUI title and `build_exe.py` — four files, two of them
+  already stale at v2.4.3 — are gone. It lives under `core/`
   rather than in `cc_memory/__init__.py` because every entry point bootstraps by
   putting the *package directory* on `sys.path` and importing flat — under the
   flat standalone layout `import cc_memory` raises `ModuleNotFoundError`.
@@ -251,7 +380,7 @@ matched on a *substring* had been quietly importing other projects' memories.
 ### Changed
 
 - **`config.json` stripped to the keys that are actually read.** Two independent
-  audits measured 35 of 51 leaf keys referenced by no code. An inert tunable is
+  audits measured 34 of 51 leaf keys referenced by no code. An inert tunable is
   worse than no tunable, because editing it looks like it does something.
 
 ## [2.4.3] — 2026-08-05
@@ -739,7 +868,7 @@ that touches them.
 - **`memory/PLAN.md`** — live plan document, full-rewritten from the
   `plan_active` SQL row on every relevant event. Distinct from
   `PROGRESS.md` (which remains the session-handoff doc). See
-  [`docs/PLAN_PROTOCOL.md`](docs/PLAN_PROTOCOL.md).
+  `docs/PLAN_PROTOCOL.md`.
 - **`plan_active` SQL table (v4 migration)** — single row per project with
   `raw`, `structured` (JSON), `active_step`, `edits_since_last_guardian`,
   `turns_since_last_guardian`, `last_guardian_at`, `last_refined_at`,
@@ -880,12 +1009,12 @@ update settings.json paths to the new subpackage layout.
   save paths (PreCompact, Stop observer, `/save-memories` skill, MCP `memory_add`,
   CLI `mem.py add`) now route through one function that decides MERGE_IN_PLACE
   vs SUPERSEDE vs INSERT based on trigram-Jaccard similarity. See
-  [`docs/MEMORY_RULES.md`](docs/MEMORY_RULES.md).
+  `docs/MEMORY_RULES.md`.
 - **`memories.supersedes_id`** column + `db.get_supersede_chain(id)` — preserves
   update history. Walk a chain via `mem.py supersedes <id>`.
 - **`progress` SQL table** + **`memory/PROGRESS.md`** — replaces v2.0
   `SESSION_HANDOFF.md`. Always full-rewritten from the SQL row, never appended.
-  See [`docs/HANDOFF_PROTOCOL.md`](docs/HANDOFF_PROTOCOL.md).
+  See `docs/HANDOFF_PROTOCOL.md`.
 - **Forced `<system-reminder>` at SessionStart** — instructs the next session
   to `Read memory/PROGRESS.md` before responding. Replaces the soft "remember
   to call /save-memories" text spam.

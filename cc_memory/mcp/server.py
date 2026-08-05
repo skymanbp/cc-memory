@@ -653,20 +653,51 @@ def _dispatch_tool_call(req_id, params):
 
 
 def _handle_request(req):
+    """Answer one Request; return in silence for a Notification.
+
+    The id decides, and it decides FIRST — for every method, not just the two
+    branches that used to check. JSON-RPC 2.0 §4.1: a Notification is a message
+    with no `id` and the server MUST NOT reply to it. Only
+    `notifications/initialized` and the unknown-method branch honoured that, so
+    a bare `{"jsonrpc":"2.0","method":"ping"}` was answered with
+    `{"jsonrpc":"2.0","id":null,"result":{}}` — and so were `initialize`,
+    `tools/list` and `tools/call`. An unsolicited `"id": null` Response is not
+    a JSON-RPC Response at all: §5 reserves that id for the one case where the
+    request's id could not be DETERMINED (an unparsable or over-length frame,
+    which is exactly what `_process_line` / `_serve` use it for). Emitting it
+    for a well-formed notification claims that reserved slot for a frame no
+    client is waiting on, and a strict client is entitled to treat it as a
+    response to a call it never made.
+
+    `req.get("id")` cannot distinguish an absent id from an explicit
+    `"id": null`, and the two are deliberately treated alike: §4 discourages a
+    null Request id precisely because it is unanswerable, and the wire contract
+    at the top of this file has always been written in terms of a "non-null"
+    id.
+
+    Consequence worth stating out loud: an id-less `tools/call` is now DROPPED,
+    not executed-then-answered-with-null. That is the safe direction and not
+    merely the convenient one — half this tool table mutates the user's
+    database (`memory_add`, `progress_regenerate`), and a write whose outcome
+    can never be reported back is worse than no write. MCP defines `tools/call`
+    as a Request; the only Notification it defines,
+    `notifications/initialized`, is a no-op here anyway.
+    """
     method = req.get("method", "")
     req_id = req.get("id")
+    if req_id is None:
+        return                 # Notification (or a null id): no reply, ever.
     params = req.get("params")
     if params is None:
         params = {}            # "params": null is legal JSON-RPC 2.0
     if not isinstance(params, dict):
-        # An id makes this a Request regardless of the method name, so it is
-        # answered; without one it is a Notification and gets silence. Keying
-        # this off the method prefix instead made the reply depend on the TYPE
-        # of a field already rejected: `notifications/cancelled` with
-        # `"params": {}` got -32601 while `"params": []` got nothing at all.
-        if req_id is not None:
-            _error(req_id, -32602,
-                   f"Invalid params: expected an object, got {type(params).__name__}")
+        # Answered for EVERY method, `notifications/*` included: an id makes
+        # this a Request regardless of the method name. Keying this off the
+        # method prefix instead made the reply depend on the TYPE of a field
+        # already rejected: `notifications/cancelled` with `"params": {}` got
+        # -32601 while `"params": []` got nothing at all.
+        _error(req_id, -32602,
+               f"Invalid params: expected an object, got {type(params).__name__}")
         return
 
     if method == "initialize":
@@ -677,11 +708,11 @@ def _handle_request(req):
                    "serverInfo": {"name": "cc-memory", "version": _VERSION},
                }})
     elif method == "notifications/initialized":
-        # A conforming client never puts an id on a notification. If this one
-        # did, the message is a Request and leaving it unanswered hangs a
-        # client that has no timeout.
-        if req_id is not None:
-            _send({"jsonrpc": "2.0", "id": req_id, "result": {}})
+        # Reached only WITH an id (the guard above returned otherwise). A
+        # conforming client never puts one on a notification; this one did, so
+        # the message is a Request and leaving it unanswered hangs a client
+        # that has no timeout.
+        _send({"jsonrpc": "2.0", "id": req_id, "result": {}})
     elif method == "tools/list":
         _send({"jsonrpc": "2.0", "id": req_id, "result": {"tools": TOOLS}})
     elif method == "tools/call":
@@ -689,8 +720,7 @@ def _handle_request(req):
     elif method == "ping":
         _send({"jsonrpc": "2.0", "id": req_id, "result": {}})
     else:
-        if req_id is not None:
-            _error(req_id, -32601, f"Method not found: {method}")
+        _error(req_id, -32601, f"Method not found: {method}")
 
 
 def _parent_heartbeat(interval=30):
@@ -737,18 +767,28 @@ def _strict_float(text):
 def _read_frame(stream):
     """Read one capped line. Returns (text, oversized); ("", False) at EOF.
 
-    readline(cap) bounds the ALLOCATION, not just the returned slice, so an
-    over-cap line is drained in cap-sized chunks and never materialised whole.
-    A short chunk with no trailing newline is the last line before EOF — a
-    legitimate frame, not an over-cap one.
+    readline(limit) bounds the ALLOCATION, not just the returned slice, so an
+    over-cap line is drained in limit-sized chunks and never materialised
+    whole. A short chunk with no trailing newline is the last line before EOF —
+    a legitimate frame, not an over-cap one.
+
+    The limit is `_MAX_LINE_CHARS + 1`, one char of headroom for the
+    terminating newline. Reading with exactly `_MAX_LINE_CHARS` made a line of
+    EXACTLY the cap indistinguishable from one that continues — readline
+    returned a full buffer with the '\\n' still unread — so a frame at the cap
+    was refused with "frame exceeds the 1048576-character limit", a message
+    about a limit it had only reached. Measured before: 1048575 answered,
+    1048576 refused. The refusal now means what it says: strictly longer than
+    `_MAX_LINE_CHARS`.
     """
-    chunk = stream.readline(_MAX_LINE_CHARS)
+    limit = _MAX_LINE_CHARS + 1
+    chunk = stream.readline(limit)
     if not chunk:
         return "", False
-    if chunk.endswith("\n") or len(chunk) < _MAX_LINE_CHARS:
+    if chunk.endswith("\n") or len(chunk) < limit:
         return chunk, False
     while True:
-        more = stream.readline(_MAX_LINE_CHARS)
+        more = stream.readline(limit)
         if not more or more.endswith("\n"):
             return chunk, True
 
