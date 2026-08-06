@@ -1,7 +1,7 @@
-<!-- i18n-source: ARCHITECTURE.md | sha256: da6715a1700b1353 | version: 2.5.4 | translated: 2026-08-05 -->
+<!-- i18n-source: ARCHITECTURE.md | sha256: a3b86f22c1f45a15 | version: 2.5.5 | translated: 2026-08-05 -->
 > [English](ARCHITECTURE.md) · **简体中文**
 
-# cc-memory — 架构（v2.5.4）
+# cc-memory — 架构（v2.5.5）
 
 cc-memory 是一个 Claude Code 插件，为 Claude 提供**跨压缩、跨会话的持久化结构化
 记忆**。本文档是总览：这个插件用来做什么、仓库如何布局、哪些钩子在何时触发、数据库
@@ -84,7 +84,7 @@ PROTOCOL）都是**有意**同时匹配中文和英文的，存储的记忆也�
 ```
 cc-memory/
 ├── .claude-plugin/
-│   ├── plugin.json              ← 插件清单（v2.5.4）
+│   ├── plugin.json              ← 插件清单（v2.5.5）
 │   └── marketplace.json         ← /plugin marketplace add 条目
 ├── hooks/hooks.json             ← 钩子声明（6 条命令 / 5 个事件）
 ├── skills/                      ← 技能的唯一规范位置

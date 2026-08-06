@@ -8,7 +8,12 @@ argument-hint: "<subcommand> [args]    e.g. stats | search <q> | progress | cons
 Run cc-memory CLI commands against the current project. The wrapper resolves
 `--project .` for you.
 
-### Common subcommands
+### Subcommands
+
+Every subcommand `cc_memory/cli/mem.py` defines is listed here, and
+`tests/smoke_test.py` fails if one is missing — an undocumented subcommand is
+one nobody uses, and `sql`'s read-only guard is a security fix that only helps
+someone who knows the command exists.
 
 | Subcommand | Effect |
 |------------|--------|
@@ -16,7 +21,13 @@ Run cc-memory CLI commands against the current project. The wrapper resolves
 | `status` | Full health check (hooks, DB, API key, PROGRESS state) |
 | `search <q>` | FTS5 search across memories |
 | `list [category]` | List memories (filter by `decision`/`result`/`bug`/...) |
+| `add <category> "<text>"` | Add one memory through the anti-patch writer |
 | `topics` | Show topic summaries |
+| `keywords` | Top project vocabulary by frequency |
+| `sessions` | Compaction history with archive paths |
+| `observations` | Raw PostToolUse rows still awaiting extraction |
+| `schema` | Print the live SQLite schema (tables, indexes, migrations) |
+| `sql "<SELECT ...>"` | Run a **read-only** query. Non-`SELECT` statements are refused — including the `PRAGMA name(value)` setter form, which an `=`-only test used to let through |
 | `progress` | Force-regenerate `memory/PROGRESS.md` from DB and print it |
 | `supersedes <id>` | Walk the supersede chain for a memory ID (anti-patch history) |
 | `consolidate` | Run full LLM-backed consolidation pipeline |

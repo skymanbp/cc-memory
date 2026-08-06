@@ -22,6 +22,7 @@ import gc
 import os
 import shutil
 import sqlite3
+import subprocess
 import sys
 import tempfile
 import time
@@ -1023,10 +1024,57 @@ def main():
                       for r in _cit_skip[:8]))
     _cit_ok = sum(1 for r in _cit if r.verdict == "OK")
     _cit_bnd = sum(1 for r in _cit if r.verdict == "BOUNDS")
-    print(f"[OK] v2.5.3 doc citations: ALL {len(_cit)} `file.py:LINE` "
-          f"references checked — {_cit_ok} anchored to a symbol's ast "
-          f"definition or reference, {_cit_bnd} bounds-checked, 0 unchecked, "
-          f"0 stale")
+    # v2.5.5: and EVERY markdown document is in scope, not a hand-picked seven.
+    # Through v2.5.4 the tracked list held 7 of the repo's 13 docs; CHANGELOG.md,
+    # both agent prompts, the slash command and both skills were checked by
+    # nothing. A subset is how "which docs are gated" rots without anyone
+    # noticing, so the subset is now the whole set and this asserts it.
+    _cit_git = subprocess.run(["git", "ls-files", "*.md"], cwd=str(_REPO),
+                              capture_output=True, text=True,
+                              encoding="utf-8").stdout.split()
+    _cit_missing = sorted(set(_cit_git) - set(citation_check.TRACKED))
+    assert not _cit_missing, (
+        f"{len(_cit_missing)} markdown file(s) are outside the citation gate — "
+        f"add them to tools/citation_check.py TRACKED: {_cit_missing}")
+    print(f"[OK] v2.5.5 doc citations: ALL {len(_cit)} `file.py:LINE` "
+          f"references in ALL {len(_cit_git)} tracked markdown files checked — "
+          f"{_cit_ok} anchored to a symbol, {_cit_bnd} bounds-checked, "
+          f"0 unchecked, 0 stale")
+
+    # ── v2.5.5 · the docs' countable claims must match the code ─────────────
+    # Nothing checked cross-document FACTS, only citation line numbers. Three
+    # had drifted: CLAUDE.md still said "run all three suites plus i18n_check"
+    # after citation_check became a gate, and commands/cc-mem.md never named 5
+    # of the CLI's 28 subcommands — including `sql`, whose read-only guard is a
+    # v2.5.0 security fix a user cannot benefit from without knowing it exists.
+    import re as _dc_re
+    _dc_cli = (_REPO / "cc_memory" / "cli" / "mem.py").read_text(encoding="utf-8")
+    _dc_cmds = set(_dc_re.findall(r'add_parser\(\s*["\']([a-z][a-z0-9-]*)["\']',
+                                  _dc_cli))
+    _dc_doc = (_REPO / "commands" / "cc-mem.md").read_text(encoding="utf-8")
+    _dc_named = {c for c in _dc_cmds
+                 if _dc_re.search(r"`/?(cc-mem )?" + _dc_re.escape(c) + r"[ `<]",
+                                  _dc_doc)}
+    assert _dc_cmds == _dc_named, (
+        f"commands/cc-mem.md does not name {len(_dc_cmds - _dc_named)} of the "
+        f"{len(_dc_cmds)} subcommands cli/mem.py defines: "
+        f"{sorted(_dc_cmds - _dc_named)}")
+    # the gate list a future Claude is told to run must be the gate list
+    _dc_claude = (_REPO / "CLAUDE.md").read_text(encoding="utf-8")
+    for _dc_gate in ("tests/smoke_test.py", "tests/test_plan_carryover.py",
+                     "tests/test_surfaces.py", "tools/i18n_check.py",
+                     "tools/citation_check.py"):
+        assert _dc_gate in _dc_claude, \
+            f"CLAUDE.md § Tests does not tell anyone to run {_dc_gate}"
+    _dc_tables = len(set(_dc_re.findall(r"CREATE TABLE IF NOT EXISTS (\w+)",
+                                        (_REPO / "cc_memory" / "core" / "db.py")
+                                        .read_text(encoding="utf-8"))))
+    assert f"Database schema ({_dc_tables} tables)" in _dc_claude, \
+        (f"CLAUDE.md's table count is stale — core/db.py creates "
+         f"{_dc_tables} tables")
+    print(f"[OK] v2.5.5 doc facts: commands/cc-mem.md names all "
+          f"{len(_dc_cmds)} CLI subcommands, CLAUDE.md § Tests lists all 5 "
+          f"gate scripts, and its '{_dc_tables} tables' claim matches db.py")
 
     # === v2.4.2: bounded transcript window (hook-safe) =======================
     # An unbounded transcript read is what killed PreCompact on large projects:

@@ -1,9 +1,9 @@
-<!-- i18n-source: README.md | sha256: aefbebfe63a8fe86 | version: 2.5.4 | translated: 2026-08-05 -->
+<!-- i18n-source: README.md | sha256: f67e0f99315e7357 | version: 2.5.5 | translated: 2026-08-05 -->
 > [English](README.md) · **简体中文**
 
 # cc-memory
 
-**Claude Code 持久化记忆插件（v2.5.4）**——反补丁式的写入即归并（reconcile-on-write）、
+**Claude Code 持久化记忆插件（v2.5.5）**——反补丁式的写入即归并（reconcile-on-write）、
 LLM 判定的语义去重、强制 PROGRESS.md 交接、带 plan-refiner / plan-guardian 子代理与
 强制结转闸门的实时 PLAN.md 锚点、有界 transcript 读取、注入可观测性、FTS5 搜索，
 以及以 Haiku 为主（本地 Ollama 兜底可选）的 AI 判定式抽取。
@@ -15,6 +15,19 @@ LLM 判定的语义去重、强制 PROGRESS.md 交接、带 plan-refiner / plan-
 
 cc-memory 在每一个对话边界捕获结构化记忆，并且**强制下一次会话在开始工作之前先阅读
 一份交接文档**。
+
+## v2.5.5 有什么新变化
+
+**文档门禁只覆盖了本仓库 13 个 markdown 文件中的 7 个。** 被问到"是不是所有文档都
+对齐了"时，去查了一遍，结果发现**陈旧的正是门禁的覆盖范围本身**。
+
+- `tools/citation_check.py` 现在跟踪**全部 13 个** markdown 文件——`CHANGELOG.md`、
+  两个子代理提示词、`commands/cc-mem.md` 和两个技能此前不受任何检查。
+  `smoke_test.py` 会断言跟踪清单等于 `git ls-files "*.md"`。
+- **文档里可计数的断言也纳入门禁**，其中三条已经漂移：`CLAUDE.md` 告诉下一个 Claude
+  跑八道门禁中的七道；`commands/cc-mem.md` 只列出了 28 个 CLI 子命令中的 23 个
+  （漏掉的五个里包括 `sql`，它的只读守卫是一个安全修复，而用户不知道这个命令存在就
+  用不上）；本 README 自己则在引用门禁已经生效三个版本之后，仍写着"没有任何门禁"。
 
 ## v2.5.4 有什么新变化
 
@@ -245,13 +258,12 @@ guardian 的漂移计数还会随模式静默变化。计划控制不是观测�
   `plans.id` 在整个数据库文件范围内是全局的。
 - 搜索一个裸的 `%` 或 `_` 现在返回 0 行而不是整张表。这正是修复本身，但它是一个
   用户可见的结果变化。
-- **文档里的 `file:line` 引用没有任何门禁，并且部分已经陈旧。** 它们靠手工维护；
-  `docs/ARCHITECTURE.md` 与 `docs/CONTRACTS.md` 中仍有一些引用指向某个符号**曾经**
-  所在的行。一个机械的“定义点”检查可以把它们找出来（对每一条 `path:lines` 引用，
-  解析同一句话里点名的符号，并断言该范围覆盖它们唯一的定义行），它理应和
-  `tools/i18n_check.py` 一起进 CI。今天没有任何东西强制它们，所以在信任一条引用
-  之前请自己重新推导一遍。这些文档中的散文式断言已对着代码做过事实核查，但行号
-  并未全部重新推导。
+- **文档里的 `file:line` 引用自 v2.5.2 起已有门禁**，由
+  `tools/citation_check.py` 强制，并在 `tests/smoke_test.py` 内部运行。自 v2.5.5
+  起它覆盖仓库里**全部 13 个** markdown 文件，且不留任何未受检项：一条引用要么被
+  锚定到符号的 `ast` 定义或引用它的行，要么（句中没有可解析符号时）改为边界检查
+  ——必须落在文件内且不是空行。行号失效请用
+  `python tools/citation_check.py --fix` 修，不要手改。
 - `tools/i18n_check.py` 只比较内容哈希。它看不见**正文**已经与英文源漂移的译文
   ——包括失效的文档内锚点，正是这一点让 22 个死锚点在中文文档里一直存活到 v2.5.1。
 
@@ -694,9 +706,12 @@ cc-memory 会从 `~/.claude/.credentials.json` 自动检测你的 Claude OAuth �
 
 ## 测试
 
-三个纯 stdlib 脚本，无需 pytest，也没有任何 pip 依赖。**三个都是发布门禁——三个都要跑。**
+五个纯 stdlib 脚本，无需 pytest，也没有任何 pip 依赖。**八道发布门禁——全部都要跑。**
 
 ```bash
+python -m compileall -q cc_memory tests tools
+python -c "import tomllib,pathlib;tomllib.loads(pathlib.Path('pyproject.toml').read_text(encoding='utf-8'))"
+
 python tests/smoke_test.py
 # 期望：一连串 [OK] 行，以 "===== ALL SMOKE TESTS PASSED =====" 结尾
 
@@ -704,23 +719,37 @@ python tests/test_plan_carryover.py
 # 期望："RESULT: 14 passed, 0 failed"
 
 python tests/test_surfaces.py
+# 期望："===== ALL SURFACE TESTS PASSED ====="（§1-§6）
+
+python tools/i18n_check.py       # 翻译漂移；有漂移则非零退出
+python tools/citation_check.py   # 文档 file:line 引用；"0 unchecked, 0 stale"
 ```
+
+第八道门禁是版本声明一致性：`pyproject.toml`、两个 `.claude-plugin/*.json`、
+`cc_memory/config.json` 和 `cc_memory/core/version.py` 必须携带同一个字符串，
+由 `smoke_test.py` 断言。
 
 - `tests/smoke_test.py` —— 权威的端到端检查：反补丁写入器的决策、PROGRESS.md 整篇
   重写、只填空的刷新契约、last-wins 的 TodoWrite 抽取、tier-3 transcript 兜底、
   旧版 `SESSION_HANDOFF.md` 迁移、布局检查器、两支路的 PreCompact 形态、有界
-  transcript 窗口，以及 i18n 漂移门。
+  transcript 窗口、i18n 漂移门，以及自 v2.5.2 起新增的 `.gitignore` 三副本一致性、
+  sqlite 句柄数回归、PLAN.md / MEMORY.md 抗伪造、唯一原子写入器规则、计划修改函数
+  仅限关键字的 `project_id`，以及两道文档门禁。
 - `tests/test_plan_carryover.py` —— v2.4.0 的结转门禁（14 项检查）；该特性唯一的覆盖。
-- `tests/test_surfaces.py` —— v2.5 新增，覆盖另外两者都没碰的表面：独立安装器
-  （界面的按名安装/卸载、畸形 `settings.json` 处理、与 `hooks/hooks.json` 的超时
-  同步）、MCP stdio 服务、Web 面板的请求守卫，以及「每个调用 LLM 的钩子都必须传入
-  绝对期限」这条规则。
+- `tests/test_surfaces.py` —— v2.5 新增，共六节，覆盖另外两者都没碰的表面：
+  §1 MCP stdio 服务、§2 Web 面板的请求守卫、§3 独立安装器（界面的按名安装/卸载、
+  畸形 `settings.json` 处理、与 `hooks/hooks.json` 的超时同步）、§4 六个钩子上的
+  `excluded_projects`、§5 config.json 的各种形态与 MCP 侧的同一退出机制、
+  §6 `settings.json` 的比较并交换。外加「每个调用 LLM 的钩子都必须传入绝对期限」。
+- `tools/i18n_check.py` —— 按归一化内容哈希检查翻译漂移。
+- `tools/citation_check.py` —— 全部 13 个 markdown 文件里的每一条 `file.py:LINE`
+  引用。`--fix` 修复，`--list` 显示每条判定。
 
-文档翻译单独做漂移检查：
+两个开发期检查器同样在 `smoke_test.py` 内部运行，所以套件绿了就意味着文档状态也绿：
 
 ```bash
-python tools/i18n_check.py          # 逐文档给出 [OK]/[STALE]/[FAIL]；有漂移则非零退出
-python tools/i18n_check.py --list   # 显示每个 英文/翻译 配对 + 记录哈希 vs 当前哈希
+python tools/i18n_check.py --list       # 每个 英文/翻译 配对 + 记录哈希 vs 当前哈希
+python tools/citation_check.py --fix    # 就地重写失效行号
 ```
 
 ## 构建可执行文件

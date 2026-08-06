@@ -2,7 +2,7 @@
 
 ## Project: cc-memory
 
-**Claude Code persistent memory plugin (v2.5.4)** — anti-patch reconcile-on-write
+**Claude Code persistent memory plugin (v2.5.5)** — anti-patch reconcile-on-write
 + LLM-judged semantic de-duplication, forced PROGRESS.md handoff with
 per-session annotation, live PLAN.md anchor with plan-refiner / plan-guardian
 subagents + mandatory carryover gate, bounded transcript reads, injection
@@ -10,7 +10,7 @@ observability, FTS5 search, AI-judged extraction with Haiku (optional local
 Ollama fallback).
 
 - **Language**: Python 3.8+ (pure stdlib, zero pip dependencies at runtime)
-- **Version**: 2.5.4
+- **Version**: 2.5.5
 - **License**: MIT
 - **Platform**: Windows-primary, cross-platform compatible (Tkinter required for GUI)
 
@@ -731,8 +731,10 @@ standalone installs.
 
 ## Tests
 
-**Three suites. ALL are release gates — run all three, plus `tools/i18n_check.py`
-and a `tomllib` parse of `pyproject.toml`.**
+**EIGHT release gates. Run all eight — three suites, two dev checkers,
+`compileall`, a `tomllib` parse of `pyproject.toml`, and version-site
+agreement.** `tests/smoke_test.py` asserts that this section names every gate
+script, so the list below cannot silently fall behind the list you must run.
 
 `tests/smoke_test.py` is the canonical end-to-end check. In a throwaway temp
 project it exercises: v3/v6 migrations, `upsert_smart` decisions
@@ -740,18 +742,35 @@ project it exercises: v3/v6 migrations, `upsert_smart` decisions
 full-rewrite, the fill-only-empty refresh contract, last-wins TodoWrite
 extraction, the tier-3 transcript fallback, the legacy `SESSION_HANDOFF.md`
 migration, the layout inspector, the v2.3.2 async consolidation lock/marker,
-the v2.3.3 i18n drift gate, and the v2.4.2 bounded-window / summary-direction
-/ killed-run-visibility contracts.
+the v2.3.3 i18n drift gate, the v2.4.2 bounded-window / summary-direction /
+killed-run-visibility contracts, and — added across v2.5.2-v2.5.5 — the
+`.gitignore` three-copy parity, `_connect` handle-count regression, PLAN.md /
+MEMORY.md forgery resistance, the single-atomic-writer rule with its
+never-truncate contract and wall-clock budget, the keyword-only `project_id` on
+the three plan mutators, and the two DOC gates below.
 
 `tests/test_plan_carryover.py` covers the v2.4.0 carryover gate (14 checks) —
 the only coverage of that feature.
 
-`tests/test_surfaces.py` (v2.5.0) covers the surfaces neither of the others
-touched: the standalone installer (surfaces installed and removed by name,
+`tests/test_surfaces.py` (v2.5.0, six sections) covers the surfaces neither of
+the others touches: §1 the MCP stdio server, §2 the web viewer's request
+guards, §3 the standalone installer (surfaces installed and removed by name,
 malformed-`settings.json` shapes, hook-timeout lockstep against
 `hooks/hooks.json`, manifest parity so a new runtime module cannot ship
-unpackaged), the MCP stdio server, the web viewer's request guards, and the
-source-level rule that every LLM-calling hook passes an absolute deadline.
+unpackaged), §4 `excluded_projects` across all six hooks, §5 the config.json
+parser shapes plus the MCP half of the same opt-out, §6 the `settings.json`
+compare-and-swap. It also asserts the source-level rule that every LLM-calling
+hook passes an absolute deadline.
+
+**Two DOC gates, both inside `smoke_test.py`.** `tools/citation_check.py`
+resolves every `file.py:LINE` citation in **all 13** tracked markdown files —
+symbol-anchored where a symbol can be resolved, bounds-checked (inside the
+file, non-blank) where it cannot — and no citation may be unchecked. A second
+block asserts the docs' countable claims against the code: that
+`commands/cc-mem.md` names every subcommand `cli/mem.py` defines, that this
+section names every gate script, and that the "11 tables" claim matches
+`core/db.py`. Prose facts rot exactly like line numbers do; nothing checked
+them until v2.5.5, and three had already drifted.
 
 ```bash
 python tests/smoke_test.py
@@ -759,14 +778,14 @@ python tests/smoke_test.py
 python tests/test_plan_carryover.py
 # expect: "RESULT: 14 passed, 0 failed"
 python tests/test_surfaces.py
-# expect: "===== ALL SURFACE TESTS PASSED ====="  (§1-§5)
+# expect: "===== ALL SURFACE TESTS PASSED ====="  (§1-§6)
 python tools/i18n_check.py
 # expect: "3 in-sync", exit 0
 python tools/citation_check.py
-# expect: "0 stale, 0 missing", exit 0  (also asserted inside smoke_test.py)
+# expect: "0 unchecked, 0 stale", exit 0 (also asserted in smoke_test.py)
 ```
 
-No pytest / pip dependencies — all three are stdlib scripts and reflect the
+No pytest / pip dependencies — all five scripts are stdlib and reflect the
 runtime contract (pure stdlib, see Development guidelines below). When you add a
 behavior to `memory_writer`, `progress`, `extractor.load_transcript_window`, or
 `session_start._refresh_progress_row`, add a corresponding assertion block.

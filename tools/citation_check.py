@@ -46,11 +46,18 @@ import re
 import sys
 from pathlib import Path
 
-# Documents whose citations are gated. README*.md carry none today; they are
-# listed so that adding one starts being checked immediately.
-TRACKED = ["README.md", "README.zh.md", "CLAUDE.md",
+# EVERY markdown document in the repository, not a hand-picked subset.
+# Through v2.5.4 this listed seven files and the other six — CHANGELOG.md, the
+# two agent prompts, the slash command and the two skills — were checked by
+# nothing at all. "Which docs are gated" is exactly the kind of question that
+# rots silently, so the answer is now "all of them", and `smoke_test.py`
+# asserts this list equals `git ls-files "*.md"`.
+TRACKED = ["README.md", "README.zh.md", "CLAUDE.md", "CHANGELOG.md",
            "docs/ARCHITECTURE.md", "docs/ARCHITECTURE.zh.md",
-           "docs/CONTRACTS.md", "docs/CONTRACTS.zh.md"]
+           "docs/CONTRACTS.md", "docs/CONTRACTS.zh.md",
+           "commands/cc-mem.md",
+           "agents/plan-refiner.md", "agents/plan-guardian.md",
+           "skills/ccm-load/SKILL.md", "skills/save-memories/SKILL.md"]
 
 # `cc_memory/core/db.py:1349`, `db.py:188-201`, `tests/smoke_test.py:266-278`
 CITATION_RE = re.compile(

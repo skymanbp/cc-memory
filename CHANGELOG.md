@@ -7,6 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [2.5.5] — 2026-08-05
+
+**The doc gates covered 7 of the repository's 13 markdown files.** Asked whether
+every document was aligned, the answer was checkable rather than assertable —
+and checking it found that the *gate scope itself* was the stale thing.
+
+### Fixed
+
+- **`tools/citation_check.py` now tracks all 13 markdown files, not 7.**
+  `CHANGELOG.md`, both agent prompts, `commands/cc-mem.md` and both skills were
+  covered by nothing at all. `smoke_test.py` now asserts the tracked list equals
+  `git ls-files "*.md"`, so "which docs are gated" cannot drift again. 599
+  citations, 0 unchecked, 0 stale.
+
+- **The docs' countable claims are gated too.** Nothing checked cross-document
+  *facts*, only citation line numbers — and three had already drifted:
+
+  * `CLAUDE.md` § Tests still said *"Three suites … run all three, plus
+    `tools/i18n_check.py`"* after `citation_check.py` became a gate, i.e. it told
+    the next Claude to run seven of the eight gates. It now describes all eight,
+    and a new assertion fails if the section stops naming any gate script.
+  * `commands/cc-mem.md` named 23 of the 28 subcommands `cli/mem.py` defines.
+    The five missing ones — `sql`, `sessions`, `schema`, `keywords`,
+    `observations` — included `sql`, whose read-only guard is a v2.5.0 security
+    fix that only helps someone who knows the command exists. All 28 are now
+    listed, and a new assertion fails if a subcommand is added without a doc row.
+  * `README.md` and `README.zh.md` still carried *"Doc `file:line` citations are
+    unenforced … Nothing enforces them today"* in their limits section, three
+    releases after `citation_check.py` started enforcing them, and both still
+    said *"Three stdlib scripts … all three are release gates"*.
+
+  The `11 tables` claim is now asserted against `core/db.py` as well.
+
+### Verification
+
+Eight gates green. Independent harnesses unchanged and re-run: 42/42, 12/12,
+6/6. Exes rebuilt, PE subsystem verified, released assets hash-verified against
+the locally tested build.
+
 ## [2.5.4] — 2026-08-05
 
 **Zero known limits.** v2.5.3 closed five of six residuals and recorded four
@@ -136,7 +175,7 @@ Two of the six turned out to be worse than they were written up as.
 - **Doc citation coverage nearly doubled.** `tools/citation_check.py` could only
   anchor a citation when the symbol was defined in the *cited* file, so the most
   common shape in these docs — a call site, `` `db.tag_progress_session(...)`
-  (`user_prompt.py:117`) `` — went unchecked: 370 of 594, 62 %. It now anchors
+  (`user_prompt.py:181`) `` — went unchecked: 370 of 594, 62 %. It now anchors
   cross-file citations on the text of the cited range, and **341 of 594 are
   checked** (was 224).
 

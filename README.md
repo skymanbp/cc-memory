@@ -2,7 +2,7 @@
 
 # cc-memory
 
-**Claude Code persistent memory plugin (v2.5.4)** — anti-patch reconcile-on-write
+**Claude Code persistent memory plugin (v2.5.5)** — anti-patch reconcile-on-write
 with LLM-judged semantic de-duplication, forced PROGRESS.md handoff, live PLAN.md
 anchor with plan-refiner / plan-guardian subagents and a mandatory carryover
 gate, bounded transcript reads, injection observability, FTS5 search, AI-judged
@@ -16,6 +16,22 @@ disappear. Conversations that end normally (terminal closed) also lose context.
 
 cc-memory captures structured memories at every conversation boundary AND
 **forces the next session to read a handoff document** before it starts work.
+
+## What's new in v2.5.5
+
+**The doc gates covered 7 of this repository's 13 markdown files.** Asked
+whether every document was aligned, the answer turned out to be that the *gate
+scope* was the stale thing.
+
+- `tools/citation_check.py` now tracks **all 13** markdown files — `CHANGELOG.md`,
+  both agent prompts, `commands/cc-mem.md` and both skills were covered by
+  nothing. `smoke_test.py` asserts the tracked list equals `git ls-files "*.md"`.
+- **The docs' countable claims are gated too**, and three had drifted:
+  `CLAUDE.md` told the next Claude to run 7 of the 8 gates; `commands/cc-mem.md`
+  named 23 of 28 CLI subcommands (the missing five included `sql`, whose
+  read-only guard is a security fix nobody can use without knowing it exists);
+  and this README still said doc citations were unenforced, three releases after
+  they stopped being.
 
 ## What's new in v2.5.4
 
@@ -292,15 +308,13 @@ Recorded honestly, because each was measured rather than assumed:
   would still cross projects, because `plans.id` is global to the DB file.
 - Searching for a bare `%` or `_` now returns 0 rows instead of the whole table.
   That is the fix, but it is a visible result change.
-- **Doc `file:line` citations are unenforced and partly stale.** They are
-  hand-maintained; `docs/ARCHITECTURE.md` and `docs/CONTRACTS.md` still carry
-  citations that point at the line a symbol *used* to be on. A mechanical
-  definition-site check finds them (for each `path:lines` citation, resolve the
-  symbols named in the same sentence and assert the range covers their unique
-  definition) and belongs in CI next to `tools/i18n_check.py`. Nothing enforces
-  them today, so re-derive a citation before you trust it. Prose claims in these
-  docs were fact-checked against the code; the line numbers were not all
-  re-derived.
+- **Doc `file:line` citations are enforced since v2.5.2** by
+  `tools/citation_check.py`, which runs inside `tests/smoke_test.py`. Since
+  v2.5.5 it covers **all 13** markdown files in the repository and leaves
+  nothing unchecked: a citation is anchored to its symbol's `ast` definition or
+  to a line that references it, and one whose sentence names no symbol is
+  bounds-checked instead (inside the file, not blank). Repair a stale number
+  with `python tools/citation_check.py --fix` rather than by hand.
 - `tools/i18n_check.py` compares content hashes only. It cannot see a
   translation whose *body* has drifted from its English source — including a
   dead in-document anchor, which is how 22 of them survived in the Chinese docs
@@ -790,10 +804,13 @@ Resolution order: `ANTHROPIC_API_KEY` env var → Claude OAuth token.
 
 ## Tests
 
-Three stdlib scripts, no pytest and no pip dependencies. **All three are release
-gates — run all three.**
+Five stdlib scripts, no pytest and no pip dependencies. **Eight release gates —
+run all of them.**
 
 ```bash
+python -m compileall -q cc_memory tests tools
+python -c "import tomllib,pathlib;tomllib.loads(pathlib.Path('pyproject.toml').read_text(encoding='utf-8'))"
+
 python tests/smoke_test.py
 # expect a series of [OK] lines ending with "===== ALL SMOKE TESTS PASSED ====="
 
@@ -801,26 +818,44 @@ python tests/test_plan_carryover.py
 # expect "RESULT: 14 passed, 0 failed"
 
 python tests/test_surfaces.py
+# expect "===== ALL SURFACE TESTS PASSED ====="   (§1-§6)
+
+python tools/i18n_check.py       # translation drift; nonzero exit on drift
+python tools/citation_check.py   # doc file:line citations; "0 unchecked, 0 stale"
 ```
+
+The eighth gate is version-site agreement: `pyproject.toml`, both
+`.claude-plugin/*.json`, `cc_memory/config.json` and `cc_memory/core/version.py`
+must all carry the same string, which `smoke_test.py` asserts.
 
 - `tests/smoke_test.py` — the canonical end-to-end check: anti-patch writer
   decisions, PROGRESS.md full-rewrite, the fill-only-empty refresh contract,
   last-wins TodoWrite extraction, the tier-3 transcript fallback, legacy
   `SESSION_HANDOFF.md` migration, the layout inspector, the two-hook PreCompact
-  shape, the bounded transcript window, and the i18n drift gate.
+  shape, the bounded transcript window, the i18n drift gate, and — since v2.5.2
+  — `.gitignore` three-copy parity, the sqlite handle-count regression, PLAN.md
+  / MEMORY.md forgery resistance, the single-atomic-writer rule, the
+  keyword-only `project_id` on the plan mutators, and the two doc gates.
 - `tests/test_plan_carryover.py` — the v2.4.0 carryover gate (14 checks); the
   only coverage of that feature.
-- `tests/test_surfaces.py` — new in v2.5, for the surfaces neither of the others
-  touched: the standalone installer (surface install/uninstall by name,
-  malformed-`settings.json` handling, hook-timeout lockstep with
-  `hooks/hooks.json`), the MCP stdio server, the web viewer's request guards,
-  and the rule that every LLM-calling hook passes an absolute deadline.
+- `tests/test_surfaces.py` — new in v2.5, six sections, for the surfaces
+  neither of the others touches: §1 the MCP stdio server, §2 the web viewer's
+  request guards, §3 the standalone installer (surface install/uninstall by
+  name, malformed-`settings.json` handling, hook-timeout lockstep with
+  `hooks/hooks.json`), §4 `excluded_projects` across all six hooks, §5 the
+  config.json parser shapes plus the MCP half of the same opt-out, §6 the
+  `settings.json` compare-and-swap. Plus the rule that every LLM-calling hook
+  passes an absolute deadline.
+- `tools/i18n_check.py` — translation drift, by normalized content hash.
+- `tools/citation_check.py` — every `file.py:LINE` citation in all 13 markdown
+  files. `--fix` repairs; `--list` shows every verdict.
 
-Documentation translations are drift-checked separately:
+Both dev checkers also run *inside* `smoke_test.py`, so a green suite already
+implies a green doc state:
 
 ```bash
-python tools/i18n_check.py          # [OK]/[STALE]/[FAIL] per doc; nonzero exit on drift
-python tools/i18n_check.py --list   # show every English/翻译 pair + recorded vs current hash
+python tools/i18n_check.py --list       # every English/翻译 pair + recorded vs current hash
+python tools/citation_check.py --fix    # rewrite stale line numbers in place
 ```
 
 ## Build executables
