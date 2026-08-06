@@ -18,7 +18,16 @@ projects.json
 # cc-memory's OWN memory/ directory is a runtime artifact, not source.
 # Anyone who clones this repo will generate their own when they enable the
 # plugin. Don't commit the maintainer's local memory data.
-memory/
+#
+# ANCHORED (leading slash) ON PURPOSE. Unanchored, `memory/` matches at every
+# depth, and a stray in-repo test project -- whose only content IS its own
+# memory/ -- becomes 100% invisible to `git status`. That is exactly how an
+# `x/` scratch project created by a v2.5.x verification harness (0 memories,
+# 0 sessions, one SessionStart injection) sat in the repo root undetected: the
+# tempfile-only test rule in CLAUDE.md was broken and .gitignore hid the
+# evidence. This repo has exactly ONE legitimate memory/ -- this one. Any other
+# is a leaked test artifact and MUST show up as untracked.
+/memory/
 
 # Per-user local Claude Code state — settings, agents, project skills.
 # The PLUGIN itself ships its hooks/skills/commands/agents from the repo
