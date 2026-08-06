@@ -1,9 +1,9 @@
-<!-- i18n-source: README.md | sha256: f67e0f99315e7357 | version: 2.5.5 | translated: 2026-08-05 -->
+<!-- i18n-source: README.md | sha256: a68c969f1090fffb | version: 2.5.6 | translated: 2026-08-05 -->
 > [English](README.md) · **简体中文**
 
 # cc-memory
 
-**Claude Code 持久化记忆插件（v2.5.5）**——反补丁式的写入即归并（reconcile-on-write）、
+**Claude Code 持久化记忆插件（v2.5.6）**——反补丁式的写入即归并（reconcile-on-write）、
 LLM 判定的语义去重、强制 PROGRESS.md 交接、带 plan-refiner / plan-guardian 子代理与
 强制结转闸门的实时 PLAN.md 锚点、有界 transcript 读取、注入可观测性、FTS5 搜索，
 以及以 Haiku 为主（本地 Ollama 兜底可选）的 AI 判定式抽取。
@@ -16,7 +16,29 @@ LLM 判定的语义去重、强制 PROGRESS.md 交接、带 plan-refiner / plan-
 cc-memory 在每一个对话边界捕获结构化记忆，并且**强制下一次会话在开始工作之前先阅读
 一份交接文档**。
 
-## v2.5.5 有什么新变化
+## v2.5.6 有什么新变化
+
+**换计划那道门只守 `steps`。它一直如此——2026-08-05 这件事让一份在用的计划
+为此丢了十条成功判据里的两条。** 替换顺利通过、什么都没打印，而蒸发的那两条
+里有一条是「已达成却从未被记录」的发布闸。一道只覆盖制品一部分的门，对其余
+部分什么也没说；那份沉默和「通过」长得一模一样。
+
+- **`success_criteria` 失配播报。** `plan-set --from-refiner` 现在会在替换
+  **之前**快照旧计划，并打印每一条「其对新计划判据（外加 `goal` 与 `context`）
+  的最佳 trigram-Jaccard 低于步骤门同一个 `0.5` 阈值」的判据。被并进新 context
+  的判据算作已继承：有损的存活仍是存活，狼来了只会训练读者跳过它。
+- **刻意是播报而非第二道拒写门。** 判据会被改写、合并、翻译、因达成而退役。
+  英文计划被中文计划取代时自动继承率为零，硬门会让正常的计划演进无法进行。
+  它换来的是：「它消失了」和「我有意退役它」不再长得一样。
+- **播报会点名自己的盲区。** 最后一行写明 `context` 是自由文本、从不比对，
+  请自己重读。一道藏起自己射程的门，正是这次翻车的成因。
+- `unmatched_criteria()` **有意追加在 `core/plan.py` 末尾**：本仓库用约 600 条
+  `file:line` 引用来记录契约，插在 `check_carryover` 旁边会让四份文档里约 60 条
+  引用集体腐烂。主题内聚性输给了「不要打断引用图」。
+- 由 `tests/test_plan_carryover.py` §7 钉死——核心结果、context 并入的抑制、
+  以及 CLI 确实把它打了出来。一个没人呈现的核心函数，等于换了个方式继续沉默。
+
+## 此前 — v2.5.5 有什么新变化
 
 **文档门禁只覆盖了本仓库 13 个 markdown 文件中的 7 个。** 被问到"是不是所有文档都
 对齐了"时，去查了一遍，结果发现**陈旧的正是门禁的覆盖范围本身**。
@@ -735,7 +757,7 @@ python tools/citation_check.py   # 文档 file:line 引用；"0 unchecked, 0 sta
   transcript 窗口、i18n 漂移门，以及自 v2.5.2 起新增的 `.gitignore` 三副本一致性、
   sqlite 句柄数回归、PLAN.md / MEMORY.md 抗伪造、唯一原子写入器规则、计划修改函数
   仅限关键字的 `project_id`，以及两道文档门禁。
-- `tests/test_plan_carryover.py` —— v2.4.0 的结转门禁（14 项检查）；该特性唯一的覆盖。
+- `tests/test_plan_carryover.py` —— v2.4.0 的结转门禁（20 项检查）；该特性唯一的覆盖。
 - `tests/test_surfaces.py` —— v2.5 新增，共六节，覆盖另外两者都没碰的表面：
   §1 MCP stdio 服务、§2 Web 面板的请求守卫、§3 独立安装器（界面的按名安装/卸载、
   畸形 `settings.json` 处理、与 `hooks/hooks.json` 的超时同步）、§4 六个钩子上的

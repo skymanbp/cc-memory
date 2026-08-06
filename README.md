@@ -2,7 +2,7 @@
 
 # cc-memory
 
-**Claude Code persistent memory plugin (v2.5.5)** — anti-patch reconcile-on-write
+**Claude Code persistent memory plugin (v2.5.6)** — anti-patch reconcile-on-write
 with LLM-judged semantic de-duplication, forced PROGRESS.md handoff, live PLAN.md
 anchor with plan-refiner / plan-guardian subagents and a mandatory carryover
 gate, bounded transcript reads, injection observability, FTS5 search, AI-judged
@@ -17,7 +17,37 @@ disappear. Conversations that end normally (terminal closed) also lose context.
 cc-memory captures structured memories at every conversation boundary AND
 **forces the next session to read a handoff document** before it starts work.
 
-## What's new in v2.5.5
+## What's new in v2.5.6
+
+**The plan-replacement gate guards `steps`. It always has — and on 2026-08-05
+that cost a live plan two of its ten success criteria.** The replacement passed
+cleanly, nothing was printed, and one of the vanished criteria was an
+achieved-but-never-recorded release gate. A gate that covers part of an
+artifact says nothing about the rest; the silence looked identical to approval.
+
+- **`success_criteria` carryover advisory.** `plan-set --from-refiner` now
+  snapshots the outgoing plan *before* the replacement and prints every
+  criterion whose best trigram-Jaccard against the new plan's criteria — plus
+  its `goal` and `context` — falls below the same `0.5` threshold the steps
+  gate uses. A criterion folded into the new context counts as carried: lossy
+  survival is still survival, and crying wolf trains the reader to skip it.
+- **Deliberately an advisory, not a second refusal.** Criteria get reworded,
+  merged, translated and retired-because-achieved. An English plan replaced by
+  a Chinese one auto-carries nothing at all, so a hard gate here would make
+  ordinary plan evolution impossible. What it buys is that "it vanished" and "I
+  retired it on purpose" stop looking the same.
+- **The advisory names its own blind spot.** Its last line says `context` is
+  free text and is never compared — read it yourself. A gate that hides its
+  scope is how this failure happened in the first place.
+- `unmatched_criteria()` is appended at the **end** of `core/plan.py` on
+  purpose: this repo documents contracts with ~600 `file:line` citations, and
+  inserting beside `check_carryover` would have rotted ~60 of them across four
+  docs. Topic cohesion lost to not breaking the citation graph.
+- Pinned by `tests/test_plan_carryover.py` §7 — the core result, the
+  context-fold suppression, and that the CLI actually *prints* it. A core
+  function nobody surfaces is the same silence with extra steps.
+
+## Previously — What's new in v2.5.5
 
 **The doc gates covered 7 of this repository's 13 markdown files.** Asked
 whether every document was aligned, the answer turned out to be that the *gate
@@ -836,7 +866,7 @@ must all carry the same string, which `smoke_test.py` asserts.
   — `.gitignore` three-copy parity, the sqlite handle-count regression, PLAN.md
   / MEMORY.md forgery resistance, the single-atomic-writer rule, the
   keyword-only `project_id` on the plan mutators, and the two doc gates.
-- `tests/test_plan_carryover.py` — the v2.4.0 carryover gate (14 checks); the
+- `tests/test_plan_carryover.py` — the v2.4.0 carryover gate (20 checks); the
   only coverage of that feature.
 - `tests/test_surfaces.py` — new in v2.5, six sections, for the surfaces
   neither of the others touches: §1 the MCP stdio server, §2 the web viewer's

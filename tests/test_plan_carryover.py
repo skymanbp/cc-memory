@@ -18,6 +18,7 @@ Run:  python tests/test_plan_carryover.py
 """
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 import tempfile
@@ -188,6 +189,59 @@ def main() -> None:
     check("cleared plan archived with reason",
           len(clear_hist) >= 1 and "test teardown ruling"
           in clear_hist[-1].read_text(encoding="utf-8"), str(clear_hist))
+
+    print("§7 success_criteria carryover advisory (v2.5.6)")
+    # The steps gate is deliberately silent about criteria, and that silence
+    # cost a real plan two criteria on 2026-08-05: the replacement passed
+    # cleanly and nobody was told. §7 pins the advisory that closes it.
+    root7, mem7, db7, pid7 = _mk_project()
+    old7 = _plan("goal seven", ["build the ingest lane"], status="done")
+    old7["success_criteria"] = [
+        "the ingest lane replays a captured batch byte for byte",
+        "no XXXXXX placeholder survives into a shipped string",
+        "the release bundle is reproducible across two clean checkouts",
+    ]
+    plan_mod.apply_refined_plan(db7, pid7, old7, memory_dir=mem7)
+
+    new7 = _plan("goal seven prime", ["build the ingest lane"], status="done")
+    new7["success_criteria"] = [
+        "the ingest lane replays a captured batch byte for byte",
+        "the release bundle is reproducible across two clean checkouts",
+    ]
+    lost = plan_mod.unmatched_criteria(
+        db7.get_plan_active(pid7)["structured"], new7)
+    check("advisory names exactly the dropped criterion",
+          len(lost) == 1 and "XXXXXX" in lost[0], str(lost))
+
+    kept = plan_mod.unmatched_criteria(
+        db7.get_plan_active(pid7)["structured"], old7)
+    check("identical criteria lists report nothing lost", kept == [], str(kept))
+
+    # A criterion folded into the replacement's context text still survives —
+    # lossy, but not a silent disappearance, so it must not be flagged.
+    folded = dict(new7)
+    folded["context"] = ("no XXXXXX placeholder survives into a shipped "
+                         "string — folded into context on purpose")
+    check("criterion folded into context counts as carried",
+          plan_mod.unmatched_criteria(
+              db7.get_plan_active(pid7)["structured"], folded) == [],
+          "context fold should suppress the advisory")
+
+    # and the CLI must actually PRINT it — a core function nobody surfaces is
+    # the same silence with extra steps.
+    mem_py7 = REPO / "cc_memory" / "cli" / "mem.py"
+    r7 = subprocess.run(
+        [sys.executable, str(mem_py7), "--project", str(root7),
+         "plan-set", "--from-refiner"],
+        input=json.dumps(new7, ensure_ascii=False).encode("utf-8"),
+        capture_output=True)
+    out7 = r7.stdout.decode("utf-8", "replace")
+    check("CLI stores the replacement", r7.returncode == 0 and "[OK]" in out7,
+          f"rc={r7.returncode} out={out7[:200]}")
+    check("CLI prints the carryover advisory",
+          "carryover advisory" in out7 and "XXXXXX" in out7, out7[:400])
+    check("advisory says context is not compared at all",
+          "`context` is free text" in out7, out7[:400])
 
     print(f"\n{'=' * 60}\nRESULT: {PASS} passed, {FAIL} failed\n{'=' * 60}")
     sys.exit(1 if FAIL else 0)

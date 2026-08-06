@@ -1180,6 +1180,11 @@ def cmd_plan_set(args):
         except (json.JSONDecodeError, UnicodeDecodeError) as e:
             print(f"[FAIL] stdin is not valid JSON: {e}")
             sys.exit(1)
+        # why: the R610 gate guards `steps` only. Snapshot the outgoing plan
+        # BEFORE the replacement so the advisory below can name the criteria
+        # that did not obviously survive — afterwards the old plan is out of
+        # the slot and lives on only in memory/.plan_history/.
+        outgoing = (db.get_plan_active(pid) or {}).get("structured") or {}
         try:
             result = plan_mod.apply_refined_plan(db, pid, structured,
                                                  memory_dir=memory_dir)
@@ -1192,6 +1197,21 @@ def cmd_plan_set(args):
         print(f"[OK] Plan stored — goal: {result['goal']!r}")
         print(f"     {len(result['steps'])} steps · PLAN.md regenerated at "
               f"{memory_dir / 'PLAN.md'}")
+        lost = plan_mod.unmatched_criteria(outgoing, structured)
+        if lost:
+            total = len([c for c in (outgoing.get("success_criteria") or [])
+                         if isinstance(c, str) and c.strip()])
+            print(f"[!] carryover advisory — {len(lost)} of {total} previous "
+                  f"success_criteria have no close match in the replacement.")
+            print("    The R610 gate covers `steps`, so these did not block "
+                  "the write. Retiring a criterion is fine; losing one "
+                  "silently is not. Confirm each was deliberate:")
+            for c in lost:
+                one = " ".join(c.split())
+                print(f"      - {one[:150]}{'…' if len(one) > 150 else ''}")
+            print("    `context` is free text and is NOT compared at all — "
+                  "re-read it yourself. The outgoing plan is archived under "
+                  "memory/.plan_history/.")
         return
 
     if args.raw_file:

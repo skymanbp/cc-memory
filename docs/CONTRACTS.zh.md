@@ -1,4 +1,4 @@
-<!-- i18n-source: CONTRACTS.md | sha256: 9e9cccdc614ebdc5 | version: 2.5.5 | translated: 2026-08-05 -->
+<!-- i18n-source: CONTRACTS.md | sha256: 6bcafba527fd0621 | version: 2.5.6 | translated: 2026-08-05 -->
 > [English](CONTRACTS.md) · **简体中文**
 
 # cc-memory — 契约（Contracts）
@@ -10,7 +10,7 @@
 
 断言分布在哪里：`tests/smoke_test.py` 覆盖反补丁决策、PROGRESS.md 的整篇重写与
 「只填空字段」刷新，以及计划生命周期（v4 迁移 → 捕获 → 精炼 → TodoWrite 同步 →
-PLAN.md）。**R610 结转门禁**由它自己的套件 `tests/test_plan_carryover.py`（14 项
+PLAN.md）。**R610 结转门禁**由它自己的套件 `tests/test_plan_carryover.py`（20 项
 检查）覆盖 —— `grep -n "carryover\|dispositions" tests/smoke_test.py` 仍然没有任何
 输出，所以两个都要跑。`tests/test_surfaces.py`（v2.5）覆盖这些契约被触达时所经过的
 发布表面。
@@ -702,6 +702,38 @@ docstring，`:485-487`）：schema 保持只增不减，因此更老的 refiner 
 会捕获它，打印 `[FAIL] refined plan rejected: …` 并以 1 退出
 （`cli/mem.py` 的 `cmd_plan_set`）。什么都不会被写入——旧计划原封不动地留在那里。
 
+##### 这道门**管不到**的部分——`success_criteria` 失配播报（v2.5.6）
+
+门的宪章是「换计划不许丢步骤」：它只读 `steps`。`success_criteria` 在射程外，
+2026-08-05 这件事应验了——一次真实替换顺利通过步骤门，而**十条判据里蒸发了两条**，
+其中一条是已达成却从未记录的发布闸。`context` 同理。
+
+`unmatched_criteria(old_structured, new_plan)`（**有意追加在 `core/plan.py` 末尾**——
+放在 `check_carryover` 旁边会让本文档里约 60 条行号引用集体腐烂）返回每一条
+「其对替换方 `success_criteria` **加上 `goal` 与 `context`** 的最佳 trigram-Jaccard
+低于同一个 `CARRYOVER_MATCH_THRESHOLD = 0.5`」的旧判据。被并进新 context 的判据
+算作已继承：有损的存活仍是存活，把它也报出来只会训练读者忽略这条播报。
+
+这**刻意不是**第二道拒写门。判据会被改写、合并、翻译、因达成而退役；一份英文计划
+被中文计划取代时自动继承率为零，硬门会让正常的计划演进无法进行。`cmd_plan_set`
+在调用 `apply_refined_plan` **之前**快照旧计划（此后它只存在于
+`memory/.plan_history/`），然后打印：
+
+```
+[!] carryover advisory — 2 of 10 previous success_criteria have no close match
+    in the replacement.
+    The R610 gate covers `steps`, so these did not block the write. Retiring a
+    criterion is fine; losing one silently is not. Confirm each was deliberate:
+      - no XXXXXX placeholder survives into a shipped string
+      - all seven machine-breaking defects are fixed and re-verified
+    `context` is free text and is NOT compared at all — re-read it yourself.
+    The outgoing plan is archived under memory/.plan_history/.
+```
+
+播报在最后一行**点名自己的盲区**：`context` 是自由文本，从不比对。由
+`tests/test_plan_carryover.py` §7 钉死（核心结果、context 并入的抑制、以及
+CLI 确实把它打出来了——一个没人呈现的核心函数，等于换了个方式继续沉默）。
+
 一次拒绝在用户看来是这样的：
 
 ```
@@ -756,7 +788,7 @@ There is no force flag by design.
 
 解决办法是带上 `--reason "<why>"` 重新运行。这个理由不是装饰品——它会被写进归档
 载荷。只有在门禁通过之后，命令才会归档、执行 `db.clear_plan_active(pid)`，并删除
-`memory/PLAN.md` + `memory/.plan_raw.md`（`cli/mem.py:1248`）。
+`memory/PLAN.md` + `memory/.plan_raw.md`（`cli/mem.py:1268`）。
 
 #### 兜底 —— 只追加的计划历史
 

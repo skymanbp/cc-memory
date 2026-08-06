@@ -2,7 +2,7 @@
 
 ## Project: cc-memory
 
-**Claude Code persistent memory plugin (v2.5.5)** — anti-patch reconcile-on-write
+**Claude Code persistent memory plugin (v2.5.6)** — anti-patch reconcile-on-write
 + LLM-judged semantic de-duplication, forced PROGRESS.md handoff with
 per-session annotation, live PLAN.md anchor with plan-refiner / plan-guardian
 subagents + mandatory carryover gate, bounded transcript reads, injection
@@ -10,7 +10,7 @@ observability, FTS5 search, AI-judged extraction with Haiku (optional local
 Ollama fallback).
 
 - **Language**: Python 3.8+ (pure stdlib, zero pip dependencies at runtime)
-- **Version**: 2.5.5
+- **Version**: 2.5.6
 - **License**: MIT
 - **Platform**: Windows-primary, cross-platform compatible (Tkinter required for GUI)
 
@@ -530,7 +530,7 @@ cc-memory/
 │   ├── smoke_test.py            end-to-end anti-patch + PROGRESS.md +
 │   │                            tier-3 transcript + layout-inspector +
 │   │                            live-plan + i18n gate + bounded-window tests
-│   ├── test_plan_carryover.py   carryover gate (v2.4.0+), 14 checks
+│   ├── test_plan_carryover.py   carryover gate (v2.4.0+), 20 checks
 │   └── test_surfaces.py         installer surfaces + settings shapes + timeout
 │                                lockstep, MCP stdio, web-viewer guards, hook
 │                                LLM deadline (v2.5.0)
@@ -749,7 +749,7 @@ MEMORY.md forgery resistance, the single-atomic-writer rule with its
 never-truncate contract and wall-clock budget, the keyword-only `project_id` on
 the three plan mutators, and the two DOC gates below.
 
-`tests/test_plan_carryover.py` covers the v2.4.0 carryover gate (14 checks) —
+`tests/test_plan_carryover.py` covers the v2.4.0 carryover gate (20 checks) —
 the only coverage of that feature.
 
 `tests/test_surfaces.py` (v2.5.0, six sections) covers the surfaces neither of

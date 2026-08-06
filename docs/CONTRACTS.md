@@ -13,7 +13,7 @@ Where the assertions live: `tests/smoke_test.py` covers the anti-patch decisions
 the PROGRESS.md full-rewrite + fill-only-empty refresh, and the plan lifecycle
 (v4 migration → capture → refine → TodoWrite sync → PLAN.md). The **R610
 carryover gate** is covered by its own suite, `tests/test_plan_carryover.py`
-(14 checks) — `grep -n "carryover\|dispositions" tests/smoke_test.py` still
+(20 checks) — `grep -n "carryover\|dispositions" tests/smoke_test.py` still
 returns nothing, so run both. `tests/test_surfaces.py` (v2.5) covers the
 shipped surfaces these contracts are reached through.
 
@@ -760,6 +760,45 @@ Any violation raises `ValueError` (`core/plan.py:639-647`). `plan-set
 (`cli/mem.py`, `cmd_plan_set`). Nothing is written — the old plan stays exactly
 as it was.
 
+##### What the gate does NOT cover — the `success_criteria` advisory (v2.5.6)
+
+The gate's charter is "换计划不许丢步骤": it reads `steps` and nothing else.
+`success_criteria` sits outside it, and on 2026-08-05 that showed: a real
+replacement passed the steps gate cleanly while **two of ten criteria
+evaporated**, one an achieved-but-never-recorded release gate. `context`
+likewise.
+
+`unmatched_criteria(old_structured, new_plan)` (appended at the **end** of
+`core/plan.py` on purpose — inserting it beside `check_carryover` would have
+rotted ~60 line citations in these docs) returns every outgoing criterion whose
+best trigram-Jaccard against the replacement's `success_criteria` **plus its
+`goal` and `context`** is below the same `CARRYOVER_MATCH_THRESHOLD = 0.5`. A
+criterion folded into the new context counts as carried: lossy survival is
+still survival, and flagging it would train the reader to ignore the advisory.
+
+This is deliberately **not** a second refusal. Criteria get reworded, merged,
+translated and retired-because-achieved; an EN plan replaced by a ZH one
+auto-carries nothing at all, so a hard gate here would make ordinary plan
+evolution impossible. `cmd_plan_set` snapshots the outgoing plan *before*
+`apply_refined_plan` (afterwards it exists only in `memory/.plan_history/`) and
+prints:
+
+```
+[!] carryover advisory — 2 of 10 previous success_criteria have no close match
+    in the replacement.
+    The R610 gate covers `steps`, so these did not block the write. Retiring a
+    criterion is fine; losing one silently is not. Confirm each was deliberate:
+      - no XXXXXX placeholder survives into a shipped string
+      - all seven machine-breaking defects are fixed and re-verified
+    `context` is free text and is NOT compared at all — re-read it yourself.
+    The outgoing plan is archived under memory/.plan_history/.
+```
+
+The advisory names its own blind spot in its last line: `context` is prose and
+is never compared. Pinned by `tests/test_plan_carryover.py` §7 (core result,
+context-fold suppression, and that the CLI actually prints it — a core function
+nobody surfaces is the same silence with extra steps).
+
 A refusal looks like this to the user:
 
 ```
@@ -817,7 +856,7 @@ Then re-pipe the JSON through `/cc-mem plan-set --from-refiner`.
 Resolve by re-running with `--reason "<why>"`. The reason is not decoration —
 it is written into the archive payload. Only after the gate passes does the
 command archive, `db.clear_plan_active(pid)`, and delete `memory/PLAN.md` +
-`memory/.plan_raw.md` (`cli/mem.py:1248`).
+`memory/.plan_raw.md` (`cli/mem.py:1268`).
 
 #### Backstop — append-only plan history
 

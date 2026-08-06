@@ -828,3 +828,51 @@ def is_sensitive_tool_call(tool_name: str, tool_input: Dict) -> bool:
         "kubectl apply", "terraform apply", "ansible-playbook",
     )
     return any(p in cmd_lower for p in sensitive_patterns)
+
+
+# ── success_criteria carryover advisory (2026-08-05, v2.5.6) ────────────────
+#
+# Appended at the END of the module ON PURPOSE, not next to check_carryover
+# where it belongs by topic. This project documents its contracts with dense
+# `file:line` references (docs/CONTRACTS.md alone carries ~30 into plan.py),
+# and smoke_test.py only validates the symbol-anchored subset — the bare
+# `:NNN` form has nothing to anchor on, so an insertion mid-file silently
+# rots it. Inserting here shifts nothing. Topic cohesion is worth less than
+# not breaking ~60 references across four docs.
+
+def unmatched_criteria(old_structured: Optional[Dict],
+                       new_plan: Dict) -> List[str]:
+    """Old `success_criteria` with no close match in the replacement.
+
+    The R610 gate guards `steps` only — by its own charter, "换计划不许丢
+    步骤". `success_criteria` sits outside it, yet a criterion is just as
+    much staged intent as a step: it is the definition of done. Observed
+    in the field (2026-08-05): a plan replacement passed the steps gate
+    cleanly while two of ten criteria evaporated, one of them an
+    achieved-but-never-recorded release gate.
+
+    This is deliberately NOT a second refusal. Criteria get reworded,
+    merged, translated, and retired-because-achieved as a plan matures —
+    an EN plan replaced by a ZH one auto-carries nothing at all, so a
+    hard gate here would make ordinary plan evolution impossible. What
+    this returns is the list the caller must SHOW, so that "it vanished"
+    and "I retired it on purpose" stop looking identical.
+
+    Same trigram-Jaccard threshold as the steps gate. A criterion folded
+    into the replacement's goal or context text counts as matched: lossy
+    survival is still survival, and flagging it would train the reader to
+    ignore the advisory.
+    """
+    if not is_valid_structured(old_structured):
+        return []
+    olds = [c for c in (old_structured.get("success_criteria") or [])
+            if isinstance(c, str) and c.strip()]
+    if not olds:
+        return []
+    candidates = [c for c in (new_plan.get("success_criteria") or [])
+                  if isinstance(c, str) and c.strip()]
+    for extra in (new_plan.get("goal"), new_plan.get("context")):
+        if isinstance(extra, str) and extra.strip():
+            candidates.append(extra)
+    return [c for c in olds
+            if _best_title_match(c, candidates) < CARRYOVER_MATCH_THRESHOLD]

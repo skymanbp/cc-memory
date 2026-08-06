@@ -7,6 +7,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [2.5.6] — 2026-08-05
+
+**The plan-replacement gate guards `steps` — and that partial coverage cost a
+live plan two of its ten success criteria on 2026-08-05.** The replacement
+passed the R610 gate cleanly, nothing was printed, and one of the two vanished
+criteria was an achieved-but-never-recorded release gate. Scope of evidence is
+not scope of claim: a green gate says nothing about the parts it does not read.
+
+### Added
+
+- **`unmatched_criteria(old_structured, new_plan)`** in `core/plan.py` —
+  returns every outgoing `success_criteria` entry whose best trigram-Jaccard
+  against the replacement's criteria **plus its `goal` and `context`** is below
+  the steps gate's own `CARRYOVER_MATCH_THRESHOLD = 0.5`. A criterion folded
+  into the new context counts as carried; flagging lossy-but-real survival
+  would train the reader to ignore the advisory.
+- **Carryover advisory in `plan-set --from-refiner`** — `cmd_plan_set`
+  snapshots the outgoing plan *before* `apply_refined_plan` (afterwards it
+  exists only in `memory/.plan_history/`) and prints the unmatched criteria,
+  what the gate does and does not cover, and — in its last line — that
+  `context` is free text and is never compared at all. A gate that hides its
+  own scope is how this failure happened.
+- `tests/test_plan_carryover.py` **§7** — the core result, the context-fold
+  suppression, and an end-to-end assertion that the CLI actually prints the
+  advisory. 20 checks in that suite, all passing.
+
+### Changed
+
+- `docs/CONTRACTS.md` + `docs/CONTRACTS.zh.md` gain a
+  "What the gate does NOT cover" subsection under Door 1, including the
+  verbatim advisory output.
+- Two stale `cli/mem.py:1248` citations rewritten to `:1268` by
+  `tools/citation_check.py --fix` after the CLI insertion shifted them.
+
+### Deliberately not done
+
+- **No second refusal gate.** Criteria legitimately get reworded, merged,
+  translated and retired-because-achieved; an EN→ZH plan replacement
+  auto-carries nothing, so a hard gate here would block ordinary evolution.
+- **`context` is still not compared.** It is prose; a similarity score over it
+  would be noise. The advisory says so out loud instead of pretending coverage.
+
+### Placement note
+
+`unmatched_criteria` sits at the **end** of `core/plan.py`, not beside
+`check_carryover` where it belongs by topic. This repo carries ~600 `file:line`
+citations and only the symbol-anchored subset is machine-checked; inserting
+mid-module would have rotted ~60 citations across four documents, most of them
+invisible to the checker. Measured before choosing: the beside-`check_carryover`
+placement broke 29 refs in `CONTRACTS.md` alone, the end-of-file placement
+breaks 0.
+
+---
+
 ## [2.5.5] — 2026-08-05
 
 **The doc gates covered 7 of the repository's 13 markdown files.** Asked whether
