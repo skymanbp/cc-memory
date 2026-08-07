@@ -50,6 +50,7 @@ enable_utf8_io()
 from core.db import MemoryDB
 from core.logger import get_logger
 from core.modes import is_excluded, read_config
+from core.roots import project_root  # v2.6.0 root anchoring — core/roots.py
 
 _log = get_logger("consolidate_async")
 
@@ -195,6 +196,12 @@ def main():
     if is_excluded(cwd):
         _log.info(f"skipped: {cwd} is in config.json excluded_projects")
         sys.exit(0)
+
+    # Anchor AFTER the opt-out so a narrow per-subdirectory exclusion is not
+    # widened away by resolving to its parent. This hook is rare, so it
+    # carries the reporting duty: `project_root` logs the redirection and
+    # names any stray database it stepped over.
+    cwd = str(project_root(cwd, log=_log))
 
     memory_dir = Path(cwd) / "memory"
     db_path = memory_dir / "memory.db"

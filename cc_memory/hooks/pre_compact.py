@@ -57,6 +57,7 @@ from core.logger import get_logger
 # check at all, so a project initialised BEFORE being listed stayed fully
 # captured. One implementation now, called by all six. See core/modes.py.
 from core.modes import is_excluded
+from core.roots import project_root  # v2.6.0 root anchoring — core/roots.py
 # Privacy filter for the PROGRESS ingress below. The observation and memory
 # write paths honoured <private> from v2.5.0; this hook's progress ingress
 # never did (see _first_user_request).
@@ -487,6 +488,13 @@ def main():
     if is_excluded(cwd):
         _log.info(f"skipped: {cwd} is in config.json excluded_projects")
         sys.exit(0)
+
+    # Anchor AFTER the opt-out so a narrow per-subdirectory exclusion is not
+    # widened away by resolving to its parent. This is the SECOND path that
+    # mkdir's memory/ (see the line below), so leaving it on the raw cwd
+    # would have kept a compaction able to create the very stray database
+    # UserPromptSubmit no longer creates. Rare hook: it logs the redirection.
+    cwd = str(project_root(cwd, log=_log))
 
     try:
         memory_dir = Path(cwd) / "memory"

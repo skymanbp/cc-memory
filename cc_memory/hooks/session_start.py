@@ -44,6 +44,7 @@ from core.db import MemoryDB
 from core.extractor import load_transcript_window, mangle_project_path
 from core.logger import get_logger
 from core.modes import is_excluded
+from core.roots import project_root  # v2.6.0 root anchoring — core/roots.py
 from core.privacy import neutralize_inline, neutralize_markers
 from core.progress import write_progress_md
 from llm.memory_writer import upsert_batch
@@ -1059,6 +1060,14 @@ def main():
         else:
             _log.info(f"skipped: {cwd} is in config.json excluded_projects")
         sys.exit(0)
+
+    # Anchor AFTER the opt-out so a narrow per-subdirectory exclusion is not
+    # widened away by resolving to its parent. Injection is the surface where
+    # a wrong root is most visible to the user — a session whose shell sat in
+    # a subdirectory used to be told "no DB for <subdir>" and start with an
+    # empty context while its real memory sat two levels up. Rare hook: it
+    # logs the redirection and names any stray database it stepped over.
+    cwd = str(project_root(cwd, log=_log))
 
     try:
         memory_dir = Path(cwd) / "memory"

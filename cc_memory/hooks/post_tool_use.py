@@ -38,6 +38,12 @@ enable_utf8_io()
 # depend on reaching a lazy import site.
 from core.modes import is_excluded
 
+# Project-root anchoring (v2.6.0) — core/roots.py. This hook never creates a
+# memory dir, but it does write observation rows and bump plan counters, so
+# resolving to the same root as UserPromptSubmit is what keeps a
+# subdirectory turn from being recorded against a different project row.
+from core.roots import project_root
+
 _MAX_INPUT_CHARS = 2000
 _MAX_OUTPUT_CHARS = 1000
 _MAX_STDIN_BYTES = 1024 * 512
@@ -144,6 +150,13 @@ def main():
     # single tool call, so a log line here would be a log line per call.
     if is_excluded(cwd):
         sys.exit(0)
+
+    # Anchor AFTER the opt-out so a narrow per-subdirectory exclusion is not
+    # widened away by resolving to its parent. Silent here by design: this
+    # hook fires after every tool call, so a redirection line would be a line
+    # per call — the rare hooks (PreCompact, SessionStart, consolidation)
+    # pass a logger and carry the reporting duty.
+    cwd = str(project_root(cwd))
 
     db_path = Path(cwd) / "memory" / "memory.db"
     if not db_path.exists():

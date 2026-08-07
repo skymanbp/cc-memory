@@ -17,7 +17,57 @@ disappear. Conversations that end normally (terminal closed) also lose context.
 cc-memory captures structured memories at every conversation boundary AND
 **forces the next session to read a handoff document** before it starts work.
 
-## What's new in v2.5.6
+## What's new in v2.6.0
+
+**Every hook read the project out of `cwd`, and `cwd` follows the agent's own
+`cd`.** A session launched at a repo root that ran one command inside `cli/`
+started reporting `<root>/cli`, and `UserPromptSubmit` created a second, fully
+independent database there. Four of the six hooks gate on `memory/memory.db`
+merely *existing*, so once born the stray sustained itself — 27 memories and
+its own `projects` row in one, against 161 in the real database two levels up.
+
+- **`core/roots.py` resolves a project root first.** Over an ancestor chain
+  bounded below every home directory, below the filesystem root, at a
+  `.ccm-root` pin and at 25 levels: a database at cwd itself (terminal) → the
+  **nearest** ancestor with one → `CLAUDE_PROJECT_DIR` when it names a
+  directory in the chain → project markers (`.git`, `.hg`, `.svn`, manifests),
+  nearest-then-outward → the cwd verbatim. Never raises: any failure returns
+  the pre-2.6.0 answer.
+- **Prevention, not migration — an existing database is never overridden.** A
+  first draft took the *outermost* database-bearing ancestor, to heal strays.
+  An adversarial review killed it against ground truth: of the 20 databases on
+  the reporting machine, **four are legitimately nested** inside another
+  project — one holds 3,725 memories and its own `.git`. A stray and a
+  deliberate sub-project are byte-for-byte identical on disk, so healing the
+  first orphans the second. The reported bug is fixed by stopping the stray
+  from being born; adopting one that already exists means merging two SQLite
+  files, which is a confirmed command's job, not a hook's.
+- **No git required.** The database rungs need no VCS and no manifest, which is
+  the case that matters for projects that are not repositories at all. The
+  marker rung is what stops a stray being created before any database exists,
+  and its outward walk has three ceilings: 6 levels, a VCS root, and a refusal
+  to ever return a *container* of projects (the reporting machine's projects
+  folder has 27 project children — one stray marker there would otherwise
+  collapse all of them into one database).
+- **The home boundary is doubled — environment *and* structure.** Containers,
+  CI, `sudo` and this project's own test sandbox all redirect
+  `HOME`/`USERPROFILE`, so a direct child of a directory named `Users` or
+  `home` is treated as a profile root regardless. Measured with HOME
+  redirected: the walk climbed seven levels out of a temp fixture into the real
+  profile and matched the `memory.db` one session run in `~` had left there.
+- **`.claude/` is no longer a marker** (the user's HOME has one, which would
+  make `~` itself look like a project) and `CLAUDE.md` never was — Claude Code
+  supports per-subdirectory ones.
+- **Anchoring happens *after* the `excluded_projects` gate, never before.**
+  Resolving first would widen a per-subdirectory exclusion away by climbing to
+  its unexcluded parent.
+- **A stray is reported, never merged or deleted.** `cc-mem status` now lists
+  every separate database below the project root with its memory count, so a
+  stray born before v2.6.0 stops being invisible. `.ccm-root` pins a nested
+  project as a root in its own right. Pinned by `tests/test_surfaces.py` §7,
+  whose 18 ladder cases include the nested-project and container shapes above.
+
+## Previously — What's new in v2.5.6
 
 **The plan-replacement gate guards `steps`. It always has — and on 2026-08-05
 that cost a live plan two of its ten success criteria.** The replacement passed
@@ -47,7 +97,7 @@ artifact says nothing about the rest; the silence looked identical to approval.
   context-fold suppression, and that the CLI actually *prints* it. A core
   function nobody surfaces is the same silence with extra steps.
 
-## Previously — What's new in v2.5.5
+## What's new in v2.5.5
 
 **The doc gates covered 7 of this repository's 13 markdown files.** Asked
 whether every document was aligned, the answer turned out to be that the *gate

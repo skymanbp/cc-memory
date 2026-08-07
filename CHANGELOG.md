@@ -7,6 +7,111 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [2.6.0] — 2026-08-07
+
+**Every hook read the project out of `cwd`, and `cwd` follows the agent's own
+`cd`.** A session launched at a repo root that ran one command inside `cli/`
+started reporting `<root>/cli`, and `UserPromptSubmit` mkdir'd a second, fully
+independent database there. Four of the six hooks gate on `memory/memory.db`
+merely EXISTING, so once born the stray sustained itself: 27 memories and its
+own `projects` row in one, against 161 in the real database two levels up —
+observations, progress rows and `PROGRESS.md` all landing where no
+`SessionStart` would ever read them. It also carried no `.gitignore`, because
+only the directory the init path creates gets one, so a 184 KB binary
+`memory.db` rode into three commits of the user's repository. There was no
+notion of a project root anywhere in the plugin: `CLAUDE_PROJECT_DIR` and
+`.git` had zero occurrences across `hooks/` and `core/`.
+
+### Added
+
+- **`core/roots.py`** — `project_root(cwd, log=None)` resolves a project root
+  from the payload's cwd and never raises: any failure returns `Path(cwd)`,
+  the pre-2.6.0 answer. Over an ancestor chain bounded below every home
+  directory, below the filesystem root, at a `.ccm-root` pin and at 25 levels,
+  first hit wins: (0) a `memory/memory.db` at cwd itself — terminal, before
+  anything else is consulted; (1) the NEAREST ancestor with one, no outward
+  extension; (2) `CLAUDE_PROJECT_DIR` when it names a directory *in the
+  chain*, ranked below the database rungs because "where Claude Code was
+  launched" is not authority to orphan a database; (3) project markers
+  (`.git`, `.hg`, `.svn`, manifests), nearest then extended outward so a
+  workspace member resolves to its workspace — the only rung that can fire
+  before any database exists, i.e. the one that stops a stray being created at
+  all; (4) cwd verbatim. Returning the ORIGINAL unresolved string when the
+  answer is cwd keeps symlinked project directories byte-identical.
+- **`.ccm-root`** — an empty file that pins a directory as a project root and
+  truncates the walk there. The escape hatch for a project deliberately nested
+  inside another, and for any layout the heuristics read wrong.
+- **`nested_databases()` + a `cc-mem status` report** — every separate
+  `memory/memory.db` below the project root is listed with its memory count
+  and what it means. Resolution never merges or moves one, so this is how a
+  stray born before v2.6.0 stops being invisible. On an explicit command, not
+  in a hook, because it walks the tree; read-only by construction (a
+  `mode=ro` connection, not `MemoryDB`, so reporting never writes a
+  `projects` row into someone else's database).
+- **`tests/test_surfaces.py` §7** — the twin of §4: 18 ladder cases over a real
+  filesystem, all six hooks run from a SUBDIRECTORY of a seeded project
+  (no second `memory/` appears; the root database gets the writes), and the
+  source-level rule that every hook resolves *after* `is_excluded`.
+
+### Fixed
+
+- **All six hooks now anchor.** Each rebinds `cwd` to the resolved root
+  immediately after its `is_excluded` gate — after, never before: resolving
+  first would widen a per-subdirectory exclusion away by climbing to its
+  unexcluded parent. One rebind per entry point rather than a fix at each use
+  site, because `memory_dir`, `db_path` and `upsert_project` must agree on one
+  directory and per-site fixes are how they drift apart.
+- **`SessionStart` from a subdirectory no longer starts blind.** It used to
+  log "no DB for `<subdir>`" and inject nothing while the project's real
+  memory sat two levels up.
+
+### Changed
+
+- **Prevention replaced migration, after an adversarial review killed the
+  first draft against ground truth.** That draft took the OUTERMOST end of a
+  contiguous run of database-bearing ancestors, to heal an existing stray.
+  Enumerating every `memory/memory.db` on the reporting machine found 20
+  databases and **four legitimately nested inside another project** —
+  `Claude-Code-Local/companion` alone holds 3725 memories and carries its own
+  `.git`. A stray and a deliberate sub-project are byte-for-byte
+  indistinguishable on disk (both have a `projects` row naming their own
+  directory, because `upsert_project` records whatever cwd it was handed), so
+  outermost-wins resolves that ambiguity in the direction that destroys data:
+  the first post-upgrade session in `companion` would have moved 3725 memories
+  out of reach, silently. An existing database is now terminal at distance 0
+  and never extended past at distance ≥ 1, which discharges "never orphan" by
+  construction for all 20.
+- **The marker rung's outward walk gained two more ceilings**, since it is now
+  the only rung that travels: it ends inclusively at a VCS root (a repository
+  is the outermost thing that can still be one project — used as a *stop*
+  signal, never as a requirement), and it refuses any directory with two or
+  more project-shaped immediate children. The reporting machine's projects
+  folder has 27, so without that one stray `package.json` dropped there would
+  have collapsed every project under it into a single database.
+- **`.claude/` is no longer treated as a project marker**, and `CLAUDE.md`
+  never was. Both mark "a directory Claude Code reads from" rather than a
+  project root: the user's HOME has a `.claude/`, and Claude Code writes one
+  into whatever directory a session happens to approve a permission in — it is
+  per-cwd session residue. Nothing is lost: every surveyed project carries
+  `.git`, and any initialised project is found by the database rungs.
+- **The home boundary is doubled: environment AND structure.** `_home_dirs()`
+  reads `Path.home()` / `USERPROFILE` / `HOME`; `_is_profile_dir()` matches any
+  direct child of a directory named `Users` or `home`. Containers, CI, `sudo`
+  and this project's own test sandbox all redirect the environment. Measured
+  with HOME pointed into a sandbox: the walk climbed seven levels out of a temp
+  fixture into the real profile and matched the `memory/memory.db` that one
+  session run in `~` had left there.
+- **A stray database is reported, never merged or deleted** — by `cc-mem
+  status`, see Added. PreCompact, SessionStart and the async consolidation
+  additionally log the redirection when one happens; the per-turn hooks stay
+  silent, because a line there is a line per turn.
+- `ui/installer.py` **and `build_exe.py`** `SUBPACKAGE_FILES` ship
+  `core/roots.py` — without it a standalone install would import a module that
+  is not on disk. The two copies are asserted identical by `smoke_test.py`,
+  which is what caught the second one being missed.
+
+---
+
 ## [2.5.6] — 2026-08-05
 
 **The plan-replacement gate guards `steps` — and that partial coverage cost a
@@ -229,7 +334,7 @@ Two of the six turned out to be worse than they were written up as.
 - **Doc citation coverage nearly doubled.** `tools/citation_check.py` could only
   anchor a citation when the symbol was defined in the *cited* file, so the most
   common shape in these docs — a call site, `` `db.tag_progress_session(...)`
-  (`user_prompt.py:181`) `` — went unchecked: 370 of 594, 62 %. It now anchors
+  (`user_prompt.py:195`) `` — went unchecked: 370 of 594, 62 %. It now anchors
   cross-file citations on the text of the cited range, and **341 of 594 are
   checked** (was 224).
 

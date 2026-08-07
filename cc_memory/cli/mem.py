@@ -534,6 +534,43 @@ def cmd_status(args):
           f"{'available' if db._fts5_available else 'unavailable (using LIKE fallback)'}")
     print(f"  [INFO] Observations: {db.get_observation_count(pid)} recorded")
 
+    # v2.6.0: the REPORTING half of root anchoring. Resolution never merges or
+    # moves a database that already exists — a stray born before v2.6.0 and a
+    # deliberate nested sub-project are byte-for-byte identical on disk, so
+    # touching either automatically would destroy the other (the reporting
+    # machine has four genuinely nested ones, the largest holding 3725
+    # memories). But an unnoticed stray is otherwise invisible: nothing reads
+    # it and nothing says so. Listing them here — an explicit command, not a
+    # per-turn hook — is the visibility without the destruction.
+    try:
+        from core.roots import nested_databases
+        nested = nested_databases(project)
+    except Exception as exc:
+        # why: a diagnostic must never take down the status report it is part of
+        nested = []
+        print(f"  [WARN] Nested-database scan skipped: {exc}")
+    for sub in nested:
+        # READ-ONLY by construction. Going through MemoryDB here would mean
+        # upsert_project() on someone else's database — a write, from a
+        # command whose whole job is to report — and counting rows needs no
+        # project id anyway.
+        n_sub = "?"
+        try:
+            conn = sqlite3.connect(
+                f"file:{sub / 'memory' / 'memory.db'}?mode=ro", uri=True)
+            try:
+                n_sub = conn.execute("SELECT COUNT(*) FROM memories").fetchone()[0]
+            finally:
+                conn.close()
+        except sqlite3.Error:
+            # why: an unreadable, locked or foreign .db is still worth naming;
+            # only its size is unknown
+            n_sub = "?"
+        print(f"  [WARN] Separate database below this project: {sub} "
+              f"({n_sub} memories). Sessions run there use IT, not this one. "
+              f"If that is a stray, move or delete it; if it is a project in "
+              f"its own right, nothing to do.")
+
     last_save = memory_dir / ".last_save.json"
     if last_save.exists():
         try:

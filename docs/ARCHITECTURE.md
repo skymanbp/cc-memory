@@ -1,6 +1,6 @@
 > **English** · [简体中文](ARCHITECTURE.zh.md)
 
-# cc-memory — Architecture (v2.5.5)
+# cc-memory — Architecture (v2.6.0)
 
 cc-memory is a Claude Code plugin that gives Claude **persistent, structured
 memory across compactions and sessions**. This document is the overview: what
@@ -117,8 +117,8 @@ cc-memory/
 │   ├── __init__.py              (re-exports core/version.py)
 │   ├── config.json
 │   ├── core/                    ← Domain: db, extractor, consolidate, idle,
-│   │                              progress, plan, privacy, modes, auth,
-│   │                              logger, encoding_setup, version
+│   │                              progress, plan, privacy, modes, roots,
+│   │                              auth, logger, encoding_setup, version
 │   ├── hooks/                   ← Hook entry points (6 modules)
 │   ├── llm/                     ← ccl_backend (Haiku/Ollama) + memory_writer
 │   ├── cli/                     ← mem.py, plan.py
@@ -228,14 +228,14 @@ the event:
   PROGRESS.md, ~1-5s; `pre_compact.py:5-20`).
 - The **async leg** runs `core.consolidate.run_consolidation` under a
   `BudgetGate` with `_BUDGET_TOTAL_S = 240.0` and `_BUDGET_SAFETY_S = 8.0`
-  (`consolidate_async.py:61`), so the last LLM call it starts finishes by
+  (`consolidate_async.py:62`), so the last LLM call it starts finishes by
   `total_s - safety_s` = 232s < the hook's own 300s timeout — the worker is
   never killed mid-write.
 - Cadence is an **interval marker + lock**, not a fragile
   `session_count % N` check: `memory/.last_consolidation.json` records the
   session count at the last successful run and
   `memory/.consolidation.lock` prevents overlapping workers (a lock older than
-  `_STALE_LOCK_S = 360.0`, `consolidate_async.py:65`, is reclaimed). This is
+  `_STALE_LOCK_S = 360.0`, `consolidate_async.py:66`, is reclaimed). This is
   race-immune against the concurrent sync leg — a ±1 drift in the count can
   cause neither a double-run nor a miss (`consolidate_async.py:19-28`).
 
@@ -279,8 +279,8 @@ silently varied by mode (the edit bump fired in `code` and `writing` but not
 `apply_todowrite_sync` directly rather than through the hook, so the suite never
 caught it.
 
-`_apply_plan_integration` (`post_tool_use.py:82`) now runs **above** the gate
-(called at `post_tool_use.py:82`), and `should_observe` wraps only the
+`_apply_plan_integration` (`post_tool_use.py:88-120`) now runs **above** the gate
+(called at `post_tool_use.py:88-120`), and `should_observe` wraps only the
 `insert_observation` block. Measured per mode (code / research / writing):
 `ExitPlanMode` → `plan_active` rows `0/0/0` → `1/1/1`; `Edit` →
 `edits_since_last_guardian` `1/0/1` → `1/1/1`; Bash `git push` (1 edit + 20)
@@ -408,9 +408,9 @@ caller's responsibility, and there are exactly two shapes:
   (`memory_writer.py:190-194`). All hook callers pass it
   (`pre_compact.py:435`, `stop.py:166`, `session_start.py:972`); the sync
   PreCompact leg additionally touches it again after the rest of its state
-  changes (`pre_compact.py:684`).
+  changes (`pre_compact.py:692`).
 - Single-shot callers call `regenerate_memory_index` explicitly:
-  `cli/mem.py:849` and `:584`, `mcp/server.py:525`, `ui/dashboard.py:1540`,
+  `cli/mem.py:886` and `:584`, `mcp/server.py:525`, `ui/dashboard.py:1540`,
   `ui/web_viewer.py:325`, plus the `skills/ccm-load` inline script
   (`SKILL.md:127, 137`). `core/idle.py:94` and
   `hooks/consolidate_async.py:188` also refresh it after maintenance.
@@ -511,7 +511,7 @@ SessionStart:
 ```
 
 Call signatures above are the real ones: `write_progress_md(db, project_id,
-memory_dir)` (`core/progress.py:323`; call sites `pre_compact.py:669`,
+memory_dir)` (`core/progress.py:323`; call sites `pre_compact.py:677`,
 `stop.py:213`, `user_prompt.py:133`, `session_start.py:680`, `mcp/server.py:243`,
 `cli/mem.py:648`). See
 [docs/CONTRACTS.md](CONTRACTS.md#handoff-contract) for the PROGRESS.md
@@ -556,10 +556,10 @@ Three changes close it:
 2. The fuzzy fallback is **deleted**. A miss returns `None`. Callers must treat
    that as "no transcript", never as licence to guess.
 3. Ownership is checked positively. `_transcript_belongs_to`
-   (`session_start.py:524`) reads the `cwd` the transcript's own records carry
+   (`session_start.py:525-542`) reads the `cwd` the transcript's own records carry
    and is **fail-closed** — no `cwd`, no ingest — and gates `retroactive_save`
    after the bounded window load. The tier-3 mine uses the deliberately weaker
-   `_transcript_is_foreign` (`session_start.py:544`): absent `cwd` is allowed,
+   `_transcript_is_foreign` (`session_start.py:545-572`): absent `cwd` is allowed,
    a *different* `cwd` is refused. The two differ on purpose — retroactive save
    persists LLM-extracted memories forever and should demand proof, while
    tier-3 must still work for the cwd-less transcript shape
@@ -625,9 +625,9 @@ while the same token via Bearer + beta gets HTTP 200 (`core/auth.py:14-15`).
 `get_api_key()` is the single-credential back-compat view of that same list (it
 does not retry, `core/auth.py:60-93`); it also carries the `oauth_expired`
 signal behind SessionStart's "[WARNING: OAuth expired — LLM extraction
-disabled]" footer (`session_start.py:443`). Hook callers use it to *supply*
-the credential passed into `call_llm`: `pre_compact.py:79 → :166`,
-`stop.py:73`, `session_start.py:443`, `core/consolidate.py:326, 549, 724`.
+disabled]" footer (`session_start.py:444`). Hook callers use it to *supply*
+the credential passed into `call_llm`: `pre_compact.py:80 → :166`,
+`stop.py:74`, `session_start.py:444`, `core/consolidate.py:326, 549, 724`.
 
 Fall-through was added in v2.3.4 for a concrete failure: a dead env key (e.g.
 zero credit → HTTP 400) used to blackhole the healthy subscription token behind
@@ -740,6 +740,114 @@ path touches the project first — `user_prompt.py:57-63` on auto-init, or
 `memory/PROGRESS.md`, `memory/MEMORY.md`, and `memory/PLAN.md` are **generated
 artifacts**. Edit the SQL source of truth instead (`progress` for PROGRESS.md,
 `plan_active` for PLAN.md, `memories`/`topics`/`keywords` for MEMORY.md).
+
+### Which `<project>` — root anchoring (v2.6.0)
+
+`<project>` is **not** the `cwd` the hook payload carries. That cwd is the
+session's CURRENT working directory and follows the agent's own `cd`, so a
+session launched at a repo root that ran one command inside `cli/` began
+reporting `<root>/cli` — and `_init_project_if_needed` (`user_prompt.py:50-78`)
+mkdir'd a second, fully independent database there. Four of the six hooks gate
+on `memory/memory.db` merely EXISTING, so once born the stray kept being
+written: measured 27 memories and its own `projects` row in one such database,
+against 161 in the real one two levels up. It also had no `.gitignore` (only
+the directory the init path creates gets one), so a 184 KB binary `memory.db`
+rode into three commits of the user's repository.
+
+**Prevention, not migration — the load-bearing decision.** The first draft of
+this resolver tried to *heal* an existing stray by taking the outermost end of
+a contiguous run of database-bearing ancestors, on the theory that a stray is
+always deeper than the real root. An adversarial design review killed it
+against ground truth: enumerating every `memory/memory.db` on the reporting
+machine found **20** databases, and **four** of them are legitimately nested
+inside another one — `Claude-Code-Local/companion` alone holds 3725 memories
+and carries its own `.git`. A stray sub-database and a deliberate nested
+sub-project are **byte-for-byte indistinguishable on disk**: both have
+`memory/memory.db` whose `projects` row names their own directory, because
+`upsert_project` (`core/db.py:465-484`) records whatever cwd it was handed.
+Outermost-wins resolves that ambiguity unconditionally in the direction that
+destroys data, so the first post-upgrade session in `companion` would have
+moved 3725 memories out of reach, silently.
+
+An existing database is therefore a **declaration of identity** and is never
+overridden. The reported bug is fixed by *prevention*: the marker rung runs
+before any database exists, so the stray is never born. Adopting one that
+already exists means merging two SQLite files — destructive and irreversible —
+which belongs in an explicit, confirmed command, not in a hook that runs on
+every prompt.
+
+`project_root` (`core/roots.py:346-383`) resolves a root first. Every hook
+rebinds `cwd` to it immediately **after** `is_excluded` and never before:
+resolving first would widen a per-subdirectory exclusion away by climbing to
+its unexcluded parent. The chain of candidate ancestors stops below any home
+directory, below the filesystem root, at a `.ccm-root` pin, and after 25
+levels (`_chain`, `core/roots.py:229-257`). First hit wins:
+
+0. `cwd` itself has `memory/memory.db` → `cwd`. Terminal, before anything else
+   is consulted. This single line is what discharges the "never orphan"
+   constraint for every database that exists today.
+1. The **nearest** ancestor with `memory/memory.db` (`_nearest`). No outward
+   extension — see above. This is the rung that fixes the reported bug, since
+   `CodeEraser/cli` has no database while `CodeEraser` does. It needs no VCS
+   and no manifest, which matters for projects that are not repositories.
+2. `CLAUDE_PROJECT_DIR`, when it names a directory in the chain (`_from_env`,
+   `core/roots.py:361-379`). Ranked *below* the database rungs deliberately:
+   it records where Claude Code was launched, which is not authority to orphan
+   a database. Containment is likewise the point — a value left over from
+   another project must not redirect this one.
+3. Project markers — `.git`, `.hg`, `.svn`, `.ccm-root` and the usual
+   manifests (`_MARKERS`, `core/roots.py:140-145`) — nearest, then extended
+   outward so that a Cargo workspace member or a monorepo package resolves to
+   its workspace rather than to itself (`_marker_root`,
+   `core/roots.py:330-358`). The only rung that can fire before any database
+   exists, i.e. the one doing the actual prevention.
+4. The cwd as given — the pre-v2.6.0 answer, so nothing that worked before
+   stops working. When the answer is cwd, the ORIGINAL string is returned
+   unresolved, which keeps symlinked project directories byte-identical to
+   their old behaviour.
+
+**The marker rung's outward extension has three ceilings**, because it is the
+only rung that travels and an unbounded one collapses a whole projects folder:
+
+- `_MARKER_MAX_RISE` (`core/roots.py:111`) = 6 levels above cwd. Caught by
+  test_surfaces §4 climbing *seven* levels out of a temp fixture into the real
+  user profile.
+- A **VCS root ends the walk inclusively** (`_is_vcs_root`): a repository is
+  the outermost thing that can still be one project. Using `.git` only as a
+  *stop* signal never *requires* it, so VCS-less projects keep working.
+- A **container of projects is refused** (`_is_container`,
+  `core/roots.py:264-293`): if a candidate has two or more immediate children
+  that are themselves VCS roots or database owners, the walk stops below it.
+  The reporting machine's projects folder has 27 such children, so without
+  this one stray `package.json` dropped there would have collapsed every
+  project under it into a single database.
+
+Two absences from the marker set are deliberate. `CLAUDE.md` is not a marker
+because Claude Code supports per-subdirectory ones, and neither is `.claude/`
+— the user's home has one, and Claude Code writes one into whatever directory
+a session happens to approve a permission in. Both are per-cwd session
+residue, not root evidence.
+
+The home boundary is doubled: what the environment reports
+(`HOME`/`USERPROFILE`/`Path.home()`, `_home_dirs`) **and** the
+platform-conventional shape — any direct child of a directory named `Users` or
+`home` (`_is_profile_dir`, `core/roots.py:199-226`). Containers, CI, `sudo`
+and this project's own test sandbox all redirect the former. Measured with
+`HOME` pointed into a sandbox: the walk climbed seven levels out of a temp
+fixture into the real profile and matched the `memory/memory.db` that one
+session run in the home directory had left there. Structure survives that
+redirection; environment does not.
+
+A pre-existing stray is therefore left exactly where it is — and *reported*,
+so it is not invisible: `nested_databases` (`core/roots.py:386-424`) backs a
+`[WARN] Separate database below this project` line in `cc-mem status`, which
+names each one and its memory count. That is an explicit command rather than a
+hook, because it walks the tree. `.ccm-root` — an empty file — pins a
+directory as a root in its own right, which is the escape hatch for a project
+deliberately nested inside another and for any layout these heuristics read
+wrong. `tests/test_surfaces.py` §7 pins all of it: the ladder over a real
+filesystem, all six hooks run from a subdirectory, and the source-level rule
+that every hook resolves *after* the opt-out.
 
 ### .gitignore migrates, not just creates (v2.4.2)
 

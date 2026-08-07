@@ -40,6 +40,7 @@ enable_utf8_io()
 from core.db import MemoryDB
 from core.logger import get_logger
 from core.modes import is_excluded
+from core.roots import project_root  # v2.6.0 root anchoring — core/roots.py
 from core.idle import maybe_run_idle
 from core.progress import write_progress_md
 from core import plan as plan_mod
@@ -338,6 +339,14 @@ def main():
     # names it touched. Silent, like PostToolUse: Stop fires every turn.
     if is_excluded(cwd):
         sys.exit(0)
+
+    # Anchor AFTER the opt-out so a narrow per-subdirectory exclusion is not
+    # widened away by resolving to its parent. Silent (no logger passed):
+    # Stop fires every turn. Without this, a turn that ended with the shell
+    # inside a subdirectory wrote its observer memories, its progress row and
+    # its PROGRESS.md into a database no SessionStart ever reads — and
+    # `maybe_run_idle(cwd, ...)` below reorganised that one too.
+    cwd = str(project_root(cwd))
 
     memory_dir = Path(cwd) / "memory"
     if not (memory_dir / "memory.db").exists():

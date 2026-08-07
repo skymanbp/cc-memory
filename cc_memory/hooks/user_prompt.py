@@ -33,6 +33,12 @@ enable_utf8_io()
 # every hook calls it. See core/modes.py:is_excluded.
 from core.modes import is_excluded
 
+# Project-root anchoring (v2.6.0). THIS hook is the one that mkdir's memory/,
+# so it is the one a wrong `cwd` turns into a second database. The payload's
+# cwd follows the agent's own `cd`, which is how a session launched at a repo
+# root came to report a subdirectory. See core/roots.py for the ladder.
+from core.roots import project_root
+
 # Privacy opt-out. `<private>…</private>` was honoured on the observation path
 # (hooks/post_tool_use.py) and on every memory-write path (llm/memory_writer.py,
 # core/extractor.py) but NOT on the progress path this hook feeds — the same tag,
@@ -96,6 +102,14 @@ def main():
     # on every user message, so logging here would write a line per turn.
     if is_excluded(cwd):
         sys.exit(0)
+
+    # Anchor AFTER the opt-out, never before: `is_excluded` must keep seeing
+    # the raw cwd. A user who excluded one sensitive SUBDIRECTORY would
+    # otherwise have that exclusion widened away by resolving to the parent
+    # project first. Rebinding `cwd` here (rather than fixing each use site)
+    # is deliberate — memory_dir, db_path and upsert_project must agree on
+    # ONE directory, and a per-site fix is how they would drift apart again.
+    cwd = str(project_root(cwd))
 
     # Zero-config bootstrap. The return value is deliberately NOT consulted:
     # gating the turn-1 PROGRESS seeding on it is exactly what made that seeding

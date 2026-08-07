@@ -1,7 +1,7 @@
-<!-- i18n-source: ARCHITECTURE.md | sha256: a3b86f22c1f45a15 | version: 2.5.5 | translated: 2026-08-05 -->
+<!-- i18n-source: ARCHITECTURE.md | sha256: 3a1051a862f71121 | version: 2.6.0 | translated: 2026-08-07 -->
 > [English](ARCHITECTURE.md) · **简体中文**
 
-# cc-memory — 架构（v2.5.5）
+# cc-memory — 架构（v2.6.0）
 
 cc-memory 是一个 Claude Code 插件，为 Claude 提供**跨压缩、跨会话的持久化结构化
 记忆**。本文档是总览：这个插件用来做什么、仓库如何布局、哪些钩子在何时触发、数据库
@@ -104,7 +104,7 @@ cc-memory/
 │   ├── __init__.py              (转出口 core/version.py 的 __version__)
 │   ├── config.json
 │   ├── core/                    ← 领域层：db, extractor, consolidate, idle,
-│   │                              progress, plan, privacy, modes, auth,
+│   │                              progress, plan, privacy, modes, roots, auth,
 │   │                              logger, encoding_setup, version
 │   ├── hooks/                   ← 钩子入口（6 个模块）
 │   ├── llm/                     ← ccl_backend（Haiku/Ollama）+ memory_writer
@@ -207,13 +207,13 @@ v2.3.2 把这个事件拆开了：
   `pre_compact.py:5-20`）。
 - **异步支路**在一个 `BudgetGate` 之下运行 `core.consolidate.run_consolidation`，
   其中 `_BUDGET_TOTAL_S = 240.0`、`_BUDGET_SAFETY_S = 8.0`
-  （`consolidate_async.py:61`），因此它启动的最后一次 LLM 调用会在
+  （`consolidate_async.py:62`），因此它启动的最后一次 LLM 调用会在
   `total_s - safety_s` = 232 秒之前完成，小于钩子自身的 300 秒超时——工作者绝不会
   在写入中途被杀。
 - 节奏由**间隔标记 + 锁**决定，而不是脆弱的 `session_count % N` 检查：
   `memory/.last_consolidation.json` 记录上一次成功运行时的会话计数，
   `memory/.consolidation.lock` 防止工作者重叠（比 `_STALE_LOCK_S = 360.0`
-  更旧的锁会被回收，见 `consolidate_async.py:65`）。这对并发的同步支路是
+  更旧的锁会被回收，见 `consolidate_async.py:66`）。这对并发的同步支路是
   竞态免疫的——计数上 ±1 的漂移既不会导致重复运行，也不会导致漏跑
   （`consolidate_async.py:19-28`）。
 
@@ -252,8 +252,8 @@ PostToolUse 12 对 8、UserPromptSubmit 12 对 8）。现在提高一个超时�
 `core.plan.capture_exit_plan_mode` / `apply_todowrite_sync` 而不是经由钩子，所以
 测试套件从来抓不到它。
 
-`_apply_plan_integration`（`post_tool_use.py:82`）现在跑在闸门**之上**
-（在 `post_tool_use.py:82` 调用），`should_observe` 只包住 `insert_observation`
+`_apply_plan_integration`（`post_tool_use.py:88-120`）现在跑在闸门**之上**
+（在 `post_tool_use.py:88-120` 调用），`should_observe` 只包住 `insert_observation`
 那一块。按模式实测（code / research / writing）：`ExitPlanMode` → `plan_active`
 行数 `0/0/0` → `1/1/1`；`Edit` → `edits_since_last_guardian` `1/0/1` → `1/1/1`；
 Bash `git push`（1 次编辑 + 20）`21/20/1` → `21/21/21`。
@@ -371,8 +371,8 @@ regenerate_memory_index(db, project_id, memory_dir)   ← MEMORY.md 刷新
   重新生成**一次**，但仅当传入了 `memory_dir` 时才会（`memory_writer.py:200-235`）。
   所有钩子调用方都会传（`pre_compact.py:435`、`stop.py:166`、
   `session_start.py:972`）；同步 PreCompact 支路还会在其余状态变更之后再刷一次
-  （`pre_compact.py:684`）。
-- 单发调用方显式调用 `regenerate_memory_index`：`cli/mem.py:849` 与 `:584`、
+  （`pre_compact.py:692`）。
+- 单发调用方显式调用 `regenerate_memory_index`：`cli/mem.py:886` 与 `:584`、
   `mcp/server.py:525`、`ui/dashboard.py:1540`、`ui/web_viewer.py:64`，外加
   `skills/ccm-load` 的内联脚本（`SKILL.md:127, 137`）。`core/idle.py:94` 与
   `hooks/consolidate_async.py:188` 也会在维护之后刷新它。
@@ -465,7 +465,7 @@ SessionStart：
 ```
 
 上面的调用签名都是真实的：`write_progress_md(db, project_id, memory_dir)`
-（`core/progress.py:323`；调用点 `pre_compact.py:669`、`stop.py:303`、
+（`core/progress.py:323`；调用点 `pre_compact.py:677`、`stop.py:304`、
 `user_prompt.py:133`、`session_start.py:680`、`mcp/server.py:243`、
 `cli/mem.py:648`）。PROGRESS.md 的结构规格见
 [docs/CONTRACTS.md](CONTRACTS.md#handoff-contract)。
@@ -503,10 +503,10 @@ slug 约定是：把 `[A-Za-z0-9]` 之外的**每一个**字符替换成 `-`。c
    —— 后者此前逐字复制了旧解析器，连模糊分支一起。
 2. 模糊兜底被**删除**。未命中返回 `None`。调用方必须把它当作「没有 transcript」，
    绝不能当成可以猜的许可。
-3. 归属改为正向校验。`_transcript_belongs_to`（`session_start.py:524`）读取
+3. 归属改为正向校验。`_transcript_belongs_to`（`session_start.py:525-542`）读取
    transcript 自身记录携带的 `cwd`，并且是**失败闭合**的 —— 没有 `cwd` 就不摄取 ——
    它在有界窗口加载之后为 `retroactive_save` 把关。第 3 级挖掘则使用故意更弱的
-   `_transcript_is_foreign`（`session_start.py:544`）：缺失 `cwd` 放行，`cwd`
+   `_transcript_is_foreign`（`session_start.py:545-572`）：缺失 `cwd` 放行，`cwd`
    **不同**才拒绝。两者的差异是刻意的 —— 追溯保存会把 LLM 抽取的记忆永久落库，
    理应要求证明；而第 3 级还必须对 `tests/smoke_test.py:266-278` 构造的那种没有
    `cwd` 的 transcript 形态继续可用。
@@ -564,8 +564,8 @@ BudgetGate 来说仍是已知量。候选顺序与传输格式（`core/auth.py:2
 `get_api_key()` 是同一份候选列表的单凭据向后兼容视图（它不重试，
 `core/auth.py:60-93`）；它同时承载 `oauth_expired` 信号，支撑 SessionStart 的
 “[WARNING: OAuth expired — LLM extraction disabled]” 页脚
-（`session_start.py:443`）。钩子调用方用它来*提供*传给 `call_llm` 的凭据：
-`pre_compact.py:79 → :166`、`stop.py:73`、`session_start.py:443`、
+（`session_start.py:444`）。钩子调用方用它来*提供*传给 `call_llm` 的凭据：
+`pre_compact.py:80 → :166`、`stop.py:74`、`session_start.py:444`、
 `core/consolidate.py:355, 549, 724`。
 
 逐级回退是 v2.3.4 为一个具体故障加入的：一个失效的环境变量密钥（例如额度为零 →
@@ -669,6 +669,85 @@ v2.4.2 才成立：`_extract_via_llm` 的 `except` 元组此前不包含 `Runtim
 `memory/PROGRESS.md`、`memory/MEMORY.md` 和 `memory/PLAN.md` 都是**生成产物**。请改
 SQL 真相来源（PROGRESS.md 对应 `progress`，PLAN.md 对应 `plan_active`，MEMORY.md
 对应 `memories`/`topics`/`keywords`）。
+
+### `<project>` 到底是哪个目录——根锚定（v2.6.0）
+
+`<project>` **不是** hook 载荷里的 `cwd`。那个 cwd 是会话的**当前**工作目录，会跟着
+agent 自己的 `cd` 走：一个在仓库根启动、却在 `cli/` 里跑过一条命令的会话，从此上报
+`<root>/cli`，于是 `_init_project_if_needed`（`user_prompt.py:50-78`）就在那里 mkdir
+出了第二个完全独立的数据库。六个 hook 里有四个只判断 `memory/memory.db` **存在**，
+所以这个野生库一旦诞生就会持续被写入：实测其中一个有 27 条记忆和自己的 `projects`
+行，而两级之上真正的库里有 161 条。它还没有 `.gitignore`（只有初始化路径亲手创建的
+那个目录才会拿到），于是一个 184 KB 的二进制 `memory.db` 混进了用户仓库的三个提交。
+
+**预防，而不是迁移——这是最吃重的一条决策。**本解析器的初版试图**治愈**已存在的
+野生库：取"拥有数据库的连续祖先段"的最外端，理由是"野生库必然比真正的根更深"。一次
+对抗式设计评审用实地数据把它否掉了：把上报机器上的每一个 `memory/memory.db` 枚举出来，
+共 **20** 个，其中 **4** 个是**合法地嵌套**在另一个项目里的——单是
+`Claude-Code-Local/companion` 就有 3725 条记忆，并且自带 `.git`。野生子库与刻意嵌套的
+子项目在磁盘上**逐字节不可区分**：两者都有 `memory/memory.db`，其 `projects` 行都写着
+自己那个目录，因为 `upsert_project`（`core/db.py:465-484`）记录的就是别人递给它的 cwd。
+"最外端胜"会把这种歧义无条件地朝毁数据的方向解决——升级后第一次在 `companion` 里开会话，
+3725 条记忆就会悄无声息地失联。
+
+因此，**已存在的数据库就是身份宣告**，永不被覆盖。所报告的那个 bug 改由**预防**修复：
+标记那一档在任何数据库存在之前就会触发，野生库根本不会诞生。收编一个已经存在的野生库
+意味着合并两个 SQLite 文件——破坏性且不可逆——那属于一条需要用户确认的显式命令，而不属于
+每轮提示都会跑的 hook。
+
+`project_root`（`core/roots.py:346-383`）先解析出根。每个 hook 都在 `is_excluded`
+**之后**、且绝不在之前把 `cwd` 重新绑定到它：先解析会因为爬到未被排除的父目录，而把
+按子目录设置的排除范围稀释掉。候选祖先链会在任何 home 目录之下、文件系统根之下、
+`.ccm-root` 钉之处以及 25 层处停止（`_chain`，`core/roots.py:229-257`）。先命中者胜：
+
+0. `cwd` 自己有 `memory/memory.db` → 就是 `cwd`。终止档，在其余一切之前。就是这一行
+   让"永不弃养已有数据库"这条约束对今天存在的每一个库都成立。
+1. **最近**的、拥有 `memory/memory.db` 的祖先（`_nearest`）。**不向外延伸**，理由见上。
+   这一档修复了所报告的 bug，因为 `CodeEraser/cli` 没有数据库而 `CodeEraser` 有。它不
+   需要任何版本控制系统、不需要任何清单文件——对根本不是仓库的项目，这一点是决定性的。
+2. `CLAUDE_PROJECT_DIR`，当它指向链中某个目录时（`_from_env`，
+   `core/roots.py:361-379`）。刻意排在数据库两档**之后**：它记录的是 Claude Code 在
+   哪里启动，而这并不构成弃养一个数据库的授权。同样地，"必须在链内"也是要点——别的项目
+   残留的值不得改道本项目。
+3. 项目标记——`.git`、`.hg`、`.svn`、`.ccm-root` 以及常见清单文件
+   （`_MARKERS` 定义于 `core/roots.py:140-145`）——最近命中后向外延伸，好让 Cargo
+   workspace 成员或 monorepo 子包解析到其 workspace 而不是自身（`_marker_root`，
+   `core/roots.py:330-358`）。这是唯一能在任何数据库存在**之前**触发的一档，也就是真正
+   在做预防的那一档。
+4. 原样的 cwd——即 v2.6.0 之前的答案，所以此前能用的一切照旧。当答案就是 cwd 时返回的
+   是**未解析的原始字符串**，因此符号链接形式的项目目录与旧行为逐字节一致。
+
+**标记那一档的向外延伸有三道天花板**，因为它是唯一会"走远"的一档，而不设界的走远会把
+整个项目文件夹塌成一个库：
+
+- `_MARKER_MAX_RISE`（`core/roots.py:111`）= cwd 之上 6 层。test_surfaces §4 曾抓到
+  它走了**七**层、走出临时夹具、进入真实用户配置目录。
+- **遇到版本库根即（含该目录）终止**（`_is_vcs_root`）：一个仓库是"仍能算作同一个项目"
+  的最外层。只把 `.git` 当**停止**信号，绝不构成"要求"，所以没有版本控制的项目照常工作。
+- **拒绝项目容器目录**（`_is_container`，`core/roots.py:264-293`）：若某个候选目录有
+  两个及以上直接子目录本身就是版本库根或数据库拥有者，走行就停在它下面。上报机器的项目
+  文件夹有 27 个这样的子目录——没有这道防线，往那里丢一个 `package.json` 就会把它下面
+  的每一个项目塌进同一个数据库。
+
+标记集合里有两个刻意的缺席。`CLAUDE.md` 不是标记，因为 Claude Code 支持逐子目录的
+`CLAUDE.md`；`.claude/` 也不是——用户 home 里就有一个，而且 Claude Code 会把它写进
+"会话恰好在其中批准过一次权限"的任意目录。两者都是**按 cwd 产生的会话残留**，不是根的
+证据。
+
+home 边界是双份的：环境所声称的（`HOME`/`USERPROFILE`/`Path.home()`，`_home_dirs`）
+**加上**平台约定的形状——任何名为 `Users` 或 `home` 的目录的直接子目录
+（`_is_profile_dir`，`core/roots.py:199-226`）。容器、CI、`sudo` 以及本项目自己的测试
+沙箱都会改写前者。实测：把 `HOME` 指向沙箱后，上行走了七层、走出临时夹具、进入真实用户
+配置目录，并命中了某次在 home 里运行的会话留下的 `memory/memory.db`。结构扛得住这种
+改写，环境扛不住。
+
+因此，已存在的野生库会被原地留下——并且被**报告**出来，不至于隐形：`nested_databases`
+（`core/roots.py:386-424`）支撑着 `cc-mem status` 里的
+`[WARN] Separate database below this project` 一行，逐个点名并给出记忆条数。它是显式
+命令而不是 hook，因为它要走一遍目录树。`.ccm-root`——一个空文件——把某个目录钉成独立的
+根，这是"刻意嵌套在另一个项目里的项目"以及"任何被这些启发式读错的布局"的逃生舱。
+`tests/test_surfaces.py` §7 把这一切钉死：真实文件系统上的整条阶梯、从子目录运行的全部
+六个 hook，以及"每个 hook 都在退出开关**之后**解析"这条源码级规则。
 
 ### .gitignore 会迁移，而不只是创建（v2.4.2）
 

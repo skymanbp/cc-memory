@@ -18,6 +18,11 @@ that defence.
   §4 hooks      `excluded_projects`, the only opt-out, driven through all SIX
                 hook entry points as real subprocesses against a COPY of the
                 package whose config.json names the fixture
+  §5 config     config.json parser shapes + the MCP surface of the same opt-out
+  §6 settings   settings.json compare-and-swap (lost-update detection)
+  §7 roots      project-root anchoring: the ladder over a real filesystem, the
+                same six hooks run from a SUBDIRECTORY, and the source-level
+                rule that every hook resolves before it touches memory/
 
 Hermetic by construction: HOME / USERPROFILE / HOMEDRIVE / HOMEPATH / TEMP /
 TMP / TMPDIR *and* `tempfile.tempdir` are redirected into one sandbox root
@@ -1631,6 +1636,257 @@ def test_settings_cas():
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+# §7  project-root anchoring -- one project, one database
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# Through v2.5.6 every hook computed `Path(cwd) / "memory"` from the payload's
+# cwd, and that cwd follows the agent's own `cd`. A session launched at a repo
+# root that ran one command inside `cli/` grew a SECOND database down there --
+# and because four of the six hooks gate on `memory/memory.db` merely EXISTING,
+# it kept being written for months. Measured on the reporting machine: 27
+# memories and its own projects row in the stray, 161 in the real one.
+#
+# Three things break in this order, so all three are pinned:
+#   (a) the ladder, over a real filesystem, INCLUDING the boundary that stops
+#       it below ~. A home-directory memory.db is a real shape (one session run
+#       in ~ leaves one), and an unbounded "walk up until you find a database"
+#       would re-point every project under the profile at it.
+#   (b) the OUTCOME, through all six real hook subprocesses run from a
+#       subdirectory: nothing created down there, the writes landed in the root.
+#   (c) the source-level rule that every hook resolves, and resolves AFTER the
+#       opt-out. A hook that skips it is a split-brain regression exactly as one
+#       that skips is_excluded is a privacy regression (§4).
+
+
+def _mkdirs(base, rel, files=()):
+    """Fixture directory with marker/db files created relative to it."""
+    d = Path(base) / rel
+    d.mkdir(parents=True, exist_ok=True)
+    for f in files:
+        p = d / f
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("x", encoding="utf-8")
+    return d
+
+
+def _roots_ladder(project_root, pin_marker):
+    """(a) the ladder over a real filesystem. Returns the case count."""
+    box = Path(tempfile.mkdtemp(prefix="ccm-roots-"))
+    cases = []
+
+    # THE contract: a directory that already owns a database is NEVER
+    # re-rooted. A stray sub-database and a deliberate nested sub-project are
+    # byte-for-byte identical on disk, so any rule that "heals" the first also
+    # destroys the second. Ground truth on the reporting machine: 20
+    # databases, FOUR of them legitimately nested -- Claude-Code-Local\
+    # companion alone holds 3725 memories and its own .git. An outermost-wins
+    # draft would have orphaned all four on the first post-upgrade session.
+    root = _mkdirs(box, "p1", ["memory/memory.db"])
+    stray = _mkdirs(box, "p1/cli", ["memory/memory.db"])
+    cases.append(("a dir that owns a DB is never re-rooted", stray, stray))
+    # ...and the same shape is how a deliberate nested project survives
+    nested = _mkdirs(box, "p1/companion", ["memory/memory.db", ".git/config"])
+    cases.append(("a nested project with its own DB keeps it", nested, nested))
+    # PREVENTION is what fixes the reported bug: a subdirectory with NO
+    # database resolves up to the nearest ancestor that has one, so the stray
+    # is never created in the first place
+    cases.append(("a subdir with no DB resolves to the nearest ancestor DB",
+                  _mkdirs(box, "p1/tests"), root))
+    # a marker root with NO database anywhere -- the only rung that can fire
+    # before init, i.e. the one doing the actual prevention
+    root = _mkdirs(box, "p2", [".git/config"])
+    cases.append(("marker root, no DB, deep cwd",
+                  _mkdirs(box, "p2/pkg/deep"), root))
+    # NO markers at all: the user who does not keep every project in git
+    root = _mkdirs(box, "p3", ["memory/memory.db"])
+    cases.append(("no markers anywhere, DB at the root",
+                  _mkdirs(box, "p3/notes/2026"), root))
+    # nothing to go on -> the pre-v2.6.0 answer, unchanged
+    unmarked = _mkdirs(box, "p4/sub")
+    cases.append(("no marker, no DB -> cwd verbatim", unmarked, unmarked))
+    # nested manifests (Cargo workspace / monorepo package): outermost wins
+    root = _mkdirs(box, "p5", ["Cargo.toml"])
+    cases.append(("workspace member -> workspace root",
+                  _mkdirs(box, "p5/cli", ["Cargo.toml"]), root))
+    # ...but the extension STOPS at a VCS root: a repository is the outermost
+    # thing that can still be one project. `ceil` carries a marker too, so
+    # without the ceiling the walk would have continued past the repo to it.
+    _mkdirs(box, "ceil", ["package.json"])
+    vcs_root = _mkdirs(box, "ceil/repo", [".git/config", "package.json"])
+    cases.append(("extension stops at the VCS root",
+                  _mkdirs(box, "ceil/repo/pkg", ["package.json"]), vcs_root))
+    # ...and it never returns a CONTAINER of projects. The reporting machine's
+    # projects folder has 27 project-shaped children; one stray marker there
+    # would otherwise have collapsed every one of them into a single database.
+    container = _mkdirs(box, "hub", ["package.json"])
+    for sibling in ("alpha", "beta"):
+        _mkdirs(box, f"hub/{sibling}", [".git/config"])
+    member = _mkdirs(box, "hub/gamma", ["package.json"])
+    cases.append(("a container of projects is refused", member, member))
+    assert container.is_dir()
+    # the escape hatch: a project deliberately nested inside another one
+    _mkdirs(box, "p6", [".git/config"])
+    pinned = _mkdirs(box, "p6/vendor/sub", [pin_marker])
+    cases.append((f"{pin_marker} pins a nested project", pinned, pinned))
+    # a cwd that does not exist must not raise -- hooks are fail-open
+    ghost = box / "does" / "not" / "exist"
+    cases.append(("nonexistent cwd -> verbatim, no raise", ghost, ghost))
+    # a DISTANT marker must not capture: this rung climbed seven levels out of
+    # a fixture and into the real user profile when HOME pointed elsewhere
+    _mkdirs(box, "p7", [".git/config"])
+    far = _mkdirs(box, "p7/a/b/c/d/e/f/g")
+    cases.append(("a marker 7 levels up does NOT capture", far, far))
+    # ...and the same shape just inside the limit still does
+    near_root = _mkdirs(box, "p8", [".git/config"])
+    cases.append(("a marker 3 levels up still captures",
+                  _mkdirs(box, "p8/a/b/c"), near_root))
+    # .claude alone is NOT a root marker: the user's HOME has one
+    only_claude = _mkdirs(box, "p9", [".claude/settings.json"])
+    deep_of_claude = _mkdirs(box, "p9/pkg")
+    cases.append((".claude alone does not mark a root", deep_of_claude,
+                  deep_of_claude))
+    assert only_claude.is_dir()
+    # A profile-SHAPED directory is a boundary even when the environment
+    # claims home is elsewhere -- this sandbox's own situation. These are
+    # fixture directory NAMES inside the temp box, not machine paths.
+    _mkdirs(box, "Users/alice", ["memory/memory.db", ".git/config"])
+    scripts = _mkdirs(box, "Users/alice/Scripts")
+    cases.append(("a profile-shaped dir bounds the walk whatever the env says",
+                  scripts, scripts))
+    # ...and a real project INSIDE that profile still resolves upward
+    inside = _mkdirs(box, "Users/alice/proj", ["memory/memory.db"])
+    cases.append(("a project inside a profile still resolves upward",
+                  _mkdirs(box, "Users/alice/proj/src"), inside))
+
+    # THE boundary: a memory.db in ~ must never capture a directory below it
+    home_db = Path.home() / "memory"
+    home_db.mkdir(parents=True, exist_ok=True)
+    (home_db / "memory.db").write_text("x", encoding="utf-8")
+    under_home = Path.home() / "Scripts"
+    under_home.mkdir(parents=True, exist_ok=True)
+    cases.append(("a memory.db in ~ never captures a child", under_home,
+                  under_home))
+    cases.append(("...but a cwd that IS ~ stays itself", Path.home(),
+                  Path.home()))
+
+    for label, cwd, want in cases:
+        got = project_root(str(cwd))
+        assert os.path.normcase(str(got)) == os.path.normcase(str(want)), \
+            f"{label}: {cwd} -> {got}, expected {want}"
+    shutil.rmtree(home_db)
+    return len(cases)
+
+
+def _roots_hooks_from_subdir(project_root):
+    """(b) all six hooks, run from a subdirectory of a seeded project."""
+    work = Path(tempfile.mkdtemp(prefix="ccm-roots-hooks-"))
+    # deliberately NO .git and no manifest: the only thing tying `deep` to
+    # `root` is the existing database, i.e. the rung that has to work for a
+    # project that is not a repository at all.
+    root = work / "project"
+    deep = root / "pkg" / "deep"
+    deep.mkdir(parents=True, exist_ok=True)
+    db, pid = _seed_project(root)
+    transcript = work / "transcript.jsonl"
+    transcript.write_text("\n".join(json.dumps(r) for r in (
+        {"type": "user", "message": {"role": "user", "content": "ship it"}},
+        {"type": "assistant", "message": {"role": "assistant", "content": [
+            {"type": "tool_use", "name": "Edit",
+             "input": {"file_path": "src/ship.py"}}]}},
+    )) + "\n", encoding="utf-8")
+
+    sid = "roots-subdir-0001"
+    out, obs = {}, {}
+    for hook in _HOOK_ORDER:
+        rc, stdout, err = _run_hook(REPO / "cc_memory", hook, deep, sid,
+                                    transcript)
+        assert rc == 0 and err == "", \
+            f"subdir run: {hook} rc={rc} stderr={err[:300]!r}"
+        out[hook] = stdout
+        # sampled per hook: PreCompact CLEANS observations after extracting
+        obs[hook] = db.get_observation_count(pid)
+
+    for stray in (deep / "memory", root / "pkg" / "memory"):
+        assert not stray.exists(), \
+            (f"a second memory dir was created at {stray} — this is the exact "
+             f"defect v2.6.0 exists to stop")
+    assert obs["post_tool_use"] >= 1, \
+        "PostToolUse stored nothing in the ROOT db, so 'no stray' proves nothing"
+    assert db.get_progress(pid) is not None, \
+        "no progress row in the root db — the subdir run wrote it elsewhere"
+    assert (root / "memory" / "PROGRESS.md").is_file(), \
+        "PreCompact wrote no PROGRESS.md at the project root"
+    assert "[cc-memory]" in out["session_start"], \
+        ("SessionStart injected nothing: from a subdirectory it used to report "
+         "'no DB' and start the session with an empty context")
+
+    # ── the PREVENTION path, end to end. The block above starts from a
+    #    project that ALREADY has a database, so it exercises rung 1. The
+    #    stray is actually prevented by rung 3, which only fires when no
+    #    database exists anywhere yet — the first-ever session of a brand-new
+    #    repo, run from a subdirectory. That is the exact shape that created
+    #    the reported stray, and nothing tested it at the HOOK level.
+    fresh = work / "fresh-repo"
+    (fresh / ".git").mkdir(parents=True, exist_ok=True)
+    fresh_deep = fresh / "cli" / "src"
+    fresh_deep.mkdir(parents=True, exist_ok=True)
+    (fresh / "cli" / "Cargo.toml").write_text("[package]", encoding="utf-8")
+    for hook in ("user_prompt", "pre_compact"):
+        rc, _, err = _run_hook(REPO / "cc_memory", hook, fresh_deep,
+                               "roots-fresh-0001", transcript)
+        assert rc == 0 and err == "", \
+            f"fresh-repo run: {hook} rc={rc} stderr={err[:300]!r}"
+    assert (fresh / "memory" / "memory.db").is_file(), \
+        ("a first-ever session in a subdirectory did not initialise the repo "
+         "ROOT — the marker rung is the only thing preventing the stray")
+    for stray in (fresh_deep / "memory", fresh / "cli" / "memory"):
+        assert not stray.exists(), \
+            (f"a brand-new project grew its database at {stray} instead of at "
+             f"the repo root — this is the reported defect, reproduced")
+    assert (Path(tempfile.gettempdir()) / f"cc_mem_turns_{sid[:16]}").is_file(), \
+        "UserPromptSubmit wrote no turn marker, so it never got past the gate"
+    # and the resolver agrees with what the hooks did
+    assert os.path.normcase(str(project_root(str(deep)))) == \
+        os.path.normcase(str(root))
+
+
+def _roots_every_hook_resolves():
+    """(c) source rule: every hook resolves, and AFTER the opt-out."""
+    for hook in _HOOK_ORDER:
+        src = (REPO / "cc_memory" / "hooks" / f"{hook}.py").read_text(
+            encoding="utf-8")
+        assert "project_root(cwd" in src, \
+            (f"hooks/{hook}.py never calls project_root — it will keep "
+             f"reading and writing whatever directory the shell happens to "
+             f"be in (split-brain regression)")
+        excl = src.index("if is_excluded(cwd)")
+        anchor = src.index("project_root(cwd")
+        assert excl < anchor, \
+            (f"hooks/{hook}.py resolves the root BEFORE is_excluded — that "
+             f"widens a per-subdirectory exclusion away by resolving to its "
+             f"unexcluded parent")
+
+
+def test_project_root_anchoring():
+    print("\n--- §7 project-root anchoring --------------------------------")
+    # imported here, not at module scope, so a syntax or import error in the
+    # resolver surfaces inside §7 rather than at suite import time
+    from core.roots import project_root, PIN_MARKER
+
+    n_cases = _roots_ladder(project_root, PIN_MARKER)
+    _roots_hooks_from_subdir(project_root)
+    _roots_every_hook_resolves()
+    print(f"[OK] project-root anchoring: {n_cases} ladder cases (a dir that "
+          f"owns a DB is never re-rooted, nested project keeps its own, "
+          f"marker-only, no-marker, workspace member, VCS ceiling, container "
+          f"refusal, {PIN_MARKER} pin, nonexistent cwd, and the ~ boundary in "
+          f"both directions); all {len(_HOOK_ORDER)} hooks run from a "
+          f"SUBDIRECTORY create no second memory/ and write to the root db; a "
+          f"first-ever session in a subdirectory initialises the REPO ROOT; "
+          f"all {len(_HOOK_ORDER)} resolve AFTER is_excluded")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 
 def main():
     print(f"Sandbox root: {_SANDBOX}")
@@ -1642,6 +1898,7 @@ def main():
     test_excluded_projects()
     test_config_shapes_and_mcp_optout()
     test_settings_cas()
+    test_project_root_anchoring()
     # Teardown is a GATE, not a courtesy: this suite creates ~475 KB of SQLite
     # per run under the real %TEMP% and used to hide its own failure to remove
     # it behind ignore_errors=True.

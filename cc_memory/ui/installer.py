@@ -64,7 +64,7 @@ SUBPACKAGE_FILES = {
     "":      ["__init__.py", "config.json"],
     "core":  ["__init__.py", "atomic.py", "auth.py", "consolidate.py", "db.py",
               "encoding_setup.py", "extractor.py", "idle.py", "logger.py",
-              "modes.py", "plan.py", "privacy.py", "progress.py",
+              "modes.py", "plan.py", "privacy.py", "progress.py", "roots.py",
               "version.py"],
     "hooks": ["__init__.py", "consolidate_async.py", "post_tool_use.py",
               "pre_compact.py", "session_start.py", "stop.py", "user_prompt.py"],

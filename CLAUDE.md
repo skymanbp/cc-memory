@@ -169,7 +169,7 @@ were closed too. Nine things that were silently wrong in shipped code:
    `skip_tools` and `ExitPlanMode` is in no mode's `observe_tools`, so both
    plan-control tools were `False` in all three modes: `plan_active` was never
    written, `.plan_raw.md` / `PLAN.md` never appeared, and the drift counters
-   varied by mode. `_apply_plan_integration` (`post_tool_use.py:82`) now runs
+   varied by mode. `_apply_plan_integration` (`post_tool_use.py:88-120`) now runs
    **above** the gate; the gate wraps only the `insert_observation` block.
    Plan control is not observation — `core/modes.py`'s `should_observe`
    docstring now forbids re-inverting this. Per mode: ExitPlanMode → plan rows
@@ -518,7 +518,7 @@ cc-memory/
 │   ├── __init__.py              (re-exports core/version.py)
 │   ├── config.json
 │   ├── core/                    db, extractor, consolidate, idle, progress,
-│   │                            plan, privacy, modes, auth, logger,
+│   │                            plan, privacy, modes, roots, auth, logger,
 │   │                            encoding_setup, version
 │   ├── hooks/                   post_tool_use, pre_compact, consolidate_async,
 │   │                            session_start, stop, user_prompt
@@ -658,7 +658,7 @@ The `plan_active` table (one row per project) backs PLAN.md. Lifecycle:
   only `plan.apply_refined_plan` may clear `needs_refine`.
 
 **All of the `PostToolUse` legs above run in EVERY mode, above the
-`should_observe` gate** (`hooks/post_tool_use.py:165`). They shipped below it
+`should_observe` gate** (`hooks/post_tool_use.py:178`). They shipped below it
 from v2.2 through v2.4.3, which made the entire anchor dead through its own
 hook — `TodoWrite` is in every mode's `skip_tools` and `ExitPlanMode` is in no
 mode's `observe_tools`. Plan control is not observation: mode selects what is
@@ -752,15 +752,35 @@ the three plan mutators, and the two DOC gates below.
 `tests/test_plan_carryover.py` covers the v2.4.0 carryover gate (20 checks) —
 the only coverage of that feature.
 
-`tests/test_surfaces.py` (v2.5.0, six sections) covers the surfaces neither of
-the others touches: §1 the MCP stdio server, §2 the web viewer's request
+`tests/test_surfaces.py` (v2.5.0, seven sections) covers the surfaces neither
+of the others touches: §1 the MCP stdio server, §2 the web viewer's request
 guards, §3 the standalone installer (surfaces installed and removed by name,
 malformed-`settings.json` shapes, hook-timeout lockstep against
 `hooks/hooks.json`, manifest parity so a new runtime module cannot ship
 unpackaged), §4 `excluded_projects` across all six hooks, §5 the config.json
 parser shapes plus the MCP half of the same opt-out, §6 the `settings.json`
-compare-and-swap. It also asserts the source-level rule that every LLM-calling
-hook passes an absolute deadline.
+compare-and-swap, §7 project-root anchoring (v2.6.0). It also asserts the
+source-level rule that every LLM-calling hook passes an absolute deadline.
+
+**§7 is the twin of §4.** It drives the same six hooks from a SUBDIRECTORY of
+a seeded project and asserts no second `memory/` appears down there while the
+root database receives the writes, walks the resolution ladder over a real
+filesystem, and asserts the source rule that every hook calls
+`core.roots.project_root` **after** `is_excluded`. A hook that skips the
+resolver is a split-brain regression, not a style nit — the same way one that
+skips `is_excluded` is a privacy regression.
+
+Two of its 18 ladder cases are the ones that cost a design round, and neither
+may be weakened: **a directory that already owns a `memory/memory.db` is never
+re-rooted** (a stray and a deliberate nested sub-project are byte-for-byte
+identical on disk — this machine has four genuinely nested ones, the largest
+holding 3725 memories, so any rule that "heals" the first orphans the second),
+and **a container of projects is never returned** (this machine's projects
+folder has 27 project-shaped children). The `~`-boundary case guards the
+third: a `memory.db` sitting in a home directory must not capture everything
+beneath it, and the boundary is deliberately doubled — environment *and*
+platform-conventional structure — because the sandbox this suite runs in
+redirects the environment.
 
 **Two DOC gates, both inside `smoke_test.py`.** `tools/citation_check.py`
 resolves every `file.py:LINE` citation in **all 13** tracked markdown files —
@@ -776,9 +796,9 @@ them until v2.5.5, and three had already drifted.
 python tests/smoke_test.py
 # expect: [OK] lines ending with "===== ALL SMOKE TESTS PASSED ====="
 python tests/test_plan_carryover.py
-# expect: "RESULT: 14 passed, 0 failed"
+# expect: "RESULT: 20 passed, 0 failed"
 python tests/test_surfaces.py
-# expect: "===== ALL SURFACE TESTS PASSED ====="  (§1-§6)
+# expect: "===== ALL SURFACE TESTS PASSED ====="  (§1-§7)
 python tools/i18n_check.py
 # expect: "3 in-sync", exit 0
 python tools/citation_check.py
@@ -814,7 +834,7 @@ Two limits to know before trusting a green result: a citation whose sentence
 names no resolvable symbol at all is reported **SKIP**, not OK (253 of 594
 today, down from 370 once v2.5.3 taught it to anchor CROSS-FILE citations on the
 text of the cited range — the `` `db.tag_progress_session(...)`
-(`user_prompt.py:181`) `` shape, which is the commonest in these docs). `--fix`
+(`user_prompt.py:195`) `` shape, which is the commonest in these docs). `--fix`
 rewrites a same-file citation to the **definition** site and a cross-file one to
 the occurrence NEAREST the stale number — a stated assumption (it was right when
 written; the file grew above it), not a proof. Ordinary variable
