@@ -1746,16 +1746,71 @@ def _roots_ladder(project_root, pin_marker):
     cases.append((".claude alone does not mark a root", deep_of_claude,
                   deep_of_claude))
     assert only_claude.is_dir()
-    # A profile-SHAPED directory is a boundary even when the environment
-    # claims home is elsewhere -- this sandbox's own situation. These are
-    # fixture directory NAMES inside the temp box, not machine paths.
-    _mkdirs(box, "Users/alice", ["memory/memory.db", ".git/config"])
-    scripts = _mkdirs(box, "Users/alice/Scripts")
-    cases.append(("a profile-shaped dir bounds the walk whatever the env says",
-                  scripts, scripts))
-    # ...and a real project INSIDE that profile still resolves upward
+    # ── v2.7.0: every case below is a defect an adversarial debug round
+    #    found in v2.6.0 and reproduced. The shared root cause was that the
+    #    guards hung off ONE rung's inner loop instead of off the candidate
+    #    set, so each rung that did not inherit them became its own defect.
+    #
+    # A container that has ACQUIRED a stray database must still not capture
+    # its children. v2.6.0's database rung consulted no guard at all, so one
+    # session run in a projects folder swallowed every project under it.
+    _mkdirs(box, "hub-db", ["memory/memory.db"])
+    for sibling in ("r0", "r1", "r2"):
+        _mkdirs(box, f"hub-db/{sibling}", [".git/config"])
+    victim = _mkdirs(box, "hub-db/r1")
+    cases.append(("a polluted container never captures its children",
+                  victim, victim))
+    # ...and the marker rung must container-check the FIRST marker too, not
+    # only the ones it extends onto: one stray manifest in a projects folder
+    # captured every marker-less directory under it.
+    _mkdirs(box, "hub-mk", ["package.json"])
+    for sibling in ("s0", "s1", "s2"):
+        _mkdirs(box, f"hub-mk/{sibling}", [".git/config"])
+    plain = _mkdirs(box, "hub-mk/notes")
+    cases.append(("a container's stray marker captures nothing", plain, plain))
+    # A cwd inside a DEPENDENCY tree belongs to the project that depends on
+    # the package. v2.6.0 anchored on the package itself and planted a
+    # database where nested_databases could not even look.
+    dep_host = _mkdirs(box, "dep-host", [".git/config"])
+    cases.append(("a cwd inside node_modules anchors on the host repo",
+                  _mkdirs(box, "dep-host/node_modules/left-pad",
+                          ["package.json"]), dep_host))
+    cases.append(("...and the same for vendor/",
+                  _mkdirs(box, "dep-host/vendor/thing", ["go.mod"]), dep_host))
+    # The monorepo shape: the intermediate `packages/` directory carries no
+    # manifest. v2.6.0 required a CONTIGUOUS run of markers, so it stopped at
+    # the package and re-created the stray -- while two docstrings promised
+    # the workspace.
+    mono = _mkdirs(box, "mono", [".git/config", "package.json"])
+    cases.append(("monorepo package resolves to the workspace root",
+                  _mkdirs(box, "mono/packages/web", ["package.json"]), mono))
+    # An in-repo directory named `users` is not a home directory. v2.6.0
+    # truncated the chain there, so no rung could reach the repo.
+    inrepo = _mkdirs(box, "inrepo", [".git/config", "memory/memory.db"])
+    cases.append(("an in-repo users/ directory is not a profile root",
+                  _mkdirs(box, "inrepo/users/alice/sub"), inrepo))
+
+    # A profile-shaped directory bounds the walk even when the environment
+    # claims home is elsewhere -- this sandbox's own situation. Asserted on
+    # the PREDICATE rather than through a fixture, because the shape is
+    # "a child of Users/ or home/ that sits at the FILESYSTEM ROOT" and no
+    # temp directory can be at a filesystem root. v2.6.0 omitted that
+    # qualifier and so mistook any in-repo `users/` folder for a profile.
+    # These are SAMPLE spellings of the OS-conventional layout, built from
+    # the running platform's own root -- no machine path is hardcoded.
+    from core.roots import _is_profile_dir
+    fs_root = Path(Path(box.anchor or "/"))
+    for container in ("Users", "home"):
+        assert _is_profile_dir(fs_root / container / "alice"), \
+            f"{fs_root / container / 'alice'} must be a per-user profile root"
+    for ordinary in (box / "repo" / "users" / "alice",
+                     box / "srv" / "home" / "bob",
+                     box / "Users" / "alice"):
+        assert not _is_profile_dir(ordinary), \
+            f"{ordinary} is an ordinary directory, not a profile root"
+    # ...and a project nested under such a directory still resolves upward
     inside = _mkdirs(box, "Users/alice/proj", ["memory/memory.db"])
-    cases.append(("a project inside a profile still resolves upward",
+    cases.append(("a project below a users/ directory resolves upward",
                   _mkdirs(box, "Users/alice/proj/src"), inside))
 
     # THE boundary: a memory.db in ~ must never capture a directory below it
@@ -1775,6 +1830,57 @@ def _roots_ladder(project_root, pin_marker):
             f"{label}: {cwd} -> {got}, expected {want}"
     shutil.rmtree(home_db)
     return len(cases)
+
+
+def _roots_contracts(project_root):
+    """(a2) contracts the path-in/path-out ladder table cannot express."""
+    from core.roots import nested_databases, _is_container, _CONTAINER_CHILDREN
+
+    # "Never raises" means never, including for a cwd that is not a path.
+    # v2.6.0's own handler re-raised: `return Path(cwd)` inside `except`
+    # raises again for an int, so a `{"cwd": 123}` payload took the hook to
+    # rc=1 with a traceback -- which Claude Code renders as an error UI.
+    for junk in (123, None, ["a"], {"x": 1}, b"bytes"):
+        got = project_root(junk)
+        assert isinstance(got, Path), \
+            f"project_root({junk!r}) returned {type(got).__name__}, not Path"
+
+    box = Path(tempfile.mkdtemp(prefix="ccm-roots-contract-"))
+    # The reporter must reach `max_depth` levels, not max_depth-1. A
+    # directory's own memory/ is found while scanning THAT directory, so
+    # v2.6.0's off-by-one silently dropped the deepest level.
+    _mkdirs(box, "R", ["memory/memory.db"])
+    for rel in ("R/a", "R/a/b", "R/a/b/c"):
+        _mkdirs(box, rel, ["memory/memory.db"])
+    got = sorted(p.relative_to(box / "R").as_posix()
+                 for p in nested_databases(str(box / "R"), max_depth=3))
+    assert got == ["a", "a/b", "a/b/c"], \
+        f"nested_databases(max_depth=3) reached only {got}"
+    # ...and it must look where the resolver could plant. v2.6.0 skipped
+    # nine directory names including `vendor` and `node_modules`, i.e. it was
+    # blind exactly where a stray was most likely to be.
+    _mkdirs(box, "S", ["memory/memory.db"])
+    _mkdirs(box, "S/vendor/pkg", ["memory/memory.db"])
+    assert [p.relative_to(box / "S").as_posix()
+            for p in nested_databases(str(box / "S"))] == ["vendor/pkg"], \
+        "a database under vendor/ is invisible to the one tool meant to find it"
+
+    # `_CONTAINER_CHILDREN` was completely unpinned: the whole ladder passed
+    # with the threshold at 1. Pin the boundary from BOTH sides.
+    _mkdirs(box, "one", ["package.json"])
+    _mkdirs(box, "one/kid0", [".git/config"])
+    assert not _is_container(box / "one"), \
+        f"one project-shaped child must not make a container (N={_CONTAINER_CHILDREN})"
+    _mkdirs(box, "one/kid1", [".git/config"])
+    assert _is_container(box / "one"), \
+        f"two project-shaped children must make a container (N={_CONTAINER_CHILDREN})"
+    # A VCS root is one project however many project children it has --
+    # without this, a repo with two submodules stops being resolvable.
+    _mkdirs(box, "repo2", [".git/config"])
+    for kid in ("m0", "m1"):
+        _mkdirs(box, f"repo2/{kid}", [".git/config"])
+    assert not _is_container(box / "repo2"), \
+        "a repository with two repo children is still one project"
 
 
 def _roots_hooks_from_subdir(project_root):
@@ -1874,6 +1980,7 @@ def test_project_root_anchoring():
     from core.roots import project_root, PIN_MARKER
 
     n_cases = _roots_ladder(project_root, PIN_MARKER)
+    _roots_contracts(project_root)
     _roots_hooks_from_subdir(project_root)
     _roots_every_hook_resolves()
     print(f"[OK] project-root anchoring: {n_cases} ladder cases (a dir that "

@@ -2,7 +2,7 @@
 
 # cc-memory
 
-**Claude Code persistent memory plugin (v2.5.6)** — anti-patch reconcile-on-write
+**Claude Code persistent memory plugin (v2.7.0)** — anti-patch reconcile-on-write
 with LLM-judged semantic de-duplication, forced PROGRESS.md handoff, live PLAN.md
 anchor with plan-refiner / plan-guardian subagents and a mandatory carryover
 gate, bounded transcript reads, injection observability, FTS5 search, AI-judged
@@ -17,7 +17,40 @@ disappear. Conversations that end normally (terminal closed) also lose context.
 cc-memory captures structured memories at every conversation boundary AND
 **forces the next session to read a handoff document** before it starts work.
 
-## What's new in v2.6.0
+## What's new in v2.7.0
+
+**v2.6.0 hung its safety guards off one rung's inner loop instead of off the
+candidate set — so every rung that did not inherit them became its own
+data-integrity defect.** A convergent adversarial debug round (five
+dimensions, every finding double-verified against the real source) confirmed
+45 defects; the three worst were reproduced before being fixed.
+
+- **`_candidates()` filters the chain once, for every rung.** Containers of
+  projects and dependency trees are no longer candidates anywhere. Before:
+  a `memory/` created by one session in a projects folder captured every
+  uninitialised project under it; one stray `package.json` there did the same
+  to every marker-less directory; and a cwd inside `node_modules/left-pad`
+  anchored on the *package*, planting a database where the reporter never looks.
+- **Monorepos resolve to the workspace, as the docs always claimed.** The
+  marker extension no longer requires a contiguous run of markers —
+  `packages/`, `apps/`, `crates/` and `libs/` carry no manifest, so v2.6.0
+  stopped at the package and re-created the stray it exists to prevent.
+- **`_is_profile_dir` now requires `Users`/`home` to sit at the filesystem
+  root.** Without that, any in-repo `users/` folder looked like a home
+  directory and truncated the chain — the guard producing the defect it guards.
+- **`project_root` really never raises now**, including for a non-path `cwd`;
+  v2.6.0's own handler re-raised and took the hook to rc=1 with a stderr
+  traceback. `user_prompt.py` gained the field-type guard the other five hooks
+  already had.
+- **Every surface anchors, not just the hooks.** `cc-mem --project` and
+  `/ccm-load` resolve too, so `/cc-mem add` from a subdirectory can no longer
+  create the stray the hooks refuse to. Redirections are always printed.
+- **The stray reporter was blind where strays live**: it reached one level
+  less than asked and skipped `vendor`, `node_modules` and seven more names.
+  Both fixed; the count is now active-only and provably cannot write to the
+  database it inspects.
+
+## Previously — What's new in v2.6.0
 
 **Every hook read the project out of `cwd`, and `cwd` follows the agent's own
 `cd`.** A session launched at a repo root that ran one command inside `cli/`
@@ -67,7 +100,7 @@ its own `projects` row in one, against 161 in the real database two levels up.
   project as a root in its own right. Pinned by `tests/test_surfaces.py` §7,
   whose 18 ladder cases include the nested-project and container shapes above.
 
-## Previously — What's new in v2.5.6
+## What's new in v2.5.6
 
 **The plan-replacement gate guards `steps`. It always has — and on 2026-08-05
 that cost a live plan two of its ten success criteria.** The replacement passed

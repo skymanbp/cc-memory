@@ -90,9 +90,16 @@ def main():
     if not isinstance(data, dict):
         sys.exit(0)
 
+    # FIELD types, not just the container type — the guard the other five
+    # hooks already carried and this one did not. `Path(123)` and
+    # `_safe_id(123)` both raise out here, outside any try: rc=1 plus a
+    # traceback on stderr, the exact pair of contract violations the
+    # isinstance check on `data` was added to close.
     cwd = data.get("cwd", "")
     session_id = data.get("session_id", "")
-    if not cwd or not session_id:
+    if not isinstance(cwd, str) or not cwd:
+        sys.exit(0)
+    if not isinstance(session_id, str) or not session_id:
         sys.exit(0)
 
     # Project opt-out — MUST precede _init_project_if_needed, which is the call

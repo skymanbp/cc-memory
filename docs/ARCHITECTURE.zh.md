@@ -1,4 +1,4 @@
-<!-- i18n-source: ARCHITECTURE.md | sha256: 3a1051a862f71121 | version: 2.6.0 | translated: 2026-08-07 -->
+<!-- i18n-source: ARCHITECTURE.md | sha256: 07c85c8fe6681825 | version: 2.7.0 | translated: 2026-08-07 -->
 > [English](ARCHITECTURE.md) · **简体中文**
 
 # cc-memory — 架构（v2.6.0）
@@ -372,7 +372,7 @@ regenerate_memory_index(db, project_id, memory_dir)   ← MEMORY.md 刷新
   所有钩子调用方都会传（`pre_compact.py:435`、`stop.py:166`、
   `session_start.py:972`）；同步 PreCompact 支路还会在其余状态变更之后再刷一次
   （`pre_compact.py:692`）。
-- 单发调用方显式调用 `regenerate_memory_index`：`cli/mem.py:886` 与 `:584`、
+- 单发调用方显式调用 `regenerate_memory_index`：`cli/mem.py:923` 与 `:584`、
   `mcp/server.py:525`、`ui/dashboard.py:1540`、`ui/web_viewer.py:64`，外加
   `skills/ccm-load` 的内联脚本（`SKILL.md:127, 137`）。`core/idle.py:94` 与
   `hooks/consolidate_async.py:188` 也会在维护之后刷新它。
@@ -467,7 +467,7 @@ SessionStart：
 上面的调用签名都是真实的：`write_progress_md(db, project_id, memory_dir)`
 （`core/progress.py:323`；调用点 `pre_compact.py:677`、`stop.py:304`、
 `user_prompt.py:133`、`session_start.py:680`、`mcp/server.py:243`、
-`cli/mem.py:648`）。PROGRESS.md 的结构规格见
+`cli/mem.py:1089`）。PROGRESS.md 的结构规格见
 [docs/CONTRACTS.md](CONTRACTS.md#handoff-contract)。
 
 ### 被杀运行检测（v2.4.2）
@@ -695,10 +695,10 @@ agent 自己的 `cd` 走：一个在仓库根启动、却在 `cli/` 里跑过一
 意味着合并两个 SQLite 文件——破坏性且不可逆——那属于一条需要用户确认的显式命令，而不属于
 每轮提示都会跑的 hook。
 
-`project_root`（`core/roots.py:346-383`）先解析出根。每个 hook 都在 `is_excluded`
+`project_root`（`core/roots.py:483-528`）先解析出根。每个 hook 都在 `is_excluded`
 **之后**、且绝不在之前把 `cwd` 重新绑定到它：先解析会因为爬到未被排除的父目录，而把
 按子目录设置的排除范围稀释掉。候选祖先链会在任何 home 目录之下、文件系统根之下、
-`.ccm-root` 钉之处以及 25 层处停止（`_chain`，`core/roots.py:229-257`）。先命中者胜：
+`.ccm-root` 钉之处以及 25 层处停止（`_chain`，`core/roots.py:267-295`）。先命中者胜：
 
 0. `cwd` 自己有 `memory/memory.db` → 就是 `cwd`。终止档，在其余一切之前。就是这一行
    让"永不弃养已有数据库"这条约束对今天存在的每一个库都成立。
@@ -706,28 +706,39 @@ agent 自己的 `cd` 走：一个在仓库根启动、却在 `cli/` 里跑过一
    这一档修复了所报告的 bug，因为 `CodeEraser/cli` 没有数据库而 `CodeEraser` 有。它不
    需要任何版本控制系统、不需要任何清单文件——对根本不是仓库的项目，这一点是决定性的。
 2. `CLAUDE_PROJECT_DIR`，当它指向链中某个目录时（`_from_env`，
-   `core/roots.py:361-379`）。刻意排在数据库两档**之后**：它记录的是 Claude Code 在
+   `core/roots.py:462-480`）。刻意排在数据库两档**之后**：它记录的是 Claude Code 在
    哪里启动，而这并不构成弃养一个数据库的授权。同样地，"必须在链内"也是要点——别的项目
    残留的值不得改道本项目。
-3. 项目标记——`.git`、`.hg`、`.svn`、`.ccm-root` 以及常见清单文件
-   （`_MARKERS` 定义于 `core/roots.py:140-145`）——最近命中后向外延伸，好让 Cargo
-   workspace 成员或 monorepo 子包解析到其 workspace 而不是自身（`_marker_root`，
-   `core/roots.py:330-358`）。这是唯一能在任何数据库存在**之前**触发的一档，也就是真正
-   在做预防的那一档。
+3. 项目标记——`.git`、`.hg`、`.svn`、`.ccm-root` 以及常见清单文件（`_MARKERS`）——
+   最近命中后向外延伸至其所属的版本库（`_marker_root`）。这是唯一能在任何数据库存在
+   **之前**触发的一档，也就是真正在做预防的那一档。
 4. 原样的 cwd——即 v2.6.0 之前的答案，所以此前能用的一切照旧。当答案就是 cwd 时返回的
    是**未解析的原始字符串**，因此符号链接形式的项目目录与旧行为逐字节一致。
 
-**标记那一档的向外延伸有三道天花板**，因为它是唯一会"走远"的一档，而不设界的走远会把
-整个项目文件夹塌成一个库：
+**守卫属于候选集合，而不属于任何单独一档（v2.7.0）。** v2.6.0 把守卫只挂在标记档的
+延伸循环上，于是每一个没继承到守卫的档位都变成了一个独立的数据完整性缺陷：数据库档
+什么都不查，所以在项目文件夹里跑过一次会话产生的 `memory/` 会俘获它下面每一个尚未初始化
+的项目；标记档从不检查它找到的**第一个**标记，所以往那里丢一个杂散 `package.json` 效果
+相同；而两者都没有"依赖树"这个概念。`_candidates`（`core/roots.py:376-404`）现在在任何
+一档读取之前，先把链过滤一次：
 
-- `_MARKER_MAX_RISE`（`core/roots.py:111`）= cwd 之上 6 层。test_surfaces §4 曾抓到
-  它走了**七**层、走出临时夹具、进入真实用户配置目录。
-- **遇到版本库根即（含该目录）终止**（`_is_vcs_root`）：一个仓库是"仍能算作同一个项目"
-  的最外层。只把 `.git` 当**停止**信号，绝不构成"要求"，所以没有版本控制的项目照常工作。
-- **拒绝项目容器目录**（`_is_container`，`core/roots.py:264-293`）：若某个候选目录有
-  两个及以上直接子目录本身就是版本库根或数据库拥有者，走行就停在它下面。上报机器的项目
-  文件夹有 27 个这样的子目录——没有这道防线，往那里丢一个 `package.json` 就会把它下面
-  的每一个项目塌进同一个数据库。
+- **移除项目容器目录**（`_is_container`）。两个不对称触发器：有两个及以上子目录是版本库根
+  ——永远是决定性的（上报机器的项目文件夹有 27 个）；而"有两个及以上子目录只是拥有数据库"
+  ——仅当该目录自己不拥有数据库时才算数，因为"自己的库与嵌套的库并存"是真实存在的合法布局。
+  自己就是版本库根的目录永远不是容器，否则带两个 submodule 的仓库将无法被解析。
+- **移除依赖树**（`_DEPENDENCY_DIRS`）。读 `node_modules/`、`vendor/` 或 `site-packages/`
+  下的文件，应锚定在**依赖**这个包的项目上。v2.6.0 锚在了包自身——它有 `package.json`，
+  标记档就接受了——并把数据库种在依赖树里，而报告器恰恰不看那里。是过滤而非截断：走行必须
+  **越过**依赖目录，才能抵达拥有它的那个项目。
+
+标记档随后只剩两道天花板：`_MARKER_MAX_RISE` = cwd 之上 6 层（test_surfaces §4 曾抓到
+它走了**七**层、走出临时夹具、进入真实用户配置目录），以及**遇到版本库根即（含该目录）
+终止**——一个仓库是"仍能算作同一个项目"的最外层，且只把 `.git` 当**停止**信号，绝不构成
+"要求"。
+
+该延伸**刻意不要求**标记连续。v2.6.0 在第一个无标记的祖先处断开，而 `packages/`、
+`apps/`、`crates/`、`libs/` 恰恰就是这种目录，于是标准 monorepo 布局解析到了子包、
+重新制造出本模块要防的野生库——与此同时有两处 docstring 承诺的是 workspace。
 
 标记集合里有两个刻意的缺席。`CLAUDE.md` 不是标记，因为 Claude Code 支持逐子目录的
 `CLAUDE.md`；`.claude/` 也不是——用户 home 里就有一个，而且 Claude Code 会把它写进
@@ -735,11 +746,19 @@ agent 自己的 `cd` 走：一个在仓库根启动、却在 `cli/` 里跑过一
 证据。
 
 home 边界是双份的：环境所声称的（`HOME`/`USERPROFILE`/`Path.home()`，`_home_dirs`）
-**加上**平台约定的形状——任何名为 `Users` 或 `home` 的目录的直接子目录
-（`_is_profile_dir`，`core/roots.py:199-226`）。容器、CI、`sudo` 以及本项目自己的测试
-沙箱都会改写前者。实测：把 `HOME` 指向沙箱后，上行走了七层、走出临时夹具、进入真实用户
-配置目录，并命中了某次在 home 里运行的会话留下的 `memory/memory.db`。结构扛得住这种
-改写，环境扛不住。
+**加上**平台约定的形状——名为 `Users` 或 `home` 的目录的子目录，**且该目录本身位于文件
+系统根之下**（`_is_profile_dir`）。容器、CI、`sudo` 以及本项目自己的测试沙箱都会改写
+前者。实测：把 `HOME` 指向沙箱后，上行走了七层、走出临时夹具、进入真实用户配置目录，并
+命中了某次在 home 里运行的会话留下的 `memory/memory.db`。结构扛得住这种改写，环境扛不住。
+"位于文件系统根之下"这个限定是 v2.7.0 加的，且在**另一个方向**上同样吃重：没有它，任何
+仓库内名为 `users/` 的目录都会被当成用户配置根并截断整条链，于是 `<repo>/users/alice/sub`
+里的会话哪一档都够不到，反而在四层深处种下野生库——防它的守卫亲手制造了它。
+
+**不只 hook，所有入口都锚定（v2.7.0）。** `cc-mem` 的 `--project` 会过
+`_anchor_project`（`cli/mem.py:1713-1741`），`/ccm-load` 技能也在搭建骨架前先解析。在此
+之前，hook 拒绝创建野生库，而从子目录跑 `/cc-mem add` 却照造不误——而且第 0 档是终止档，
+一旦造出来，六个 hook 就被永久钉死在它上面。重定向一律**打印**出来：显式的 `--project`
+是一条指令，悄悄拿它做别的事比那个 bug 更糟。
 
 因此，已存在的野生库会被原地留下——并且被**报告**出来，不至于隐形：`nested_databases`
 （`core/roots.py:386-424`）支撑着 `cc-mem status` 里的

@@ -410,7 +410,7 @@ caller's responsibility, and there are exactly two shapes:
   PreCompact leg additionally touches it again after the rest of its state
   changes (`pre_compact.py:692`).
 - Single-shot callers call `regenerate_memory_index` explicitly:
-  `cli/mem.py:886` and `:584`, `mcp/server.py:525`, `ui/dashboard.py:1540`,
+  `cli/mem.py:923` and `:584`, `mcp/server.py:525`, `ui/dashboard.py:1540`,
   `ui/web_viewer.py:325`, plus the `skills/ccm-load` inline script
   (`SKILL.md:127, 137`). `core/idle.py:94` and
   `hooks/consolidate_async.py:188` also refresh it after maintenance.
@@ -513,7 +513,7 @@ SessionStart:
 Call signatures above are the real ones: `write_progress_md(db, project_id,
 memory_dir)` (`core/progress.py:323`; call sites `pre_compact.py:677`,
 `stop.py:213`, `user_prompt.py:133`, `session_start.py:680`, `mcp/server.py:243`,
-`cli/mem.py:648`). See
+`cli/mem.py:1089`). See
 [docs/CONTRACTS.md](CONTRACTS.md#handoff-contract) for the PROGRESS.md
 schema.
 
@@ -776,12 +776,12 @@ already exists means merging two SQLite files — destructive and irreversible �
 which belongs in an explicit, confirmed command, not in a hook that runs on
 every prompt.
 
-`project_root` (`core/roots.py:346-383`) resolves a root first. Every hook
+`project_root` (`core/roots.py:483-528`) resolves a root first. Every hook
 rebinds `cwd` to it immediately **after** `is_excluded` and never before:
 resolving first would widen a per-subdirectory exclusion away by climbing to
 its unexcluded parent. The chain of candidate ancestors stops below any home
 directory, below the filesystem root, at a `.ccm-root` pin, and after 25
-levels (`_chain`, `core/roots.py:229-257`). First hit wins:
+levels (`_chain`, `core/roots.py:267-295`). First hit wins:
 
 0. `cwd` itself has `memory/memory.db` → `cwd`. Terminal, before anything else
    is consulted. This single line is what discharges the "never orphan"
@@ -791,36 +791,53 @@ levels (`_chain`, `core/roots.py:229-257`). First hit wins:
    `CodeEraser/cli` has no database while `CodeEraser` does. It needs no VCS
    and no manifest, which matters for projects that are not repositories.
 2. `CLAUDE_PROJECT_DIR`, when it names a directory in the chain (`_from_env`,
-   `core/roots.py:361-379`). Ranked *below* the database rungs deliberately:
+   `core/roots.py:462-480`). Ranked *below* the database rungs deliberately:
    it records where Claude Code was launched, which is not authority to orphan
    a database. Containment is likewise the point — a value left over from
    another project must not redirect this one.
 3. Project markers — `.git`, `.hg`, `.svn`, `.ccm-root` and the usual
-   manifests (`_MARKERS`, `core/roots.py:140-145`) — nearest, then extended
-   outward so that a Cargo workspace member or a monorepo package resolves to
-   its workspace rather than to itself (`_marker_root`,
-   `core/roots.py:330-358`). The only rung that can fire before any database
-   exists, i.e. the one doing the actual prevention.
+   manifests (`_MARKERS`) — nearest, then extended outward to the enclosing
+   repository (`_marker_root`). The only rung that can fire before any
+   database exists, i.e. the one doing the actual prevention.
 4. The cwd as given — the pre-v2.6.0 answer, so nothing that worked before
    stops working. When the answer is cwd, the ORIGINAL string is returned
    unresolved, which keeps symlinked project directories byte-identical to
    their old behaviour.
 
-**The marker rung's outward extension has three ceilings**, because it is the
-only rung that travels and an unbounded one collapses a whole projects folder:
+**The guards belong to the CANDIDATE SET, not to any one rung (v2.7.0).**
+v2.6.0 hung them off the marker rung's extension loop alone, and every rung
+that did not inherit them became a separate data-integrity defect: the
+database rung consulted nothing, so a `memory/` created by one session in a
+projects folder captured every uninitialised project under it; the marker rung
+never checked the FIRST marker it found, so one stray `package.json` there did
+the same; and neither had any notion of a dependency tree. `_candidates`
+(`core/roots.py:376-404`) now filters the chain once, before any rung reads it:
 
-- `_MARKER_MAX_RISE` (`core/roots.py:111`) = 6 levels above cwd. Caught by
-  test_surfaces §4 climbing *seven* levels out of a temp fixture into the real
-  user profile.
-- A **VCS root ends the walk inclusively** (`_is_vcs_root`): a repository is
-  the outermost thing that can still be one project. Using `.git` only as a
-  *stop* signal never *requires* it, so VCS-less projects keep working.
-- A **container of projects is refused** (`_is_container`,
-  `core/roots.py:264-293`): if a candidate has two or more immediate children
-  that are themselves VCS roots or database owners, the walk stops below it.
-  The reporting machine's projects folder has 27 such children, so without
-  this one stray `package.json` dropped there would have collapsed every
-  project under it into a single database.
+- **Containers of projects are removed** (`_is_container`). Two asymmetric
+  triggers: two or more children that are VCS roots is always decisive (the
+  reporting machine's projects folder has 27), while two or more children that
+  merely own a database counts only when this directory owns none itself — a
+  project whose own database sits alongside nested ones is a real, observed
+  layout. A directory that is itself a VCS root is never a container, or a
+  repository with two submodules would stop being resolvable.
+- **Dependency trees are removed** (`_DEPENDENCY_DIRS`). Reading a file under
+  `node_modules/`, `vendor/` or `site-packages/` anchors on the project that
+  *depends* on the package. v2.6.0 anchored on the package — it has a
+  `package.json`, so the marker rung accepted it — and planted a database
+  inside the dependency tree, where the reporter did not look. Filtering, not
+  truncating: the walk must continue *past* the dependency to reach its owner.
+
+The marker rung then has two remaining ceilings: `_MARKER_MAX_RISE` = 6 levels
+above cwd (caught by test_surfaces §4 climbing *seven* levels out of a temp
+fixture into the real user profile), and a **VCS root, which ends the walk
+inclusively** — a repository is the outermost thing that can still be one
+project, and using `.git` only as a *stop* signal never *requires* it.
+
+The extension deliberately does **not** require a contiguous run of markers.
+v2.6.0 broke the run at the first marker-less ancestor, which is exactly what
+`packages/`, `apps/`, `crates/` and `libs/` are, so the standard monorepo
+layout resolved to the package and re-created the very stray this module
+exists to prevent — while two docstrings promised the workspace.
 
 Two absences from the marker set are deliberate. `CLAUDE.md` is not a marker
 because Claude Code supports per-subdirectory ones, and neither is `.claude/`
@@ -830,13 +847,25 @@ residue, not root evidence.
 
 The home boundary is doubled: what the environment reports
 (`HOME`/`USERPROFILE`/`Path.home()`, `_home_dirs`) **and** the
-platform-conventional shape — any direct child of a directory named `Users` or
-`home` (`_is_profile_dir`, `core/roots.py:199-226`). Containers, CI, `sudo`
-and this project's own test sandbox all redirect the former. Measured with
-`HOME` pointed into a sandbox: the walk climbed seven levels out of a temp
-fixture into the real profile and matched the `memory/memory.db` that one
-session run in the home directory had left there. Structure survives that
-redirection; environment does not.
+platform-conventional shape — a child of a directory named `Users` or `home`
+**that itself sits at the filesystem root** (`_is_profile_dir`). Containers,
+CI, `sudo` and this project's own test sandbox all redirect the former.
+Measured with `HOME` pointed into a sandbox: the walk climbed seven levels out
+of a temp fixture into the real profile and matched the `memory/memory.db`
+that one session run in the home directory had left there. Structure survives
+that redirection; environment does not. The filesystem-root qualifier is
+v2.7.0 and is load-bearing in the other direction: without it any in-repo
+directory named `users/` looked like a profile and truncated the chain, so a
+session in `<repo>/users/alice/sub` could reach no rung at all and planted a
+stray four levels down — the defect produced by the guard against it.
+
+**Every surface anchors, not just the hooks (v2.7.0).** `cc-mem`'s
+`--project` goes through `_anchor_project` (`cli/mem.py:1713-1741`) and the
+`/ccm-load` skill resolves before it builds the scaffold. Until then the hooks
+refused to create a stray while `/cc-mem add` from a subdirectory happily made
+one — and rung 0, being terminal, then pinned all six hooks to it forever. A
+redirection is always PRINTED: an explicit `--project` is an instruction, and
+quietly doing something else with it would be worse than the bug.
 
 A pre-existing stray is therefore left exactly where it is — and *reported*,
 so it is not invisible: `nested_databases` (`core/roots.py:386-424`) backs a
@@ -994,7 +1023,7 @@ mentions "cc-memory" without running one of this build's six hook scripts is
 
 Detection accepts both shapes: `mem.py:181` tests
 `(legacy / "cc_memory").exists() or (legacy / "core" / "db.py").exists()`.
-Inspection used to disagree with it. `_inspect_layout` (`mem.py:353`) resolved
+Inspection used to disagree with it. `_inspect_layout` (`mem.py:358-427`) resolved
 every `cc_memory/…`-prefixed entry of `_REQUIRED_PLUGIN_FILES` (`mem.py:138`)
 against the layout **root**, so a healthy flat install reported all 22 files
 missing, printed `[FAIL]`, and — because `/cc-mem status` only runs the API-key

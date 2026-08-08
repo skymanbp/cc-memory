@@ -7,6 +7,92 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [2.7.0] — 2026-08-08
+
+**v2.6.0 attached its safety guards to one rung's inner loop instead of to the
+candidate set, and every rung that did not inherit them became its own
+data-integrity defect.** A convergent adversarial debug round — five
+dimensions, every finding double-verified against the real source — confirmed
+45 defects in the release. The three worst all share that one root cause, and
+all three were reproduced before being fixed:
+
+- the **database rung consulted no guard at all**, so a `memory/` created by a
+  single session in a projects folder captured every uninitialised project
+  under it (measured: five repository children, all swallowed);
+- the **marker rung never container-checked the first marker it found**, only
+  the ones it extended onto, so one stray `package.json` in a projects folder
+  did the same to every marker-less directory below it;
+- **neither had any notion of a dependency tree**, so a cwd inside
+  `node_modules/left-pad` anchored on the package — it has a `package.json` —
+  and planted a database where the reporter does not look.
+
+### Fixed — resolution
+
+- **`_candidates()` filters the chain once, before any rung reads it.**
+  Containers and dependency internals are simply not candidates, for every
+  rung, which is the structural fix rather than three separate patches.
+- **`_is_container` rewritten with asymmetric triggers.** Two VCS-root
+  children is always decisive; two merely database-owning children counts only
+  when the directory owns none itself. A directory that is itself a VCS root
+  is never a container — otherwise a repository with two submodules stops
+  being resolvable. v2.6.0's version exempted any directory with a database,
+  which is exactly what a polluted container has.
+- **The marker extension no longer requires a contiguous run.** `packages/`,
+  `apps/`, `crates/` and `libs/` carry no manifest, so v2.6.0 stopped at the
+  package and re-created the stray — while two of its own docstrings promised
+  the workspace. The VCS ceiling is what bounds the climb.
+- **`_is_profile_dir` now requires the `Users`/`home` container to sit at the
+  filesystem root.** Without that, any in-repo `users/` directory looked like
+  a profile and truncated the chain, so a session in `<repo>/users/alice/sub`
+  reached no rung and planted a stray four levels down — the defect produced
+  by the guard against it.
+
+### Fixed — hook contract
+
+- **`project_root` now really never raises.** v2.6.0 claimed it and did not
+  deliver: the handler's own `return Path(cwd)` re-raised the TypeError it was
+  catching, so a `{"cwd": 123}` payload took the hook to rc=1 with a traceback
+  on stderr — which Claude Code renders as an error UI.
+- **`user_prompt.py` gained the field-type guard the other five hooks already
+  had.** It was the one hook that would crash on a non-string `cwd` or
+  `session_id` outside any try.
+
+### Fixed — reporting and install
+
+- **Every surface anchors, not just the hooks.** `cc-mem`'s `--project` goes
+  through `_anchor_project` and `/ccm-load` resolves before building the
+  scaffold. Until now the hooks refused to create a stray while `/cc-mem add`
+  from a subdirectory made one — and rung 0, being terminal, then pinned all
+  six hooks to it permanently. A redirection is always PRINTED: an explicit
+  `--project` is an instruction.
+- **`nested_databases` reached one level less than asked** (a directory's own
+  `memory/` is found while scanning that directory), and **skipped nine
+  directory names including `vendor` and `node_modules`** — i.e. the one tool
+  meant to surface a stray was blind exactly where strays are most likely.
+  Depth is now honoured and the skip set is down to `.git` and `__pycache__`.
+- **The nested-database report now runs BEFORE the missing-database early
+  return.** The stray-only shape — no database here, one in a subdirectory —
+  is the most damaging layout there is, and v2.6.0 printed "No database" and
+  returned without mentioning it.
+- **The nested count is active-only and cannot write.** It counted every row
+  while the root's own line counted active rows, so the same command reported
+  two sizes for one database (3725 vs 2607 here); and plain `mode=ro` still
+  lets SQLite create `-wal`/`-shm` siblings, so the "read-only" report wrote
+  into the directory it only meant to name. `immutable=1` forbids that.
+- **`core/roots.py` added to `_REQUIRED_PLUGIN_FILES`.** Every hook imports it
+  at module level, so an install missing it does not degrade — all six die at
+  import, while `status` reported the install healthy.
+
+### Tests
+
+`tests/test_surfaces.py` §7 grew to 23 ladder cases plus a contracts block:
+every defect above has a fixture that reproduces it, `_CONTAINER_CHILDREN` is
+pinned from both sides (it was completely unpinned — the suite passed with the
+threshold at 1), and `project_root` is asserted to return a `Path` for `int`,
+`None`, `list`, `dict` and `bytes`.
+
+---
+
 ## [2.6.0] — 2026-08-07
 
 **Every hook read the project out of `cwd`, and `cwd` follows the agent's own
@@ -334,7 +420,7 @@ Two of the six turned out to be worse than they were written up as.
 - **Doc citation coverage nearly doubled.** `tools/citation_check.py` could only
   anchor a citation when the symbol was defined in the *cited* file, so the most
   common shape in these docs — a call site, `` `db.tag_progress_session(...)`
-  (`user_prompt.py:195`) `` — went unchecked: 370 of 594, 62 %. It now anchors
+  (`user_prompt.py:202`) `` — went unchecked: 370 of 594, 62 %. It now anchors
   cross-file citations on the text of the cited range, and **341 of 594 are
   checked** (was 224).
 

@@ -114,6 +114,16 @@ _MARKER_MAX_RISE = 6
 # of projects, not a project. `D:\Projects` on the reporting machine has 27.
 _CONTAINER_CHILDREN = 2
 
+# Directories whose CONTENTS are somebody else's code. A cwd inside one of
+# these belongs to the project that depends on the package, never to the
+# package — and a database planted in here is invisible to every reporting
+# path, so it can never be cleaned up. Matched by directory NAME, lowercased.
+_DEPENDENCY_DIRS = frozenset((
+    "node_modules", "vendor", "site-packages", "bower_components",
+    ".venv", "venv", "virtualenv", ".tox", ".nox", "eggs", ".eggs",
+    "third_party", "thirdparty", "external", "deps", "_deps",
+))
+
 # Explicit pin. Truncates the walk INCLUSIVELY: the directory holding it is
 # the root, and no ancestor of it is ever considered.
 PIN_MARKER = ".ccm-root"
@@ -203,12 +213,32 @@ def _home_dirs():
 _PROFILE_PARENTS = ("users", "home")
 
 
+def _is_fs_root(path):
+    """True for `C:\\`, `/`, `\\\\server\\share` — a path that is its own parent."""
+    try:
+        return path.parent == path
+    except Exception:
+        # why: an undecomposable path is not a filesystem root; the depth cap
+        # still bounds the walk
+        return False
+
+
 def _is_profile_dir(path):
     """True when `path` is a per-user profile root by platform convention.
 
-    That is: any direct child of a directory named `Users` or `home` — the
-    shape a home directory has on Windows, Linux and macOS alike. Nothing
-    machine-specific is encoded; only the container name is matched.
+    That is: a direct child of a directory named `Users` or `home` **that
+    itself sits at the filesystem root** — `C:\\Users\\alice`, `/home/alice`,
+    `/Users/alice`. Nothing machine-specific is encoded; only the shape is.
+
+    The filesystem-root qualifier is load-bearing and was missing in v2.6.0.
+    Without it any in-repo directory named `users` or `home` looked like a
+    profile: measured, a session in `<repo>/users/alice/sub` had its chain
+    truncated to `[cwd]`, so no rung could reach the repo and the next
+    UserPromptSubmit planted a stray database four levels down — the exact
+    defect this module exists to prevent, produced by the guard meant to
+    prevent it. A real profile's parent (`C:\\Users`, `/home`) is always a
+    child of the filesystem root; an application's `users/` table directory
+    never is.
 
     `_home_dirs()` alone is not enough: every entry in it comes from the
     ENVIRONMENT. Redirect HOME/USERPROFILE — which containers, CI, sudo and
@@ -226,7 +256,8 @@ def _is_profile_dir(path):
     try:
         parent = path.parent
         return (parent != path and bool(path.name)
-                and parent.name.lower() in _PROFILE_PARENTS)
+                and parent.name.lower() in _PROFILE_PARENTS
+                and _is_fs_root(parent.parent))
     except Exception:
         # why: an exotic path that cannot be decomposed is simply not a
         # profile dir; the env boundary and the depth cap still apply.
@@ -286,18 +317,43 @@ def _is_vcs_root(directory):
 def _is_container(directory):
     """True when `directory` holds several projects rather than being one.
 
-    Checked before every upward step of the marker rung. Without it, one
-    stray marker in a projects folder captures every project under it at
-    once: the reporting machine's `D:\\Projects` has 27 project-shaped
-    children, so a single `package.json` dropped there — or a `memory/`
-    created by one session run in that folder — would have collapsed all of
-    them into one database.
+    Consulted for EVERY candidate, on every rung — see `_candidates`. In
+    v2.6.0 it had exactly one call site, the marker rung's extension loop,
+    and that single-point wiring was the shared root cause of three separate
+    data-integrity defects: the database rung never asked (so a `memory/`
+    created by one session in a projects folder captured every uninitialised
+    project under it), the marker rung never asked about the FIRST marker it
+    found (so one stray `package.json` there did the same), and nothing asked
+    on behalf of a marker-less cwd. Measured on the reporting machine:
+    `D:\\Projects` has 27 project-shaped children.
 
-    Scans at most a bounded prefix of the directory: it stops as soon as the
-    threshold is reached, and a directory it cannot read is not a container.
+    A directory that is itself a VCS ROOT is never a container, however many
+    project-shaped children it has: a repository is an unambiguous statement
+    of "I am one project", and without that clause `Claude-Code-Local` —
+    which carries its own `.git` plus three nested project databases — would
+    be refused and a new subdirectory of it could no longer resolve to it.
+
+    Owning a `memory/` is deliberately NOT such a statement. A container that
+    has acquired a stray database is exactly the damage shape being guarded
+    against: measured, a projects folder with a stray `memory/memory.db`
+    and five repository children captured every one of them.
+
+    The two triggers are therefore asymmetric:
+
+      * >= N children that are VCS roots — always decisive; this is the real
+        projects-folder shape (27 such children on the reporting machine);
+      * >= N children that merely own a database — only when this directory
+        owns none itself. A project whose own database sits alongside two
+        nested ones is a legitimate, observed layout, not a container.
+
+    Reads the directory once and counts both; an unreadable directory is not
+    a container.
     """
+    if _is_vcs_root(directory):
+        return False
+    vcs_children = 0
+    db_children = 0
     try:
-        hits = 0
         with os.scandir(directory) as entries:
             for entry in entries:
                 try:
@@ -308,16 +364,51 @@ def _is_container(directory):
                     # decide the verdict for the whole directory
                     continue
                 child = Path(entry.path)
-                if _is_vcs_root(child) or _has_db(child):
-                    hits += 1
-                    if hits >= _CONTAINER_CHILDREN:
-                        return True
-        return False
+                if _is_vcs_root(child):
+                    vcs_children += 1
+                elif _has_db(child):
+                    db_children += 1
+                if vcs_children >= _CONTAINER_CHILDREN:
+                    return True  # decisive; no need to read the rest
     except Exception:
         # why: an unreadable directory cannot be shown to be a container, and
-        # the caller's other ceiling (VCS root) plus _MARKER_MAX_RISE still
-        # bound the walk.
+        # the VCS ceiling plus _MARKER_MAX_RISE still bound the walk.
         return False
+    return db_children >= _CONTAINER_CHILDREN and not _has_db(directory)
+
+
+def _candidates(chain):
+    """The entries of `chain` that may legitimately BE a project root.
+
+    Two exclusions, applied once so that every rung inherits them. v2.6.0
+    attached its guards to one rung's inner loop instead, and each rung that
+    did not inherit them became its own defect.
+
+    1. Anything at or inside a DEPENDENCY directory. Reading a file under
+       `node_modules/`, `vendor/` or `site-packages/` must anchor memory on
+       the project that DEPENDS on the package, not on the package: measured,
+       a cwd of `<repo>/node_modules/left-pad` resolved to `left-pad` itself
+       (it has a `package.json`, so the marker rung accepted it) and planted
+       a database inside the dependency tree — where `nested_databases` does
+       not look, so it could never even be reported. The cut is by outermost
+       occurrence: everything nearer the cwd than a dependency directory is
+       that dependency's internals.
+    2. Containers of projects — see `_is_container`.
+
+    Filtering rather than truncating is deliberate: the walk must continue
+    PAST a dependency directory to reach the project that owns it.
+    """
+    dep_cut = -1
+    for i, directory in enumerate(chain):
+        try:
+            if directory.name.lower() in _DEPENDENCY_DIRS:
+                dep_cut = i
+        except Exception:
+            # why: an undecomposable name is not a dependency marker; the
+            # remaining exclusions still apply to it
+            continue
+    return [d for i, d in enumerate(chain)
+            if i > dep_cut and not _is_container(d)]
 
 
 def _nearest(chain, predicate):
@@ -328,16 +419,27 @@ def _nearest(chain, predicate):
 
 
 def _marker_root(chain):
-    """Nearest marker, extended outward under two ceilings, or None.
+    """Nearest marker, extended outward to the enclosing repository, or None.
 
-    The extension is what makes a Cargo workspace member or a monorepo
-    package resolve to its workspace instead of to itself. The ceilings are
-    what keep it from walking out of the project entirely:
+    `chain` is already filtered by `_candidates`, so containers and
+    dependency internals are simply not present — that is what fixes
+    v2.6.0's hole where only the EXTENSION candidates were checked and the
+    seed was accepted unconditionally.
+
+    Two ceilings remain:
 
       * a VCS root ENDS the walk inclusively — a repository is the outermost
         thing that can still be one project. Using `.git` as a stop signal
         never *requires* git, so projects without any VCS keep working;
-      * a container directory is refused and stops the walk BELOW itself.
+      * `_MARKER_MAX_RISE`, so a guess cannot travel far.
+
+    The extension deliberately does NOT require a contiguous run of markers.
+    v2.6.0 broke the run at the first marker-less ancestor, which is exactly
+    what `packages/`, `apps/`, `crates/` and `libs/` are — so the standard
+    monorepo layout resolved to the package and re-created the very stray
+    database this module exists to prevent, while two docstrings claimed the
+    opposite. Climbing to the enclosing repository is the whole point; the
+    VCS ceiling is what bounds it.
     """
     start = None
     for i, directory in enumerate(chain[:_MARKER_MAX_RISE + 1]):
@@ -350,11 +452,10 @@ def _marker_root(chain):
     if _is_vcs_root(best):
         return best
     for directory in chain[start + 1:_MARKER_MAX_RISE + 1]:
-        if not _has_marker(directory) or _is_container(directory):
-            break
-        best = directory
         if _is_vcs_root(directory):
-            break
+            return directory  # the enclosing repository wins outright
+        if _has_marker(directory):
+            best = directory
     return best
 
 
@@ -390,13 +491,23 @@ def project_root(cwd, log=None):
 
     `log`, when given, is a `core.logger` instance; it is used ONLY to report
     a redirection, and only from hooks rare enough that a line per event is
-    not a line per turn. Never raises: any failure returns `Path(cwd)`.
+    not a line per turn.
+
+    NEVER RAISES — including for a `cwd` that is not a path at all. v2.6.0
+    claimed this and did not deliver it: the handler's own `return Path(cwd)`
+    re-raised the TypeError it was catching, so a payload carrying
+    `{"cwd": 123}` took the hook to rc=1 with a traceback on stderr, which
+    Claude Code renders as an error. A non-path `cwd` now yields `Path(".")`,
+    whose `memory/memory.db` check fails in every caller, so the hook exits
+    quietly the way a malformed payload always should.
     """
     try:
         start = Path(cwd).resolve()
         if _has_db(start):
             return Path(cwd)  # rung 0: an existing database is terminal
-        chain = _chain(start)
+        # Every rung reads the FILTERED chain: containers and dependency
+        # internals are not project roots no matter which rung is asking.
+        chain = _candidates(_chain(start))
         root = (_nearest(chain, _has_db)
                 or _from_env(chain)
                 or _marker_root(chain))
@@ -414,7 +525,18 @@ def project_root(cwd, log=None):
         # why: hook safety outranks correctness here. An unresolvable cwd
         # falls back to exactly what every hook did before this module
         # existed, so the worst case is the old behaviour, never a crash.
+        return _safe_path(cwd)
+
+
+def _safe_path(cwd):
+    """`Path(cwd)` that cannot itself raise — the fallback's fallback."""
+    try:
         return Path(cwd)
+    except Exception:
+        # why: `cwd` was not path-like at all (a number, a list). Returning
+        # the current directory keeps the contract "never raises" true; every
+        # caller then fails its memory/memory.db existence check and exits 0.
+        return Path(".")
 
 
 def nested_databases(root, max_depth=3):
@@ -425,6 +547,18 @@ def nested_databases(root, max_depth=3):
     before v2.6.0 is otherwise invisible: nothing reads it and nothing says
     so. This is the reporting half, deliberately on an explicit CLI command
     rather than in a hook, because it walks the tree.
+
+    `max_depth` counts DIRECTORY LEVELS below `root` that may own a database,
+    so `max_depth=3` reports `a`, `a/b` and `a/b/c`. v2.6.0 started the walk
+    at depth 1 against the same guard and reported only two of those three:
+    a directory's own `memory/` is discovered while scanning that directory,
+    so the deepest level was cut off before it was ever read.
+
+    The skip set is now only the two names that structurally cannot hold a
+    project's memory directory. v2.6.0 also skipped `vendor`, `node_modules`,
+    `.venv` and five more — the exact places the resolver could plant a
+    database, which made the one tool meant to surface a stray blind to the
+    strays most likely to exist.
     """
     out = []
     try:
@@ -432,8 +566,7 @@ def nested_databases(root, max_depth=3):
     except Exception:
         # why: an unresolvable root has nothing to report on
         return out
-    skip = {".git", "node_modules", "target", "dist", "build", ".venv",
-            "__pycache__", ".tox", "vendor"}
+    skip = {".git", "__pycache__"}
 
     def walk(directory, depth):
         if depth > max_depth:
@@ -456,5 +589,5 @@ def nested_databases(root, max_depth=3):
                 continue
             walk(child, depth + 1)
 
-    walk(base, 1)
+    walk(base, 0)
     return out

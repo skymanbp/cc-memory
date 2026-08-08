@@ -204,7 +204,21 @@ best = active[0]
 print(f'[OK] cc-memory ACTIVATED ({best[\"name\"]} layout) - bootstrapping project')
 
 # ── (2) Project init ───────────────────────────────────────────────────
+# Anchor on the project ROOT, not the shell's cwd. Run from a subdirectory
+# this used to build the scaffold there — the exact stray database the hooks
+# refuse to create since v2.6.0 — and because an existing database is
+# terminal, all six hooks would then be pinned to it permanently. Falls back
+# to cwd if the resolver cannot be imported (flat installs predating it).
 project = Path('.').resolve()
+try:
+    sys.path.insert(0, str(Path(best['path'])))
+    from core.roots import project_root
+    anchored = Path(project_root(str(project))).resolve()
+    if anchored != project:
+        print(f'[init] {project} is inside a project rooted at {anchored} - using that root')
+        project = anchored
+except Exception as _anchor_err:
+    print(f'[init] root anchoring unavailable ({_anchor_err}); using {project}')
 mem_dir = project / 'memory'
 db_path = mem_dir / 'memory.db'
 

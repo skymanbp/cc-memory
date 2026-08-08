@@ -2,7 +2,7 @@
 
 ## Project: cc-memory
 
-**Claude Code persistent memory plugin (v2.5.6)** — anti-patch reconcile-on-write
+**Claude Code persistent memory plugin (v2.7.0)** — anti-patch reconcile-on-write
 + LLM-judged semantic de-duplication, forced PROGRESS.md handoff with
 per-session annotation, live PLAN.md anchor with plan-refiner / plan-guardian
 subagents + mandatory carryover gate, bounded transcript reads, injection
@@ -10,7 +10,7 @@ observability, FTS5 search, AI-judged extraction with Haiku (optional local
 Ollama fallback).
 
 - **Language**: Python 3.8+ (pure stdlib, zero pip dependencies at runtime)
-- **Version**: 2.5.6
+- **Version**: 2.7.0
 - **License**: MIT
 - **Platform**: Windows-primary, cross-platform compatible (Tkinter required for GUI)
 
@@ -834,7 +834,7 @@ Two limits to know before trusting a green result: a citation whose sentence
 names no resolvable symbol at all is reported **SKIP**, not OK (253 of 594
 today, down from 370 once v2.5.3 taught it to anchor CROSS-FILE citations on the
 text of the cited range — the `` `db.tag_progress_session(...)`
-(`user_prompt.py:195`) `` shape, which is the commonest in these docs). `--fix`
+(`user_prompt.py:202`) `` shape, which is the commonest in these docs). `--fix`
 rewrites a same-file citation to the **definition** site and a cross-file one to
 the occurrence NEAREST the stale number — a stated assumption (it was right when
 written; the file grew above it), not a proof. Ordinary variable

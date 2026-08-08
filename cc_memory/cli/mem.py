@@ -151,6 +151,11 @@ _REQUIRED_PLUGIN_FILES = [
     "cc_memory/core/auth.py",
     "cc_memory/core/consolidate.py",
     "cc_memory/core/idle.py",
+    # v2.6.0: every hook imports this at MODULE level, so an install missing
+    # it does not degrade — all six die at import with a stderr traceback.
+    # It was absent from this list, which is what let `status` report an
+    # install "healthy" while nothing worked.
+    "cc_memory/core/roots.py",
     "cc_memory/hooks/pre_compact.py",
     "cc_memory/hooks/consolidate_async.py",
     "cc_memory/hooks/session_start.py",
@@ -458,6 +463,69 @@ def _print_layout_report(layout: dict) -> bool:
     return layout["plugin_files_ok"] and n == 5 and layout["enabled"]
 
 
+def _count_active_memories(db_file):
+    """Active memory rows in `db_file`, or "?" — without writing to it.
+
+    `immutable=1` on top of `mode=ro` is the load-bearing part. Plain
+    `mode=ro` still lets SQLite create `-wal` and `-shm` siblings next to a
+    WAL database, i.e. the report writes into the very directory it is only
+    supposed to NAME. immutable forbids that outright; the cost is that
+    content sitting unmerged in a WAL is not counted, which for a "there is
+    another database here, roughly this big" line is an acceptable trade and
+    is why the number is presented as approximate.
+
+    Counts ACTIVE rows only, matching `get_stats` — the root's own line is
+    active-only, and v2.6.0 counted every row here, so the same command
+    reported two different sizes for the same database (3725 vs 2607 on the
+    reporting machine).
+    """
+    try:
+        conn = sqlite3.connect(f"file:{db_file}?mode=ro&immutable=1", uri=True)
+    except sqlite3.Error:
+        # why: unreadable, locked or not a database — it is still worth
+        # naming; only its size is unknown
+        return "?"
+    try:
+        return conn.execute(
+            "SELECT COUNT(*) FROM memories WHERE is_active = 1").fetchone()[0]
+    except sqlite3.Error:
+        # why: a foreign or pre-v2 schema has no is_active column; the row
+        # count is still a useful magnitude
+        try:
+            return conn.execute("SELECT COUNT(*) FROM memories").fetchone()[0]
+        except sqlite3.Error:
+            return "?"
+    finally:
+        conn.close()
+
+
+def _report_nested_databases(project):
+    """Name every separate database below `project`. Never raises.
+
+    The REPORTING half of root anchoring. Resolution never merges or moves a
+    database that already exists — a stray born before v2.6.0 and a
+    deliberate nested sub-project are byte-for-byte identical on disk, so
+    touching either automatically would destroy the other (the reporting
+    machine has four genuinely nested ones, the largest holding 3725
+    memories). But an unnoticed stray is otherwise invisible: nothing reads
+    it and nothing says so. Listing them here — an explicit command, not a
+    per-turn hook — is the visibility without the destruction.
+    """
+    try:
+        from core.roots import nested_databases
+        nested = nested_databases(project)
+    except Exception as exc:
+        # why: a diagnostic must never take down the status report it is in
+        print(f"  [WARN] Nested-database scan skipped: {exc}")
+        return
+    for sub in nested:
+        n_sub = _count_active_memories(sub / "memory" / "memory.db")
+        print(f"  [WARN] Separate database below this project: {sub} "
+              f"(~{n_sub} memories). Sessions run there use IT, not this one. "
+              f"If that is a stray, move or delete it; if it is a project in "
+              f"its own right, nothing to do.")
+
+
 def cmd_status(args):
     memory_dir, db_path, name = _resolve_db(args.project)
     project = str(Path(args.project).resolve())
@@ -521,6 +589,12 @@ def cmd_status(args):
                           if "broken_reason" not in L
                           and L.get("plugin_files_ok")), None)
 
+    # BEFORE the missing-database early return, deliberately. The
+    # stray-only shape — this directory has no database of its own while a
+    # subdirectory does — is the single most damaging layout there is, and
+    # v2.6.0 printed "No database" and returned without ever mentioning it.
+    _report_nested_databases(project)
+
     if not db_path.exists():
         print(f"  [FAIL] No database at {db_path}")
         return
@@ -533,43 +607,6 @@ def cmd_status(args):
     print(f"  [{'OK' if db._fts5_available else 'WARN'}]   FTS5: "
           f"{'available' if db._fts5_available else 'unavailable (using LIKE fallback)'}")
     print(f"  [INFO] Observations: {db.get_observation_count(pid)} recorded")
-
-    # v2.6.0: the REPORTING half of root anchoring. Resolution never merges or
-    # moves a database that already exists — a stray born before v2.6.0 and a
-    # deliberate nested sub-project are byte-for-byte identical on disk, so
-    # touching either automatically would destroy the other (the reporting
-    # machine has four genuinely nested ones, the largest holding 3725
-    # memories). But an unnoticed stray is otherwise invisible: nothing reads
-    # it and nothing says so. Listing them here — an explicit command, not a
-    # per-turn hook — is the visibility without the destruction.
-    try:
-        from core.roots import nested_databases
-        nested = nested_databases(project)
-    except Exception as exc:
-        # why: a diagnostic must never take down the status report it is part of
-        nested = []
-        print(f"  [WARN] Nested-database scan skipped: {exc}")
-    for sub in nested:
-        # READ-ONLY by construction. Going through MemoryDB here would mean
-        # upsert_project() on someone else's database — a write, from a
-        # command whose whole job is to report — and counting rows needs no
-        # project id anyway.
-        n_sub = "?"
-        try:
-            conn = sqlite3.connect(
-                f"file:{sub / 'memory' / 'memory.db'}?mode=ro", uri=True)
-            try:
-                n_sub = conn.execute("SELECT COUNT(*) FROM memories").fetchone()[0]
-            finally:
-                conn.close()
-        except sqlite3.Error:
-            # why: an unreadable, locked or foreign .db is still worth naming;
-            # only its size is unknown
-            n_sub = "?"
-        print(f"  [WARN] Separate database below this project: {sub} "
-              f"({n_sub} memories). Sessions run there use IT, not this one. "
-              f"If that is a stray, move or delete it; if it is a project in "
-              f"its own right, nothing to do.")
 
     last_save = memory_dir / ".last_save.json"
     if last_save.exists():
@@ -1653,8 +1690,44 @@ def make_parser():
     return p
 
 
+def _anchor_project(raw):
+    """Resolve `--project` to the project ROOT, announcing any redirection.
+
+    Every subcommand reads `args.project`, so anchoring once here is what
+    makes "one project, one database" true at the CLI too. Until v2.7.0 the
+    hooks anchored and the CLI did not, so `/cc-mem add` run from a
+    subdirectory created exactly the stray database the hooks had just been
+    taught to refuse — and rung 0 (an existing database is terminal) then
+    pinned all six hooks to it permanently. The same gap made `status`
+    report "No database" for a subdirectory the hooks were happily using.
+
+    The redirection is PRINTED, never silent: an explicit `--project` is an
+    instruction, and quietly doing something else to it would be worse than
+    the bug. Never raises — `project_root` cannot, and a failed import
+    leaves the raw value in place.
+    """
+    try:
+        from core.roots import project_root
+        root = project_root(raw)
+    except Exception as exc:
+        # why: the CLI must keep working even if the resolver cannot load;
+        # the raw path is exactly the pre-v2.7.0 behaviour
+        print(f"[cc-memory] project-root anchoring unavailable ({exc}); "
+              f"using {raw} as given")
+        return raw
+    # Path comparison, not os.path.normcase: PurePath.__eq__ already applies
+    # the platform's case rule, and mem.py deliberately imports no `os`.
+    if Path(root).resolve() != Path(raw).resolve():
+        print(f"[cc-memory] {raw}\n"
+              f"            is inside a project rooted at {root} — using that "
+              f"root, so this command and the hooks share one database.")
+    return str(root)
+
+
 def main():
     args = make_parser().parse_args()
+    if getattr(args, "project", None):
+        args.project = _anchor_project(args.project)
     dispatch = {
         "status": cmd_status, "stats": cmd_stats, "list": cmd_list, "search": cmd_search,
         "sessions": cmd_sessions, "sql": cmd_sql, "add": cmd_add,
