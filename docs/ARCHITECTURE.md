@@ -421,7 +421,7 @@ caller's responsibility, and there are exactly two shapes:
   PreCompact leg additionally touches it again after the rest of its state
   changes (`pre_compact.py:782`).
 - Single-shot callers call `regenerate_memory_index` explicitly:
-  `cli/mem.py:1089` and `:584`, `mcp/server.py:644`, `ui/dashboard.py:1634`,
+  `cli/mem.py:1089` and `:584`, `mcp/server.py:644`, `ui/dashboard.py:1664`,
   `ui/web_viewer.py:325`, plus the `skills/ccm-load` inline script
   (`skills/ccm-load/SKILL.md:308, 318`). `core/idle.py:96` and
   `hooks/consolidate_async.py:188` also refresh it after maintenance.

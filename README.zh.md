@@ -1,9 +1,9 @@
-<!-- i18n-source: README.md | sha256: dc929db33b0cbad6 | version: 2.10.0 | translated: 2026-08-10 -->
+<!-- i18n-source: README.md | sha256: becac90fc94e5aab | version: 2.10.1 | translated: 2026-08-10 -->
 > [English](README.md) · **简体中文**
 
 # cc-memory
 
-**Claude Code 持久化记忆插件（v2.10.0）**——反补丁式的写入即归并（reconcile-on-write）、
+**Claude Code 持久化记忆插件（v2.10.1）**——反补丁式的写入即归并（reconcile-on-write）、
 LLM 判定的语义去重、强制 PROGRESS.md 交接、带 plan-refiner / plan-guardian 子代理与
 强制结转闸门的实时 PLAN.md 锚点、有界 transcript 读取、注入可观测性、FTS5 搜索，
 以及以 Haiku 为主（本地 Ollama 兜底可选）的 AI 判定式抽取。
@@ -15,6 +15,16 @@ LLM 判定的语义去重、强制 PROGRESS.md 交接、带 plan-refiner / plan-
 
 cc-memory 在每一个对话边界捕获结构化记忆，并且**强制下一次会话在开始工作之前先阅读
 一份交接文档**。
+
+## v2.10.1 有什么新变化
+
+v2.10.0 记录为未闭合的三条,已全部闭合:dashboard 仅剩的两个最高复杂度
+核心现在是**测试套件无头驱动的纯 staticmethod**(Progress/Plan 渲染器
+连同其标记转义、LLM tidy 裁决归一化器——各自的 Tk 回调只剩 widget
+编排);contracts 注册表在共享钩子闸门不再委托退出开关时**大声报错**
+(而不是把六个钩子列成被一个名存实亡的闸门保护);codex 对 v2.10.0
+防护修复的复签结论返回 **CONFIRMED-CLOSED**。falsify 登记
+149 → 151,两个新用例均单独验证跑红。
 
 ## v2.10.0 有什么新变化
 

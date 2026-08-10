@@ -165,6 +165,33 @@ def _render_paths(repo):
         exclude=(f"{PKG}/core/privacy.py",))
 
 
+def _verify_entry_gate(repo):
+    """Counting `resolve_project` is honest only while the gate DELEGATES.
+
+    The six hooks qualify for the opt-out and anchoring registries through
+    one proxy name, so a gutted gate — one that stops consulting
+    `is_excluded`, or anchors before it — would leave every hook listed as
+    a protected surface while protecting nothing. Same fail-loud rule as
+    `_BACKSTOP_CREATORS`: if the delegation text disappears from
+    `hooks/_entry.py`, the registry ERRORS instead of silently keeping six
+    stale members (recorded as an accepted risk in round 10 of the falsify
+    ledger; this check retires it). The import-without-call shape is
+    covered by the tests, deliberately not here: `tests/test_surfaces.py`
+    §7 requires the literal call `resolve_project(cwd` in every hook and
+    §4 drives the exclusion behaviourally.
+    """
+    src = (repo / PKG / "hooks" / "_entry.py").read_text(encoding="utf-8",
+                                                         errors="replace")
+    excl = src.find("if is_excluded(cwd)")
+    anchor = src.find("project_root(cwd")
+    if excl == -1 or anchor == -1 or anchor < excl:
+        raise RuntimeError(
+            "hooks/_entry.py no longer consults is_excluded before "
+            "project_root — the opt-out/anchoring registries would list "
+            "every hook as protected by a gate that is not one. Fix the "
+            "gate, or update this contract to match the tree.")
+
+
 @contract("optout_surfaces",
           "modules that consult config.json excluded_projects")
 def _optout_surfaces(repo):
@@ -173,7 +200,8 @@ def _optout_surfaces(repo):
     # called `is_excluded` itself — the same reason `cli_opt_out_notice`
     # counts for the CLI surfaces. `_entry.py` joins `core/modes.py` in the
     # exclude list because it IMPLEMENTS the gate rather than being a surface
-    # protected by it.
+    # protected by it — and _verify_entry_gate makes that proxy fail-loud.
+    _verify_entry_gate(repo)
     return _modules_calling(repo, {"is_excluded", "cli_opt_out_notice",
                                    "refusal_notice", "resolve_project"},
                             exclude=(f"{PKG}/core/modes.py",
@@ -218,7 +246,9 @@ def _anchoring_surfaces(repo):
     # `resolve_project` anchors through `project_root` on behalf of its
     # caller (hooks/_entry.py, v2.10.0), so a hook using the shared gate is
     # an anchoring surface; `_entry.py` itself is the implementation, same
-    # exclude rule as `core/roots.py`.
+    # exclude rule as `core/roots.py`. The proxy is fail-loud — see
+    # _verify_entry_gate.
+    _verify_entry_gate(repo)
     return _modules_calling(repo, {"project_root", "anchor_project",
                                    "resolve_project"},
                             exclude=(f"{PKG}/core/roots.py",

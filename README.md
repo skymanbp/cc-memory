@@ -2,7 +2,7 @@
 
 # cc-memory
 
-**Claude Code persistent memory plugin (v2.10.0)** — anti-patch reconcile-on-write
+**Claude Code persistent memory plugin (v2.10.1)** — anti-patch reconcile-on-write
 with LLM-judged semantic de-duplication, forced PROGRESS.md handoff, live PLAN.md
 anchor with plan-refiner / plan-guardian subagents and a mandatory carryover
 gate, bounded transcript reads, injection observability, FTS5 search, AI-judged
@@ -16,6 +16,18 @@ disappear. Conversations that end normally (terminal closed) also lose context.
 
 cc-memory captures structured memories at every conversation boundary AND
 **forces the next session to read a handoff document** before it starts work.
+
+## What's new in v2.10.1
+
+The three items v2.10.0 recorded as open are closed: the dashboard's two
+remaining highest-complexity cores are now **pure staticmethods driven
+headlessly by the test suite** (the Progress/Plan renderer with its marker
+escaping, and the LLM tidy-verdict normaliser — their Tk callbacks keep only
+widget plumbing), the contracts registries **fail loud** if the shared hook
+gate ever stops delegating to the opt-out (instead of listing six hooks as
+protected by a gate that is not one), and the codex confirmation verdict on
+the v2.10.0 guard fix came back **CONFIRMED-CLOSED**. Falsify registry
+149 → 151, both new cases verified red.
 
 ## What's new in v2.10.0
 

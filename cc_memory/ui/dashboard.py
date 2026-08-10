@@ -1082,15 +1082,37 @@ Category Breakdown:
         """Render the `progress` row and the `plan_active` row (read-only).
 
         These are the SQL sources of truth behind memory/PROGRESS.md and
-        memory/PLAN.md. Neither was reachable from this GUI before.
+        memory/PLAN.md. Neither was reachable from this GUI before. The text
+        itself comes from the module-level `_render_progress_plan` (v2.10.1:
+        extracted so the render logic is drivable without a Tk display —
+        this method keeps only the widget plumbing).
         """
         if not hasattr(self, "progress_text"):
             return
-        # Marker neutralisation on EVERY stored slot below (register E3): this
-        # tab renders memory content, LLM summaries and plan text — the same
-        # model-reachable columns every other render path escapes — and it was
-        # the one surface printing them raw. A copied-out live tag re-enters
-        # a Claude session as an authority marker; escaped, it stays prose.
+        self.progress_text.config(state=tk.NORMAL)
+        self.progress_text.delete("1.0", tk.END)
+        if not self.db or self.project_id is None:
+            self.progress_text.insert("1.0", "Load a project first.")
+            self.progress_text.config(state=tk.DISABLED)
+            return
+        text = self._render_progress_plan(
+            self.db.get_progress(self.project_id),
+            self.db.get_plan_active(self.project_id))
+        self.progress_text.insert("1.0", text)
+        self.progress_text.config(state=tk.DISABLED)
+
+    @staticmethod
+    def _render_progress_plan(prog, pa):
+        """Text for the Progress/Plan tab, from the two SQL rows. PURE — no
+        Tk, no DB — extracted (v2.10.1) so the escaping and every
+        hostile-shape branch below is drivable headlessly.
+
+        Marker neutralisation on EVERY stored slot below (register E3): this
+        tab renders memory content, LLM summaries and plan text — the same
+        model-reachable columns every other render path escapes — and it was
+        the one surface printing them raw. A copied-out live tag re-enters
+        a Claude session as an authority marker; escaped, it stays prose.
+        """
         try:
             from core.privacy import neutralize_inline as _ni, \
                 neutralize_markers as _nm
@@ -1101,17 +1123,10 @@ Category Breakdown:
             def _ni(t):
                 return str(t).replace("<", "&lt;")
             _nm = _ni
-        self.progress_text.config(state=tk.NORMAL)
-        self.progress_text.delete("1.0", tk.END)
-        if not self.db or self.project_id is None:
-            self.progress_text.insert("1.0", "Load a project first.")
-            self.progress_text.config(state=tk.DISABLED)
-            return
 
         out = ["=" * 74,
                "PROGRESS   (SQL source of truth for memory/PROGRESS.md)",
                "=" * 74, ""]
-        prog = self.db.get_progress(self.project_id)
         if not prog:
             out.append("(no progress row yet — PreCompact writes it at the first "
                        "compaction of this project)")
@@ -1166,7 +1181,6 @@ Category Breakdown:
         out += ["", "=" * 74,
                 "PLAN   (SQL source of truth for memory/PLAN.md)",
                 "=" * 74, ""]
-        pa = self.db.get_plan_active(self.project_id)
         if not pa:
             out.append("(no live plan — capture one with Claude's plan mode, "
                        "or `/cc-mem plan-set`)")
@@ -1225,8 +1239,7 @@ Category Breakdown:
                     f"edits_since_last_guardian : {pa.get('edits_since_last_guardian', 0)}",
                     f"turns_since_last_guardian : {pa.get('turns_since_last_guardian', 0)}"]
 
-        self.progress_text.insert("1.0", "\n".join(out))
-        self.progress_text.config(state=tk.DISABLED)
+        return "\n".join(out)
 
     # ── SQL Console ──────────────────────────────────────────────────────────
 
@@ -1423,14 +1436,12 @@ Memories:
             messagebox.showerror("API Error", f"LLM analysis failed:\n\n{e}")
             return
 
-        # Collect all IDs to delete. EVERY value below is LLM-controlled and
-        # none of it is covered by the try/except above (which wraps only
-        # call_llm + json.loads), so plausible model output used to raise
-        # straight out of this Tk callback — no dialog, no traceback the
-        # --windowed exe could show, status bar frozen on "Analyzing memories
-        # with LLM...". Verified live: [1,2,3] -> AttributeError,
-        # {"id":"abc"} -> ValueError, delete_ids:[null] -> TypeError.
-        if not isinstance(analysis, dict):
+        # Normalisation of the verdict is PURE and lives in
+        # _normalize_tidy_verdict (v2.10.1) so its hostile shapes are
+        # drivable headlessly; this callback keeps only the dialogs.
+        verdict = self._normalize_tidy_verdict(analysis,
+                                               {r["id"] for r in rows})
+        if verdict is None:
             self.status_var.set("Ready")
             messagebox.showerror(
                 "Unusable LLM output",
@@ -1438,6 +1449,38 @@ Memories:
                 'object with "delete" / "merge" / "summary" keys it was asked '
                 "for.\n\nNothing was changed.")
             return
+        delete_ids, reasons, notes, summary = verdict
+
+        if not delete_ids:
+            self.status_var.set("Ready")
+            if notes:
+                messagebox.showwarning(
+                    "Nothing to archive",
+                    "The model's reply contained no usable memory id.\n\n- "
+                    + "\n- ".join(notes))
+            else:
+                messagebox.showinfo("All Clean", "LLM found no garbage to remove.")
+            return
+
+        # Show confirmation dialog
+        self._show_tidy_confirm(rows, delete_ids, reasons, summary)
+
+    @staticmethod
+    def _normalize_tidy_verdict(analysis, known_ids):
+        """LLM tidy verdict -> (delete_ids, reasons, notes, summary); None
+        when the top level is not a JSON object. PURE — no Tk, no DB —
+        extracted (v2.10.1) so every hostile shape is drivable headlessly.
+
+        EVERY value below is LLM-controlled and none of it is covered by the
+        caller's try/except (which wraps only call_llm + extract_json), so
+        plausible model output used to raise straight out of a Tk callback —
+        no dialog, no traceback the --windowed exe could show, status bar
+        frozen on "Analyzing memories with LLM...". Verified live:
+        [1,2,3] -> AttributeError, {"id":"abc"} -> ValueError,
+        delete_ids:[null] -> TypeError.
+        """
+        if not isinstance(analysis, dict):
+            return None
 
         def _as_id(value):
             """An LLM value -> a positive int row id, or None if it is not one."""
@@ -1502,7 +1545,7 @@ Memories:
         # dialog skipped the rest while its button still counted them, so
         # {"delete":[{"id":99999}]} produced a dialog with zero checkboxes and
         # a button reading "Archive Selected (1)".
-        known = {r["id"] for r in rows}
+        known = set(known_ids)
         unknown = sorted(i for i in delete_ids if i not in known)
         delete_ids &= known
 
@@ -1515,25 +1558,12 @@ Memories:
             notes.append(f"{malformed} malformed entr"
                          f"{'y' if malformed == 1 else 'ies'} ignored")
 
-        if not delete_ids:
-            self.status_var.set("Ready")
-            if notes:
-                messagebox.showwarning(
-                    "Nothing to archive",
-                    "The model's reply contained no usable memory id.\n\n- "
-                    + "\n- ".join(notes))
-            else:
-                messagebox.showinfo("All Clean", "LLM found no garbage to remove.")
-            return
-
         summary = analysis.get("summary", "")
         if not isinstance(summary, str):
             summary = str(summary)
         if notes:
             summary = (summary + "\n" if summary else "") + " | ".join(notes)
-
-        # Show confirmation dialog
-        self._show_tidy_confirm(rows, delete_ids, reasons, summary)
+        return delete_ids, reasons, notes, summary
 
     def _show_tidy_confirm(self, all_rows, delete_ids, reasons, summary):
         """Show dialog with LLM suggestions for user to confirm."""

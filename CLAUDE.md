@@ -2,7 +2,7 @@
 
 ## Project: cc-memory
 
-**Claude Code persistent memory plugin (v2.10.0)** — anti-patch reconcile-on-write
+**Claude Code persistent memory plugin (v2.10.1)** — anti-patch reconcile-on-write
 + LLM-judged semantic de-duplication, forced PROGRESS.md handoff with
 per-session annotation, live PLAN.md anchor with plan-refiner / plan-guardian
 subagents + mandatory carryover gate, bounded transcript reads, injection
@@ -10,9 +10,32 @@ observability, FTS5 search, AI-judged extraction with Haiku (optional local
 Ollama fallback).
 
 - **Language**: Python 3.8+ (pure stdlib, zero pip dependencies at runtime)
-- **Version**: 2.10.0
+- **Version**: 2.10.1
 - **License**: MIT
 - **Platform**: Windows-primary, cross-platform compatible (Tkinter required for GUI)
+
+## What changed in v2.10.1 (over v2.10.0)
+
+**The three items v2.10.0 left open, closed.** Full narrative in
+`CHANGELOG.md`. Two additions a future change must not break:
+
+1. **The dashboard's logic cores are PURE staticmethods, driven by §8.**
+   `DashboardApp._render_progress_plan` (Progress/Plan tab text, including
+   the register-E3 marker escaping) and `DashboardApp._normalize_tidy_verdict`
+   (the LLM tidy verdict normaliser) take plain data and return plain data —
+   no Tk, no DB. Do not fold them back into their callbacks "for locality":
+   the callbacks keep widget plumbing and dialogs ONLY, and
+   `tests/test_surfaces.py` §8 drives both cores headlessly
+   (`falsify --case r10dashrender` proves the escape assertion is not
+   vacuous). The Tk shells hold no logic now; that is what makes their
+   remaining zero coverage tolerable.
+
+2. **The contracts registries fail LOUD when their proxy goes hollow.**
+   `tools/contracts.py:_verify_entry_gate` errors both registries if
+   `hooks/_entry.py` stops consulting `is_excluded` before `project_root` —
+   six hooks listed as protected by a gate that is not one was the registry's
+   one way to lie (`falsify --case r10gateproxy`). Same fail-loud rule as
+   `_BACKSTOP_CREATORS`; keep them in step.
 
 ## What changed in v2.10.0 (over v2.9.0)
 
@@ -907,12 +930,12 @@ standalone installs.
   - `["observer","realtime"]` — `hooks/stop.py`
   - `["mcp"]` — `mcp/server.py`
   - `["manual"]` — `cli/mem.py`
-  - `["manual","dashboard"]` — `ui/dashboard.py:1737` (Add-Memory dialog)
+  - `["manual","dashboard"]` — `ui/dashboard.py:1767` (Add-Memory dialog)
   - `[method, "manual"]` where `method` is `"llm"` or `"regex"` —
-    `ui/dashboard.py:2125` (Save Session)
-  - `["regex","manual"]` — `ui/dashboard.py:2208` (Save Session, regex leg)
-  - `["metric","manual"]` — `ui/dashboard.py:2156` (Save Session, metric leg)
-  - `["auto-detected","init"]` — `ui/dashboard.py:2301` (new-project init)
+    `ui/dashboard.py:2272` (Save Session)
+  - `["regex","manual"]` — `ui/dashboard.py:2298` (Save Session, regex leg)
+  - `["metric","manual"]` — `ui/dashboard.py:2303` (Save Session, metric leg)
+  - `["auto-detected","init"]` — `ui/dashboard.py:2440` (new-project init)
   - `["web"]` — `ui/web_viewer.py`
   - `["llm-dedup","merged"]` — `core/consolidate.py`
 

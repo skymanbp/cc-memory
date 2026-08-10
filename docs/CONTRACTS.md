@@ -213,9 +213,9 @@ r8antipatch` proves the assertion goes red when a bypass caller appears.
 | `/save-memories` skill | `upsert_batch(db, pid, None, memories, memory_dir=Path(project) / 'memory')` (`skills/save-memories/SKILL.md:100`) |
 | `mem.py add` CLI | `upsert_smart(...)` + `regenerate_memory_index(...)` (`cli/mem.py:1089,524`) |
 | `mcp/server.py handle_memory_add` | `upsert_smart(...)` + `regenerate_memory_index(...)` (`mcp/server.py:629-656,192`) |
-| Dashboard UI "Add Memory" | `upsert_smart(...)` + `regenerate_memory_index(...)` — routed since v2.2 (`ui/dashboard.py:1634,956`). `ui/dashboard.py` contains no `db.insert_memory` call. |
-| Dashboard UI "Save Session" | `upsert_batch(...)` (`ui/dashboard.py:2216`) |
-| Dashboard UI "Init Project" scan | `upsert_batch(db, pid, None, batch, memory_dir=memory_dir)` (`ui/dashboard.py:2216`) |
+| Dashboard UI "Add Memory" | `upsert_smart(...)` + `regenerate_memory_index(...)` — routed since v2.2 (`ui/dashboard.py:1664,956`). `ui/dashboard.py` contains no `db.insert_memory` call. |
+| Dashboard UI "Save Session" | `upsert_batch(...)` (`ui/dashboard.py:2246`) |
+| Dashboard UI "Init Project" scan | `upsert_batch(db, pid, None, batch, memory_dir=memory_dir)` (`ui/dashboard.py:2246`) |
 | web_viewer POST `/api/memory` | `upsert_smart(...)` + `regenerate_memory_index(...)` (`ui/web_viewer.py:65`) |
 
 ### Consolidation backstop exception (v2.3)

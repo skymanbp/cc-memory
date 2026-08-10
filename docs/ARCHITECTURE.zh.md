@@ -1,4 +1,4 @@
-<!-- i18n-source: ARCHITECTURE.md | sha256: 95f4e96b5cf89d2f | version: 2.10.0 | translated: 2026-08-10 -->
+<!-- i18n-source: ARCHITECTURE.md | sha256: d4dcc4607b70a8f2 | version: 2.10.1 | translated: 2026-08-10 -->
 > [English](ARCHITECTURE.md) · **简体中文**
 
 # cc-memory — 架构（v2.9.0）
@@ -383,7 +383,7 @@ regenerate_memory_index(db, project_id, memory_dir)   ← MEMORY.md 刷新
   `session_start.py:1056`）；同步 PreCompact 支路还会在其余状态变更之后再刷一次
   （`pre_compact.py:782`）。
 - 单发调用方显式调用 `regenerate_memory_index`：`cli/mem.py:1089` 与 `:584`、
-  `mcp/server.py:644`、`ui/dashboard.py:1634`、`ui/web_viewer.py:65`，外加
+  `mcp/server.py:644`、`ui/dashboard.py:1664`、`ui/web_viewer.py:65`，外加
   `skills/ccm-load` 的内联脚本（`skills/ccm-load/SKILL.md:308, 318`）。
   `core/idle.py:96` 与 `hooks/consolidate_async.py:188` 也会在维护之后刷新它。
 

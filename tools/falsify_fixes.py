@@ -1679,6 +1679,40 @@ def _break_r9gateleak(root):
            "assert Path.home() != _HOME, (  # BREAKAGE: sandbox inverted")
 
 
+@case("r10dashrender", ["tests/test_surfaces.py"],
+      "render the Progress/Plan tab without escaping -> a stored authority "
+      "marker leaves the dashboard live")
+def _break_r10dashrender(root):
+    # NOT "raise ImportError above the fallback": the fallback ALSO escapes
+    # (that is its whole point), so that breakage stays green — the same
+    # inverted-counterfactual trap r9dataver fell into. Render RAW instead.
+    _patch(root, f"{PKG}/ui/dashboard.py",
+           "        try:\n"
+           "            from core.privacy import neutralize_inline as _ni, \\\n"
+           "                neutralize_markers as _nm\n"
+           "        except Exception:\n"
+           "            # why: a read-only view must render even on a broken install;\n"
+           "            # over-escaping every '<' is the same fail-closed fallback the\n"
+           "            # CLI's _neutralize uses (register Y3)\n"
+           "            def _ni(t):\n"
+           '                return str(t).replace("<", "&lt;")\n'
+           "            _nm = _ni",
+           "        def _ni(t):  # BREAKAGE: render raw\n"
+           "            return str(t)\n"
+           "        _nm = _ni")
+
+
+@case("r10gateproxy", ["tools/doc_claims.py"],
+      "gut is_excluded from the shared gate -> the registries must ERROR, "
+      "not keep listing six protected hooks")
+def _break_r10gateproxy(root):
+    _patch(root, f"{PKG}/hooks/_entry.py",
+           "    if is_excluded(cwd):\n"
+           "        return None\n"
+           "    return str(project_root(cwd, log=log))",
+           "    return str(project_root(cwd, log=log))  # BREAKAGE: gate gutted")
+
+
 @case("r10lograise", ["tests/test_surfaces.py"],
       "unguard the shared ladder's log call -> a broken logger crashes every "
       "hook at once")

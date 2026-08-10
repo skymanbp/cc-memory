@@ -7,6 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [2.10.1] — 2026-08-10
+
+### The three items v2.10.0 recorded as open, closed
+
+- **The dashboard's highest-complexity logic is now executed by a gate.**
+  `_scan_project_deep` (cx 100) was already a pure module-level function and
+  already driven by §8; the other two monsters' cores are now pure
+  staticmethods — `DashboardApp._render_progress_plan` (the Progress/Plan
+  tab's cx-54 text builder, register-E3 escaping included) and
+  `DashboardApp._normalize_tidy_verdict` (the tidy callback's cx-heavy LLM
+  verdict normaliser) — extracted behaviour-preserving, with the Tk callbacks
+  keeping only widget plumbing and dialogs. §8 drives both: hostile stored
+  markers must come out escaped, empty rows must render placeholders, and the
+  three LLM shapes measured live pre-v2.9.0 (`[1,2,3]`, `{"id":"abc"}`,
+  `delete_ids:[null]`) plus the keep==delete refusal and the unknown-id
+  filter all hold. `falsify --case r10dashrender` un-escapes the renderer on
+  a copy and §8 goes RED (the first draft of that breakage modelled the
+  counterfactual backwards — `raise ImportError` lands in a fallback that
+  ALSO escapes — and was rewritten per round 9's lesson 1). What remains
+  uncovered is stated: the Tk event/dialog shells, which now hold no logic.
+- **The contracts registries are fail-loud about their proxy.**
+  `_verify_entry_gate` (same pattern as `_BACKSTOP_CREATORS`): if
+  `hooks/_entry.py` stops consulting `is_excluded` before `project_root`,
+  the opt-out and anchoring registries raise instead of keeping six hooks
+  listed as protected. `falsify --case r10gateproxy` guts the gate and
+  `doc_claims` goes RED (verified). The v2.10.0 ledger entry recording this
+  as an accepted risk is retired.
+- **The codex confirmation verdict is in: CONFIRMED-CLOSED.** The follow-up
+  had been queued behind a zombie — the FIRST review run, wedged for over an
+  hour after its file reads with no report. Killed it, re-dispatched the
+  one-question confirmation fresh: the Q2 guard closes the finding, encloses
+  only the diagnostic call, and changes no control flow or return value
+  (three file:line citations).
+
+Falsify registry: 149 → **151** cases, anchors 151/151 intact, both new
+cases verified RED individually.
+
+---
+
 ## [2.10.0] — 2026-08-10
 
 ### An anti-bloat architecture round: measure first, mechanise the one real duplication
