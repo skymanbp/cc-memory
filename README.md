@@ -2,7 +2,7 @@
 
 # cc-memory
 
-**Claude Code persistent memory plugin (v2.9.0)** — anti-patch reconcile-on-write
+**Claude Code persistent memory plugin (v2.10.0)** — anti-patch reconcile-on-write
 with LLM-judged semantic de-duplication, forced PROGRESS.md handoff, live PLAN.md
 anchor with plan-refiner / plan-guardian subagents and a mandatory carryover
 gate, bounded transcript reads, injection observability, FTS5 search, AI-judged
@@ -16,6 +16,30 @@ disappear. Conversations that end normally (terminal closed) also lose context.
 
 cc-memory captures structured memories at every conversation boundary AND
 **forces the next session to read a handoff document** before it starts work.
+
+## What's new in v2.10.0
+
+**An anti-bloat architecture round.** Every function in the tree was measured
+(LOC + cyclomatic complexity, against the v2.5.0 baseline) to answer one
+question: had five convergence rounds of fixes accreted into patch-on-patch
+bloat? The verdict: the growth is overwhelmingly *mechanism* with a measured
+defect behind every guard — except ONE real structural duplication, now fixed:
+
+- **The six hooks each hand-rolled the same entry ladder** (stdin read → JSON
+  parse → object check → opt-out on the RAW cwd → root anchor), ~350 lines of
+  six-way copies whose every historical drift shipped as a defect. The ladder
+  now lives once in `hooks/_entry.py`; per-hook policies (coerce vs abort,
+  the NUL check, excluded-branch reactions) stay per-hook. `test_surfaces` §4
+  gained a narrow-exclusion drive (a listed subdirectory inside a live
+  project — the case an ordering inversion silently breaks), §7 asserts the
+  order once inside the gate, and `falsify_fixes --case r10entryorder` proves
+  the inversion turns the suite red.
+
+What was deliberately NOT refactored is on record too (CLAUDE.md § v2.10.0):
+the dashboard's three highest-complexity functions stay untouched because
+they have zero executable coverage, and refactoring an untested 2.9k-line GUI
+is the exact "each fix breeds two bugs" failure mode this round exists to
+avoid.
 
 ## What's new in v2.9.0
 
@@ -1040,8 +1064,10 @@ because editing it looks like it does something. What remains:
 - `excluded_projects` — absolute paths that opt OUT of cc-memory entirely. A
   listed directory *and everything beneath it* gets no `memory/` directory, no
   DB, no observations, no extraction and no PROGRESS.md: **all six hooks <!--ce:hooks-->, plus
-  the MCP server**, call `core.modes.is_excluded(cwd)` as their first act after
-  resolving `cwd` and exit 0 (MCP answers `isError`). That is one shared
+  the MCP server**, consult `core.modes.is_excluded` as their first act — on
+  the RAW `cwd`, before the root anchor — and exit 0 (MCP answers `isError`);
+  the hooks since v2.10.0 route through the one shared gate
+  `hooks/_entry.py:resolve_project`, which owns that ordering. That is one shared
   implementation, not a copy per caller — v2.5.0 shipped it as two private
   copies in the only two hooks <!--ce:hooks:subset--> that *create* `memory/`, which left a project
   that was initialised BEFORE it was listed fully instrumented: observations

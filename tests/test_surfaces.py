@@ -1439,15 +1439,22 @@ def test_excluded_projects():
     excluded = work / "excluded-project"
     beneath = excluded / "vendor" / "nested-checkout"
     control = work / "control-project"
+    # A NARROW exclusion: a listed SUBDIRECTORY of a live project (v2.10.0).
+    # This is the direction the shared gate's ordering contract exists for —
+    # anchoring before the opt-out resolves `narrow` to `control` (not
+    # listed) and widens the user's opt-out away, recording the private
+    # zone's activity in the parent's database. Driven red by inverting the
+    # order in hooks/_entry.py (tools/falsify_fixes.py `r10entryorder`).
+    narrow = control / "private-zone"
     fresh = work / "control-fresh"
-    for d in (excluded, beneath, control, fresh):
+    for d in (excluded, beneath, control, narrow, fresh):
         d.mkdir(parents=True, exist_ok=True)
     cfg = json.loads((pkg / "config.json").read_text(encoding="utf-8"))
-    cfg["excluded_projects"] = [str(excluded)]
+    cfg["excluded_projects"] = [str(excluded), str(narrow)]
     (pkg / "config.json").write_text(json.dumps(cfg, indent=2, ensure_ascii=False),
                                      encoding="utf-8")
     assert json.loads((pkg / "config.json").read_text(
-        encoding="utf-8"))["excluded_projects"] == [str(excluded)]
+        encoding="utf-8"))["excluded_projects"] == [str(excluded), str(narrow)]
 
     transcript = work / "transcript.jsonl"
     transcript.write_text("\n".join(json.dumps(r) for r in (
@@ -1532,6 +1539,29 @@ def test_excluded_projects():
     assert (tmp_dir / f"cc_mem_turns_{safe_id(ctrl_sid)}").is_file(), \
         "control: UserPromptSubmit wrote no turn marker"
 
+    # ── narrow exclusion: the listed SUBDIRECTORY of the live control
+    #    project. Its activity must be recorded NOWHERE — not as a stray
+    #    memory/ under the subdirectory, and not in the parent's database,
+    #    which is exactly what an anchor-before-opt-out inversion produces.
+    #    Placed AFTER the control block so the parent is a demonstrably
+    #    live, recording project when the excluded subdirectory is driven.
+    base_obs = ctrl_db.get_observation_count(ctrl_pid)
+    nar_sid = "ctrl-narrow-0001"
+    for hook in _HOOK_ORDER:
+        rc, out, err = _run_hook(pkg, hook, narrow, nar_sid, transcript)
+        assert rc == 0 and err == "", f"narrow: {hook} rc={rc} {err[:300]!r}"
+        assert out == "", \
+            (f"narrow: {hook} wrote {len(out)} chars into the session for an "
+             f"excluded subdirectory: {out[:300]!r}")
+    assert not (narrow / "memory").exists(), \
+        "memory/ was created inside the excluded subdirectory"
+    assert ctrl_db.get_observation_count(ctrl_pid) == base_obs, \
+        ("activity inside the excluded subdirectory was recorded in the "
+         "PARENT project's database — the anchor ran before the opt-out and "
+         "widened the narrow exclusion away")
+    assert not (tmp_dir / f"cc_mem_turns_{safe_id(nar_sid)}").exists(), \
+        "narrow: a turn marker was written for an excluded subdirectory"
+
     # ...and a NOT-excluded project with nothing yet still gets memory/ built,
     # which is what makes the "directory beneath" assertion non-vacuous.
     for hook in ("user_prompt", "pre_compact"):
@@ -1543,10 +1573,11 @@ def test_excluded_projects():
         "control-fresh: a NOT-excluded fresh project got no memory/memory.db"
 
     print(f"[OK] excluded_projects: {len(_HOOK_ORDER)} hooks x (excluded root "
-          f"with memory.db ALREADY present + a directory beneath it) -> no "
-          f"memory/, no observations, no progress row, no injection, no turn "
-          f"marker; the same hooks against an identical NOT-excluded project "
-          f"produce all five")
+          f"with memory.db ALREADY present + a directory beneath it + a "
+          f"NARROW exclusion inside a live project) -> no memory/, no "
+          f"observations, no progress row, no injection, no turn marker, and "
+          f"nothing leaked into the parent's database; the same hooks against "
+          f"an identical NOT-excluded project produce all five")
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -2133,21 +2164,72 @@ def _roots_hooks_from_subdir(project_root):
         os.path.normcase(str(root))
 
 
+def _entry_gate_never_raises():
+    """(c2) the shared ladder honours the hook contract even with a BROKEN
+    logger: parse_payload takes an arbitrary log object, and a raising one
+    must yield None (caller exits 0), never an escaping exception. The
+    pre-v2.10.0 post_tool_use guarded exactly this; the guard now lives at
+    the ONE shared site, so this is the assertion that keeps it there.
+    Driven with the real module in-process — both failure branches (parse
+    error, well-formed non-object) under a logger whose every method raises.
+    """
+    import io
+    from hooks._entry import parse_payload
+
+    class _RaisingLog:
+        def error(self, *a, **k): raise RuntimeError("boom")
+        def warn(self, *a, **k): raise RuntimeError("boom")
+
+    class _Stdin:
+        def __init__(self, payload): self.buffer = io.BytesIO(payload)
+
+    real_stdin = sys.stdin
+    try:
+        sys.stdin = _Stdin(b"{not json")
+        assert parse_payload(log=_RaisingLog()) is None, \
+            "parse_payload let a raising logger escape on the parse-error branch"
+        sys.stdin = _Stdin(b"[1, 2]")
+        assert parse_payload(log=_RaisingLog()) is None, \
+            "parse_payload let a raising logger escape on the non-object branch"
+    finally:
+        sys.stdin = real_stdin
+    return 2
+
+
 def _roots_every_hook_resolves():
-    """(c) source rule: every hook resolves, and AFTER the opt-out."""
+    """(c) source rule: every hook routes cwd through the ONE shared gate.
+
+    Until v2.9.0 each hook carried its own is_excluded → project_root ladder
+    and this rule asserted the pair's ORDER once per hook. Six copies is how
+    the rungs drifted (v2.7.0's release theme; the v2.9.0 junk-cwd database
+    plant), so the ladder now lives in hooks/_entry.py and this rule asserts
+    (1) the ORDER once, inside the gate itself, and (2) that no hook bypasses
+    the gate with a direct import — the same shape `_cli_opt_out_gate`
+    asserts for the three CLI surfaces via `cli_opt_out_notice`.
+    """
+    entry = (REPO / "cc_memory" / "hooks" / "_entry.py").read_text(
+        encoding="utf-8")
+    assert "if is_excluded(cwd)" in entry and "project_root(cwd" in entry, \
+        ("hooks/_entry.py no longer contains the recognisable opt-out→anchor "
+         "pair — update this rule alongside the gate, don't let it go vacuous")
+    excl = entry.index("if is_excluded(cwd)")
+    anchor = entry.index("project_root(cwd")
+    assert excl < anchor, \
+        ("hooks/_entry.py resolves the root BEFORE is_excluded — that widens "
+         "a per-subdirectory exclusion away by resolving to its unexcluded "
+         "parent, for EVERY hook at once")
     for hook in _HOOK_ORDER:
         src = (REPO / "cc_memory" / "hooks" / f"{hook}.py").read_text(
             encoding="utf-8")
-        assert "project_root(cwd" in src, \
-            (f"hooks/{hook}.py never calls project_root — it will keep "
+        assert "resolve_project(cwd" in src, \
+            (f"hooks/{hook}.py never calls the shared gate — it will keep "
              f"reading and writing whatever directory the shell happens to "
              f"be in (split-brain regression)")
-        excl = src.index("if is_excluded(cwd)")
-        anchor = src.index("project_root(cwd")
-        assert excl < anchor, \
-            (f"hooks/{hook}.py resolves the root BEFORE is_excluded — that "
-             f"widens a per-subdirectory exclusion away by resolving to its "
-             f"unexcluded parent")
+        for direct in ("import is_excluded", "import project_root"):
+            assert direct not in src, \
+                (f"hooks/{hook}.py bypasses hooks/_entry.py with a direct "
+                 f"`{direct}` — six inline ladders is how the guards drifted "
+                 f"apart before v2.10.0")
 
 
 def _every_creator_refuses_in_practice(pkg, victim):
@@ -2592,6 +2674,10 @@ def test_project_root_anchoring():
     _roots_contracts(project_root)
     _roots_hooks_from_subdir(project_root)
     _roots_every_hook_resolves()
+    n_gate = _entry_gate_never_raises()
+    print(f"[OK] shared entry ladder: {n_gate} failure branches survive a "
+          f"logger whose every method raises (hook contract holds at the "
+          f"ONE shared site)")
     n_creators = _every_creator_asks_the_opt_out()
     pkg = Path(tempfile.mkdtemp(prefix="ccm-creator-pkg-")) / "cc_memory"
     shutil.copytree(REPO / "cc_memory", pkg,
@@ -2645,7 +2731,8 @@ def test_project_root_anchoring():
           f"both directions); all {len(_HOOK_ORDER)} hooks run from a "
           f"SUBDIRECTORY create no second memory/ and write to the root db; a "
           f"first-ever session in a subdirectory initialises the REPO ROOT; "
-          f"all {len(_HOOK_ORDER)} resolve AFTER is_excluded")
+          f"all {len(_HOOK_ORDER)} route cwd through the ONE shared gate "
+          f"(opt-out before anchor, hooks/_entry.py)")
 
 
 # ═══════════════════════════════════════════════════════════════════════════

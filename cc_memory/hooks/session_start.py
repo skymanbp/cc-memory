@@ -43,8 +43,10 @@ enable_utf8_io()
 from core.db import CATEGORIES, MemoryDB
 from core.extractor import load_transcript_window, mangle_project_path
 from core.logger import get_logger
-from core.modes import is_excluded
-from core.roots import project_root  # v2.6.0 root anchoring — core/roots.py
+# Shared entry ladder (v2.10.0): stdin parsing + the opt-out→anchor gate,
+# once, in hooks/_entry.py — six hand-rolled copies is how guard drift
+# between hooks kept becoming shipped defects.
+from hooks._entry import parse_payload, resolve_project
 from core.privacy import (neutralize_document, neutralize_inline,
                           neutralize_markers)
 from core.progress import write_progress_md
@@ -1106,19 +1108,10 @@ def _flush_stdout():
 
 
 def main():
-    try:
-        data = json.loads(sys.stdin.buffer.read().decode("utf-8"))
-    except Exception as e:
-        _log.error(f"session_start stdin error: {e}")
-        sys.exit(0)
-
-    # json.loads succeeds for well-formed but NON-OBJECT payloads (null, 42,
-    # "s", [1,2], true). .get() on those raises outside the try above, so the
-    # hook would exit 1 with a traceback on stderr — a hook-contract violation
-    # that Claude Code renders as error UI.
-    if not isinstance(data, dict):
-        _log.error(f"session_start: non-object stdin payload "
-                   f"({type(data).__name__}) — nothing to do")
+    # Logged: SessionStart fires once per session, so a line per failure is
+    # affordable and a silently empty injection is otherwise unexplainable.
+    data = parse_payload(log=_log)
+    if data is None:
         sys.exit(0)
 
     # FIELD types, not just the container type. The guard above only makes
@@ -1133,15 +1126,16 @@ def main():
     if not isinstance(session_id, str):
         session_id = ""
 
-    # Project opt-out — the FIRST act after resolving cwd, before the DB is
-    # opened. Gating on memory/memory.db existing is not an opt-out: for a
-    # project initialised before the user listed it, this hook would otherwise
-    # still print that project's memories and PROGRESS.md preview into the next
-    # session's context, still write memory/.last_inject.json, and still run
-    # retroactive LLM extraction over its transcripts. Logged (unlike Stop /
-    # PostToolUse) because SessionStart fires once per session and a silently
-    # empty injection is otherwise unexplainable.
-    if is_excluded(cwd):
+    # Opt-out gate + root anchor via the ONE shared gate (hooks/_entry.py) —
+    # BEFORE the DB is opened. Gating on memory/memory.db existing is not an
+    # opt-out: for a project initialised before the user listed it, this hook
+    # would otherwise still print that project's memories and PROGRESS.md
+    # preview into the next session's context, still write
+    # memory/.last_inject.json, and still run retroactive LLM extraction over
+    # its transcripts. Rare hook: it passes the logger, so a redirection is
+    # announced and any stray database stepped over is named.
+    resolved = resolve_project(cwd, log=_log)
+    if resolved is None:
         # A project the user LISTED stays completely silent — that silence is
         # the feature. But an unusable config.json also excludes everything
         # (fail-closed, v2.5.2), and through v2.5.2 that was indistinguishable
@@ -1162,14 +1156,7 @@ def main():
         else:
             _log.info(f"skipped: {cwd} is in config.json excluded_projects")
         sys.exit(0)
-
-    # Anchor AFTER the opt-out so a narrow per-subdirectory exclusion is not
-    # widened away by resolving to its parent. Injection is the surface where
-    # a wrong root is most visible to the user — a session whose shell sat in
-    # a subdirectory used to be told "no DB for <subdir>" and start with an
-    # empty context while its real memory sat two levels up. Rare hook: it
-    # logs the redirection and names any stray database it stepped over.
-    cwd = str(project_root(cwd, log=_log))
+    cwd = resolved
 
     try:
         memory_dir = Path(cwd) / "memory"

@@ -7,6 +7,64 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [2.10.0] — 2026-08-10
+
+### An anti-bloat architecture round: measure first, mechanise the one real duplication
+
+The brief was to re-read everything since v2.5 and answer one question: had
+five convergence rounds of fixes turned into patch-on-patch bloat? The answer
+came from measurement, not impression. A stdlib-`ast` sweep of every function
+in `cc_memory/` + `tools/` against the v2.5.0 baseline (487 → 818 functions,
+12,514 → 20,836 function-LOC, per-function cyclomatic complexity ranked)
+showed the growth is overwhelmingly *mechanism* — `core/atomic.py`,
+`core/textsim.py`, `core/markers.py`, `core/roots.py`, the snapshot-verdict
+guards in `core/db.py`, and the three gate tools — each line traceable to a
+measured defect. One structural duplication survived the review:
+
+- **The six hooks each hand-rolled the same entry ladder** — stdin read →
+  JSON parse → object check → `is_excluded` on the RAW cwd → `project_root`
+  anchor — ~350 lines of six-way copies with the guard comments pasted
+  verbatim ("json.loads SUCCEEDS on well-formed non-object payloads" ×5,
+  "Anchor AFTER the opt-out" ×6). Every drift between those copies has
+  shipped as a defect: v2.7.0's release theme was rungs that missed a guard,
+  and v2.9.0's junk-cwd database plant was a missing `isinstance` rung in
+  exactly one hook. The ladder now lives ONCE in **`hooks/_entry.py`**:
+  `parse_payload()` (with `replace_errors` carrying PostToolUse's deliberate
+  lossy-decode) and `resolve_project()` (which owns the opt-out→anchor
+  ORDER). Per-hook field policies stay per-hook — coerce vs abort,
+  pre_compact's NUL check, SessionStart's `config_fault` visibility — the
+  same mechanism/policy split `cli_opt_out_notice` gave the three CLI
+  surfaces in v2.7.0.
+
+What holds it in place:
+
+- `tests/test_surfaces.py` §4 gained the **narrow-exclusion drive**: a listed
+  subdirectory INSIDE a live project, driven through all six hooks, asserting
+  its activity is recorded nowhere — not as a stray `memory/` and not in the
+  parent's database. That is the direction an anchor-before-opt-out inversion
+  widens away, and it was behaviourally untested before this round.
+- §7's source rule now asserts the ORDER once, inside the gate itself, and
+  refuses a direct `is_excluded` / `project_root` import in any hook.
+- `tools/falsify_fixes.py --case r10entryorder` inverts the order inside the
+  gate on a temporary copy and the suite goes RED (verified); `r9bigstdin`
+  re-anchored onto the shared read, RED at its new anchor (verified). Anchors
+  148/148 intact.
+- `tools/contracts.py` counts `resolve_project` for the opt-out and anchoring
+  registries, with `hooks/_entry.py` excluded as the implementing module —
+  both registries report the SAME 12 members as before the refactor.
+
+Reviewed and deliberately NOT refactored (dispositions in
+CLAUDE.md § v2.10.0): `pre_compact.main`'s linear pipeline, the `db.py`
+snapshot-verdict cluster, `_refresh_progress_row`'s three-tier fill, and the
+dashboard's three cx-47..100 functions (zero executable coverage — refactoring
+an untested 2.9k-line GUI is the failure mode this round exists to avoid).
+
+Net: six hook entries shrank by the ladder; the one new module carries the
+mechanism plus its documentation; behaviour pinned by the 48-pair junk-cwd
+probe, §4 (now four exclusion shapes), §7, and the full falsify registry.
+
+---
+
 ## [2.9.0] — 2026-08-09
 
 ### A dual-perspective review: two independent readers, 18 defects, 18 repros
@@ -1329,7 +1387,7 @@ Two of the six turned out to be worse than they were written up as.
 - **Doc citation coverage nearly doubled.** `tools/citation_check.py` could only
   anchor a citation when the symbol was defined in the *cited* file, so the most
   common shape in these docs — a call site, `` `db.tag_progress_session(...)`
-  (`user_prompt.py:214`) `` — went unchecked: 370 of 594, 62 %. It now anchors
+  (`user_prompt.py:193`) `` — went unchecked: 370 of 594, 62 %. It now anchors
   cross-file citations on the text of the cited range, and **341 of 594 are
   checked** (was 224).
 

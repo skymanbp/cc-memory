@@ -44,8 +44,10 @@ from core.logger import get_logger
 # copy (three hooks <!--ce:hooks:asof--> each had one, and truncation
 # cross-wired any two sessions sharing a 16-char prefix).
 from core.markers import marker_path, read_marker, safe_id as _safe_id, write_marker
-from core.modes import is_excluded
-from core.roots import project_root  # v2.6.0 root anchoring — core/roots.py
+# Shared entry ladder (v2.10.0): stdin parsing + the opt-out→anchor gate,
+# once, in hooks/_entry.py — six hand-rolled copies is how guard drift
+# between hooks kept becoming shipped defects.
+from hooks._entry import parse_payload, resolve_project
 from core.idle import maybe_run_idle
 from core.progress import write_progress_md
 from core import plan as plan_mod
@@ -326,16 +328,9 @@ def _patch_progress_from_recent_obs(db, project_id, memory_dir):
 
 
 def main():
-    try:
-        data = json.loads(sys.stdin.buffer.read().decode("utf-8"))
-    except Exception:
-        sys.exit(0)
-
-    # json.loads SUCCEEDS on well-formed non-object payloads (`null`, `42`,
-    # `"s"`, `[1,2]`, `true`). The `.get()` calls below sit outside the try, so
-    # without this guard those raise AttributeError, print a traceback to
-    # stderr and exit 1 — two hook-contract violations at once.
-    if not isinstance(data, dict):
+    # Silent (no logger): Stop fires every turn.
+    data = parse_payload()
+    if data is None:
         sys.exit(0)
 
     # FIELD types, not just the container type. The guard above only makes
@@ -350,22 +345,18 @@ def main():
     if not isinstance(session_id, str) or not session_id:
         sys.exit(0)
 
-    # Project opt-out — the FIRST act after resolving cwd. Gating on
-    # memory/memory.db existing is not an opt-out: for a project initialised
+    # Opt-out gate + root anchor via the ONE shared gate (hooks/_entry.py).
+    # An exclusion gates BEFORE any project work: for a project initialised
     # before the user listed it, this hook would otherwise still POST its
     # observations to the Anthropic API (the observer leg is unconditional),
-    # still write a progress row, and still rewrite PROGRESS.md with the file
-    # names it touched. Silent, like PostToolUse: Stop fires every turn.
-    if is_excluded(cwd):
+    # still write a progress row, and still rewrite PROGRESS.md. Without the
+    # anchor, a turn that ended with the shell inside a subdirectory wrote
+    # all of that into a database no SessionStart ever reads — and
+    # `maybe_run_idle(cwd, ...)` below reorganised that one too. Silent
+    # (no log passed): Stop fires every turn.
+    cwd = resolve_project(cwd)
+    if cwd is None:
         sys.exit(0)
-
-    # Anchor AFTER the opt-out so a narrow per-subdirectory exclusion is not
-    # widened away by resolving to its parent. Silent (no logger passed):
-    # Stop fires every turn. Without this, a turn that ended with the shell
-    # inside a subdirectory wrote its observer memories, its progress row and
-    # its PROGRESS.md into a database no SessionStart ever reads — and
-    # `maybe_run_idle(cwd, ...)` below reorganised that one too.
-    cwd = str(project_root(cwd))
 
     memory_dir = Path(cwd) / "memory"
     if not (memory_dir / "memory.db").exists():

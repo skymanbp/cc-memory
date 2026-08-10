@@ -1,4 +1,4 @@
-<!-- i18n-source: ARCHITECTURE.md | sha256: 7f534593d18a5d45 | version: 2.9.0 | translated: 2026-08-09 -->
+<!-- i18n-source: ARCHITECTURE.md | sha256: 95f4e96b5cf89d2f | version: 2.10.0 | translated: 2026-08-10 -->
 > [English](ARCHITECTURE.md) · **简体中文**
 
 # cc-memory — 架构（v2.9.0）
@@ -107,7 +107,8 @@ cc-memory/
 │   │                              progress, plan, privacy, modes, roots, auth,
 │   │                              logger, encoding_setup, version,
 │   │                              atomic, markers, textsim
-│   ├── hooks/                   ← 钩子入口（6 个模块）
+│   ├── hooks/                   ← 6 个钩子入口 + _entry.py（共享入口阶梯：
+│   │                              stdin 解析 + 退出开关→锚定闸门，v2.10.0）
 │   ├── llm/                     ← ccl_backend（Haiku/Ollama）+ memory_writer
 │   │                              + parse（容错的 LLM-JSON 读取器）
 │   ├── cli/                     ← mem.py, plan.py
@@ -209,13 +210,13 @@ v2.3.2 把这个事件拆开了：
   `pre_compact.py:5-20`）。
 - **异步支路**在一个 `BudgetGate` 之下运行 `core.consolidate.run_consolidation`，
   其中 `_BUDGET_TOTAL_S = 240.0`、`_BUDGET_SAFETY_S = 8.0`
-  （`consolidate_async.py:62`），因此它启动的最后一次 LLM 调用会在
+  （`consolidate_async.py:65`），因此它启动的最后一次 LLM 调用会在
   `total_s - safety_s` = 232 秒之前完成，小于钩子自身的 300 秒超时——工作者绝不会
   在写入中途被杀。
 - 节奏由**间隔标记 + 锁**决定，而不是脆弱的 `session_count % N` 检查：
   `memory/.last_consolidation.json` 记录上一次成功运行时的会话计数，
   `memory/.consolidation.lock` 防止工作者重叠（比 `_STALE_LOCK_S = 360.0`
-  更旧的锁会被回收，见 `consolidate_async.py:66`）。这对并发的同步支路是
+  更旧的锁会被回收，见 `consolidate_async.py:69`）。这对并发的同步支路是
   竞态免疫的——计数上 ±1 的漂移既不会导致重复运行，也不会导致漏跑
   （`consolidate_async.py:19-28`）。
 
@@ -380,7 +381,7 @@ regenerate_memory_index(db, project_id, memory_dir)   ← MEMORY.md 刷新
   重新生成**一次**，但仅当传入了 `memory_dir` 时才会（`memory_writer.py:200-235`）。
   所有钩子调用方都会传（`pre_compact.py:435`、`stop.py:166`、
   `session_start.py:1056`）；同步 PreCompact 支路还会在其余状态变更之后再刷一次
-  （`pre_compact.py:790`）。
+  （`pre_compact.py:782`）。
 - 单发调用方显式调用 `regenerate_memory_index`：`cli/mem.py:1089` 与 `:584`、
   `mcp/server.py:644`、`ui/dashboard.py:1634`、`ui/web_viewer.py:65`，外加
   `skills/ccm-load` 的内联脚本（`skills/ccm-load/SKILL.md:308, 318`）。
@@ -474,7 +475,7 @@ SessionStart：
 ```
 
 上面的调用签名都是真实的：`write_progress_md(db, project_id, memory_dir)`
-（`core/progress.py:331-490`；调用点 `pre_compact.py:759`、`stop.py:323`、
+（`core/progress.py:331-490`；调用点 `pre_compact.py:751`、`stop.py:325`、
 `user_prompt.py:133`、`session_start.py:912`、`mcp/server.py:243`、
 `cli/mem.py:1179`）。PROGRESS.md 的结构规格见
 [docs/CONTRACTS.md](CONTRACTS.md#handoff-contract)。
@@ -573,8 +574,8 @@ BudgetGate 来说仍是已知量。候选顺序与传输格式（`core/auth.py:2
 `get_api_key()` 是同一份候选列表的单凭据向后兼容视图（它不重试，
 `core/auth.py:60-93`）；它同时承载 `oauth_expired` 信号，支撑 SessionStart 的
 “[WARNING: OAuth expired — LLM extraction disabled]” 页脚
-（`session_start.py:592`）。钩子调用方用它来*提供*传给 `call_llm` 的凭据：
-`pre_compact.py:82 → :166`、`stop.py:82`、`session_start.py:592`、
+（`session_start.py:594`）。钩子调用方用它来*提供*传给 `call_llm` 的凭据：
+`pre_compact.py:80 → :166`、`stop.py:84`、`session_start.py:594`、
 `core/consolidate.py:355, 549, 724`。
 
 逐级回退是 v2.3.4 为一个具体故障加入的：一个失效的环境变量密钥（例如额度为零 →
@@ -706,7 +707,11 @@ agent 自己的 `cd` 走：一个在仓库根启动、却在 `cli/` 里跑过一
 
 `project_root`（`core/roots.py:530-575`）先解析出根。每个 hook 都在 `is_excluded`
 **之后**、且绝不在之前把 `cwd` 重新绑定到它：先解析会因为爬到未被排除的父目录，而把
-按子目录设置的排除范围稀释掉。候选祖先链会在任何 home 目录之下、文件系统根之下、
+按子目录设置的排除范围稀释掉。自 v2.10.0 起这一先后顺序不再是每个 hook 各自遵守的
+纪律，而是机制：hook 统一调用 `hooks/_entry.py:resolve_project` 这一个共享闸门——
+它对原始 cwd 跑 `is_excluded`，然后才锚定（stdin 解析同样经由 `parse_payload` 共享）。
+`tests/test_surfaces.py` 只在闸门内部断言一次顺序、拒绝任何 hook 直接 import 这两个
+守卫，`tools/falsify_fixes.py --case r10entryorder` 证明顺序反转会翻红。候选祖先链会在任何 home 目录之下、文件系统根之下、
 `.ccm-root` 钉之处以及 25 层处停止（`_chain`，`core/roots.py:267-295`）。先命中者胜：
 
 0. `cwd` 自己有 `memory/memory.db` → 就是 `cwd`。终止档，在其余一切之前。就是这一行

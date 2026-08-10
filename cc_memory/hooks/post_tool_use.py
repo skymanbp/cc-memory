@@ -35,14 +35,18 @@ enable_utf8_io()
 
 # Module level, unlike `should_observe` below (imported lazily inside main's
 # try): the opt-out has to be evaluated BEFORE any project work, so it must not
-# depend on reaching a lazy import site.
-from core.modes import is_excluded
-
-# Project-root anchoring (v2.6.0) — core/roots.py. This hook never creates a
-# memory dir, but it does write observation rows and bump plan counters, so
-# resolving to the same root as UserPromptSubmit is what keeps a
+# depend on reaching a lazy import site. Shared entry ladder (v2.10.0): stdin
+# parsing + the opt-out→anchor gate live ONCE in hooks/_entry.py. This hook
+# never creates a memory dir, but it does write observation rows and bump plan
+# counters, so resolving to the same root as UserPromptSubmit is what keeps a
 # subdirectory turn from being recorded against a different project row.
-from core.roots import project_root
+from hooks._entry import parse_payload, resolve_project
+from core.logger import get_logger
+
+# Construction is I/O-free (the file opens on first WRITE, core/logger.py
+# Logger._get_file), so a module-level logger costs this per-tool-call hook
+# nothing on the happy path.
+_log = get_logger("post_tool_use")
 
 _MAX_INPUT_CHARS = 2000
 _MAX_OUTPUT_CHARS = 1000
@@ -120,31 +124,12 @@ def _apply_plan_integration(db, project_id, cwd, tool_name, tool_input):
 
 
 def main():
-    try:
-        # Read to EOF like every sibling hook. This was the ONLY hook with a
-        # prefix cap (512 KiB) — any larger payload truncated mid-JSON, the
-        # parse raised, and the silent except dropped the WHOLE event: not
-        # just the observation row but the mode-independent live-plan block
-        # below (ExitPlanMode capture, TodoWrite sync, drift counters), with
-        # rc=0, empty stderr and no log line. A 600 KiB Read result — a
-        # package-lock.json is routinely that size — was enough to reach it.
-        raw = sys.stdin.buffer.read()
-        data = json.loads(raw.decode("utf-8", errors="replace"))
-    except Exception:
-        try:
-            from core.logger import get_logger
-            get_logger("post_tool_use").error_tb("stdin parse error")
-        except Exception:
-            # why: logger failing in a hook — nothing left but the clean exit
-            # the hook contract requires
-            pass
-        sys.exit(0)
-
-    # json.loads SUCCEEDS on well-formed non-object payloads (`null`, `42`,
-    # `"s"`, `[1,2]`, `true`). Every `.get()` below sits outside the try, so
-    # without this guard those five payloads raise AttributeError, print a
-    # traceback to stderr and exit 1 — two hook-contract violations at once.
-    if not isinstance(data, dict):
+    # replace_errors: this hook's payloads carry tool output, which tolerates
+    # U+FFFD — the read-to-EOF / no-prefix-cap rationale lives in _entry.
+    # Logged: a dropped event loses not just the observation row but the
+    # mode-independent live-plan block, which is worth one log line.
+    data = parse_payload(log=_log, replace_errors=True)
+    if data is None:
         sys.exit(0)
 
     # FIELD types, not just the container type. The guard above only makes
@@ -156,20 +141,15 @@ def main():
     if not isinstance(cwd, str) or not cwd:
         sys.exit(0)
 
-    # Project opt-out — the FIRST act after resolving cwd, ahead of the DB
-    # probe. Gating on memory/memory.db existing is not an opt-out: a project
-    # initialised BEFORE the user listed it would otherwise keep storing every
-    # tool input and output. Deliberately silent: this hook fires after every
-    # single tool call, so a log line here would be a log line per call.
-    if is_excluded(cwd):
+    # Opt-out gate + root anchor via the ONE shared gate (hooks/_entry.py),
+    # ahead of the DB probe. Gating on memory/memory.db existing is not an
+    # opt-out: a project initialised BEFORE the user listed it would otherwise
+    # keep storing every tool input and output. No log passed — this hook
+    # fires after every tool call, so a redirection line would be a line per
+    # call; the rare hooks pass a logger and carry the reporting duty.
+    cwd = resolve_project(cwd)
+    if cwd is None:
         sys.exit(0)
-
-    # Anchor AFTER the opt-out so a narrow per-subdirectory exclusion is not
-    # widened away by resolving to its parent. Silent here by design: this
-    # hook fires after every tool call, so a redirection line would be a line
-    # per call — the rare hooks (PreCompact, SessionStart, consolidation)
-    # pass a logger and carry the reporting duty.
-    cwd = str(project_root(cwd))
 
     db_path = Path(cwd) / "memory" / "memory.db"
     if not db_path.exists():

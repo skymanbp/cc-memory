@@ -11,7 +11,6 @@ If this is the FIRST user message of a session AND PROGRESS.md exists,
 also seed `progress.current_request` so PROGRESS.md captures the goal
 right away (don't wait for PreCompact).
 """
-import json
 import sys
 from pathlib import Path
 
@@ -24,20 +23,13 @@ sys.path.insert(0, str(_PKG_ROOT))
 from core.encoding_setup import enable_utf8_io
 enable_utf8_io()
 
-# Project opt-out. This USED to be a private literal copy here and a second
-# byte-identical one in hooks/pre_compact.py, on the grounds that those two are
-# "the ONLY paths that create memory/". The other four hooks
-# <!--ce:hooks:asof--> gated on memory/memory.db merely existing, so a project
-# initialised BEFORE being listed stayed fully captured; the single
-# implementation now lives in core.modes and
-# every hook calls it. See core/modes.py:is_excluded.
-from core.modes import is_excluded
-
-# Project-root anchoring (v2.6.0). THIS hook is the one that mkdir's memory/,
-# so it is the one a wrong `cwd` turns into a second database. The payload's
-# cwd follows the agent's own `cd`, which is how a session launched at a repo
-# root came to report a subdirectory. See core/roots.py for the ladder.
-from core.roots import project_root
+# Shared entry ladder (v2.10.0): stdin parsing and the opt-out→anchor gate
+# live in hooks/_entry.py, ONCE. Six hand-rolled copies of this ladder is how
+# guard drift between hooks kept becoming shipped defects (v2.7.0's whole
+# release theme; the v2.9.0 junk-cwd database plant). This hook is the one
+# that mkdir's memory/, so it is the one a wrong `cwd` turns into a second
+# database — see hooks/_entry.py for the ordering contract.
+from hooks._entry import parse_payload, resolve_project
 # safe_id replaces this hook's private `[:16]` truncating copy (three hooks
 # <!--ce:hooks:asof--> each had one; truncation cross-wired any two sessions
 # sharing a 16-char prefix). read_marker never raises and refuses to follow a
@@ -78,16 +70,9 @@ def _init_project_if_needed(cwd):
 
 
 def main():
-    try:
-        data = json.loads(sys.stdin.buffer.read().decode("utf-8"))
-    except Exception:
-        sys.exit(0)
-
-    # json.loads SUCCEEDS on well-formed non-object payloads (`null`, `42`,
-    # `"s"`, `[1,2]`, `true`). The `.get()` calls below sit outside the try, so
-    # without this guard those raise AttributeError, print a traceback to
-    # stderr and exit 1 — two hook-contract violations at once.
-    if not isinstance(data, dict):
+    # Silent (no logger): this hook fires on every user message.
+    data = parse_payload()
+    if data is None:
         sys.exit(0)
 
     # FIELD types, not just the container type — the guard the other five
@@ -102,21 +87,15 @@ def main():
     if not isinstance(session_id, str) or not session_id:
         sys.exit(0)
 
-    # Project opt-out — MUST precede _init_project_if_needed, which is the call
-    # that mkdir's memory/ in whatever cwd we were handed. Placed after the
-    # empty-cwd guard so `Path("").resolve()` can never widen the match to the
-    # interpreter's own working directory. Deliberately silent: this hook fires
-    # on every user message, so logging here would write a line per turn.
-    if is_excluded(cwd):
+    # Opt-out gate + root anchor via the ONE shared gate (hooks/_entry.py),
+    # which owns the ordering contract. MUST precede _init_project_if_needed,
+    # the call that mkdir's memory/ in whatever cwd we were handed; placed
+    # after the empty-cwd guard so `Path("").resolve()` can never widen the
+    # match to the interpreter's own working directory. Deliberately silent
+    # (no log passed): this hook fires on every user message.
+    cwd = resolve_project(cwd)
+    if cwd is None:
         sys.exit(0)
-
-    # Anchor AFTER the opt-out, never before: `is_excluded` must keep seeing
-    # the raw cwd. A user who excluded one sensitive SUBDIRECTORY would
-    # otherwise have that exclusion widened away by resolving to the parent
-    # project first. Rebinding `cwd` here (rather than fixing each use site)
-    # is deliberate — memory_dir, db_path and upsert_project must agree on
-    # ONE directory, and a per-site fix is how they would drift apart again.
-    cwd = str(project_root(cwd))
 
     # Zero-config bootstrap. The return value is deliberately NOT consulted:
     # gating the turn-1 PROGRESS seeding on it is exactly what made that seeding

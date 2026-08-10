@@ -1,9 +1,9 @@
-<!-- i18n-source: README.md | sha256: 7ee052e487fedb30 | version: 2.9.0 | translated: 2026-08-09 -->
+<!-- i18n-source: README.md | sha256: dc929db33b0cbad6 | version: 2.10.0 | translated: 2026-08-10 -->
 > [English](README.md) · **简体中文**
 
 # cc-memory
 
-**Claude Code 持久化记忆插件（v2.9.0）**——反补丁式的写入即归并（reconcile-on-write）、
+**Claude Code 持久化记忆插件（v2.10.0）**——反补丁式的写入即归并（reconcile-on-write）、
 LLM 判定的语义去重、强制 PROGRESS.md 交接、带 plan-refiner / plan-guardian 子代理与
 强制结转闸门的实时 PLAN.md 锚点、有界 transcript 读取、注入可观测性、FTS5 搜索，
 以及以 Haiku 为主（本地 Ollama 兜底可选）的 AI 判定式抽取。
@@ -15,6 +15,25 @@ LLM 判定的语义去重、强制 PROGRESS.md 交接、带 plan-refiner / plan-
 
 cc-memory 在每一个对话边界捕获结构化记忆，并且**强制下一次会话在开始工作之前先阅读
 一份交接文档**。
+
+## v2.10.0 有什么新变化
+
+**一轮反臃肿架构整备。**对全树每个函数做了 LOC + 圈复杂度测量（对比 v2.5.0
+基线），回答一个问题：五轮收敛修复是否已经堆成补丁摞补丁的臃肿？结论：增长
+几乎全部是*机制*——每道守卫背后都有一个实测缺陷——只有**一处**真正的结构性
+重复，本轮已修：
+
+- **六个钩子各自手搓同一套入口阶梯**（stdin 读取 → JSON 解析 → 对象检查 →
+  对原始 cwd 跑退出开关 → 锚定项目根），约 350 行六份同构拷贝，历史上每次
+  拷贝间漂移都变成过已发货缺陷。阶梯现在只在 `hooks/_entry.py` 存在一份；
+  各钩子的策略（coerce 还是 abort、NUL 检查、被排除分支的反应）仍留在各钩子。
+  `test_surfaces` §4 新增窄排除驱动（活项目内部被列出的子目录——顺序反转会
+  静默破坏的正是这个方向），§7 只在闸门内部断言一次顺序，
+  `falsify_fixes --case r10entryorder` 证明反转会让套件翻红。
+
+刻意**不**重构的部分同样有案可查（CLAUDE.md § v2.10.0）：dashboard 复杂度
+最高的三个函数原样保留，因为它们没有任何可执行覆盖——在零测试下重构一个
+2.9k 行的 GUI，恰恰是本轮要避免的「越改越错」失败模式。
 
 ## v2.9.0 有什么新变化
 
@@ -881,8 +900,10 @@ $P clear              # 丢弃 done/failed/skipped
   **需显式开启；`enabled` 默认为 `false`**，此时 Anthropic 那几条腿是唯一后端。
 - `excluded_projects` — 完全退出 cc-memory 的绝对路径。被列出的目录*及其下的一切*
   都不会得到 `memory/` 目录、数据库、observation、抽取和 PROGRESS.md：**全部六个
-  钩子 <!--ce:hooks-->，外加 MCP 服务**，在解析出 `cwd` 之后的第一件事就是调用
-  `core.modes.is_excluded(cwd)` 并以 0 退出（MCP 则回 `isError`）。那是**一份**
+  钩子 <!--ce:hooks-->，外加 MCP 服务**，第一件事就是对**原始** `cwd`（锚定到项目根
+  之前）咨询 `core.modes.is_excluded` 并以 0 退出（MCP 则回 `isError`）；钩子自
+  v2.10.0 起统一经由共享闸门 `hooks/_entry.py:resolve_project`，该闸门独占这一
+  先后顺序。那是**一份**
   共享实现，而不是每个调用方各抄一份——v2.5.0 曾把它作为两份私有副本放进仅有的
   两个会*创建* `memory/` 的钩子里，结果是：一个在被列入名单**之前**就已初始化过的
   项目仍被完整地埋点——observation 继续累积，PROGRESS.md 继续点名它的文件，而在有

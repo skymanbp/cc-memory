@@ -120,7 +120,9 @@ cc-memory/
 │   │                              progress, plan, privacy, modes, roots,
 │   │                              auth, logger, encoding_setup, version,
 │   │                              atomic, markers, textsim
-│   ├── hooks/                   ← Hook entry points (6 modules)
+│   ├── hooks/                   ← 6 hook entry points + _entry.py (the
+│   │                              shared entry ladder: stdin parse + the
+│   │                              opt-out→anchor gate, v2.10.0)
 │   ├── llm/                     ← ccl_backend (Haiku/Ollama) + memory_writer
 │   │                              + parse (tolerant LLM-JSON reader)
 │   ├── cli/                     ← mem.py, plan.py
@@ -230,14 +232,14 @@ the event:
   PROGRESS.md, ~1-5s; `pre_compact.py:5-20`).
 - The **async leg** runs `core.consolidate.run_consolidation` under a
   `BudgetGate` with `_BUDGET_TOTAL_S = 240.0` and `_BUDGET_SAFETY_S = 8.0`
-  (`consolidate_async.py:62`), so the last LLM call it starts finishes by
+  (`consolidate_async.py:65`), so the last LLM call it starts finishes by
   `total_s - safety_s` = 232s < the hook's own 300s timeout — the worker is
   never killed mid-write.
 - Cadence is an **interval marker + lock**, not a fragile
   `session_count % N` check: `memory/.last_consolidation.json` records the
   session count at the last successful run and
   `memory/.consolidation.lock` prevents overlapping workers (a lock older than
-  `_STALE_LOCK_S = 360.0`, `consolidate_async.py:66`, is reclaimed). This is
+  `_STALE_LOCK_S = 360.0`, `consolidate_async.py:69`, is reclaimed). This is
   race-immune against the concurrent sync leg — a ±1 drift in the count can
   cause neither a double-run nor a miss (`consolidate_async.py:19-28`).
 
@@ -417,7 +419,7 @@ caller's responsibility, and there are exactly two shapes:
   (`memory_writer.py:190-194`). All hook callers pass it
   (`pre_compact.py:435`, `stop.py:166`, `session_start.py:1056`); the sync
   PreCompact leg additionally touches it again after the rest of its state
-  changes (`pre_compact.py:790`).
+  changes (`pre_compact.py:782`).
 - Single-shot callers call `regenerate_memory_index` explicitly:
   `cli/mem.py:1089` and `:584`, `mcp/server.py:644`, `ui/dashboard.py:1634`,
   `ui/web_viewer.py:325`, plus the `skills/ccm-load` inline script
@@ -520,7 +522,7 @@ SessionStart:
 ```
 
 Call signatures above are the real ones: `write_progress_md(db, project_id,
-memory_dir)` (`core/progress.py:331-490`; call sites `pre_compact.py:759`,
+memory_dir)` (`core/progress.py:331-490`; call sites `pre_compact.py:751`,
 `stop.py:292`, `user_prompt.py:133`, `session_start.py:912`, `mcp/server.py:243`,
 `cli/mem.py:1179`). See
 [docs/CONTRACTS.md](CONTRACTS.md#handoff-contract) for the PROGRESS.md
@@ -634,9 +636,9 @@ while the same token via Bearer + beta gets HTTP 200 (`core/auth.py:14-15`).
 `get_api_key()` is the single-credential back-compat view of that same list (it
 does not retry, `core/auth.py:60-93`); it also carries the `oauth_expired`
 signal behind SessionStart's "[WARNING: OAuth expired — LLM extraction
-disabled]" footer (`session_start.py:592`). Hook callers use it to *supply*
-the credential passed into `call_llm`: `pre_compact.py:82 → :166`,
-`stop.py:82`, `session_start.py:592`, `core/consolidate.py:424, 549, 724`.
+disabled]" footer (`session_start.py:594`). Hook callers use it to *supply*
+the credential passed into `call_llm`: `pre_compact.py:80 → :166`,
+`stop.py:84`, `session_start.py:594`, `core/consolidate.py:424, 549, 724`.
 
 Fall-through was added in v2.3.4 for a concrete failure: a dead env key (e.g.
 zero credit → HTTP 400) used to blackhole the healthy subscription token behind
@@ -788,7 +790,13 @@ every prompt.
 `project_root` (`core/roots.py:530-575`) resolves a root first. Every hook
 rebinds `cwd` to it immediately **after** `is_excluded` and never before:
 resolving first would widen a per-subdirectory exclusion away by climbing to
-its unexcluded parent. The chain of candidate ancestors stops below any home
+its unexcluded parent. Since v2.10.0 that ordering is not a per-hook
+discipline but a mechanism: hooks call
+`hooks/_entry.py:resolve_project`, the ONE shared gate that runs
+`is_excluded` on the raw cwd and then anchors (stdin parsing is shared the
+same way via `parse_payload`). `tests/test_surfaces.py` asserts the order
+once inside the gate, refuses a direct import in any hook, and
+`tools/falsify_fixes.py --case r10entryorder` proves the inversion goes red. The chain of candidate ancestors stops below any home
 directory, below the filesystem root, at a `.ccm-root` pin, and after 25
 levels (`_chain`, `core/roots.py:267-295`). First hit wins:
 

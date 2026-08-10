@@ -49,8 +49,11 @@ enable_utf8_io()
 
 from core.db import MemoryDB
 from core.logger import get_logger
-from core.modes import is_excluded, read_config
-from core.roots import project_root  # v2.6.0 root anchoring — core/roots.py
+from core.modes import read_config
+# Shared entry ladder (v2.10.0): stdin parsing + the opt-out→anchor gate,
+# once, in hooks/_entry.py — six hand-rolled copies is how guard drift
+# between hooks kept becoming shipped defects.
+from hooks._entry import parse_payload, resolve_project
 
 _log = get_logger("consolidate_async")
 
@@ -178,18 +181,10 @@ def _write_marker(marker_path, data):
 
 
 def main():
-    try:
-        data = json.loads(sys.stdin.buffer.read().decode("utf-8"))
-    except Exception as exc:
-        _log.error(f"stdin parse error: {exc}")
-        sys.exit(0)
-
-    # json.loads SUCCEEDS on well-formed non-object payloads (`null`, `42`,
-    # `"s"`, `[1,2]`, `true`). The `.get()` calls below sit outside the try, so
-    # without this guard those raise AttributeError, print a traceback to
-    # stderr and exit 1 — two hook-contract violations at once.
-    if not isinstance(data, dict):
-        _log.warn(f"stdin payload is {type(data).__name__}, not an object")
+    # Logged: this hook is rare, and a skipped consolidation is worth being
+    # able to explain afterwards.
+    data = parse_payload(log=_log)
+    if data is None:
         sys.exit(0)
 
     # FIELD types, not just the container type. The guard above only makes
@@ -200,20 +195,17 @@ def main():
     if not isinstance(cwd, str) or not cwd:
         sys.exit(0)
 
-    # Project opt-out — the FIRST act after resolving cwd. Consolidation is the
-    # heaviest LLM leg in the plugin (semantic de-dup ships memory content to
-    # the Anthropic API); an excluded project must not reach it just because its
-    # memory/ predates the exclusion. Logged: this hook is rare, and a skipped
-    # consolidation is worth being able to explain afterwards.
-    if is_excluded(cwd):
+    # Opt-out gate + root anchor via the ONE shared gate (hooks/_entry.py).
+    # Consolidation is the heaviest LLM leg in the plugin (semantic de-dup
+    # ships memory content to the Anthropic API); an excluded project must
+    # not reach it just because its memory/ predates the exclusion. Rare
+    # hook, so it carries the reporting duty: the exclusion is logged and
+    # `project_root` announces any redirection.
+    resolved = resolve_project(cwd, log=_log)
+    if resolved is None:
         _log.info(f"skipped: {cwd} is in config.json excluded_projects")
         sys.exit(0)
-
-    # Anchor AFTER the opt-out so a narrow per-subdirectory exclusion is not
-    # widened away by resolving to its parent. This hook is rare, so it
-    # carries the reporting duty: `project_root` logs the redirection and
-    # names any stray database it stepped over.
-    cwd = str(project_root(cwd, log=_log))
+    cwd = resolved
 
     memory_dir = Path(cwd) / "memory"
     db_path = memory_dir / "memory.db"

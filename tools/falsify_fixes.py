@@ -1600,7 +1600,10 @@ def _break_r9manifest(root):
 @case("r9bigstdin", ["tests/test_surfaces.py"],
       "cap PostToolUse stdin again -> a large tool result drops the whole event")
 def _break_r9bigstdin(root):
-    _patch(root, f"{PKG}/hooks/post_tool_use.py",
+    # anchor repaired 2026-08-10: v2.10.0 moved the stdin read from
+    # post_tool_use.py into the shared hooks/_entry.py:parse_payload, so the
+    # cap is re-applied there — same breakage, one level down.
+    _patch(root, f"{PKG}/hooks/_entry.py",
            "        raw = sys.stdin.buffer.read()",
            "        raw = sys.stdin.buffer.read(1024 * 512)  # BREAKAGE")
 
@@ -1674,6 +1677,46 @@ def _break_r9gateleak(root):
     _patch(root, "tests/test_plan_carryover.py",
            "assert Path.home() == _HOME, (",
            "assert Path.home() != _HOME, (  # BREAKAGE: sandbox inverted")
+
+
+@case("r10lograise", ["tests/test_surfaces.py"],
+      "unguard the shared ladder's log call -> a broken logger crashes every "
+      "hook at once")
+def _break_r10lograise(root):
+    _patch(root, f"{PKG}/hooks/_entry.py",
+           "        try:\n"
+           "            if log is not None:\n"
+           '                log.error(f"stdin parse error: {exc}")\n'
+           "        except Exception:\n"
+           "            # why: this is the shared ladder for every hook, and the hook\n"
+           "            # contract (exit 0, empty stderr) outranks the log line. The\n"
+           "            # pre-v2.10.0 post_tool_use carried exactly this guard; losing\n"
+           "            # it here would let a broken logger crash all six hooks\n"
+           "            # <!--ce:hooks--> at once.\n"
+           "            pass\n"
+           "        return None",
+           "        if log is not None:\n"
+           '            log.error(f"stdin parse error: {exc}")  # BREAKAGE: guard removed\n'
+           "        return None")
+
+
+@case("r10entryorder", ["tests/test_surfaces.py"],
+      "anchor before the opt-out in the shared gate -> a narrow exclusion is "
+      "widened away for every hook at once")
+def _break_r10entryorder(root):
+    # v2.10.0 moved the six hand-rolled entry ladders into
+    # hooks/_entry.py:resolve_project, so ONE inversion now breaks all six
+    # hooks together — which is exactly why the gate must catch it: §4's
+    # narrow-exclusion drive records the private zone's activity in the
+    # PARENT project's database, and §7's source rule sees the order flip.
+    _patch(root, f"{PKG}/hooks/_entry.py",
+           "    if is_excluded(cwd):\n"
+           "        return None\n"
+           "    return str(project_root(cwd, log=log))",
+           "    anchored = str(project_root(cwd, log=log))  # BREAKAGE: anchor first\n"
+           "    if is_excluded(anchored):\n"
+           "        return None\n"
+           "    return anchored")
 
 
 def verify_anchors():

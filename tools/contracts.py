@@ -168,9 +168,16 @@ def _render_paths(repo):
 @contract("optout_surfaces",
           "modules that consult config.json excluded_projects")
 def _optout_surfaces(repo):
+    # `resolve_project` is the hooks' shared gate (hooks/_entry.py, v2.10.0):
+    # a hook that routes through it consults the opt-out exactly as one that
+    # called `is_excluded` itself — the same reason `cli_opt_out_notice`
+    # counts for the CLI surfaces. `_entry.py` joins `core/modes.py` in the
+    # exclude list because it IMPLEMENTS the gate rather than being a surface
+    # protected by it.
     return _modules_calling(repo, {"is_excluded", "cli_opt_out_notice",
-                                   "refusal_notice"},
-                            exclude=(f"{PKG}/core/modes.py",))
+                                   "refusal_notice", "resolve_project"},
+                            exclude=(f"{PKG}/core/modes.py",
+                                     f"{PKG}/hooks/_entry.py"))
 
 
 # Creators that deliberately do NOT call `ensure_memory_dir`, and the exact
@@ -208,8 +215,14 @@ def _memory_dir_creators(repo):
 @contract("anchoring_surfaces",
           "modules that resolve a raw cwd to the project root")
 def _anchoring_surfaces(repo):
-    return _modules_calling(repo, {"project_root", "anchor_project"},
-                            exclude=(f"{PKG}/core/roots.py",))
+    # `resolve_project` anchors through `project_root` on behalf of its
+    # caller (hooks/_entry.py, v2.10.0), so a hook using the shared gate is
+    # an anchoring surface; `_entry.py` itself is the implementation, same
+    # exclude rule as `core/roots.py`.
+    return _modules_calling(repo, {"project_root", "anchor_project",
+                                   "resolve_project"},
+                            exclude=(f"{PKG}/core/roots.py",
+                                     f"{PKG}/hooks/_entry.py"))
 
 
 @contract("insert_memory_callers",

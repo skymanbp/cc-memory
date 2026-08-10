@@ -2,7 +2,7 @@
 
 ## Project: cc-memory
 
-**Claude Code persistent memory plugin (v2.9.0)** — anti-patch reconcile-on-write
+**Claude Code persistent memory plugin (v2.10.0)** — anti-patch reconcile-on-write
 + LLM-judged semantic de-duplication, forced PROGRESS.md handoff with
 per-session annotation, live PLAN.md anchor with plan-refiner / plan-guardian
 subagents + mandatory carryover gate, bounded transcript reads, injection
@@ -10,9 +10,49 @@ observability, FTS5 search, AI-judged extraction with Haiku (optional local
 Ollama fallback).
 
 - **Language**: Python 3.8+ (pure stdlib, zero pip dependencies at runtime)
-- **Version**: 2.9.0
+- **Version**: 2.10.0
 - **License**: MIT
 - **Platform**: Windows-primary, cross-platform compatible (Tkinter required for GUI)
+
+## What changed in v2.10.0 (over v2.9.0)
+
+**An anti-bloat architecture round, driven by measurement.** A function-level
+LOC + cyclomatic-complexity sweep of the whole tree against the v2.5.0
+baseline (487 → 818 functions, 12,514 → 20,836 function-LOC) found exactly ONE
+structural duplication worth a mechanism — and confirmed the rest of the
+growth is machinery this file already documents (atomic / textsim / markers /
+roots / snapshot-verdict guards, each line traceable to a measured defect).
+Full register: the complexity data and per-finding dispositions are in the
+session's `memory/arch-review-2026-08-10.md`. The invariant a future change
+must not break:
+
+1. **`hooks/_entry.py` is THE hook entry ladder.** Every hook parses stdin
+   through `parse_payload` (read-to-EOF, JSON, object check — the guard
+   comments that used to be pasted verbatim into six files live on the ONE
+   implementation now) and routes cwd through `resolve_project`, which owns
+   the `is_excluded`-on-RAW-cwd-THEN-`project_root` order. Six hand-rolled
+   copies of that ladder is how every drift between them became a shipped
+   defect — v2.7.0's whole release theme, and the v2.9.0 junk-cwd database
+   plant, were both single-rung misses. Field POLICIES stay per-hook on
+   purpose (coerce vs abort, pre_compact's NUL check, each hook's
+   excluded-branch reaction); the gate carries the mechanism only.
+   `tests/test_surfaces.py` §7 asserts the order once inside the gate and
+   refuses a direct `is_excluded`/`project_root` import in any hook; §4
+   gained the NARROW-exclusion drive (a listed subdirectory inside a live
+   project) that goes red when the order is inverted —
+   `tools/falsify_fixes.py --case r10entryorder` proves it. Do not re-inline
+   the ladder "for one hook's special case": the special cases are already
+   parameters.
+
+Deliberately NOT refactored, with the reasoning on record: `pre_compact.main`
+stays one linear pipeline (its length is documentation of measured failure
+modes, not duplication); `db.py`'s snapshot-verdict cluster and
+`session_start._refresh_progress_row`'s three-tier fill are essential
+complexity (every branch is a distinct measured defect); the dashboard's three
+cx-47..100 functions stay untouched because they have ZERO executable coverage
+(recorded in `memory/falsify-coverage.md`) and refactoring an untested 2.9k-line
+GUI is the exact越改越错 entry point this round exists to avoid — user-ratified
+deferral, 2026-08-10.
 
 ## What changed in v2.9.0 (over v2.8.0)
 
@@ -673,10 +713,12 @@ cc-memory/
 │   ├── config.json
 │   ├── core/                    db, extractor, consolidate, idle, progress,
 │   │                            plan, privacy, modes, roots, auth, logger,
-│   │                            encoding_setup, version
-│   ├── hooks/                   post_tool_use, pre_compact, consolidate_async,
+│   │                            encoding_setup, version, atomic, markers,
+│   │                            textsim
+│   ├── hooks/                   _entry (shared entry ladder, v2.10.0),
+│   │                            post_tool_use, pre_compact, consolidate_async,
 │   │                            session_start, stop, user_prompt
-│   ├── llm/                     ccl_backend, memory_writer
+│   ├── llm/                     ccl_backend, memory_writer, parse
 │   ├── cli/                     mem, plan
 │   ├── mcp/                     server
 │   └── ui/                      installer, dashboard, web_viewer
@@ -812,7 +854,7 @@ The `plan_active` table (one row per project) backs PLAN.md. Lifecycle:
   only `plan.apply_refined_plan` may clear `needs_refine`.
 
 **All of the `PostToolUse` legs above run in EVERY mode, above the
-`should_observe` gate** (`hooks/post_tool_use.py:191`). They shipped below it
+`should_observe` gate** (`hooks/post_tool_use.py:184`). They shipped below it
 from v2.2 through v2.4.3, which made the entire anchor dead through its own
 hook — `TodoWrite` is in every mode's `skip_tools` and `ExitPlanMode` is in no
 mode's `observe_tools`. Plan control is not observation: mode selects what is
@@ -942,10 +984,12 @@ the `hooks` set `tools/contracts.py` computes from the manifest.
 **§7 is the twin of §4.** It drives the same six hooks <!--ce:hooks--> from a SUBDIRECTORY of
 a seeded project and asserts no second `memory/` appears down there while the
 root database receives the writes, walks the resolution ladder over a real
-filesystem, and asserts the source rule that every hook calls
-`core.roots.project_root` **after** `is_excluded`. A hook that skips the
-resolver is a split-brain regression, not a style nit — the same way one that
-skips `is_excluded` is a privacy regression.
+filesystem, and asserts the source rule that every hook routes cwd through
+`hooks/_entry.py:resolve_project` — the opt-out→anchor ORDER is asserted once,
+inside the gate itself, and a direct `is_excluded`/`project_root` import in a
+hook is refused (v2.10.0; the same shared-gate shape `_cli_opt_out_gate`
+asserts for the three CLI surfaces). A hook that skips the gate is a
+split-brain regression AND a privacy regression, not a style nit.
 
 v2.8.0 added the checks below, each verified to FAIL against the state it
 exists to catch before being kept. (This used to say "four checks" while
@@ -1064,10 +1108,13 @@ emits real UTF-8.
 
 **`excluded_projects` is covered by `tests/test_surfaces.py` §4** — it drives
 all six hooks <!--ce:hooks--> against a fresh excluded directory, a
-subdirectory of one, and a
+subdirectory of one, a NARROW exclusion (a listed subdirectory INSIDE a live
+project — the direction an anchor-before-opt-out inversion widens away,
+v2.10.0), and a
 project that was initialised BEFORE it was listed (the case the two-copy v2.5.0
 implementation got wrong). Keep that block in step with any hook you add: a hook
-that does not call `core.modes.is_excluded` is a privacy regression, not a style
+that does not route through `hooks/_entry.py:resolve_project` (which consults
+`core.modes.is_excluded` before anchoring) is a privacy regression, not a style
 nit.
 
 **Doc `file:line` citations ARE gated now — `tools/citation_check.py` (v2.5.2).**
@@ -1083,7 +1130,7 @@ Two limits to know before trusting a green result: a citation whose sentence
 names no resolvable symbol at all is reported **SKIP**, not OK (253 of 594
 today, down from 370 once v2.5.3 taught it to anchor CROSS-FILE citations on the
 text of the cited range — the `` `db.tag_progress_session(...)`
-(`user_prompt.py:214`) `` shape, which is the commonest in these docs). `--fix`
+(`user_prompt.py:193`) `` shape, which is the commonest in these docs). `--fix`
 rewrites a same-file citation to the **definition** site and a cross-file one to
 the occurrence NEAREST the stale number — a stated assumption (it was right when
 written; the file grew above it), not a proof. Ordinary variable

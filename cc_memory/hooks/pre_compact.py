@@ -58,8 +58,11 @@ from core.logger import get_logger
 # <!--ce:hooks:asof--> had no check at all, so a project initialised BEFORE
 # being listed stayed fully captured. One implementation now, called by all
 # six. See core/modes.py.
-from core.modes import is_excluded
-from core.roots import project_root  # v2.6.0 root anchoring — core/roots.py
+# Shared entry ladder (v2.10.0): stdin parsing + the opt-out→anchor gate,
+# once, in hooks/_entry.py — six hand-rolled copies is how guard drift
+# between hooks kept becoming shipped defects (this hook's own junk-cwd
+# database plant, fixed in v2.9.0, was a rung the other five carried).
+from hooks._entry import parse_payload, resolve_project
 # Privacy filter for the PROGRESS ingress below. The observation and memory
 # write paths honoured <private> from v2.5.0; this hook's progress ingress
 # never did (see _first_user_request).
@@ -449,18 +452,9 @@ def _reserve_archive_ts(memory_dir, now):
 
 
 def main():
-    try:
-        data = json.loads(sys.stdin.buffer.read().decode("utf-8"))
-    except Exception as exc:
-        _log.error(f"stdin parse error: {exc}")
-        sys.exit(0)
-
-    # json.loads SUCCEEDS on well-formed non-object payloads (`null`, `42`,
-    # `"s"`, `[1,2]`, `true`). The `.get()` calls below sit outside the try, so
-    # without this guard those raise AttributeError, print a traceback to
-    # stderr and exit 1 — two hook-contract violations at once.
-    if not isinstance(data, dict):
-        _log.warn(f"stdin payload is {type(data).__name__}, not an object")
+    # Logged: PreCompact is rare, and a dropped compaction costs the handoff.
+    data = parse_payload(log=_log)
+    if data is None:
         sys.exit(0)
 
     cwd = data.get("cwd", "")
@@ -519,23 +513,21 @@ def main():
                   "accepts it, so there is nothing this compaction can do")
         sys.exit(0)
 
-    # Project opt-out — MUST precede the try block below, whose first act is to
-    # mkdir memory/ + sessions/ + topics/ in cwd. Placed after the empty-cwd
-    # guard so `Path("").resolve()` can never widen the match to the
-    # interpreter's own working directory. Logged (unlike UserPromptSubmit,
-    # which fires every message) because PreCompact is rare and a skipped
-    # handoff is worth being able to explain afterwards. No stdout: an excluded
-    # project must produce no artifact at all, including a status line.
-    if is_excluded(cwd):
+    # Opt-out gate + root anchor via the ONE shared gate (hooks/_entry.py) —
+    # MUST precede the try block below, whose first act is to mkdir memory/ +
+    # sessions/ + topics/ in cwd (this is the SECOND path that mkdir's
+    # memory/, so an unanchored cwd would keep a compaction able to create
+    # the very stray database UserPromptSubmit no longer creates). Placed
+    # after the empty-cwd guard so `Path("").resolve()` can never widen the
+    # match to the interpreter's own working directory. Logged (unlike the
+    # per-turn hooks) because PreCompact is rare and a skipped handoff is
+    # worth being able to explain afterwards. No stdout: an excluded project
+    # must produce no artifact at all, including a status line.
+    resolved = resolve_project(cwd, log=_log)
+    if resolved is None:
         _log.info(f"skipped: {cwd} is in config.json excluded_projects")
         sys.exit(0)
-
-    # Anchor AFTER the opt-out so a narrow per-subdirectory exclusion is not
-    # widened away by resolving to its parent. This is the SECOND path that
-    # mkdir's memory/ (see the line below), so leaving it on the raw cwd
-    # would have kept a compaction able to create the very stray database
-    # UserPromptSubmit no longer creates. Rare hook: it logs the redirection.
-    cwd = str(project_root(cwd, log=_log))
+    cwd = resolved
 
     try:
         # ensure_memory_dir refuses a project directory that no longer exists
