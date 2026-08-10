@@ -432,9 +432,9 @@ def neutralize_document(text: str) -> str:
     NEXT value beginning ``>`` is likewise inert on its own. Rendered one after
     the other they are a complete tag, and everything the renderer itself puts
     between them (``\\n\\n**In-flight** — ``, ``\\`: 1\\n- \\``) is inside the
-    character class. Measured on all three sibling renderers with two rows that
-    `clean_for_storage` leaves byte-identical and `_MARKER_TAG_RE` does not
-    match individually:
+    character class. Measured on each of the assembled artifacts listed below,
+    with two rows that `clean_for_storage` leaves byte-identical and
+    `_MARKER_TAG_RE` does not match individually:
 
       PROGRESS.md  ``<system-reminder\\n\\n**In-flight** — >``
       PLAN.md      ``<system-reminder\\n\\n## Steps\\n\\n1. [ ] **t1** …\\n\\n## Context\\n\\n>``

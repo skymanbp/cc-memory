@@ -495,11 +495,20 @@ def _copy_surfaces(log_fn=print):
         written.append(rel)
         log_fn(f"  Surface: {rel}")
 
+    # UNION with previously-recorded surfaces still on disk, never replace:
+    # recording only THIS run's successes orphaned every surface a run
+    # skipped. Total case measured: the SHIPPED copy of this installer
+    # resolves _get_surface_root() to ~/.claude/hooks, every surface SKIPs,
+    # the manifest became [] — and uninstall then deleted the package while
+    # leaving all five surfaces installed, pointing at nothing.
+    still_ours = {r for r in previously_ours
+                  if r not in written and (CLAUDE_DIR / r).is_file()}
     try:
         SURFACE_MANIFEST.parent.mkdir(parents=True, exist_ok=True)
         SURFACE_MANIFEST.write_text(json.dumps(
             {"version": _VERSION, "root": str(CLAUDE_DIR),
-             "files": sorted(written)}, indent=2), encoding="utf-8")
+             "files": sorted(set(written) | still_ours)}, indent=2),
+            encoding="utf-8")
     except OSError as e:
         # why: the manifest only makes uninstall precise; failing to write it
         # must not abort an otherwise successful install
@@ -880,22 +889,36 @@ def _marketplace_warning_lines(key):
     ]
 
 
+# _settings_fingerprint sentinels. Neither can ever equal a real sha256 hex
+# digest, so comparing them against one always reads as "the file changed".
+_FP_ABSENT = "<absent>"
+_FP_UNREADABLE = "<unreadable>"
+
+
 def _settings_fingerprint():
-    """Exact identity of settings.json on disk right now, or None if absent.
+    """Exact identity of settings.json on disk right now.
 
     A content digest, not (mtime, size): both are too coarse to detect a
     concurrent write that happens to preserve the length, and NTFS mtime
     granularity is worse than the window being guarded.
+
+    An absent file returns `_FP_ABSENT`, never None: "I expect the file to
+    be absent" is a perfectly checkable expectation, and returning None here
+    conflated it with "I have no expectation" — `_write_settings_json` gates
+    BOTH halves of its guard on `expect is not None`, so on a machine where
+    settings.json did not exist yet the whole compare-and-swap AND the
+    post-write verification were silently disarmed, and a settings.json that
+    Claude Code created inside the window was destroyed with rc=0.
     """
     try:
         return hashlib.sha256(SETTINGS_PATH.read_bytes()).hexdigest()
     except FileNotFoundError:
-        return None
+        return _FP_ABSENT
     except OSError:
         # why: unreadable is not "unchanged" — returning a sentinel that can
         # never equal a real digest makes the caller treat it as a conflict,
         # which is the safe direction.
-        return "<unreadable>"
+        return _FP_UNREADABLE
 
 
 def _write_settings_json(settings, log_fn=print, expect=None):
@@ -1081,10 +1104,17 @@ def _merge_once(hooks_config, log_fn=print):
             if not isinstance(mg, dict):
                 n_malformed += 1  # a bare string used to be iterated per-character
                 continue
-            if _is_ccm_group(mg):
-                continue  # strip prior cc-memory entries so re-install upgrades
-            ambiguous += [(event, c) for c in _ambiguous_commands(mg)]
-            kept.append(mg)
+            # Per-ENTRY, not per-group (register Y2, the same defect the
+            # UNINSTALL path was fixed for while this path kept the old
+            # shape): dropping a whole matcher group because ONE command in
+            # it is ours deleted a user hook that shared the group — with
+            # rc=0 and no warning, on every reinstall/upgrade. Strip only
+            # our entries; a mixed group survives holding the user's.
+            survivor, _n = _strip_ccm_entries(mg)
+            if survivor is None:
+                continue  # the group was entirely ours — the upgrade replaces it
+            ambiguous += [(event, c) for c in _ambiguous_commands(survivor)]
+            kept.append(survivor)
         if n_malformed:
             log_fn(f"  [WARN] {event}: dropped {n_malformed} malformed "
                    f"(non-object) hook entr{'y' if n_malformed == 1 else 'ies'}")

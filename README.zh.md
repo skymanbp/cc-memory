@@ -1,9 +1,9 @@
-<!-- i18n-source: README.md | sha256: 348d504985024673 | version: 2.8.0 | translated: 2026-08-09 -->
+<!-- i18n-source: README.md | sha256: 7ee052e487fedb30 | version: 2.9.0 | translated: 2026-08-09 -->
 > [English](README.md) · **简体中文**
 
 # cc-memory
 
-**Claude Code 持久化记忆插件（v2.8.0）**——反补丁式的写入即归并（reconcile-on-write）、
+**Claude Code 持久化记忆插件（v2.9.0）**——反补丁式的写入即归并（reconcile-on-write）、
 LLM 判定的语义去重、强制 PROGRESS.md 交接、带 plan-refiner / plan-guardian 子代理与
 强制结转闸门的实时 PLAN.md 锚点、有界 transcript 读取、注入可观测性、FTS5 搜索，
 以及以 Haiku 为主（本地 Ollama 兜底可选）的 AI 判定式抽取。
@@ -15,6 +15,52 @@ LLM 判定的语义去重、强制 PROGRESS.md 交接、带 plan-refiner / plan-
 
 cc-memory 在每一个对话边界捕获结构化记忆，并且**强制下一次会话在开始工作之前先阅读
 一份交接文档**。
+
+## v2.9.0 有什么新变化
+
+**两位互相独立的审阅者同时读了已发布的 v2.8.0 代码树**，文件集不相交、角度不同：
+我这边是六个作用域的扇出（严重发现还要过一轮对抗式反驳），codex 那边是对整个运行
+时包的只读通读。**18 条缺陷在这里被我本人复现之后才算数**；另有 2 条被反驳、丢弃。
+
+对使用者真正有影响的几条：
+
+- **一条记忆的历史可能被截断。**归档一条本身已经带着 supersede 链接的行时，那个
+  链接被**覆盖**了，于是它所替代的版本从任何链游走中都不可达——而
+  `/cc-mem supersedes` 仍然把结果标成"最新在前"。现在用 `COALESCE` 写入：先到的
+  血缘事实胜出，第二条写进日志。
+- **共用一个数据库文件时，`/cc-mem` 会跨项目泄漏。**一个 `memory.db` 合法地持有
+  多个项目行（目录改名会产生一个，把 `memory/` 复制到别的仓库也会）。
+  `encoding-check --apply` 会**归档**别的项目的行，`supersedes` 会把别的项目的
+  记忆整条打印进 Claude 会话，`sessions` / `keywords` 也会把它列出来。这四个现在
+  都加了作用域；`archive` 一直就有。
+- **重装会删掉你自己的钩子。**如果你在 `settings.json` 里的某个钩子条目与
+  cc-memory 的条目共处同一个 matcher 组，安装路径会把整组丢弃——rc=0，无告警。
+  卸载路径早就修好了这一点，安装路径没有。
+- **在还没有 `settings.json` 的机器上，安装器的比较并交换是完全失效的**，因此
+  安装期间 Claude Code 写下的 `settings.json` 会被无声销毁。
+- **大的工具结果被整条丢弃。**PostToolUse 只读入 512 KiB 的**前缀**；更大的载荷
+  在 JSON 中途截断，钩子把整个事件丢掉——观察行与实时计划跟踪一起没了。读一个
+  常见大小的 `package-lock.json` 就足以触发。
+- **Windows junction 能同时骗过两道「绝不穿过链接写入」的守卫**（`stat.S_ISLNK`
+  对 junction 返回 False），于是被 junction 化的 `memory/` 会被写入，并被当作
+  项目根采纳。
+- **Web 面板可能被无限期锁死**：连接只要一直滴送尚未结束的报头块即可，因为墙钟
+  期限只覆盖请求体。现在报头阶段有 10 秒的绝对预算。
+- **空 prompt 会把你上一轮的请求留在**那个由 Stop 观察者发往 Anthropic 的标记里，
+  使它写下的记忆被归到错误的请求名下。
+
+**还有门禁自身的五个洞**，因为这一轮也把枪口对准了它们：引用检查器只认 `.py`
+（25 条引用豁免，其中 2 条已经烂了）、数字与名词之间隔一个词就绕过 `doc_claims`
+的全部触发式、契约登记册把标记防御少算了一个、`verify_anchors` 只捕获
+`SystemExit`（锚一旦烂掉整趟扫描就死）、第三道发布门禁在沙箱之外运行——每跑一次
+往真实 `%TEMP%` 泄漏两个项目目录（发现 270 个，已清理）。
+
+证伪登记册从 127 条增至 **147 条**，每条新用例都单独跑红过。完整叙事见
+[CHANGELOG.md](CHANGELOG.md)。
+
+**首次提供 release 资产：**两个 PyInstaller 可执行文件
+（`cc-memory-installer.exe`、`cc-memory-dashboard.exe`）加一份 `SHA256SUMS.txt`，
+附在 GitHub release 上。
 
 ## v2.8.0 有什么新变化
 
@@ -880,7 +926,7 @@ python tests/test_plan_carryover.py
 # 期望："RESULT: 20 passed, 0 failed"
 
 python tests/test_surfaces.py
-# 期望："===== ALL SURFACE TESTS PASSED ====="（§1-§8）
+# 期望："===== ALL SURFACE TESTS PASSED ====="（§1-§9）
 
 python tools/i18n_check.py       # 翻译漂移；有漂移则非零退出
 python tools/citation_check.py   # 文档 file:line 引用；"0 unchecked, 0 stale"
@@ -898,16 +944,20 @@ python tools/doc_claims.py       # 散文里的计数 vs tools/contracts.py；"0
   sqlite 句柄数回归、PLAN.md / MEMORY.md 抗伪造、唯一原子写入器规则、计划修改函数
   仅限关键字的 `project_id`，以及三道文档门禁。
 - `tests/test_plan_carryover.py` —— v2.4.0 的结转门禁（20 项检查）；该特性唯一的覆盖。
-- `tests/test_surfaces.py` —— v2.5 新增，自 v2.8.0 起共八节，覆盖另外两者都
+- `tests/test_surfaces.py` —— v2.5 新增，自 v2.9.0 起共九节，覆盖另外两者都
   没碰的表面：
   §1 MCP stdio 服务、§2 Web 面板的请求守卫、§3 独立安装器（界面的按名安装/卸载、
   畸形 `settings.json` 处理、与 `hooks/hooks.json` 的超时同步）、§4 六个钩子 <!--ce:hooks--> 上的
-  `excluded_projects`、§5 config.json 的各种形态与 MCP 侧的同一退出机制、
+  `excluded_projects`（开头先断言它自己那份钩子清单等于 `hooks/hooks.json`）、
+  §5 config.json 的各种形态与 MCP 侧的同一退出机制、
   §6 `settings.json` 的比较并交换、§7 项目根锚定（真实文件系统上的整条阶梯、从子目录
   驱动同一批钩子，以及「每个钩子都在退出开关**之后**解析」这条源码级规则）、
   §8 v2.8.0 的新表面（MCP 启动项目作用域门、加界的 `memory_topics`、经由自己
   钩子在每种模式下驱动的计划锚点，以及对敌意 `package.json` 无头执行的
-  `ui/dashboard.py`）。外加「每个调用 LLM 的钩子都必须传入绝对期限」。
+  `ui/dashboard.py`）、§9 v2.9.0 双视角审查的表面（CLI 的项目作用域、安装器按条
+  剥离与文件缺席时的比较并交换、面清单取并集、600 KiB 的 PostToolUse 载荷、
+  空 prompt 的标记覆写、MCP 的 `jsonrpc` 成员，以及报头阶段的滴流连接）。
+  外加「每个调用 LLM 的钩子都必须传入绝对期限」。
 - `tools/i18n_check.py` —— 按归一化内容哈希检查翻译漂移。
 - `tools/citation_check.py` —— 全部 13 个 markdown 文件里的每一条 `file.py:LINE`
   引用。`--fix` 修复，`--list` 显示每条判定。

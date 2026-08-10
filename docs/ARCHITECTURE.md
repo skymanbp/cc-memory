@@ -1,6 +1,6 @@
 > **English** · [简体中文](ARCHITECTURE.zh.md)
 
-# cc-memory — Architecture (v2.8.0)
+# cc-memory — Architecture (v2.9.0)
 
 cc-memory is a Claude Code plugin that gives Claude **persistent, structured
 memory across compactions and sessions**. This document is the overview: what
@@ -323,9 +323,9 @@ Eleven tables, matching `CLAUDE.md` § "Database schema (11 tables)".
 
 Plus `memories_fts` — an FTS5 virtual table over `memories` (`core/db.py:455-458`),
 kept in sync by three triggers (`core/db.py:459-478`, migration `v2_fts5` at
-`db.py:2583-2617`). It is created only when the local SQLite build has FTS5; otherwise
-`db.search_fts` (`core/db.py:2583-2617`) falls back to `LIKE ? ESCAPE '\'`
-(`core/db.py:2583-2617`). FTS5 is advertised in `.claude-plugin/plugin.json:4`
+`db.py:2625-2659`). It is created only when the local SQLite build has FTS5; otherwise
+`db.search_fts` (`core/db.py:2625-2659`) falls back to `LIKE ? ESCAPE '\'`
+(`core/db.py:2625-2659`). FTS5 is advertised in `.claude-plugin/plugin.json:4`
 and `:12`, and `/cc-mem status` reports which path is live (`cli/mem.py`,
 `cmd_status`).
 
@@ -336,8 +336,8 @@ new memory supersedes an old one, the new row links back to the old row's ID
 `db.get_supersede_chain(memory_id)` (`db.py:1340-1355`) shows the full update
 history. `content_hash` (migration `v2_content_hash`, `db.py:1340-1355`) is
 `sha256[:16]` of the normalized content, used for the cheap exact-duplicate
-check (`db.compute_content_hash` at `db.py:1869-1871`, `db.find_by_hash` at
-`db.py:1869-1871`).
+check (`db.compute_content_hash` at `db.py:1897-1899`, `db.find_by_hash` at
+`db.py:1897-1899`).
 
 Migrations are applied in order from the `_MIGRATIONS` list (`db.py:121-284`) and
 recorded in `_migrations`. Levels shipped so far: **v1** (topic column +
@@ -419,9 +419,9 @@ caller's responsibility, and there are exactly two shapes:
   PreCompact leg additionally touches it again after the rest of its state
   changes (`pre_compact.py:790`).
 - Single-shot callers call `regenerate_memory_index` explicitly:
-  `cli/mem.py:1067` and `:584`, `mcp/server.py:644`, `ui/dashboard.py:1634`,
+  `cli/mem.py:1089` and `:584`, `mcp/server.py:644`, `ui/dashboard.py:1634`,
   `ui/web_viewer.py:325`, plus the `skills/ccm-load` inline script
-  (`SKILL.md:127, 137`). `core/idle.py:96` and
+  (`skills/ccm-load/SKILL.md:308, 318`). `core/idle.py:96` and
   `hooks/consolidate_async.py:188` also refresh it after maintenance.
 
 (The pre-merge diagram showed regeneration as an unconditional step of
@@ -522,7 +522,7 @@ SessionStart:
 Call signatures above are the real ones: `write_progress_md(db, project_id,
 memory_dir)` (`core/progress.py:331-490`; call sites `pre_compact.py:759`,
 `stop.py:292`, `user_prompt.py:133`, `session_start.py:912`, `mcp/server.py:243`,
-`cli/mem.py:1152`). See
+`cli/mem.py:1179`). See
 [docs/CONTRACTS.md](CONTRACTS.md#handoff-contract) for the PROGRESS.md
 schema.
 
@@ -636,7 +636,7 @@ does not retry, `core/auth.py:60-93`); it also carries the `oauth_expired`
 signal behind SessionStart's "[WARNING: OAuth expired — LLM extraction
 disabled]" footer (`session_start.py:592`). Hook callers use it to *supply*
 the credential passed into `call_llm`: `pre_compact.py:82 → :166`,
-`stop.py:82`, `session_start.py:592`, `core/consolidate.py:414, 549, 724`.
+`stop.py:82`, `session_start.py:592`, `core/consolidate.py:424, 549, 724`.
 
 Fall-through was added in v2.3.4 for a concrete failure: a dead env key (e.g.
 zero credit → HTTP 400) used to blackhole the healthy subscription token behind
@@ -913,7 +913,7 @@ was in the queue. `cli/mem.py` had always refused instead; two halves of one
 CLI pair must not disagree about that.
 
 A pre-existing stray is therefore left exactly where it is — and *reported*,
-so it is not invisible: `nested_databases` (`core/roots.py:386-424`) backs a
+so it is not invisible: `nested_databases` (`core/roots.py:658-709`) backs a
 `[WARN] Separate database below this project` line in `cc-mem status`, which
 names each one and its memory count. That is an explicit command rather than a
 hook, because it walks the tree. `.ccm-root` — an empty file — pins a
@@ -992,7 +992,7 @@ shapes do not share a `cc_memory/` path segment.
 **Standalone installer (FLAT)** — `_copy_subpackages(TARGET_DIR)`
 (`installer.py:77-89`) writes each `SUBPACKAGE_FILES` key (`installer.py:77-89`)
 directly under `TARGET_DIR` (`installer.py:72`), with **no `cc_memory/`
-segment**, and `_make_hooks_config` (`installer.py:664-686`) builds commands as
+segment**, and `_make_hooks_config` (`installer.py:695-717`) builds commands as
 `python "<TARGET_DIR>/hooks/<name>.py"`:
 
 ```
@@ -1068,7 +1068,7 @@ mentions "cc-memory" without running one of this build's six hook scripts <!--ce
 
 Detection accepts both shapes: `mem.py:457` tests
 `(legacy / "cc_memory").exists() or (legacy / "core" / "db.py").exists()`.
-Inspection used to disagree with it. `_inspect_layout` (`mem.py:358-427`) resolved
+Inspection used to disagree with it. `_inspect_layout` (`mem.py:493-562`) resolved
 every `cc_memory/…`-prefixed entry of `_REQUIRED_PLUGIN_FILES` (`mem.py:237-277`)
 against the layout **root**, so a healthy flat install reported all 22 files
 missing, printed `[FAIL]`, and — because `/cc-mem status` only runs the API-key

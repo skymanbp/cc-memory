@@ -2,7 +2,7 @@
 
 # cc-memory
 
-**Claude Code persistent memory plugin (v2.8.0)** — anti-patch reconcile-on-write
+**Claude Code persistent memory plugin (v2.9.0)** — anti-patch reconcile-on-write
 with LLM-judged semantic de-duplication, forced PROGRESS.md handoff, live PLAN.md
 anchor with plan-refiner / plan-guardian subagents and a mandatory carryover
 gate, bounded transcript reads, injection observability, FTS5 search, AI-judged
@@ -16,6 +16,62 @@ disappear. Conversations that end normally (terminal closed) also lose context.
 
 cc-memory captures structured memories at every conversation boundary AND
 **forces the next session to read a handoff document** before it starts work.
+
+## What's new in v2.9.0
+
+**Two independent readers went over the shipped v2.8.0 tree at once**, with
+disjoint file sets and different angles: a six-scope fan-out of my own (with
+adversarial refutation of the severe findings) and a read-only pass by codex
+over the whole runtime package. 18 defects survived being **reproduced here**
+before they counted; two were refuted and dropped.
+
+The ones worth knowing about as a user:
+
+- **A memory's history could be truncated.** Archiving a row that already
+  carried a supersede link OVERWROTE that link, so the version it replaced
+  became unreachable from every chain walk — while `/cc-mem supersedes` still
+  printed the result under "newest first". The link is now written with
+  `COALESCE`: first fact wins, the second goes to the log.
+- **`/cc-mem` leaked across projects in a shared database file.** One
+  `memory.db` legitimately holds several project rows (a directory rename
+  makes one; copying a `memory/` between repos makes one). `encoding-check
+  --apply` **archived** the other project's rows, `supersedes` printed the
+  other project's memory into the Claude session, and `sessions` / `keywords`
+  listed it. All four are scoped now; `archive` always was.
+- **A reinstall deleted your own hooks.** If one of your `settings.json` hook
+  entries shared a matcher group with a cc-memory entry, the install path
+  dropped the whole group — rc=0, no warning. The uninstall path had been
+  fixed for this and the install path had not.
+- **On a machine with no `settings.json` yet, the installer's compare-and-swap
+  was entirely disarmed**, so a `settings.json` Claude Code wrote during the
+  install was destroyed silently.
+- **Large tool results were dropped whole.** PostToolUse read a 512 KiB
+  *prefix* of its input; anything bigger truncated mid-JSON and the hook
+  discarded the event — the observation row and the live-plan tracking with
+  it. A `Read` of a typical `package-lock.json` is enough.
+- **A Windows junction defeated both "never write through a link" guards**
+  (`stat.S_ISLNK` is False for one), so a junctioned `memory/` was written
+  into and adopted as a project root.
+- **The web viewer could be locked out indefinitely** by connections dripping
+  an unfinished header block: the wall-clock deadlines covered only the
+  request body. There is a 10-second absolute header budget now.
+- **An empty prompt left your PREVIOUS request** in the marker the Stop
+  observer ships to Anthropic, mis-attributing the memories it wrote.
+
+**And five holes in the gates themselves**, because this round was pointed at
+them too: the citation checker was `.py`-only (25 citations exempt, 2 already
+rotten), one modifier word between a number and its noun defeated every
+`doc_claims` trigger, the contracts registry under-counted the marker defence
+by one, `verify_anchors` caught only `SystemExit` so a rotted anchor killed the
+whole scan, and the third release gate ran outside a sandbox — leaking two
+project directories into the real `%TEMP%` per run (270 found, removed).
+
+The falsification register went 127 → **147 cases**, every new one driven RED
+individually. Full narrative in [CHANGELOG.md](CHANGELOG.md).
+
+**Release assets, for the first time:** both PyInstaller executables
+(`cc-memory-installer.exe`, `cc-memory-dashboard.exe`) plus a
+`SHA256SUMS.txt`, attached to the GitHub release.
 
 ## What's new in v2.8.0
 
@@ -1038,7 +1094,7 @@ python tests/test_plan_carryover.py
 # expect "RESULT: 20 passed, 0 failed"
 
 python tests/test_surfaces.py
-# expect "===== ALL SURFACE TESTS PASSED ====="   (§1-§8)
+# expect "===== ALL SURFACE TESTS PASSED ====="   (§1-§9)
 
 python tools/i18n_check.py       # translation drift; nonzero exit on drift
 python tools/citation_check.py   # doc file:line citations; "0 unchecked, 0 stale"
@@ -1059,20 +1115,24 @@ must all carry the same string, which `smoke_test.py` asserts.
   keyword-only `project_id` on the plan mutators, and the three doc gates.
 - `tests/test_plan_carryover.py` — the v2.4.0 carryover gate (20 checks); the
   only coverage of that feature.
-- `tests/test_surfaces.py` — new in v2.5, eight sections since v2.8.0, for
+- `tests/test_surfaces.py` — new in v2.5, nine sections since v2.9.0, for
   the surfaces neither of the others touches: §1 the MCP stdio server, §2 the
   web viewer's request guards, §3 the standalone installer (surface
   install/uninstall by name, malformed-`settings.json` handling, hook-timeout
   lockstep with `hooks/hooks.json`), §4 `excluded_projects` across all six
-  hooks <!--ce:hooks-->, §5 the config.json parser shapes plus the MCP half
+  hooks <!--ce:hooks--> (opening by asserting its own hook list equals
+  `hooks/hooks.json`), §5 the config.json parser shapes plus the MCP half
   of the same opt-out, §6 the `settings.json` compare-and-swap, §7
   project-root anchoring (the ladder over a real filesystem, the same hooks
   driven from a subdirectory, and the source rule that every hook resolves
   *after* the opt-out), §8 the v2.8.0 surfaces (the MCP launch-project scope
   gate, the bounded `memory_topics`, the plan anchor driven through its own
   hook in every mode, and `ui/dashboard.py` executed headlessly against a
-  hostile `package.json`). Plus the rule that every LLM-calling hook passes
-  an absolute deadline.
+  hostile `package.json`), §9 the v2.9.0 dual-review surfaces (CLI project
+  scoping, the installer's per-entry strip and absent-file compare-and-swap,
+  the surface-manifest union, a 600 KiB PostToolUse payload, the empty-prompt
+  marker, the MCP `jsonrpc` member, and header-phase drip-feeders). Plus the
+  rule that every LLM-calling hook passes an absolute deadline.
 - `tools/i18n_check.py` — translation drift, by normalized content hash.
 - `tools/citation_check.py` — every `file.py:LINE` citation in all 13 markdown
   files. `--fix` repairs; `--list` shows every verdict.

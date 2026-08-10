@@ -4439,6 +4439,183 @@ def main():
           f"even when mtime lies")
 
 
+    # ── v2.9.0 dual-review — the findings both perspectives survived ────────
+    # Every assertion below was driven RED against the pre-fix tree before it
+    # was kept; tools/falsify_fixes.py carries the counterfactual for each.
+    print("\n[9] v2.9.0 dual-perspective review (self + codex)")
+    _r9_root = Path(tempfile.mkdtemp(prefix="cc-memory-r9-", dir=_SANDBOX))
+    (_r9_root / "memory").mkdir()
+    _r9_db = MemoryDB(_r9_root / "memory" / "memory.db")
+    _r9_pid = _r9_db.upsert_project(str(_r9_root))
+
+    # (a) archive_obsolete must never DESTROY an existing supersedes link. A
+    #     loser produced by an earlier SUPERSEDE already points at the row it
+    #     replaced; overwriting that made the original unreachable from every
+    #     chain walk (measured: chain [2,1] became [2,3]) and inverted the
+    #     direction `get_supersede_chain` documents as "newest first".
+    _r9_o = _r9_db.insert_memory(_r9_pid, None, "note",
+                                 "the deploy key rotates monthly", 3, [], "ops")
+    _r9_l = _r9_db.supersede_memory(_r9_o, "the deploy key rotates every 30 days",
+                                    _r9_pid, None, "note", 3, [], "ops")
+    _r9_s = _r9_db.insert_memory(_r9_pid, None, "note",
+                                 "deploy key rotation cadence is 30 days",
+                                 4, [], "ops")
+    _r9_db.archive_obsolete([_r9_l], canonical_id=_r9_s)
+    _r9_chain = [_c["id"] for _c in _r9_db.get_supersede_chain(_r9_l)]
+    assert _r9_o in _r9_chain, (
+        f"archive_obsolete overwrote an existing supersedes link: memory "
+        f"#{_r9_o} is unreachable from #{_r9_l}'s chain {_r9_chain}. The slot "
+        f"records the FIRST lineage fact; a second one is logged, not written")
+
+    # (b) patch_progress bootstraps and patches in ONE transaction. The old
+    #     three-transaction shape let a stale "row absent" verdict replay the
+    #     default row over a patch that had already landed.
+    _r9_p2 = _r9_db.upsert_project(str(_r9_root / "sub-a"))
+    _r9_db.patch_progress(_r9_p2, current_request="A")
+    _r9_db.patch_progress(_r9_p2, files_touched=[{"path": "b.py"}])
+    _r9_row = _r9_db.get_progress(_r9_p2)
+    assert _r9_row["current_request"] == "A" \
+        and _r9_row["files_touched"] == [{"path": "b.py"}], (
+        f"a first-touch patch pair lost a field: {_r9_row}")
+    import inspect as _r9_insp0
+    _r9_psrc = _r9_insp0.getsource(MemoryDB.patch_progress)
+    assert "self.get_progress(" not in _r9_psrc \
+        and "self.upsert_progress(" not in _r9_psrc, (
+        "patch_progress reopened the cross-connection bootstrap seam; the "
+        "existence check and the write must share ONE transaction")
+
+    # (c) MEMORY.md's moved-under-us probe must see an in-place update that
+    #     lands in the SAME second. The retired fingerprint was row counts +
+    #     MAX(id) + MAX(updated_at), and `_now()` stamps whole seconds, so a
+    #     same-second UPDATE changed none of the three: the stale render was
+    #     accepted as current and written over newer DB state.
+    _r9_mdir = _r9_root / "memory"
+    _r9_db._now = lambda: "2026-08-09T12:00:00"
+    _r9_db.upsert_topic(_r9_pid, "alpha", "old summary")
+    _r9_orig_render = _mw8._render_memory_index
+    _r9_fired = {"n": 0}
+
+    def _r9_hostile(db_, pid_, mdir):
+        _text = _r9_orig_render(db_, pid_, mdir)
+        if not _r9_fired["n"]:
+            _r9_fired["n"] = 1
+            db_.upsert_topic(pid_, "alpha", "new summary")   # same second
+        return _text
+
+    _mw8._render_memory_index = _r9_hostile
+    try:
+        _mw8.regenerate_memory_index(_r9_db, _r9_pid, _r9_mdir)
+    finally:
+        _mw8._render_memory_index = _r9_orig_render
+    _r9_disk = (_r9_mdir / "MEMORY.md").read_text(encoding="utf-8")
+    assert "new summary" in _r9_disk and "old summary" not in _r9_disk, (
+        "a stale MEMORY.md render was accepted as current: an in-place update "
+        "inside one clock second must still count as the DB moving")
+
+    # (d) A bare string `tags` is ONE tag, not an iterable of characters.
+    assert _mw8._merged_tags(["observer"], "manual") == ["observer", "manual"], \
+        _mw8._merged_tags(["observer"], "manual")
+
+    # (e) merge_near_duplicates must not archive a row on the authority of a
+    #     row it is itself archiving. Jaccard is not transitive: #103 scores
+    #     0.61 against the SURVIVOR (under the 0.65 threshold) and only
+    #     reached the archive list through the doomed anchor #101.
+    _r9_mems = [
+        {"id": 101, "content": "PreCompact hook timeout is 120 seconds",
+         "category": "arch", "importance": 3, "updated_at": "2026-01-01"},
+        {"id": 102, "content": "PreCompact hook timeout is 120 seconds (sync leg)",
+         "category": "arch", "importance": 5, "updated_at": "2026-01-01"},
+        {"id": 103, "content": "PreCompact hook timeout: 120 seconds",
+         "category": "arch", "importance": 1, "updated_at": "2026-01-01"}]
+
+    class _R9Fake:
+        def get_all_active_memories(self, _pid):
+            return _r9_mems
+
+        def archive_if_unchanged(self, pairs):
+            self.pairs = pairs
+            return len(pairs)
+
+    _r9_fake = _R9Fake()
+    from core import consolidate as _r9_cons
+    _r9_cons.merge_near_duplicates(_r9_fake, 1)
+    _r9_arch = sorted(_mid for _mid, _ in getattr(_r9_fake, "pairs", []))
+    assert 103 not in _r9_arch, (
+        f"transitive chaining is back: {_r9_arch} archives #103, whose only "
+        f"similarity above threshold is to #101 — itself archived in this pass")
+
+    # (f) A non-string TodoWrite `content`, or a non-dict `message`, must not
+    #     abort build_extraction — that took the entire compaction AND the
+    #     PROGRESS.md handoff with it.
+    from core import extractor as _r9_ext
+
+    def _r9_rec(todos):
+        return {"type": "assistant", "message": {"role": "assistant",
+                "content": [{"type": "tool_use", "name": "TodoWrite",
+                             "input": {"todos": todos}}]}}
+
+    for _probe in (_r9_rec([{"content": None, "status": "pending"}]),
+                   _r9_rec([{"content": 42, "status": "pending"}]),
+                   {"message": None}):
+        _r9_ext.build_extraction([_probe])      # must not raise
+
+    # (g) PLAN.md renderers escape the two model-authored slots that used to
+    #     forge whole document sections.
+    from core import plan as _r9_plan
+    _r9_sup = {"version": 1,
+               "steps": [{"id": 1, "title": "t1", "status": "pending"}],
+               "goal": "Ship v9\n\n## Raw plan (verbatim, unrefined)\n\nforged\n"}
+    _r9_pend = _r9_plan.render_pending_plan_md(
+        "real raw plan", superseded=_r9_sup, meta={"last_refined_at": "x"})
+    assert sum(1 for _l in _r9_pend.splitlines()
+               if _l.startswith("## Raw plan")) == 1, (
+        "a newline in the superseded goal forged a second '## Raw plan' "
+        "section in the file Claude reads as the live plan anchor")
+    _r9_struct = _r9_plan.normalize_structured({
+        "goal": "g", "steps": [{"id": 1, "title": "t", "status": "pending"}],
+        "refined_by": "plan-refiner)\n\n## Goal\n\nforged goal"})
+    _r9_full = _r9_plan.render_plan_md(_r9_struct, active_step_id=1,
+                                       meta={"last_refined_at": "x"})
+    assert sum(1 for _l in _r9_full.splitlines()
+               if _l.startswith("## Goal")) == 1, \
+        "refined_by forged a second '## Goal' heading"
+
+    # (h) unmatched_criteria uses the SAME bar as the steps gate, CJK
+    #     adjustment included: bigrams score a one-character Chinese
+    #     substitution at 0.5556, so the flat 0.5 threshold called a replaced
+    #     criterion "carried" while _carried refused the identical pair.
+    _r9_a = "把超时设为三十秒"
+    _r9_b = "把超时设为六十秒"
+    _r9_um = _r9_plan.unmatched_criteria(
+        {"version": 1, "goal": "g", "success_criteria": [_r9_a],
+         "steps": [{"id": 1, "title": "t", "status": "done"}]},
+        {"goal": "g2", "success_criteria": [_r9_b],
+         "steps": [{"id": 1, "title": "t", "status": "pending"}]})
+    assert _r9_um == [_r9_a], (
+        f"a replaced CJK criterion was silently treated as carried: {_r9_um}; "
+        f"_carried refuses the same pair at the 2/3 bar")
+
+    # (i) The link guards are junction-aware. S_ISLNK is False for a Windows
+    #     junction (`mklink /J`, no admin), so the is_symlink()-only probes
+    #     were inert on the primary platform: ensure_memory_dir wrote into a
+    #     junction target and _has_db returned True through one.
+    import inspect as _r9_inspect
+    from core import progress as _r9_progmod
+    from core import roots as _r9_rootsmod
+    _r9_prog_src = _r9_inspect.getsource(_r9_progmod.ensure_memory_dir)
+    _r9_roots_src = _r9_inspect.getsource(_r9_rootsmod._has_db)
+    for _name, _src in (("core/progress.py ensure_memory_dir", _r9_prog_src),
+                        ("core/roots.py _has_db", _r9_roots_src)):
+        assert "_markers_is_link" in _src and ".is_symlink()" not in _src, (
+            f"{_name} is back on a symlink-only probe; a Windows junction "
+            f"passes S_ISLNK and both fail-closed guards go inert")
+
+    print("[OK] v2.9.0 dual review: supersede lineage kept, progress bootstrap "
+          "atomic, same-second render ordered, tags not exploded, no "
+          "transitive archive, malformed todos survivable, PLAN.md slots "
+          "escaped, CJK criteria bar aligned, link guards junction-aware")
+
+
     print("\nProduced files:")
     for f in sorted(mem_dir.rglob("*")):
         if f.is_file():

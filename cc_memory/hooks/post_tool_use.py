@@ -46,7 +46,6 @@ from core.roots import project_root
 
 _MAX_INPUT_CHARS = 2000
 _MAX_OUTPUT_CHARS = 1000
-_MAX_STDIN_BYTES = 1024 * 512
 
 
 def _truncate_input(tool_name, tool_input):
@@ -122,9 +121,23 @@ def _apply_plan_integration(db, project_id, cwd, tool_name, tool_input):
 
 def main():
     try:
-        raw = sys.stdin.buffer.read(_MAX_STDIN_BYTES)
+        # Read to EOF like every sibling hook. This was the ONLY hook with a
+        # prefix cap (512 KiB) — any larger payload truncated mid-JSON, the
+        # parse raised, and the silent except dropped the WHOLE event: not
+        # just the observation row but the mode-independent live-plan block
+        # below (ExitPlanMode capture, TodoWrite sync, drift counters), with
+        # rc=0, empty stderr and no log line. A 600 KiB Read result — a
+        # package-lock.json is routinely that size — was enough to reach it.
+        raw = sys.stdin.buffer.read()
         data = json.loads(raw.decode("utf-8", errors="replace"))
     except Exception:
+        try:
+            from core.logger import get_logger
+            get_logger("post_tool_use").error_tb("stdin parse error")
+        except Exception:
+            # why: logger failing in a hook — nothing left but the clean exit
+            # the hook contract requires
+            pass
         sys.exit(0)
 
     # json.loads SUCCEEDS on well-formed non-object payloads (`null`, `42`,
@@ -228,8 +241,9 @@ def main():
             # get_recent_observations / get_observations_since, i.e. out of the
             # Stop-hook observer and the PreCompact extraction prompt, so a
             # false 0 ships that file's path to the Anthropic API and into
-            # progress.files_touched. Raw scanning is bounded by
-            # _MAX_STDIN_BYTES and `has_private` is a single substring find.
+            # progress.files_touched. `has_private` is a single substring
+            # find, linear in the payload — microseconds even on the multi-MB
+            # payloads the uncapped stdin read now admits.
             raw_in = tool_input if isinstance(tool_input, str) else str(tool_input)
             raw_out = (tool_response if isinstance(tool_response, str)
                        else str(tool_response))

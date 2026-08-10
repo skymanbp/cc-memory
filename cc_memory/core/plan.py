@@ -425,7 +425,13 @@ def render_pending_plan_md(raw: str, superseded: Optional[Dict] = None,
         lines += [
             "## Previous refined plan — STALE, superseded by the raw text above",
             "",
-            f"- Goal: {superseded['goal'].strip()}",
+            # neutralize_inline, same reason as every slot in render_plan_md
+            # below: the goal is refiner/model text, and a newline embedded in
+            # it forged a second complete "## Pending refinement" + fenced
+            # raw-plan section — an attacker-chosen "current plan" in the file
+            # Claude reads as the live anchor (measured: 2 of each heading
+            # where the document has 1).
+            f"- Goal: {neutralize_inline(superseded['goal'].strip())}",
             f"- Progress when it was superseded: {done}/{len(steps)} steps done",
             f"- Last refined: {meta.get('last_refined_at') or '(never)'}",
             "",
@@ -509,7 +515,11 @@ def render_plan_md(structured: Dict, active_step_id: int = 0,
         f"- Active step: #{active_step_id}" if active_step_id else "- Active step: none",
     ]
     if meta.get("last_refined_at"):
-        lines.append(f"- Last refined: {meta['last_refined_at']} ({structured.get('refined_by', 'manual')})")
+        # refined_by is refiner-authored like every other structured field —
+        # normalize_structured only strips it, so embedded newlines survived
+        # to here and forged whole "## Goal"/"## Steps" sections.
+        lines.append(f"- Last refined: {meta['last_refined_at']} "
+                     f"({neutralize_inline(str(structured.get('refined_by', 'manual')))})")
     if meta.get("last_guardian_at"):
         lines.append(f"- Last guardian check: {meta['last_guardian_at']}")
     if meta.get("edits_since_last_guardian") is not None:
@@ -1177,10 +1187,13 @@ def unmatched_criteria(old_structured: Optional[Dict],
     this returns is the list the caller must SHOW, so that "it vanished"
     and "I retired it on purpose" stop looking identical.
 
-    Same trigram-Jaccard threshold as the steps gate. A criterion folded
-    into the replacement's goal or context text counts as matched: lossy
-    survival is still survival, and flagging it would train the reader to
-    ignore the advisory.
+    Same bar as the steps gate — including the CJK 2/3 adjustment
+    (`_carryover_bar`): bigram shingles score a one-character Chinese
+    substitution at 0.5556, so the flat 0.5 threshold silently treated a
+    replaced ZH criterion as carried while `_carried` refused the identical
+    pair. A criterion folded into the replacement's goal or context text
+    counts as matched: lossy survival is still survival, and flagging it
+    would train the reader to ignore the advisory.
     """
     if not is_valid_structured(old_structured):
         return []
@@ -1194,4 +1207,4 @@ def unmatched_criteria(old_structured: Optional[Dict],
         if isinstance(extra, str) and extra.strip():
             candidates.append(extra)
     return [c for c in olds
-            if _best_title_match(c, candidates) < CARRYOVER_MATCH_THRESHOLD]
+            if _best_title_match(c, candidates) < _carryover_bar(c)]

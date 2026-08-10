@@ -13,6 +13,7 @@ FAILS there, while the same gate passes on the untouched tree.
     python tools/falsify_fixes.py --case tags # just one
 """
 import argparse
+import json
 import os
 import re
 import shutil
@@ -267,11 +268,16 @@ def _break_claimword(root):
 @case("claimof", ["tests/test_surfaces.py"],
       "remove the quantifier pattern -> 'seven of the hooks' is not a claim")
 def _break_claimof(root):
+    # anchor repaired 2026-08-09: the tuple gained TRIGGER_GAP_RE when the gate
+    # learned the "6 command hooks" shape (one modifier word between the count
+    # and the noun).
     _patch(root, "tools/doc_claims.py",
-           "        (hit for pattern in (TRIGGER_OF_RE, TRIGGER_RE, "
-           "TRIGGER_ZH_RE,\n                             TRIGGER_PAREN_RE)",
-           "        (hit for pattern in (TRIGGER_RE, TRIGGER_ZH_RE,\n"
-           "                             TRIGGER_PAREN_RE)  # BREAKAGE")
+           "        (hit for pattern in (TRIGGER_OF_RE, TRIGGER_GAP_RE, "
+           "TRIGGER_RE,\n                             TRIGGER_ZH_RE, "
+           "TRIGGER_PAREN_RE)",
+           "        (hit for pattern in (TRIGGER_GAP_RE, TRIGGER_RE,\n"
+           "                             TRIGGER_ZH_RE, TRIGGER_PAREN_RE)"
+           "  # BREAKAGE")
 
 
 @case("pendingsync", ["tests/smoke_test.py"],
@@ -643,16 +649,20 @@ def _break_r5d7parsed(root):
 @case("r5y1roots", ["tests/smoke_test.py"],
       "follow a symlinked memory/ in _has_db -> rung 0 adopts a linked identity")
 def _break_r5y1roots(root):
+    # anchor repaired 2026-08-09: junction-aware probe, same change as r5y1emd.
     _patch(root, "cc_memory/core/roots.py",
-           '    mem = directory / "memory"\n    try:\n        if mem.is_symlink() or (mem / "memory.db").is_symlink():\n            return False\n',
-           '    mem = directory / "memory"\n    try:\n        if False:  # BREAKAGE: pre-fix, a symlinked memory/ was followed\n            return False\n')
+           '        if _markers_is_link(mem) or _markers_is_link(mem / "memory.db"):\n            return False\n',
+           '        if False:  # BREAKAGE: pre-fix, a linked memory/ was followed\n            return False\n')
 
 
 @case("r5y1emd", ["tests/smoke_test.py"],
       "write through a linked memory/ again -> ensure_memory_dir stops refusing")
 def _break_r5y1emd(root):
+    # anchor repaired 2026-08-09: the probe became core.markers._is_link
+    # (junction-aware) — S_ISLNK alone is False for a Windows junction, so the
+    # is_symlink()-only guard was inert on the primary platform.
     _patch(root, "cc_memory/core/progress.py",
-           '    if memory_dir.is_symlink():\n',
+           '    if _markers_is_link(memory_dir):\n',
            '    if False:  # BREAKAGE: pre-fix, ensure_memory_dir wrote through links\n')
 
 
@@ -927,8 +937,11 @@ def _break_r7wrote(root):
 @case("r7render", ["tests/smoke_test.py"],
       "drop the render generation check -> an older MEMORY.md overwrites a newer")
 def _break_r7render(root):
+    # anchor repaired 2026-08-09: the probe became `PRAGMA data_version` read
+    # twice on ONE held connection. The old row-count/MAX() fingerprint was
+    # blind to an in-place update landing in the same clock second.
     _patch(root, f"{PKG}/llm/memory_writer.py",
-           "        if _index_generation(db, project_id) == _gen_before:\n"
+           "        if not _moved:\n"
            "            break",
            "        break  # BREAKAGE: write whatever was rendered, unordered")
 
@@ -1431,6 +1444,238 @@ def _break_r8arcorder(root):
            "        except OSError:")
 
 
+# ── v2.9.0 (dual-perspective review: this maintainer + codex) ───────────────
+# One case per fix. Each was run individually and confirmed RED before being
+# kept; `--anchors` verifies every anchor below still exists in the tree.
+
+@case("r9chain", ["tests/smoke_test.py"],
+      "overwrite an existing supersedes link -> the older version is orphaned")
+def _break_r9chain(root):
+    _patch(root, f"{PKG}/core/db.py",
+           "                    set_sql = (\"is_active = 0, \"\n"
+           "                               \"supersedes_id = COALESCE(supersedes_id, ?), \"\n"
+           "                               \"updated_at = ?\")",
+           "                    set_sql = (\"is_active = 0, \"  # BREAKAGE\n"
+           "                               \"supersedes_id = ?, \"\n"
+           "                               \"updated_at = ?\")")
+
+
+@case("r9progtx", ["tests/smoke_test.py"],
+      "split the progress bootstrap back out -> a stale verdict wipes a patch")
+def _break_r9progtx(root):
+    _patch(root, f"{PKG}/core/db.py",
+           "        with self._connect() as conn:\n"
+           "            conn.execute(\"BEGIN IMMEDIATE\")\n"
+           "            conn.execute(\n"
+           "                \"INSERT OR IGNORE INTO progress (project_id, updated_at) \"\n"
+           "                \"VALUES (?, ?)\",\n"
+           "                (project_id, now)\n"
+           "            )",
+           "        if not self.get_progress(project_id):  # BREAKAGE\n"
+           "            self.upsert_progress(project_id)\n"
+           "        with self._connect() as conn:")
+
+
+@case("r9dataver", ["tests/smoke_test.py"],
+      "fingerprint by row counts again -> a same-second update reads as no change")
+def _break_r9dataver(root):
+    # The breakage must model "the probe is BLIND", not "the probe always
+    # fires": a first attempt at `_dv_before = 0` made every render look
+    # moved, so the loop retried and the SECOND render — taken after the
+    # concurrent write — was correct, and the case ran GREEN. That is the
+    # retired fingerprint's real failure: it reported UNCHANGED across a
+    # same-second in-place update.
+    _patch(root, f"{PKG}/llm/memory_writer.py",
+           "            _moved = (conn.execute(\"PRAGMA data_version\").fetchone()[0]\n"
+           "                      != _dv_before)",
+           "            _moved = False  # BREAKAGE: blind to a same-second update")
+
+
+@case("r9tags", ["tests/smoke_test.py"],
+      "iterate a str tags argument -> 'manual' is stored as five one-char tags")
+def _break_r9tags(root):
+    _patch(root, f"{PKG}/llm/memory_writer.py",
+           "        if isinstance(group, str):",
+           "        if False:  # BREAKAGE: pre-fix, a bare string was iterated")
+
+
+@case("r9transit", ["tests/smoke_test.py"],
+      "keep comparing a doomed anchor -> a row is archived with no live twin")
+def _break_r9transit(root):
+    _patch(root, f"{PKG}/core/consolidate.py",
+           "                if mi[\"id\"] in to_archive:",
+           "                if False:  # BREAKAGE: transitive chaining is back")
+
+
+@case("r9todos", ["tests/smoke_test.py"],
+      "strip a non-string todo content -> the whole compaction + handoff dies")
+def _break_r9todos(root):
+    _patch(root, f"{PKG}/core/extractor.py",
+           "    c = item.get(\"content\")\n"
+           "    return c.strip() if isinstance(c, str) else \"\"",
+           "    return item.get(\"content\", \"\").strip()  # BREAKAGE")
+
+
+@case("r9planslot", ["tests/smoke_test.py"],
+      "interpolate the superseded goal raw -> PLAN.md grows a forged section")
+def _break_r9planslot(root):
+    _patch(root, f"{PKG}/core/plan.py",
+           "            f\"- Goal: {neutralize_inline(superseded['goal'].strip())}\",",
+           "            f\"- Goal: {superseded['goal'].strip()}\",  # BREAKAGE")
+
+
+@case("r9cjkcrit", ["tests/smoke_test.py"],
+      "flat 0.5 bar on CJK criteria -> a replaced Chinese criterion reads as carried")
+def _break_r9cjkcrit(root):
+    _patch(root, f"{PKG}/core/plan.py",
+           "            if _best_title_match(c, candidates) < _carryover_bar(c)]",
+           "            if _best_title_match(c, candidates) < "
+           "CARRYOVER_MATCH_THRESHOLD]  # BREAKAGE")
+
+
+@case("r9junction", ["tests/smoke_test.py"],
+      "symlink-only link guard -> a Windows junction passes both fail-closed checks")
+def _break_r9junction(root):
+    _patch(root, f"{PKG}/core/progress.py",
+           "    if _markers_is_link(memory_dir):",
+           "    if memory_dir.is_symlink():  # BREAKAGE: blind to junctions")
+
+
+@case("r9cliscope", ["tests/test_surfaces.py"],
+      "unpredicated encoding-check -> --apply archives another project's rows")
+def _break_r9cliscope(root):
+    _patch(root, f"{PKG}/cli/mem.py",
+           "            q = (f\"SELECT * FROM {table} WHERE project_id = ?\"\n"
+           "                 + _ENCODING_SCAN_PREDICATE.get(table, \"\"))\n"
+           "            try:\n"
+           "                rows = conn.execute(q, (pid,)).fetchall()",
+           "            q = f\"SELECT * FROM {table}\"  # BREAKAGE: no scope\n"
+           "            try:\n"
+           "                rows = conn.execute(q).fetchall()")
+
+
+@case("r9supscope", ["tests/test_surfaces.py"],
+      "drop the supersedes scope check -> another project's memory is printed")
+def _break_r9supscope(root):
+    _patch(root, f"{PKG}/cli/mem.py",
+           "    head = db.get_memory(args.memory_id)\n"
+           "    if head is not None and head[\"project_id\"] != pid:\n"
+           "        print(f\"Error: memory {args.memory_id} belongs to a "
+           "different project\")\n"
+           "        sys.exit(1)",
+           "    # BREAKAGE: any id in the file is walkable")
+
+
+@case("r9instgrp", ["tests/test_surfaces.py"],
+      "strip settings.json per-GROUP again -> a reinstall deletes a user hook")
+def _break_r9instgrp(root):
+    _patch(root, f"{PKG}/ui/installer.py",
+           "            survivor, _n = _strip_ccm_entries(mg)\n"
+           "            if survivor is None:\n"
+           "                continue  # the group was entirely ours — the "
+           "upgrade replaces it",
+           "            if _is_ccm_group(mg):  # BREAKAGE: per-group again\n"
+           "                continue\n"
+           "            survivor = mg")
+
+
+@case("r9instcas", ["tests/test_surfaces.py"],
+      "return None for an absent settings.json -> the whole CAS is disarmed")
+def _break_r9instcas(root):
+    _patch(root, f"{PKG}/ui/installer.py",
+           "    except FileNotFoundError:\n"
+           "        return _FP_ABSENT",
+           "    except FileNotFoundError:\n"
+           "        return None  # BREAKAGE: conflated with 'no expectation'")
+
+
+@case("r9manifest", ["tests/test_surfaces.py"],
+      "record only this run's surfaces -> uninstall orphans every skipped one")
+def _break_r9manifest(root):
+    _patch(root, f"{PKG}/ui/installer.py",
+           "             \"files\": sorted(set(written) | still_ours)}, indent=2),",
+           "             \"files\": sorted(written)}, indent=2),  # BREAKAGE")
+
+
+@case("r9bigstdin", ["tests/test_surfaces.py"],
+      "cap PostToolUse stdin again -> a large tool result drops the whole event")
+def _break_r9bigstdin(root):
+    _patch(root, f"{PKG}/hooks/post_tool_use.py",
+           "        raw = sys.stdin.buffer.read()",
+           "        raw = sys.stdin.buffer.read(1024 * 512)  # BREAKAGE")
+
+
+@case("r9emptypr", ["tests/test_surfaces.py"],
+      "guard the marker write on a truthy prompt -> the previous turn's request survives")
+def _break_r9emptypr(root):
+    _patch(root, f"{PKG}/hooks/user_prompt.py",
+           "        prompt_file = marker_path(_PROMPT_FILE_PREFIX, safe)\n"
+           "        try:",
+           "        prompt_file = marker_path(_PROMPT_FILE_PREFIX, safe)\n"
+           "        try:\n"
+           "            if not prompt:  # BREAKAGE: skip the overwrite\n"
+           "                raise OSError(\"skipped\")")
+
+
+@case("r9jsonrpc", ["tests/test_surfaces.py"],
+      "accept any jsonrpc member -> a 1.0 frame is answered as a valid Request")
+def _break_r9jsonrpc(root):
+    _patch(root, f"{PKG}/mcp/server.py",
+           "    if req.get(\"jsonrpc\") != \"2.0\":",
+           "    if False:  # BREAKAGE: the member is not checked")
+
+
+@case("r9hdrdead", ["tests/test_surfaces.py"],
+      "drop the header deadline -> 16 drip-feeders hold every admission permit")
+def _break_r9hdrdead(root):
+    _patch(root, f"{PKG}/ui/web_viewer.py",
+           "        left = self.deadline - time.monotonic()\n"
+           "        if left <= 0:",
+           "        left = 1e9  # BREAKAGE: the header phase is unbounded\n"
+           "        if left <= 0:")
+
+
+@case("r9hookbind", ["tests/test_surfaces.py"],
+      "unbind _HOOK_ORDER from hooks.json -> a new hook is covered by nothing")
+def _break_r9hookbind(root):
+    _patch(root, f"{PKG}/hooks/pre_compact.py",
+           "def main():",
+           "def main():\n"
+           "    pass  # BREAKAGE placeholder so the manifest gains a 7th hook\n")
+    spec = root / "hooks" / "hooks.json"
+    data = json.loads(spec.read_text(encoding="utf-8"))
+    # Structural, not textual: the entry is found by walking the parsed spec
+    # for the pre_compact command, so a reformat of hooks.json cannot rot this
+    # anchor. The check is still exact — one entry, or refuse.
+    entries = [e for group in data.get("hooks", {}).values() for mg in group
+               for e in mg.get("hooks", [])
+               if "pre_compact.py" in str(e.get("command", ""))]
+    if len(entries) != 1:
+        raise SystemExit(
+            f"BREAKAGE ANCHOR ROTTED: hooks/hooks.json holds {len(entries)} "
+            f"pre_compact entries, expected 1. Fix this script, not the tree.")
+    (root / PKG / "hooks" / "rogue.py").write_text(
+        "import sys\nsys.exit(0)\n", encoding="utf-8")
+    rogue = dict(entries[0])
+    rogue["command"] = entries[0]["command"].replace("pre_compact.py",
+                                                     "rogue.py")
+    for group in data["hooks"].values():
+        for mg in group:
+            if any("pre_compact.py" in str(e.get("command", ""))
+                   for e in mg.get("hooks", [])):
+                mg["hooks"].append(rogue)   # BREAKAGE: a 7th registered hook
+                break
+    spec.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+
+@case("r9gateleak", ["tests/test_plan_carryover.py"],
+      "run the carryover gate outside a sandbox -> it writes to the real home")
+def _break_r9gateleak(root):
+    _patch(root, "tests/test_plan_carryover.py",
+           "assert Path.home() == _HOME, (",
+           "assert Path.home() != _HOME, (  # BREAKAGE: sandbox inverted")
+
+
 def verify_anchors():
     """Count every registered case's breakage anchors WITHOUT running a gate.
 
@@ -1445,8 +1690,19 @@ def verify_anchors():
         box, root = _copy_repo()
         try:
             CASES[name][0](root)
-        except SystemExit as e:
-            rotted.append((name, str(e).splitlines()[0]))
+        except (Exception, SystemExit) as e:
+            # EVERY failure shape. `_patch` raises SystemExit — which is a
+            # BaseException, NOT an Exception, so the two must be named
+            # together; catching only one of them leaves the other uncaught.
+            # Four registered cases detect rot with a bare `str.index`/
+            # `assert` instead (ValueError / AssertionError), so a single one
+            # of those rotting killed this whole scan with an uncaught
+            # traceback — no [ROT] line, no summary, every remaining case
+            # unverified. That is exactly the failure mode this function
+            # exists to replace, and it was reachable through the four cases
+            # the SystemExit-only handler could not catch.
+            rotted.append((name, f"{type(e).__name__}: "
+                                 f"{(str(e) or '(no message)').splitlines()[0]}"))
         finally:
             shutil.rmtree(box, ignore_errors=True)
     for name, msg in rotted:
@@ -1459,7 +1715,23 @@ def run_case(name, keep=False):
     breaker, gate, description = CASES[name]
     box, root = _copy_repo()
     try:
-        breaker(root)
+        try:
+            breaker(root)
+        except (Exception, SystemExit) as e:
+            # Both, for the reason spelled out in verify_anchors: `_patch`
+            # raises SystemExit (a BaseException), the hand-written anchors
+            # raise ValueError/AssertionError.
+            # A rotted anchor is a HARNESS failure, reported as one. It used
+            # to abort the whole run mid-way with a traceback and no summary
+            # (same gap as verify_anchors above); reporting it per-case keeps
+            # the remaining cases running and never lets rot masquerade as a
+            # detected breakage.
+            print(f"[ROT ] {name:<11} anchor no longer matches the tree: "
+                  f"{type(e).__name__}: "
+                  f"{(str(e) or '(no message)').splitlines()[0]}")
+            print(f"          {description}")
+            print("          fix this script, not the tree — then re-run")
+            return False
         proc = _run(root, *gate)
         red = proc.returncode != 0
         tail = (proc.stdout or "")[-600:] + (proc.stderr or "")[-600:]

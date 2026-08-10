@@ -945,6 +945,20 @@ def _handle_request(req):
     req_id = req.get("id")
     if req_id is None:
         return                 # Notification (or a null id): no reply, ever.
+
+    # JSON-RPC 2.0 §4: the `jsonrpc` member is MANDATORY and must be exactly
+    # "2.0". Nothing checked it, so `{"id":1,"method":"ping"}` (member absent)
+    # and `"jsonrpc":"1.0"` were both answered with ordinary success frames —
+    # measured on the real stdio server. -32600 is the code the spec reserves
+    # for it, and answering (rather than dropping) is required because the id
+    # above proves this is a Request: silence hangs a client with no timeout,
+    # the failure mode the id-first rule in this docstring exists to prevent.
+    if req.get("jsonrpc") != "2.0":
+        _error(req_id, -32600,
+               f"Invalid Request: jsonrpc member must be \"2.0\", got "
+               f"{req.get('jsonrpc')!r}")
+        return
+
     params = req.get("params")
     if params is None:
         params = {}            # "params": null is legal JSON-RPC 2.0

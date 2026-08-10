@@ -1,7 +1,7 @@
-<!-- i18n-source: ARCHITECTURE.md | sha256: 57293c7589169b66 | version: 2.8.0 | translated: 2026-08-09 -->
+<!-- i18n-source: ARCHITECTURE.md | sha256: 7f534593d18a5d45 | version: 2.9.0 | translated: 2026-08-09 -->
 > [English](ARCHITECTURE.md) · **简体中文**
 
-# cc-memory — 架构（v2.8.0）
+# cc-memory — 架构（v2.9.0）
 
 cc-memory 是一个 Claude Code 插件，为 Claude 提供**跨压缩、跨会话的持久化结构化
 记忆**。本文档是总览：这个插件用来做什么、仓库如何布局、哪些钩子在何时触发、数据库
@@ -294,17 +294,17 @@ SQLite 表（定义在 [`cc_memory/core/db.py`](../cc_memory/core/db.py)），�
 
 此外还有 `memories_fts`——一个建立在 `memories` 之上的 FTS5 虚拟表
 （`core/db.py:455-458`），由三个触发器保持同步（`core/db.py:459-478`，迁移 `v2_fts5` 在
-`db.py:2583-2617`）。它只在本地 SQLite 构建带 FTS5 时才会创建；否则
-`db.search_fts`（`core/db.py:2583-2617`）回退到 `LIKE ? ESCAPE '\'`
-（`core/db.py:2583-2617`）。FTS5 在 `.claude-plugin/plugin.json:4` 与 `:12` 中被
+`db.py:2625-2659`）。它只在本地 SQLite 构建带 FTS5 时才会创建；否则
+`db.search_fts`（`core/db.py:2625-2659`）回退到 `LIKE ? ESCAPE '\'`
+（`core/db.py:2625-2659`）。FTS5 在 `.claude-plugin/plugin.json:4` 与 `:12` 中被
 宣传，`/cc-mem status` 会报告当前实际走哪条路径（`cli/mem.py` 的 `cmd_status`）。
 
 `memories` 上的 `supersedes_id` 列（迁移 `v3_supersedes`，`db.py:168`）把反补丁的
 取代链显式化：当 `upsert_smart` 判定一条新记忆取代了一条旧记忆时，新行会回链到旧行
 的 ID（旧行被归档）。通过 `db.get_supersede_chain(memory_id)`（`db.py:1340-1355`）走一遍
-链条，就能看到完整的更新历史。`content_hash`（迁移 `v2_content_hash`，`db.py:1869-1871`）
+链条，就能看到完整的更新历史。`content_hash`（迁移 `v2_content_hash`，`db.py:1897-1899`）
 是归一化内容的 `sha256[:16]`，用于廉价的精确重复检查（`db.compute_content_hash` 在
-`db.py:1882-1890`，`db.find_by_hash` 在 `db.py:1882-1890`）。
+`db.py:1910-1918`，`db.find_by_hash` 在 `db.py:1910-1918`）。
 
 迁移按 `_MIGRATIONS` 列表（`db.py:121-284`）的顺序应用，并记录在 `_migrations` 中。目前
 已交付的层级：**v1**（topic 列 + 索引）、**v2**（content_hash、observations、
@@ -381,10 +381,10 @@ regenerate_memory_index(db, project_id, memory_dir)   ← MEMORY.md 刷新
   所有钩子调用方都会传（`pre_compact.py:435`、`stop.py:166`、
   `session_start.py:1056`）；同步 PreCompact 支路还会在其余状态变更之后再刷一次
   （`pre_compact.py:790`）。
-- 单发调用方显式调用 `regenerate_memory_index`：`cli/mem.py:1067` 与 `:584`、
+- 单发调用方显式调用 `regenerate_memory_index`：`cli/mem.py:1089` 与 `:584`、
   `mcp/server.py:644`、`ui/dashboard.py:1634`、`ui/web_viewer.py:65`，外加
-  `skills/ccm-load` 的内联脚本（`SKILL.md:127, 137`）。`core/idle.py:96` 与
-  `hooks/consolidate_async.py:188` 也会在维护之后刷新它。
+  `skills/ccm-load` 的内联脚本（`skills/ccm-load/SKILL.md:308, 318`）。
+  `core/idle.py:96` 与 `hooks/consolidate_async.py:188` 也会在维护之后刷新它。
 
 （合并前的示意图把重新生成画成 `upsert_smart` 的无条件步骤，并省略了 `db` 参数；
 上面已依据 `memory_writer.py:223-258, 190, 199` 对两者做了修正。调用方清单同样是在
@@ -476,7 +476,7 @@ SessionStart：
 上面的调用签名都是真实的：`write_progress_md(db, project_id, memory_dir)`
 （`core/progress.py:331-490`；调用点 `pre_compact.py:759`、`stop.py:323`、
 `user_prompt.py:133`、`session_start.py:912`、`mcp/server.py:243`、
-`cli/mem.py:1152`）。PROGRESS.md 的结构规格见
+`cli/mem.py:1179`）。PROGRESS.md 的结构规格见
 [docs/CONTRACTS.md](CONTRACTS.md#handoff-contract)。
 
 ### 被杀运行检测（v2.4.2）
@@ -507,7 +507,7 @@ slug 约定是：把 `[A-Za-z0-9]` 之外的**每一个**字符替换成 `-`。c
 
 三处改动关闭了它：
 
-1. `core.extractor.mangle_project_path`（`extractor.py:516-532`）成为该约定的唯一真源，
+1. `core.extractor.mangle_project_path`（`extractor.py:548-564`）成为该约定的唯一真源，
    由 `find_latest_transcript`、`hooks/session_start.py` 和 `ui/dashboard.py` 共用
    —— 后者此前逐字复制了旧解析器，连模糊分支一起。
 2. 模糊兜底被**删除**。未命中返回 `None`。调用方必须把它当作「没有 transcript」，
@@ -582,7 +582,7 @@ HTTP 400）过去会把排在它后面的健康订阅令牌黑洞掉，从而无
 Ollama，每一批整理都要冷加载一个 5.9 GB 的本地模型（`core/auth.py:30-33`、
 `ccl_backend.py:10-12`）。
 
-本地 Ollama 兜底是**按需开启、默认关闭**的（`cc_memory/config.json:63` 的
+本地 Ollama 兜底是**按需开启、默认关闭**的（`cc_memory/config.json:7` 的
 `ccl.enabled: false`；`ccl_backend.py:36` 的 `_DEFAULT_OLLAMA_ENABLED = False`，
 因此缺少该键也读作 False），与之并列的还有 `ccl.ollama_url` / `ccl.local_model`。
 当它被禁用时，这条支路被跳过，只记录一个原因字符串
@@ -798,7 +798,7 @@ home 边界是双份的：环境所声称的（`HOME`/`USERPROFILE`/`Path.home()
 退出的；同一对 CLI 的两半不该在这件事上互相矛盾。
 
 因此，已存在的野生库会被原地留下——并且被**报告**出来，不至于隐形：`nested_databases`
-（`core/roots.py:386-424`）支撑着 `cc-mem status` 里的
+（`core/roots.py:658-709`）支撑着 `cc-mem status` 里的
 `[WARN] Separate database below this project` 一行，逐个点名并给出记忆条数。它是显式
 命令而不是 hook，因为它要走一遍目录树。`.ccm-root`——一个空文件——把某个目录钉成独立的
 根，这是"刻意嵌套在另一个项目里的项目"以及"任何被这些启发式读错的布局"的逃生舱。

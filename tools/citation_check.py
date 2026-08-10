@@ -59,9 +59,19 @@ TRACKED = ["README.md", "README.zh.md", "CLAUDE.md", "CHANGELOG.md",
            "agents/plan-refiner.md", "agents/plan-guardian.md",
            "skills/ccm-load/SKILL.md", "skills/save-memories/SKILL.md"]
 
-# `cc_memory/core/db.py:1349`, `db.py:188-201`, `tests/smoke_test.py:266-278`
+# `cc_memory/core/db.py:1349`, `db.py:188-201`, `tests/smoke_test.py:266-278`,
+# `hooks/hooks.json:9`, `skills/ccm-load/SKILL.md:137`, `plugin.json:4`.
+#
+# NOT `.py`-only. It was, and that silently exempted 25 citations in the
+# tracked docs from the invariant CLAUDE.md states as "no citation may be
+# UNCHECKED" — two of them already rotten in exactly the way the BOUNDS
+# branch exists to catch (`cc_memory/config.json:63` in a 29-line file;
+# `skills/ccm-load/SKILL.md:137`, a blank line). A non-Python file has no
+# AST, so those citations get the bounds check and nothing more — a weaker
+# verdict than the symbol anchor, and infinitely stronger than none.
+_CITED_EXTS = ("py", "json", "md", "toml", "cfg", "ini", "txt", "yml", "yaml")
 CITATION_RE = re.compile(
-    r"(?P<path>[A-Za-z0-9_][A-Za-z0-9_./-]*\.py)"
+    r"(?P<path>[A-Za-z0-9_][A-Za-z0-9_./-]*\.(?:" + "|".join(_CITED_EXTS) + r"))"
     r":(?P<start>\d+)(?:\s*[-–]\s*(?P<end>\d+))?")
 
 # An identifier, optionally dotted: `core.plan.raw_pending_refinement`,
@@ -214,6 +224,31 @@ class Result:
         self.symbol, self.want, self.detail = symbol, want, detail
 
 
+def _bounds_result(rel, n, cited, start, end, src):
+    """The weakest verdict that is still a verdict — never "unchecked".
+
+    A citation nothing can anchor on can still be WRONG in a mechanically
+    decidable way: it can point past the end of the file, or at nothing but
+    blank lines. 23 of the 253 previously-unanchored citations were exactly
+    that. Reported separately (BOUNDS) rather than counted as a full
+    verdict, so the strength of the check is never overstated — but the
+    number of citations NOTHING checks stays zero. Used by BOTH the
+    last-resort branch for Python files and every non-Python citation,
+    which have no AST to anchor against at all.
+    """
+    n_lines = len(src)
+    live = [i for i in range(start, min(end, n_lines) + 1)
+            if i >= 1 and src[i - 1].strip()]
+    if end > n_lines:
+        return Result(rel, n, cited, start, end, "STALE", None, None,
+                      f"cites line {end} of a {n_lines}-line file")
+    if not live:
+        return Result(rel, n, cited, start, end, "STALE", None, None,
+                      f"lines {start}-{end} are blank")
+    return Result(rel, n, cited, start, end, "BOUNDS", None, None,
+                  "in range, no symbol to anchor on")
+
+
 def classify(root: Path):
     results = []
     defs_cache = {}
@@ -250,6 +285,13 @@ def classify(root: Path):
                     verdict = "SKIP" if "ambiguous" in (note or "") else "MISSING"
                     results.append(Result(rel, n, cited, start, end, verdict,
                                           detail=note))
+                    continue
+                if target.suffix != ".py":
+                    # No AST, so no symbol anchor — but a line number is still
+                    # mechanically checkable, and the two rotten citations
+                    # this branch was added for were both found by it.
+                    results.append(_bounds_result(rel, n, cited, start, end,
+                                                  _lines_of(target)))
                     continue
                 key = str(target)
                 if key not in defs_cache:
@@ -326,30 +368,8 @@ def classify(root: Path):
                         if cand:
                             break
                     if cand is None:
-                        # LAST RESORT — never "unchecked". A citation whose
-                        # sentence names no symbol at all can still be WRONG in
-                        # a way that is mechanically decidable: it can point
-                        # past the end of the file, or at nothing but blank
-                        # lines. 23 of the 253 previously-unanchored citations
-                        # were exactly that. This is a weaker check than the
-                        # symbol anchor, so it is reported separately (BOUNDS)
-                        # rather than being counted as a full verdict — but the
-                        # number of citations NOTHING checks is now zero.
-                        _n_lines = len(src)
-                        _live = [i for i in range(start, min(end, _n_lines) + 1)
-                                 if i >= 1 and src[i - 1].strip()]
-                        if end > _n_lines:
-                            results.append(Result(
-                                rel, n, cited, start, end, "STALE", None, None,
-                                f"cites line {end} of a {_n_lines}-line file"))
-                        elif not _live:
-                            results.append(Result(
-                                rel, n, cited, start, end, "STALE", None, None,
-                                f"lines {start}-{end} are blank"))
-                        else:
-                            results.append(Result(
-                                rel, n, cited, start, end, "BOUNDS", None, None,
-                                "in range, no symbol to anchor on"))
+                        results.append(_bounds_result(rel, n, cited, start,
+                                                      end, src))
                         continue
                     tail, occ = cand
                     if any(start <= o <= end for o in occ):

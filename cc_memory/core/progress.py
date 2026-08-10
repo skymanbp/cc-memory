@@ -118,19 +118,23 @@ def ensure_memory_dir(memory_dir: Path) -> Path:
     if not memory_dir.parent.is_dir():
         raise FileNotFoundError(
             f"project directory not found: {memory_dir.parent}")
-    if memory_dir.is_symlink():
-        # Fail closed (register Y1, user-ratified): a symlinked memory/
+    if _markers_is_link(memory_dir):
+        # Fail closed (register Y1, user-ratified): a linked memory/
         # redirects every artifact — memory.db, PROGRESS.md, session archives
         # — to wherever the link points, outside the project and outside
         # every reporting path. core/roots._has_db refuses the same shape as
         # project IDENTITY; this is the WRITE-side choke for a directory that
-        # already exists. is_symlink() is an lstat — the portable guard
-        # (O_NOFOLLOW is 0 on Windows; fstat-after-open describes the
-        # target). OSError so every caller's existing handler applies.
+        # already exists. The probe is core.markers._is_link, NOT bare
+        # is_symlink(): S_ISLNK is False for a Windows junction (`mklink /J`,
+        # no admin needed), and the is_symlink()-only guard here ACCEPTED a
+        # junctioned memory/ and created .gitignore/sessions/topics inside
+        # the junction target (measured) — inert on the primary platform.
+        # OSError so every caller's existing handler applies.
         raise OSError(
-            f"memory/ at {memory_dir} is a symlink; cc-memory refuses to "
-            f"write through links (privacy fail-closed). Replace it with a "
-            f"real directory, or pin an exotic layout with .ccm-root.")
+            f"memory/ at {memory_dir} is a symlink or junction; cc-memory "
+            f"refuses to write through links (privacy fail-closed). Replace "
+            f"it with a real directory, or pin an exotic layout with "
+            f".ccm-root.")
     memory_dir.mkdir(exist_ok=True)
     (memory_dir / "sessions").mkdir(exist_ok=True)
     (memory_dir / "topics").mkdir(exist_ok=True)
@@ -145,6 +149,10 @@ if str(_PKG_ROOT) not in sys.path:
 from core.atomic import write_atomic, _DERIVED_BUDGET_S
 from core.db import MemoryDB
 from core.logger import get_logger
+# The junction-aware link probe. Aliased because this module already reads
+# naturally with bare helper names; ensure_memory_dir above resolves it at
+# call time, after this module-level import has run.
+from core.markers import _is_link as _markers_is_link
 from core.privacy import (neutralize_block, neutralize_document,
                           neutralize_inline, neutralize_markers)
 

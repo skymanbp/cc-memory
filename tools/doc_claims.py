@@ -140,6 +140,26 @@ TRIGGER_OF_RE = re.compile(
     rf"\b(?<!\.)(?P<n>{_NUM})\s+(?:out\s+)?of\s+(?:the\s+|these\s+|those\s+)?"
     rf"(?:{_NUM}\s+)?(?P<noun>{'|'.join(TRIGGER_NOUNS)})\b(?![-/])",
     re.IGNORECASE)
+# "6 command hooks", "three sibling renderers": ONE modifier word between the
+# number and the noun — the commonest English shape, and seen by none of the
+# patterns above, so two live claims about the hooks contract sat unbound and
+# unchecked (`docs/CONTRACTS.md` "declares 5 events / 6 command hooks" and
+# CLAUDE.md "PreCompact fires TWO command hooks").
+#
+# Two guards make this safe, and both were measured over every scanned surface
+# before being kept (5 matches, 0 false positives):
+#  * exactly ONE word, never a free-length gap — `.{0,20}` was tried and
+#    paired numbers with nouns from different clauses;
+#  * the noun must be PLURAL. That is what separates a count of hooks from the
+#    ADJECTIVAL use, where the trigger noun modifies the real head: "Two
+#    independent hook registries" counts registries, "the 300 s hook timeout"
+#    counts seconds, and both are in this tree today.
+# `of` and number words are excluded because TRIGGER_OF_RE owns those forms.
+TRIGGER_GAP_RE = re.compile(
+    rf"(?<!every\s)(?<!each\s)\b(?<!\.)(?P<n>{_NUM})\s+"
+    rf"(?!of\b)(?!{_NUM}\b)[A-Za-z][A-Za-z-]*\s+"
+    rf"(?P<noun>hooks|renderers|render\s+paths)\b(?![-/])",
+    re.IGNORECASE)
 # Headings and tables also write the count AFTER the noun: `## Hooks (6)`.
 # Invisible to the number-first grammar, that 6 was the one live count in
 # CLAUDE.md nothing checked.
@@ -223,8 +243,8 @@ def _scan_doc(text):
     """
     fences = _fenced(text)
     raw = sorted(
-        (hit for pattern in (TRIGGER_OF_RE, TRIGGER_RE, TRIGGER_ZH_RE,
-                             TRIGGER_PAREN_RE)
+        (hit for pattern in (TRIGGER_OF_RE, TRIGGER_GAP_RE, TRIGGER_RE,
+                             TRIGGER_ZH_RE, TRIGGER_PAREN_RE)
          for hit in pattern.finditer(text)
          if not sum(1 for f in fences if f < hit.start()) % 2),
         key=lambda m: (m.start(), -(m.end() - m.start())))

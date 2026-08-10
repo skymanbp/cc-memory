@@ -1217,14 +1217,30 @@ def main():
         # from the manifest build_context just wrote (ground truth, not a guess).
         try:
             man = json.loads((memory_dir / ".last_inject.json").read_text(encoding="utf-8"))
+            if not isinstance(man, dict):
+                # Same escape _build_footer closed for .last_save.json 900
+                # lines up: json.loads succeeds on null/42/"s"/[1,2], .get()
+                # then raises AttributeError PAST the tuple below — skipping
+                # this OK line, the flush after it and, worse, the
+                # retroactive_save block that follows. Same threat model too:
+                # a plain file in the project that anything with the Write
+                # tool can plant.
+                raise ValueError("inject manifest is not a JSON object")
+            topics = man.get("topic_names", [])
+            n_topics = len(topics) if isinstance(topics, list) else 0
+            # neutralize_inline on every value: this line is printed into the
+            # stdout Claude reads, and the manifest is re-read from disk — a
+            # planted string value must not carry a live authority marker.
+            ni = neutralize_inline(str(man.get("n_injected_memories", 0)))
+            et = neutralize_inline(str(man.get("est_tokens", 0)))
             print(
-                f"[cc-memory OK] Injected {man.get('n_injected_memories', 0)} memories"
-                f" ({len(man.get('topic_names', []))} topics, "
-                f"~{man.get('est_tokens', 0)} tokens"
+                f"[cc-memory OK] Injected {ni} memories"
+                f" ({n_topics} topics, ~{et} tokens"
                 f"{', +PROGRESS.md' if man.get('progress_preview_included') else ''})"
                 f" · see `/cc-mem inject-show`"
             )
-        except (OSError, json.JSONDecodeError, ValueError):
+        except (OSError, json.JSONDecodeError, ValueError, TypeError,
+                AttributeError):
             print(
                 f"[cc-memory OK] Context loaded: "
                 f"{stats['n_memories']} memories, {stats.get('n_topics', 0)} topics"

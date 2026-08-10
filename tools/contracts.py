@@ -67,11 +67,19 @@ def _called_names(tree):
     without a direct Call node — `core/progress.py` aliases `neutralize_block`
     this way today. Attribute access still counts only in call position:
     counting every attribute LOAD would make an unrelated `obj.is_excluded`
-    field read register as an opt-out surface. Two shapes stay invisible by
-    choice — `getattr(mod, "guard_name")` (scanning string constants would
-    make every docstring mention a false positive) and a foreign object's
-    same-name method call; neither exists in the tree (checked by exact AST
-    probe, not assumption).
+    field read register as an opt-out surface.
+
+    An `import ... as` ALIAS counts as a use of the ORIGINAL name. Without
+    this, `from core.privacy import neutralize_inline as _ni` followed by
+    `_ni(...)` is invisible from both ends — the import binds `_ni`, the call
+    loads `_ni`, and the guard's real name appears nowhere in the AST. That
+    is not hypothetical: `ui/dashboard.py:1095` does exactly this, and it is
+    half of why the render-path registry under-counted the marker defence.
+
+    Two shapes stay invisible by choice — `getattr(mod, "guard_name")`
+    (scanning string constants would make every docstring mention a false
+    positive) and a foreign object's same-name method call; neither exists in
+    the tree (checked by exact AST probe, not assumption).
     """
     names = set()
     for node in ast.walk(tree):
@@ -80,6 +88,10 @@ def _called_names(tree):
         elif isinstance(node, ast.Call) and \
                 isinstance(node.func, ast.Attribute):
             names.add(node.func.attr)
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            for alias in node.names:
+                if alias.asname:
+                    names.add(alias.name.split(".")[-1])
     return names
 
 
@@ -141,9 +153,16 @@ def _command_strings(spec):
 @contract("render_paths",
           "modules that escape authority markers before emitting content")
 def _render_paths(repo):
+    # `neutralize_document` belongs here as much as the per-slot helpers do:
+    # it is the ASSEMBLED-document sweep, and for `ui/dashboard.py` it is the
+    # escaping call made by its own name. Omitting it made this registry —
+    # the one CLAUDE.md points readers at as authoritative — report 6 render
+    # paths while the tree had 7. The same N+1 shape `_BACKSTOP_CREATORS`
+    # below records recurring "inside its own cure".
     return _modules_calling(repo, {
         "neutralize_markers", "neutralize_inline", "neutralize_block",
-        "_neutralize", "_defang"}, exclude=(f"{PKG}/core/privacy.py",))
+        "neutralize_document", "_neutralize", "_defang"},
+        exclude=(f"{PKG}/core/privacy.py",))
 
 
 @contract("optout_surfaces",

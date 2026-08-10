@@ -395,6 +395,20 @@ def _double_registration():
     return key, events
 
 
+def _as_dict(v):
+    """Collapse a wrong-typed settings level to {} so `status` can report.
+
+    `_read_user_settings` guarantees only the TOP level is a dict, and its
+    sibling `_settings_hook_events` already spells out that nothing about a
+    user-edited settings.json's shape is guaranteed below that. This chain
+    used to `.get()` through four such levels bare, so the health-check
+    command — the one you run precisely when settings.json looks wrong —
+    died with `AttributeError: 'list' object has no attribute 'get'` (rc=1,
+    raw traceback) instead of printing the report that would diagnose it.
+    """
+    return v if isinstance(v, dict) else {}
+
+
 def _detect_install_layouts():
     """Detect every cc-memory install layout active on this machine.
 
@@ -417,11 +431,11 @@ def _detect_install_layouts():
     settings = _read_user_settings()
     enabled_marketplace = bool(_marketplace_enabled_key(settings))
 
-    mp_entry = settings.get("extraKnownMarketplaces", {}).get("cc-memory", {})
-    mp_src = mp_entry.get("source", {})
+    mp_entry = _as_dict(_as_dict(settings.get("extraKnownMarketplaces")).get("cc-memory"))
+    mp_src = _as_dict(mp_entry.get("source"))
     if mp_src.get("type") == "directory" or mp_src.get("source") == "directory":
         mp_path = mp_src.get("path")
-        if mp_path:
+        if isinstance(mp_path, str) and mp_path:
             layouts.append(_inspect_layout(
                 "marketplace-directory", Path(mp_path),
                 hooks_via="plugin-manifest", enabled=enabled_marketplace,
@@ -436,9 +450,10 @@ def _detect_install_layouts():
             # at the Claude Code level too — we surface that elsewhere; here
             # we just skip the cache layout so the report continues
             inst = {}
-        for entry in inst.get("plugins", {}).get("cc-memory@cc-memory", []):
-            p = entry.get("installPath")
-            if not p:
+        entries = _as_dict(_as_dict(inst).get("plugins")).get("cc-memory@cc-memory")
+        for entry in (entries if isinstance(entries, list) else []):
+            p = _as_dict(entry).get("installPath")
+            if not isinstance(p, str) or not p:
                 continue
             root = Path(p)
             if not root.exists():
@@ -928,11 +943,18 @@ def cmd_search(args):
 def cmd_sessions(args):
     _, db_path, name = _resolve_db(args.project)
     conn = _require_db(db_path)
+    # Register E1's exact defect, closed for `list`/`stats` and missed here:
+    # one memory.db can hold several project rows, and an unpredicated query
+    # printed the OTHER project's sessions — archive_path basenames included —
+    # under this project's heading.
+    pid = _require_project_id(conn, args.project)
     rows = conn.execute(
         """SELECT s.id, s.trigger_type, s.compacted_at, s.msg_count,
                   COUNT(m.id) n_mem, s.archive_path
            FROM sessions s LEFT JOIN memories m ON m.session_id=s.id AND m.is_active=1
-           GROUP BY s.id ORDER BY s.compacted_at DESC LIMIT 10"""
+           WHERE s.project_id = ?
+           GROUP BY s.id ORDER BY s.compacted_at DESC LIMIT 10""",
+        (pid,)
     ).fetchall()
     print(f"\nSessions for {name}:\n")
     _table(["ID", "Trigger", "Compacted At", "Msgs", "Memories", "Archive"],
@@ -1110,8 +1132,13 @@ def cmd_add(args):
 def cmd_keywords(args):
     _, db_path, name = _resolve_db(args.project)
     conn = _require_db(db_path)
+    # Same register-E1 scope defect as cmd_sessions: `keywords.project_id` is
+    # NOT NULL and cmd_stats already filters it; this listing did not.
+    pid = _require_project_id(conn, args.project)
     rows = conn.execute(
-        "SELECT keyword, frequency, last_seen FROM keywords ORDER BY frequency DESC LIMIT 40"
+        "SELECT keyword, frequency, last_seen FROM keywords "
+        "WHERE project_id = ? ORDER BY frequency DESC LIMIT 40",
+        (pid,)
     ).fetchall()
     print(f"\nVocabulary for {name}:\n")
     _table(["Keyword", "Freq", "Last Seen"],
@@ -1272,10 +1299,22 @@ def cmd_progress(args):
 
 
 def cmd_supersedes(args):
-    """Show the supersede chain for a memory ID."""
+    """Show the supersede chain for a memory ID.
+
+    Refuses a foreign id for the same reason `cmd_archive` does three
+    functions down: `memories.id` is global to the DB file, and this command
+    used to print the FULL content of another project's memory under this
+    project's --project — into a Claude session's context, since /cc-mem
+    output is a render path.
+    """
     _, db_path, _ = _resolve_db(args.project)
     _require_db_path(db_path)
     db = MemoryDB(db_path)
+    pid = db.upsert_project(str(Path(args.project).resolve()))
+    head = db.get_memory(args.memory_id)
+    if head is not None and head["project_id"] != pid:
+        print(f"Error: memory {args.memory_id} belongs to a different project")
+        sys.exit(1)
     chain = db.get_supersede_chain(args.memory_id)
     if not chain:
         print(f"No memory with id {args.memory_id}")
@@ -1773,7 +1812,9 @@ _ENCODING_SCAN = {
 # quarantines by flipping is_active=0. Scanning archived rows too meant a
 # quarantined row was re-reported forever and "Re-run with --apply" never
 # stopped being printed — the command could not converge.
-_ENCODING_SCAN_PREDICATE = {"memories": " WHERE is_active = 1"}
+# AND-form: every scan query now leads with `WHERE project_id = ?` (all four
+# tables carry the column), so this predicate composes onto it.
+_ENCODING_SCAN_PREDICATE = {"memories": " AND is_active = 1"}
 
 
 def _count_fffd(row, cols):
@@ -1804,9 +1845,16 @@ def cmd_encoding_check(args):
     quarantined_ids = []
     with db._connect() as conn:
         for table, cols in _ENCODING_SCAN.items():
-            q = f"SELECT * FROM {table}" + _ENCODING_SCAN_PREDICATE.get(table, "")
+            # `WHERE project_id = ?` on every table: this scan used to run
+            # unpredicated, so the counts summed EVERY project in the file and
+            # --apply below archived another project's rows by bare id — the
+            # cmd_archive guard ("memories.id is global to the DB file")
+            # existed three functions up while the one command that WRITES
+            # skipped it. `pid` was resolved and then never used.
+            q = (f"SELECT * FROM {table} WHERE project_id = ?"
+                 + _ENCODING_SCAN_PREDICATE.get(table, ""))
             try:
-                rows = conn.execute(q).fetchall()
+                rows = conn.execute(q, (pid,)).fetchall()
             except sqlite3.Error:
                 # why: a table absent on an older schema version is not a
                 # failure of the scan — report the tables that do exist
@@ -1826,7 +1874,8 @@ def cmd_encoding_check(args):
 
         try:
             for r in conn.execute(
-                "SELECT * FROM memories WHERE is_active = 0"
+                "SELECT * FROM memories WHERE is_active = 0 AND project_id = ?",
+                (pid,)
             ).fetchall():
                 if _count_fffd(r, _ENCODING_SCAN["memories"]):
                     quarantined_ids.append(r["id"])

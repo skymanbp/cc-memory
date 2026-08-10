@@ -75,6 +75,14 @@ _LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1")
 _BODY_STALL_S = 5.0          # max silence inside one body read
 _BODY_DEADLINE_S = 15.0      # max TOTAL time to receive a declared body
 _DRAIN_DEADLINE_S = 3.0      # max TOTAL time spent draining a rejected body
+# ...and for reading the REQUEST LINE + HEADER BLOCK, which had none. The
+# handler's `timeout` is per-recv, so every byte resets it: a peer dripping
+# one header line every 2 s never completed its header block, never reached
+# any body budget, and — since v2.8.0's admission cap — held one of the 16
+# permits the whole time. 16 such connections shed 100 % of real traffic
+# with a 503, indefinitely (measured; no recovery until the drippers were
+# closed). Same shape as _BODY_DEADLINE_S, applied one phase earlier.
+_HEADER_DEADLINE_S = 10.0    # max TOTAL time to receive request line + headers
 
 # Concurrency admission. The budgets above bound ONE request; they say nothing
 # about how many. A connection that sends no bytes at all never reaches them
@@ -106,6 +114,10 @@ _SHED_REPLY = (
 # a loopback peer either fits the socket buffer immediately or is not worth
 # waiting on.
 _SHED_WRITE_S = 0.25
+# Bound on the post-shed drain (see _shed_response). A refused request's
+# headers are a couple of hundred bytes; anything past this is a peer that
+# is not owed the courtesy, and the accept loop is not owed the wait.
+_SHED_DRAIN_BYTES = 8192
 
 
 def _shed_response(request):
@@ -123,6 +135,23 @@ def _shed_response(request):
     try:
         request.settimeout(_SHED_WRITE_S)
         request.sendall(_SHED_REPLY)
+        # Half-close, then drain what the peer already sent. Closing a socket
+        # that still holds unread inbound bytes makes Windows emit a TCP RST,
+        # and the RST DISCARDS the 503 we just queued — measured, 4 of 30 raw
+        # probes (and 2 of 3 with a browser-sized request, whose extra headers
+        # make unread bytes far more likely) surfaced as
+        # ConnectionAbortedError [WinError 10053] instead of the status line.
+        # That is precisely the transport error this function exists to
+        # replace; _drain_body's docstring documents the same mechanism for
+        # the handler path. Bounded by the same _SHED_WRITE_S budget and a
+        # byte cap, because this runs on the accept loop.
+        request.shutdown(socket.SHUT_WR)
+        drained = 0
+        while drained < _SHED_DRAIN_BYTES:
+            chunk = request.recv(min(4096, _SHED_DRAIN_BYTES - drained))
+            if not chunk:
+                break
+            drained += len(chunk)
     except OSError:
         # why: the peer may already be gone, or refusing to read. The socket
         # is closed by the caller regardless, and a raise here would escape
@@ -167,6 +196,71 @@ class _BoundedServer(ThreadingHTTPServer):
             super().shutdown_request(request)
         finally:
             _ADMIT.release()
+
+
+class _HeaderDeadlineReader:
+    """`rfile` proxy that bounds the HEADER phase by ABSOLUTE wall clock.
+
+    `BaseHTTPRequestHandler` reads the request line and the header block
+    itself, under the handler's `timeout` — which is PER-recv, so every
+    arriving byte resets it. That is the same property this module's
+    docstring already names as the reason a size bound is no bound, and the
+    body path answers with `_BODY_DEADLINE_S`; the header phase had no
+    equivalent. A peer dripping one header line every 2 s therefore never
+    finished its header block, never reached a body budget, and held one of
+    the `_MAX_CONCURRENT` permits for as long as it kept dripping.
+
+    `deadline` is cleared by `parse_request` the moment the headers are in,
+    so the body budgets own the rest of the request and this object becomes
+    a transparent proxy. The idle bound stays the handler's own `timeout`;
+    this only adds the total.
+    """
+
+    def __init__(self, rfile, connection, deadline, stall):
+        self._rfile = rfile
+        self._conn = connection
+        self.deadline = deadline
+        self._stall = stall
+
+    def _arm(self):
+        if self.deadline is None:
+            return
+        left = self.deadline - time.monotonic()
+        if left <= 0:
+            # socket.timeout is what BaseHTTPRequestHandler.handle_one_request
+            # already catches ("Request timed out"), so the connection closes
+            # through the path the base class designed for exactly this.
+            raise socket.timeout("request header wall-clock deadline exceeded")
+        try:
+            self._conn.settimeout(min(left, self._stall))
+        except (AttributeError, OSError):
+            # why: nothing to set a timeout on (closed socket); the deadline
+            # check above still bounds the phase, just less tightly
+            pass
+
+    def disarm(self, restore):
+        """Headers are in — hand the rest of the request to the body budgets."""
+        self.deadline = None
+        try:
+            self._conn.settimeout(restore)
+        except (AttributeError, OSError):
+            # why: same as _arm — a closed socket has no timeout to restore
+            pass
+
+    def readline(self, *args):
+        self._arm()
+        return self._rfile.readline(*args)
+
+    def read(self, *args):
+        self._arm()
+        return self._rfile.read(*args)
+
+    def read1(self, *args):
+        self._arm()
+        return self._rfile.read1(*args)
+
+    def __getattr__(self, name):
+        return getattr(self._rfile, name)
 
 
 class _BadRequest(ValueError):
@@ -495,6 +589,31 @@ class MemoryHandler(BaseHTTPRequestHandler):
 
     def log_message(self, format, *args):
         _log.debug(format % args)
+
+    # ── header-phase liveness ───────────────────────────────────────────────
+
+    def handle_one_request(self):
+        """Read one request with the header phase under an absolute deadline.
+
+        See _HeaderDeadlineReader. The wrapper is installed per REQUEST, not
+        per connection, so a keep-alive peer gets a fresh header budget for
+        each request rather than one budget for the whole connection.
+        """
+        real_rfile = self.rfile
+        self.rfile = _HeaderDeadlineReader(
+            real_rfile, self.connection,
+            time.monotonic() + _HEADER_DEADLINE_S, self.timeout)
+        try:
+            super().handle_one_request()
+        finally:
+            self.rfile = real_rfile
+
+    def parse_request(self):
+        ok = super().parse_request()
+        reader = self.rfile
+        if isinstance(reader, _HeaderDeadlineReader):
+            reader.disarm(self.timeout)
+        return ok
 
     # ── response helpers ────────────────────────────────────────────────────
 

@@ -7,6 +7,160 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [2.9.0] — 2026-08-09
+
+### A dual-perspective review: two independent readers, 18 defects, 18 repros
+
+No cc-tree this round. Two reviewers with **disjoint file sets and different
+angles** read the shipped v2.8.0 tree at the same time: a six-scope fan-out of
+my own (db/writer · hooks · mcp/cli · ui · core · tools/tests, severe findings
+put through adversarial refutation) and an independent read-only pass by codex
+over the whole runtime package. 12 candidates survived refutation, 17 more came
+back below the severity bar, codex returned 3 — and **every single one was
+reproduced here before it counted**. Two were refuted and dropped: a
+"reconcile_upsert caps its candidate set" claim that misattributed a pre-existing
+bound, and a "SessionStart tier-3 runs unbudgeted" claim whose structural half
+was right and whose consequence did not follow.
+
+The fixes, by what they protect:
+
+**Data you would have lost.**
+
+- **`archive_obsolete` DESTROYED an existing supersede link.** A loser produced
+  by an earlier SUPERSEDE already points at the row it replaced; the write was
+  an unconditional `supersedes_id = ?`, so chain `[2,1]` became `[2,3]` and the
+  original wording was unreachable from every walk — while `/cc-mem supersedes`
+  printed the result under the label "newest first". Now `COALESCE`: the slot
+  keeps the FIRST lineage fact it learns and the second is logged rather than
+  written over the first.
+- **`patch_progress` bootstrapped across three transactions.** A read, a
+  conditional `upsert_progress`, then the UPDATE — each on its own connection.
+  Two hooks first-touching the same project interleaved and B's stale "row
+  absent" verdict replayed the default row over A's landed patch (measured:
+  `current_request` came back `''`). One `BEGIN IMMEDIATE` with
+  `INSERT OR IGNORE` now; 200 concurrent first-touch pairs lost 0 fields.
+- **MEMORY.md's ordering probe was blind inside one second.** The
+  moved-under-us fingerprint was row counts + `MAX(id)` + `MAX(updated_at)`,
+  and `_now()` stamps whole seconds, so an in-place UPDATE in the same second
+  changed none of the three: a stale render was accepted as current and written
+  over newer state. Replaced by `PRAGMA data_version` read twice on ONE held
+  connection.
+- **`merge_near_duplicates` archived on the authority of a row it was
+  archiving.** Jaccard is not transitive; the inner loop kept comparing an
+  anchor already condemned in the same pass, so a memory left the active set
+  with no surviving near-duplicate (measured at 0.61 against the actual
+  survivor, under the 0.65 threshold).
+- **One malformed TodoWrite entry cost the entire compaction.** A `content` of
+  `null` or a number raised `AttributeError` out of `build_extraction` — taking
+  the session archive, the batch upsert AND the PROGRESS.md handoff with it.
+  Same for a non-dict `message`. Both are typed gates now, matching the guard
+  `_decode_records` already had one level up.
+
+**Data that reached the wrong project, or the wrong person.**
+
+- **Four `/cc-mem` commands ignored project scope**, in a database file that
+  legitimately holds several projects. `encoding-check` counted every project's
+  rows and `--apply` **archived** them by bare id; `supersedes` printed another
+  project's full memory into the Claude session; `sessions` and `keywords`
+  listed the other project's rows — archive filenames included — under this
+  project's heading. `cmd_archive` had carried the guard the whole time.
+- **A reinstall DELETED a user's own hook.** The install path judged ownership
+  per matcher GROUP, so any user entry sharing a group with ours vanished with
+  rc=0 and no warning. Register Y2 fixed exactly this for the uninstall path and
+  left the install path on the old shape; both are per-ENTRY now.
+- **The settings.json compare-and-swap was disarmed on a fresh machine.**
+  `_settings_fingerprint` returned `None` for an absent file and both halves of
+  the guard are gated on `expect is not None`, so "I expect no file" was
+  conflated with "I have no expectation" — a settings.json Claude Code created
+  inside the write window was destroyed with rc=0. Now an `_FP_ABSENT` sentinel.
+- **PLAN.md forged whole document sections.** Two model-authored slots — a
+  superseded plan's `goal` and `refined_by` — were interpolated raw, and an
+  embedded newline produced a second complete "Pending refinement" block or a
+  second `## Goal`: an attacker-chosen "current plan" inside the file Claude
+  reads as the live anchor.
+- **An empty prompt left the PREVIOUS turn's request** in the per-session
+  marker that the Stop observer splices verbatim into its Anthropic request, so
+  the memories it wrote were attributed to a different turn. The marker write
+  now sits above every truthiness test, which is what the code's own comment
+  had always claimed.
+
+**Things that silently stopped working.**
+
+- **PostToolUse discarded any tool event over 512 KiB.** It was the only hook
+  reading a stdin PREFIX; a larger payload truncated mid-JSON, the parse raised,
+  and the silent handler dropped the observation row **and** the
+  mode-independent live-plan block — rc=0, empty stderr, no log line. A 600 KiB
+  `Read` result reaches it; a `package-lock.json` is routinely that size.
+- **The Windows junction defeated both fail-closed link guards.**
+  `stat.S_ISLNK` is False for a `mklink /J` reparse point (no admin needed), so
+  `ensure_memory_dir` accepted a junctioned `memory/` and created `.gitignore`,
+  `sessions/` and `topics/` inside the junction target, and `roots._has_db`
+  adopted the directory as a project root through it. Both now use
+  `core.markers._is_link`, which this package already had.
+- **The web viewer could be locked out indefinitely** by 16 connections
+  dripping an unfinished header block: the deadlines covered only the request
+  BODY, and the handler's own `timeout` is per-recv, so every byte reset it
+  while the connection held one of the 16 admission permits. A 10 s absolute
+  header budget closes it (measured: recovery at t+10.1 s, from "no recovery,
+  ever"). The 503 shed reply was also being discarded by a TCP reset — the
+  socket was closed with the peer's request unread — so it now half-closes and
+  drains first (30/30 probes received the 503, from 26/30).
+- **MCP answered frames with no `jsonrpc` member**, and frames claiming
+  `"1.0"`, as ordinary Requests. JSON-RPC 2.0 §4 requires exactly `"2.0"`;
+  they get `-32600` now.
+- **`unmatched_criteria` judged CJK criteria on the ASCII bar.** Bigram
+  shingles score a one-character Chinese substitution at 0.5556, so the flat
+  0.5 threshold called a REPLACED criterion "carried" while the steps gate
+  refused the identical pair at 2/3 — the two halves of one replacement
+  disagreeing.
+- **`_merged_tags` exploded a bare string** into one tag per character.
+
+**The gates themselves — five holes, found by turning the review on them.**
+
+- **The citation gate was `.py`-only**, silently exempting 25 citations in the
+  tracked docs from the invariant "no citation may be UNCHECKED". Two were
+  already rotten in exactly the way the bounds branch exists to catch. Now
+  623/623 checked, 0 skip.
+- **One modifier word between a number and its noun defeated every
+  `doc_claims` trigger** — the commonest English shape. Two live claims about
+  the hooks contract were unbound and unchecked; the new pattern (one word,
+  plural noun, measured at 5 matches and 0 false positives across every scanned
+  surface) caught them plus two more the moment it landed.
+- **`tools/contracts.py` under-counted the marker defence by one**:
+  `neutralize_document` was missing from the render-path probe, and an
+  `import ... as` alias was invisible from both ends. `render_paths` was 6 with
+  7 in the tree — the same N+1 disease its own comments record recurring
+  "inside its own cure".
+- **`verify_anchors` caught only `SystemExit`**, so a rotted anchor of the four
+  hand-written kinds killed the whole scan with a traceback and no summary.
+  Both handlers name `(Exception, SystemExit)` now — `SystemExit` is a
+  `BaseException`, which is why naming one is not naming the other. It proved
+  itself immediately: four anchors this round's fixes moved were reported
+  together instead of one at a time.
+- **`_HOOK_ORDER` was a hand list bound to nothing.** It is the sole
+  enumeration behind the opt-out gate, the subdirectory test, the
+  is_excluded-then-project_root rule and the junk-cwd probe, so a seventh hook
+  would have been covered by none of them while the banner still said "all 6".
+  It is asserted equal to the computed `hooks` contract now.
+- **The third release gate ran outside a sandbox and never cleaned up** —
+  `Path.home()` stayed the real one and each run leaked two project
+  directories into the real `%TEMP%`. Found: 270 of them, 42 MB, removed.
+
+### Verification
+
+Nine gates green in one run. `tests/smoke_test.py` gained a §9 block and
+`tests/test_surfaces.py` a §9 section (both named for this round); the
+falsification register went **127 → 147 cases**, every new one driven RED
+individually — including one that had to be rewritten after it ran GREEN,
+because it modelled "the probe always fires" instead of "the probe is blind".
+`--anchors` 147/147. Recorded coverage gaps, including the ones this round did
+NOT close, are in `memory/falsify-coverage.md`.
+
+Release assets, for the first time: both PyInstaller executables and a
+`SHA256SUMS.txt`.
+
+---
+
 ## [2.8.0] — 2026-08-09
 
 ### Round 8 — the radial audit turned on round 7's own fixes
@@ -1175,7 +1329,7 @@ Two of the six turned out to be worse than they were written up as.
 - **Doc citation coverage nearly doubled.** `tools/citation_check.py` could only
   anchor a citation when the symbol was defined in the *cited* file, so the most
   common shape in these docs — a call site, `` `db.tag_progress_session(...)`
-  (`user_prompt.py:207`) `` — went unchecked: 370 of 594, 62 %. It now anchors
+  (`user_prompt.py:214`) `` — went unchecked: 370 of 594, 62 %. It now anchors
   cross-file citations on the text of the cited range, and **341 of 594 are
   checked** (was 224).
 

@@ -145,38 +145,45 @@ def main():
             pass
 
         prompt = data.get("prompt", "")
-        if prompt and isinstance(prompt, str):
-            if prompt.startswith("/"):
-                prompt = prompt[1:]
-            # PRIVACY GATE (v2.5.2). BOTH consumers of this variable ship the
-            # text somewhere it cannot be taken back, and neither used to clean
-            # it — while the observation and memory paths always did:
-            #   * the temp prompt file below, which hooks/stop.py reads and
-            #     splices VERBATIM into the Anthropic observer request as
-            #     "User request: …" (stop.py `_observer_evaluate`);
-            #   * progress.current_request, rendered into memory/PROGRESS.md —
-            #     a file core.progress.MEMORY_GITIGNORE_LINES deliberately does
-            #     NOT ignore, so it is committed to the user's repository.
-            # Cleaned BEFORE the 500-char cut so a span straddling the cut is
-            # still seen as a matched pair; clean_for_storage fails CLOSED on a
-            # dangling open tag, so a cut landing mid-span drops the remainder
-            # instead of emitting it.
-            # strip_harness_blocks first, same primitive and same reason as
-            # pre_compact._first_user_request: whatever ends up here is
-            # stored as `progress.current_request` and spliced into the
-            # Stop observer's Anthropic request, and neither should ever
-            # be Claude Code's own slash-command scaffolding.
-            prompt = clean_for_storage(strip_harness_blocks(prompt))[:500]
-            prompt_file = marker_path(_PROMPT_FILE_PREFIX, safe)
-            try:
-                # Written even when cleaning emptied it: this marker is
-                # per-SESSION and reused every turn, so skipping the write would
-                # leave the PREVIOUS turn's prompt in place for stop.py to read.
-                write_marker(prompt_file, prompt)
-            except OSError:
-                # why: prompt context for observer is enrichment, not required
-                pass
+        if not isinstance(prompt, str):
+            prompt = ""
+        if prompt.startswith("/"):
+            prompt = prompt[1:]
+        # PRIVACY GATE (v2.5.2). BOTH consumers of this variable ship the
+        # text somewhere it cannot be taken back, and neither used to clean
+        # it — while the observation and memory paths always did:
+        #   * the temp prompt file below, which hooks/stop.py reads and
+        #     splices VERBATIM into the Anthropic observer request as
+        #     "User request: …" (stop.py `_observer_evaluate`);
+        #   * progress.current_request, rendered into memory/PROGRESS.md —
+        #     a file core.progress.MEMORY_GITIGNORE_LINES deliberately does
+        #     NOT ignore, so it is committed to the user's repository.
+        # Cleaned BEFORE the 500-char cut so a span straddling the cut is
+        # still seen as a matched pair; clean_for_storage fails CLOSED on a
+        # dangling open tag, so a cut landing mid-span drops the remainder
+        # instead of emitting it.
+        # strip_harness_blocks first, same primitive and same reason as
+        # pre_compact._first_user_request: whatever ends up here is
+        # stored as `progress.current_request` and spliced into the
+        # Stop observer's Anthropic request, and neither should ever
+        # be Claude Code's own slash-command scaffolding.
+        prompt = clean_for_storage(strip_harness_blocks(prompt))[:500]
+        prompt_file = marker_path(_PROMPT_FILE_PREFIX, safe)
+        try:
+            # Written even when cleaning emptied it — AND when the raw prompt
+            # was already empty: this marker is per-SESSION and reused every
+            # turn, so skipping the write leaves the PREVIOUS turn's prompt in
+            # place for stop.py to splice into the observer's Anthropic
+            # request. The old `if prompt` guard around this whole block did
+            # exactly that for a raw "" prompt (measured: turn 2's empty
+            # prompt left turn 1's text in the marker), so the write sits
+            # ABOVE any truthiness test now.
+            write_marker(prompt_file, prompt)
+        except OSError:
+            # why: prompt context for observer is enrichment, not required
+            pass
 
+        if prompt:
             # First turn of a session: also seed PROGRESS.md current_request.
             # `and not created` used to guard this and made the branch
             # UNREACHABLE for a project's very first session: on turn 1 of a new
@@ -184,8 +191,8 @@ def main():
             # `created` was True, and on turn 2+ `turn_count != 1`. A brand-new
             # project therefore got no progress row and no PROGRESS.md until its
             # first compaction. db.patch_progress bootstraps the row itself
-            # (core/db.py: `if not self.get_progress(...): self.upsert_progress(...)`),
-            # so running on a just-created DB is safe.
+            # (one INSERT OR IGNORE + UPDATE transaction, core/db.py), so
+            # running on a just-created DB is safe.
             #
             # `and prompt` is the privacy gate's second half: a prompt that was
             # ENTIRELY private redacts to "" and must not be stored — and must

@@ -99,6 +99,12 @@ project, before init.
 import os
 from pathlib import Path
 
+# Junction-aware link probe (symlink OR `mklink /J` reparse point) — the
+# shared implementation core/markers.py carries for exactly this check.
+# Module-level like every other import: this file is on every hook's path
+# already, and markers.py is pure stdlib with no imports back into core.
+from core.markers import _is_link as _markers_is_link
+
 # Depth cap. Nothing legitimate is 25 levels below its own project root; the
 # cap exists so a pathological path (a mount loop, a fuzzed payload) costs a
 # bounded number of stat calls rather than an unbounded walk.
@@ -314,7 +320,12 @@ def _has_db(directory):
     """
     mem = directory / "memory"
     try:
-        if mem.is_symlink() or (mem / "memory.db").is_symlink():
+        # core.markers._is_link, not bare is_symlink(): S_ISLNK is False for
+        # a Windows junction, and the symlink-only probe returned True
+        # THROUGH a junctioned memory/ — rung 0 then adopted the directory
+        # as a project root (measured; the exact hole this guard exists to
+        # close, open on the primary platform).
+        if _markers_is_link(mem) or _markers_is_link(mem / "memory.db"):
             return False
     except OSError:
         # why: a probe that cannot even lstat proves nothing — treat as no

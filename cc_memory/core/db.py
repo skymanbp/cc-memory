@@ -1785,12 +1785,24 @@ class MemoryDB:
         with ctx as conn:
 
             def _archive(id_list, link_to):
-                """UPDATE each id under the guards; returns rows touched."""
+                """UPDATE each id under the guards; returns rows touched.
+
+                COALESCE, never overwrite: a loser produced by an earlier
+                SUPERSEDE already carries a link to the row IT replaced, and
+                an unconditional `supersedes_id = ?` destroyed that link —
+                the older version became unreachable from every chain walk
+                (measured: chain [2,1] became [2,3], #1 orphaned). The slot
+                records the FIRST lineage fact it learns; when it is already
+                occupied, the replaced-by fact is logged instead (see the
+                prior-link warn in the caller below).
+                """
                 n = 0
                 set_sql = "is_active = 0, updated_at = ?"
                 set_params = [now]
                 if link_to is not None:
-                    set_sql = "is_active = 0, supersedes_id = ?, updated_at = ?"
+                    set_sql = ("is_active = 0, "
+                               "supersedes_id = COALESCE(supersedes_id, ?), "
+                               "updated_at = ?")
                     set_params = [link_to, now]
                 if expected_contents is None:
                     for chunk in self._id_chunks(id_list):
@@ -1834,6 +1846,20 @@ class MemoryDB:
                 if looped:
                     self._warn_cycle(looped, canonical_id)
                     archived += _archive(looped, None)
+                # An occupied slot keeps its original link (COALESCE above);
+                # the "replaced by canonical" fact is then recorded nowhere,
+                # so say so in the log rather than silently dropping it.
+                prior = []
+                for chunk in self._id_chunks(linked):
+                    ph = ",".join("?" * len(chunk))
+                    prior += [r["id"] for r in conn.execute(
+                        f"SELECT id FROM memories WHERE id IN ({ph}) "
+                        f"AND supersedes_id IS NOT NULL", chunk).fetchall()]
+                if prior:
+                    self._db_warn(
+                        f"archive_obsolete: {prior} already carry a "
+                        f"supersedes link; kept it. Their replacement by "
+                        f"#{canonical_id} is recorded only here.")
                 archived += _archive(linked, canonical_id)
             else:
                 archived += _archive(ids, None)
@@ -2200,12 +2226,20 @@ class MemoryDB:
         Used by Stop-hook to drip-update files_touched and open_todos each turn
         while leaving the full state intact. Distinct from upsert_progress which
         is the PreCompact full rewrite.
+
+        Bootstrap + patch are ONE transaction. The old shape was three — a
+        get_progress() read, an upsert_progress() bootstrap when absent, then
+        the UPDATE, each on its own connection — so concurrent hooks
+        bootstrapping the same fresh project could interleave: B's stale "row
+        absent" verdict replayed the default row OVER A's already-landed patch
+        (reproduced: A's current_request came back ''). INSERT OR IGNORE
+        leans on `project_id INTEGER PRIMARY KEY` and the schema's column
+        DEFAULTs — verified identical to upsert_progress's defaults dict —
+        so there is no window between the existence check and the write.
+        Same BEGIN IMMEDIATE discipline as upsert_progress above.
         """
         if not fields:
             return
-        # Bootstrap empty row first if absent
-        if not self.get_progress(project_id):
-            self.upsert_progress(project_id)
         now = self._now()
         serialized = {}
         for k, v in fields.items():
@@ -2216,6 +2250,12 @@ class MemoryDB:
         set_clause = ", ".join(f"{c} = ?" for c in serialized.keys()) + ", updated_at = ?"
         params = list(serialized.values()) + [now, project_id]
         with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute(
+                "INSERT OR IGNORE INTO progress (project_id, updated_at) "
+                "VALUES (?, ?)",
+                (project_id, now)
+            )
             conn.execute(
                 f"UPDATE progress SET {set_clause} WHERE project_id = ?",
                 params

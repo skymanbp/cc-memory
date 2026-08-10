@@ -430,9 +430,33 @@ def _text_from_content(content: Any) -> str:
     return ""
 
 
+def _msg_dict(msg: Dict) -> Dict:
+    """The record's `message` value as a dict, {} on any other shape.
+
+    `_decode_records` guarantees each RECORD is a dict; it says nothing about
+    the `message` VALUE. `{"message": null}` parses fine and `.get()` on the
+    None raised AttributeError out of build_extraction — aborting the entire
+    compaction and the PROGRESS.md handoff, the exact escape _decode_records
+    was hardened against one level up (and summarize_transcript already
+    guards with its own isinstance check).
+    """
+    m = msg.get("message")
+    return m if isinstance(m, dict) else {}
+
+
+def _todo_content(item: Dict) -> str:
+    """A todo item's `content` as stripped text, "" on any non-str shape.
+
+    `item.get("content", "").strip()` raised AttributeError when the key was
+    PRESENT with null or a number — same blast radius as _msg_dict above.
+    """
+    c = item.get("content")
+    return c.strip() if isinstance(c, str) else ""
+
+
 def _iter_tool_uses(messages: List[Dict]):
     for msg in messages:
-        content = msg.get("message", {}).get("content", [])
+        content = _msg_dict(msg).get("content", [])
         if not isinstance(content, list):
             continue
         for block in content:
@@ -443,9 +467,10 @@ def _iter_tool_uses(messages: List[Dict]):
 def _iter_assistant_texts(messages: List[Dict]) -> List[str]:
     texts = []
     for msg in messages:
-        if msg.get("message", {}).get("role") != "assistant":
+        m = _msg_dict(msg)
+        if m.get("role") != "assistant":
             continue
-        text = _text_from_content(msg.get("message", {}).get("content", ""))
+        text = _text_from_content(m.get("content", ""))
         if text.strip():
             texts.append(text)
     return texts
@@ -472,7 +497,7 @@ def extract_todos(messages: List[Dict]) -> List[Dict]:
                 if len(item.strip()) > 3:
                     todos.append({"status": "pending", "priority": "medium", "content": item.strip()})
             elif isinstance(item, dict):
-                content = item.get("content", "").strip()
+                content = _todo_content(item)
                 if len(content) > 3:
                     todos.append({
                         "status":   item.get("status", "pending"),
@@ -505,7 +530,7 @@ def extract_latest_todo_state(messages: List[Dict]) -> List[Dict]:
         snapshot: List[Dict] = []
         for item in raw_todos:
             if isinstance(item, dict):
-                content = (item.get("content") or "").strip()
+                content = _todo_content(item)
                 if len(content) > 3:
                     snapshot.append({
                         "status":   item.get("status", "pending"),
@@ -693,7 +718,7 @@ def build_extraction(messages: List[Dict],
     """
     all_texts: List[str] = []
     for msg in messages:
-        t = _text_from_content(msg.get("message", {}).get("content", ""))
+        t = _text_from_content(_msg_dict(msg).get("content", ""))
         if t:
             all_texts.append(t)
     full_text = "\n".join(all_texts)

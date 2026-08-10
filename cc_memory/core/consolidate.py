@@ -305,6 +305,16 @@ def merge_near_duplicates(db, project_id, threshold=0.65):
                     # stepped-back clock). id is creation order by
                     # construction; keep the higher one.
                     to_archive.add(min(mi["id"], mj["id"]))
+                if mi["id"] in to_archive:
+                    # The ANCHOR just lost. Jaccard is not transitive — the
+                    # outer loop's guard skips a doomed anchor at entry, but
+                    # kept comparing one doomed MID-SCAN: a later row similar
+                    # only to the doomed anchor (0.61 to the survivor, under
+                    # threshold) was archived on its authority, leaving the
+                    # active set with no near-duplicate of it. Same failure
+                    # _nominate_groups documents avoiding ("NO transitive
+                    # union-find"). Stop; the outer loop re-anchors.
+                    break
 
     if to_archive:
         # Hash-guarded, same rationale as cleanup_garbage: the pairwise loop

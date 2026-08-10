@@ -96,6 +96,11 @@ def _merged_tags(*groups):
     """
     out = []
     for group in groups:
+        if isinstance(group, str):
+            # A bare string is ONE tag, not an iterable of its characters:
+            # `_merged_tags(rows, "manual")` used to explode into
+            # ['m','a','n','u','l'] and store that verbatim.
+            group = [group]
         for tag in group or []:
             if isinstance(tag, str) and tag and tag not in out:
                 out.append(tag)
@@ -250,53 +255,38 @@ def upsert_batch(db: MemoryDB,
 _RENDER_ATTEMPTS = 3
 
 
-def _index_generation(db: MemoryDB, project_id: int) -> tuple:
-    """Cheap fingerprint of every DB fact MEMORY.md projects.
-
-    The render below is a SNAPSHOT verdict — several separate queries, each on
-    its own connection — and `write_atomic` makes the replacement atomic
-    without making it ORDERED. Two surfaces (a hook, the MCP server, the
-    dashboard, the viewer) routinely render concurrently, and the slower
-    renderer replaced the faster one's newer file: measured, the DB held 2
-    memories while MEMORY.md announced 1, and MEMORY.md is re-injected as
-    authoritative context. The same multi-query read could also STRADDLE a
-    commit and project a state that never existed.
-
-    One fingerprint before and after the read closes both: unequal means the
-    DB moved under us, so the render is re-done rather than written. This is
-    the `archive_if_unchanged` shape (re-assert the predicate the verdict
-    rests on) applied to a file instead of a row.
-    """
-    with db._connect() as conn:
-        return tuple(conn.execute(
-            """SELECT (SELECT COUNT(*) FROM memories WHERE project_id = ?),
-                      (SELECT COALESCE(MAX(id), 0) FROM memories
-                        WHERE project_id = ?),
-                      (SELECT COALESCE(MAX(updated_at), '') FROM memories
-                        WHERE project_id = ?),
-                      (SELECT COUNT(*) FROM topics WHERE project_id = ?),
-                      (SELECT COALESCE(MAX(updated_at), '') FROM topics
-                        WHERE project_id = ?),
-                      (SELECT COUNT(*) FROM keywords WHERE project_id = ?),
-                      (SELECT COALESCE(MAX(last_seen), '') FROM keywords
-                        WHERE project_id = ?),
-                      (SELECT COUNT(*) FROM sessions WHERE project_id = ?)""",
-            (project_id,) * 8).fetchone())
-
-
 def regenerate_memory_index(db: MemoryDB, project_id: int, memory_dir: Path) -> None:
     """Rewrite memory/MEMORY.md from the current DB state.
 
     Called automatically after every batch upsert AND on consolidation /
     Stop-hook idle reorg, so MEMORY.md never goes stale.
 
-    The render is retried while the DB moves under it (`_index_generation`),
-    so a slow renderer cannot replace a newer projection with an older one.
+    The render is a SNAPSHOT verdict — several separate queries, each on its
+    own connection — and `write_atomic` makes the replacement atomic without
+    making it ORDERED. Two surfaces (a hook, the MCP server, the dashboard,
+    the viewer) routinely render concurrently, and the slower renderer used
+    to replace the faster one's newer file: measured, the DB held 2 memories
+    while MEMORY.md announced 1, and MEMORY.md is re-injected as
+    authoritative context. So the render is retried while the DB moves under
+    it, and a stale render is re-done rather than written.
+
+    The moved-under-us probe is `PRAGMA data_version`, read twice on ONE
+    HELD connection: the counter bumps iff some OTHER connection committed
+    between the two reads, and every writer in this package commits on its
+    own connection (`_connect` opens per call), so any concurrent commit is
+    visible — same-process or not. The previous probe was a fingerprint of
+    row counts / MAX(id) / MAX(updated_at); `_now()` stamps whole seconds,
+    so an in-place UPDATE landing in the same second changed none of the
+    three and the stale render was accepted as current (reproduced: the DB
+    held "new summary" v2 while MEMORY.md kept "old summary").
     """
     for _attempt in range(_RENDER_ATTEMPTS):
-        _gen_before = _index_generation(db, project_id)
-        _rendered = _render_memory_index(db, project_id, memory_dir)
-        if _index_generation(db, project_id) == _gen_before:
+        with db._connect() as conn:
+            _dv_before = conn.execute("PRAGMA data_version").fetchone()[0]
+            _rendered = _render_memory_index(db, project_id, memory_dir)
+            _moved = (conn.execute("PRAGMA data_version").fetchone()[0]
+                      != _dv_before)
+        if not _moved:
             break
     # After _RENDER_ATTEMPTS of continuous churn the last render is written
     # anyway: it projects a state that really existed moments ago, every

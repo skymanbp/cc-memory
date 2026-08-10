@@ -18,13 +18,80 @@ Run:  python tests/test_plan_carryover.py
 """
 from __future__ import annotations
 
+import gc
 import json
+import os
+import shutil
+import sqlite3
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
+
+# ── sandbox: must be installed BEFORE importing anything from cc_memory ─────
+# This is one of the nine release gates and it was the only one running against
+# the REAL home and the REAL %TEMP%: `Path.home()` stayed the maintainer's, so
+# every core.logger write landed in the live ~/.claude/hooks/cc-memory/logs/,
+# and `_mk_project` leaked two project directories per run into %TEMP% with no
+# teardown at all (measured: 270 `ccm_gate_*` directories, 42 MB, each holding
+# a memory.db). Its two siblings have carried this block for releases, and both
+# treat an uncleanable leak as a test FAILURE. Deliberate literal twin of
+# smoke_test.py / test_surfaces.py: standalone scripts that cannot import each
+# other, and a shared helper would have to live inside the package under test.
+_SANDBOX = Path(tempfile.mkdtemp(prefix="ccm-gate-box-"))
+_HOME = _SANDBOX / "home"
+_TMP = _SANDBOX / "tmp"
+_HOME.mkdir(parents=True, exist_ok=True)
+_TMP.mkdir(parents=True, exist_ok=True)
+_drive, _rest = os.path.splitdrive(str(_HOME))
+os.environ.update({
+    "USERPROFILE": str(_HOME),      # ntpath.expanduser checks this first
+    "HOME": str(_HOME),             # posixpath.expanduser
+    "HOMEDRIVE": _drive or "",
+    "HOMEPATH": _rest or str(_HOME),
+    "TEMP": str(_TMP),
+    "TMP": str(_TMP),
+    "TMPDIR": str(_TMP),
+})
+# env alone is not enough in-process: tempfile caches gettempdir() on first use,
+# and mkdtemp() above already primed it with the REAL temp dir.
+tempfile.tempdir = str(_TMP)
+assert Path.home() == _HOME, (
+    f"sandbox home not in effect (Path.home()={Path.home()}); refusing to run "
+    f"against the real ~/.claude")
+
+
+def _cleanup_sandbox():
+    """Close every sqlite handle this process opened, then REMOVE the sandbox."""
+    for _conn in [o for o in gc.get_objects()
+                  if isinstance(o, sqlite3.Connection)]:
+        try:
+            _conn.close()
+        except sqlite3.Error:
+            # why: an already-closed or mid-statement handle; the only goal is
+            # releasing the OS file handle before rmtree, and one we cannot
+            # release is caught by the rmtree check below anyway
+            pass
+    gc.collect()
+    try:
+        from core import logger as _logger_mod
+        for _lg in list(getattr(_logger_mod, "_loggers", {}).values()):
+            _lg.close()
+    except ImportError:
+        # why: teardown must work even if the package never became importable
+        pass
+    tempfile.tempdir = None
+    try:
+        shutil.rmtree(_SANDBOX)
+    except OSError as exc:
+        left = sorted(str(p) for p in _SANDBOX.rglob("*") if p.is_file())
+        raise AssertionError(
+            f"sandbox {_SANDBOX} survived cleanup ({exc}); {len(left)} file(s) "
+            f"leaked into the real %TEMP%: {left[:10]}")
+
+
 sys.path.insert(0, str(REPO / "cc_memory"))
 
 from core.db import MemoryDB          # noqa: E402  -- why: imports must follow the sys.path bootstrap above; repo tests run as plain scripts
@@ -244,8 +311,14 @@ def main() -> None:
           "`context` is free text" in out7, out7[:400])
 
     print(f"\n{'=' * 60}\nRESULT: {PASS} passed, {FAIL} failed\n{'=' * 60}")
-    sys.exit(1 if FAIL else 0)
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    finally:
+        # Teardown runs on the failure path too — a suite that leaks only when
+        # it fails leaks exactly when someone is least likely to notice. The
+        # sys.exit that used to end main() skipped every finally in this file.
+        _cleanup_sandbox()
+    sys.exit(1 if FAIL else 0)

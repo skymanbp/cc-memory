@@ -63,6 +63,7 @@ import ast
 import contextlib
 import gc
 import hashlib
+import importlib
 import io
 import json
 import os
@@ -1324,8 +1325,34 @@ def test_installer():
 # gate on memory/memory.db merely EXISTING, which is why the fixture below is
 # a project that was initialised BEFORE it was excluded -- the case where
 # "gates on the DB existing" and "opts out" are not the same behaviour.
+#
+# The ORDER is editorial; the MEMBERSHIP is not, and it is asserted against
+# hooks/hooks.json below. This list is the sole enumeration behind every
+# hook-wide guarantee in this file -- the excluded_projects privacy gate, the
+# run-from-a-subdirectory test, the is_excluded-then-project_root source rule
+# and the junk-cwd probe -- so a hook registered in hooks.json but missing
+# here would be covered by NONE of them while the banner still claimed "all
+# {len(_HOOK_ORDER)} hooks". tools/contracts.py already computes that set from
+# the manifest; §3 of this file binds installer timeouts to the same file.
 _HOOK_ORDER = ["user_prompt", "post_tool_use", "stop", "pre_compact",
                "session_start", "consolidate_async"]
+
+
+def _assert_hook_order_matches_manifest():
+    """_HOOK_ORDER == the hooks Claude Code is actually told to run."""
+    sys.path.insert(0, str(REPO / "tools"))
+    import contracts as _contracts
+    registered = {Path(rel).stem
+                  for rel in _contracts.values(REPO)["hooks"]}
+    listed = set(_HOOK_ORDER)
+    assert listed == registered, (
+        f"_HOOK_ORDER disagrees with hooks/hooks.json: "
+        f"only in hooks.json {sorted(registered - listed)}, "
+        f"only in _HOOK_ORDER {sorted(listed - registered)}. Every hook-wide "
+        f"rule in this file iterates _HOOK_ORDER, so a hook missing from it "
+        f"is covered by none of them.")
+    print(f"[OK] hook enumeration: _HOOK_ORDER == hooks/hooks.json "
+          f"({len(listed)} hooks)")
 
 
 def _hook_payload(hook, cwd, session_id, transcript):
@@ -1395,6 +1422,10 @@ def _memory_names(mem_dir):
 
 def test_excluded_projects():
     print("\n--- §4 excluded_projects across all six hooks ----------------")
+    # FIRST: the enumeration every loop below trusts. A hook registered in
+    # hooks/hooks.json but absent from _HOOK_ORDER is silently exempt from
+    # the opt-out gate, the anchoring rules and the junk-cwd probe.
+    _assert_hook_order_matches_manifest()
     # A COPY of the package: the repo's own config.json must never be written
     # to (it is the live plugin on this machine), and the fixture paths have to
     # be listed literally because matching is on the resolved absolute path.
@@ -3290,6 +3321,496 @@ def _dashboard_generates_a_swept_claude_md():
     return checks
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# §9  v2.9.0 dual-perspective review — the surfaces smoke_test cannot reach
+# ═══════════════════════════════════════════════════════════════════════════
+
+def _cli_commands_are_project_scoped(pkg):
+    """(§9a) `memories.id` is global to the DB file, and so is every table.
+
+    One memory.db legitimately holds several project rows (a directory
+    rename creates one; copying a `memory/` between repos creates one). Four
+    commands ignored that: `encoding-check` scanned and — with `--apply` —
+    ARCHIVED every project's rows, `supersedes` printed another project's
+    full content into the Claude session, and `sessions` / `keywords` listed
+    the other project's rows (archive filenames included) under this
+    project's heading. `cmd_archive` had the guard the whole time.
+    """
+    box = Path(tempfile.mkdtemp(prefix="ccm-scope-"))
+    a, b = box / "A", box / "B"
+    (a / "memory").mkdir(parents=True)
+    (b / "memory").mkdir(parents=True)
+    db = MemoryDB(b / "memory" / "memory.db")
+    pid_a = db.upsert_project(str(a))
+    pid_b = db.upsert_project(str(b))
+    with db._connect() as conn:
+        now = db._now()
+        conn.execute(
+            "INSERT INTO memories (project_id,session_id,category,content,"
+            "importance,created_at,updated_at,is_active) "
+            "VALUES (?,NULL,'note',?,5,?,?,1)",
+            (pid_a, "A-ONLY: ACME contract note with a mojibake \ufffd char",
+             now, now))
+        conn.execute(
+            "INSERT INTO memories (project_id,session_id,category,content,"
+            "importance,created_at,updated_at,is_active) "
+            "VALUES (?,NULL,'note',?,3,?,?,1)",
+            (pid_b, "B: chose pytest over unittest", now, now))
+        for kw, pid in (("acme-contract", pid_a), ("pytest", pid_b)):
+            conn.execute("INSERT INTO keywords (project_id,keyword,frequency,"
+                         "last_seen) VALUES (?,?,9,?)", (pid, kw, now))
+    db.insert_session(pid_a, "sA", "auto", 42,
+                      str(a / "memory/sessions/2026/01/SECRET-ARCHIVE.md"),
+                      "A work")
+    db.insert_session(pid_b, "sB", "auto", 7, None, "B work")
+    foreign_id = [r["id"] for r in db.get_all_active_memories(pid_a)][0]
+
+    mem_py = pkg / "cli" / "mem.py"
+    checks = 0
+
+    def run(*args):
+        return subprocess.run(
+            [sys.executable, str(mem_py), "--project", str(b)] + list(args),
+            capture_output=True, encoding="utf-8",
+            env=dict(os.environ, PYTHONIOENCODING="utf-8"))
+
+    r = run("encoding-check", "--apply")
+    assert "A-ONLY" not in r.stdout and "Corrupted ACTIVE" not in r.stdout, \
+        f"encoding-check scanned another project's rows: {r.stdout[:400]}"
+    assert db.get_memory(foreign_id)["is_active"] == 1, \
+        ("encoding-check --apply archived a row belonging to a DIFFERENT "
+         "project in the same database file")
+    checks += 1
+
+    r = run("supersedes", str(foreign_id))
+    assert r.returncode == 1 and "A-ONLY" not in r.stdout, \
+        (f"`supersedes` printed a foreign project's memory into the session: "
+         f"rc={r.returncode} {r.stdout[:300]!r}")
+    checks += 1
+
+    r = run("sessions")
+    assert "SECRET-ARCHIVE" not in r.stdout, \
+        f"`sessions` listed another project's archive path: {r.stdout[:300]}"
+    checks += 1
+
+    r = run("keywords")
+    assert "acme-contract" not in r.stdout, \
+        f"`keywords` listed another project's vocabulary: {r.stdout[:300]}"
+    checks += 1
+
+    # ...and `status` must survive a parseable-but-wrong-typed settings.json:
+    # it is the command you run PRECISELY when settings.json looks wrong, and
+    # it died with a raw AttributeError traceback instead of reporting.
+    home = box / "home"
+    (home / ".claude").mkdir(parents=True)
+    (home / ".claude" / "plugins").mkdir()
+    for shape, extra in (
+            ('{"extraKnownMarketplaces": []}', None),
+            ('{"extraKnownMarketplaces": {"cc-memory": "dev"}}', None),
+            ('{"extraKnownMarketplaces": {"cc-memory": {"source": "directory"}}}',
+             None),
+            ('{}', "[]")):
+        (home / ".claude" / "settings.json").write_text(shape, encoding="utf-8")
+        if extra is not None:
+            (home / ".claude" / "plugins" / "installed_plugins.json").write_text(
+                extra, encoding="utf-8")
+        r = subprocess.run(
+            [sys.executable, str(mem_py), "--project", str(b), "status"],
+            capture_output=True, encoding="utf-8",
+            env=dict(os.environ, PYTHONIOENCODING="utf-8",
+                     HOME=str(home), USERPROFILE=str(home)))
+        assert r.returncode == 0 and "AttributeError" not in r.stderr, \
+            (f"`status` died on a parseable settings.json {shape}: "
+             f"rc={r.returncode} {r.stderr.strip().splitlines()[-1:]}")
+        checks += 1
+
+    for conn in [o for o in gc.get_objects() if isinstance(o, sqlite3.Connection)]:
+        try:
+            conn.close()
+        except sqlite3.Error:
+            # why: only releasing the OS handle before rmtree matters here
+            pass
+    shutil.rmtree(box, ignore_errors=True)
+    return checks
+
+
+def _installer_preserves_a_user_hook_in_our_group():
+    """(§9b) Install strips per-ENTRY, exactly as uninstall already did.
+
+    Dropping a whole matcher group because ONE command in it is ours deleted
+    a user hook that shared the group — rc=0, no warning, on every reinstall.
+    Register Y2 closed this for the uninstall path and left the install path
+    on the old shape, so the two directions disagreed about what is ours.
+
+    Also pins the compare-and-swap when settings.json does NOT exist at read
+    time: `_settings_fingerprint` returned None there and BOTH halves of the
+    guard are gated on `expect is not None`, so a settings.json Claude Code
+    created inside the window was destroyed with rc=0.
+    """
+    box = Path(tempfile.mkdtemp(prefix="ccm-inst9-"))
+    home, tmp = box / "home", box / "tmp"
+    home.mkdir(), tmp.mkdir()
+    drive, rest = os.path.splitdrive(str(home))
+    env = dict(os.environ, PYTHONIOENCODING="utf-8",
+               HOME=str(home), USERPROFILE=str(home),
+               HOMEDRIVE=drive or "", HOMEPATH=rest or str(home),
+               TMPDIR=str(tmp), TEMP=str(tmp), TMP=str(tmp))
+    inst = REPO / "cc_memory" / "ui" / "installer.py"
+    r = subprocess.run([sys.executable, str(inst), "--cli"],
+                       capture_output=True, encoding="utf-8", env=env)
+    assert r.returncode == 0, f"install failed: {r.stdout[-400:]}"
+    sj = home / ".claude" / "settings.json"
+    settings = json.loads(sj.read_text(encoding="utf-8"))
+    user_cmd = 'python3 "D:/work/my_audit.py"'
+    settings["hooks"]["Stop"][0]["hooks"].append(
+        {"type": "command", "command": user_cmd, "timeout": 5})
+    sj.write_text(json.dumps(settings, indent=2), encoding="utf-8")
+
+    r = subprocess.run([sys.executable, str(inst), "--cli"],
+                       capture_output=True, encoding="utf-8", env=env)
+    assert r.returncode == 0, f"reinstall failed: {r.stdout[-400:]}"
+    after = json.loads(sj.read_text(encoding="utf-8"))
+    survivors = [h.get("command", "") for g in after["hooks"]["Stop"]
+                 for h in g.get("hooks", [])]
+    assert any("my_audit" in c for c in survivors), (
+        f"a reinstall DELETED the user's own hook because it shared a matcher "
+        f"group with ours: {survivors}")
+    assert sum(1 for c in survivors if "stop.py" in c) == 1, (
+        f"the cc-memory entry was duplicated instead of upgraded: {survivors}")
+
+    # the absent-file CAS half, driven in-process against the same sandbox
+    sys.path.insert(0, str(REPO / "cc_memory" / "ui"))
+    prev_env = {k: os.environ.get(k) for k in
+                ("HOME", "USERPROFILE", "HOMEDRIVE", "HOMEPATH")}
+    home2 = box / "home2"
+    (home2 / ".claude").mkdir(parents=True)
+    d2, r2 = os.path.splitdrive(str(home2))
+    os.environ.update({"HOME": str(home2), "USERPROFILE": str(home2),
+                       "HOMEDRIVE": d2 or "", "HOMEPATH": r2 or str(home2)})
+    try:
+        import installer as inst_mod
+        importlib.reload(inst_mod)
+        assert str(inst_mod.SETTINGS_PATH).startswith(str(home2)), \
+            inst_mod.SETTINGS_PATH
+        real_write = inst_mod._write_settings_json
+
+        def racy(settings_obj, log_fn=print, expect=None):
+            # Claude Code lands a settings.json inside the read->rename window
+            inst_mod.SETTINGS_PATH.write_text(
+                json.dumps({"model": "opus"}, indent=2), encoding="utf-8")
+            return real_write(settings_obj, log_fn, expect=expect)
+
+        inst_mod._write_settings_json = racy
+        lines = []
+        try:
+            inst_mod._merge_into_settings(
+                {"Stop": [{"matcher": "", "hooks": [
+                    {"type": "command", "command": "python3 x.py"}]}]},
+                log_fn=lines.append)
+        finally:
+            inst_mod._write_settings_json = real_write
+        final = json.loads(inst_mod.SETTINGS_PATH.read_text(encoding="utf-8"))
+        assert "model" in final, (
+            "a concurrent settings.json created inside the write window was "
+            "destroyed: the compare-and-swap is disarmed when the file is "
+            "ABSENT at read time")
+        assert any("changed underneath" in l or "rewritten during" in l
+                   for l in lines), \
+            f"the CAS conflict was not reported: {lines}"
+    finally:
+        for k, v in prev_env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        import installer as inst_mod2
+        importlib.reload(inst_mod2)
+    shutil.rmtree(box, ignore_errors=True)
+    return len(survivors)
+
+
+def _installer_manifest_keeps_earlier_surfaces():
+    """(§9c) The surface manifest is a UNION, never this run's successes.
+
+    Recording only what THIS run copied orphaned every surface a run
+    skipped: running the SHIPPED copy of the installer resolves its surface
+    root to `~/.claude/hooks`, all five SKIP, the manifest became `[]` — and
+    `_remove_surfaces` treats an empty manifest as authoritative, so a later
+    uninstall deleted the package and left all five surfaces installed,
+    pointing at nothing.
+    """
+    box = Path(tempfile.mkdtemp(prefix="ccm-manifest-"))
+    home, tmp = box / "home", box / "tmp"
+    home.mkdir(), tmp.mkdir()
+    drive, rest = os.path.splitdrive(str(home))
+    env = dict(os.environ, PYTHONIOENCODING="utf-8",
+               HOME=str(home), USERPROFILE=str(home),
+               HOMEDRIVE=drive or "", HOMEPATH=rest or str(home),
+               TMPDIR=str(tmp), TEMP=str(tmp), TMP=str(tmp))
+    inst = REPO / "cc_memory" / "ui" / "installer.py"
+    subprocess.run([sys.executable, str(inst), "--cli"],
+                   capture_output=True, encoding="utf-8", env=env)
+    manifest = home / ".claude" / "hooks" / "cc-memory" / "installed_surfaces.json"
+    first = json.loads(manifest.read_text(encoding="utf-8"))["files"]
+    assert first, "the first install recorded no surfaces at all"
+
+    shipped = home / ".claude" / "hooks" / "cc-memory" / "ui" / "installer.py"
+    subprocess.run([sys.executable, str(shipped), "--cli"],
+                   capture_output=True, encoding="utf-8", env=env)
+    second = json.loads(manifest.read_text(encoding="utf-8"))["files"]
+    assert set(second) >= set(first), (
+        f"a run that SKIPPED every surface erased them from the manifest: "
+        f"{first} -> {second}; uninstall then orphans them permanently")
+
+    subprocess.run([sys.executable, str(inst), "--uninstall"],
+                   capture_output=True, encoding="utf-8", env=env)
+    left = [str(p.relative_to(home / ".claude"))
+            for p in (home / ".claude").rglob("*.md")
+            if {"commands", "agents", "skills"} & set(p.parts)]
+    assert not left, f"uninstall orphaned {len(left)} surfaces: {left}"
+    shutil.rmtree(box, ignore_errors=True)
+    return len(first)
+
+
+def _post_tool_use_reads_a_large_payload():
+    """(§9d) A big tool result must not drop the WHOLE event.
+
+    This hook was the only one with a prefix-capped stdin read (512 KiB):
+    anything larger truncated mid-JSON, the parse raised, and the silent
+    except dropped the observation row AND the mode-independent live-plan
+    block, with rc=0, empty stderr and no log line. A 600 KiB `Read` result
+    — a package-lock.json is routinely that size — reaches it.
+    """
+    box = Path(tempfile.mkdtemp(prefix="ccm-bigpayload-"))
+    proj, tmp = box / "proj", box / "tmp"
+    (proj / "memory").mkdir(parents=True)
+    tmp.mkdir()
+    MemoryDB(proj / "memory" / "memory.db").upsert_project(str(proj))
+    env = dict(os.environ, PYTHONIOENCODING="utf-8",
+               TMPDIR=str(tmp), TEMP=str(tmp), TMP=str(tmp))
+    hook = REPO / "cc_memory" / "hooks" / "post_tool_use.py"
+
+    def fire(body):
+        payload = {"cwd": str(proj), "session_id": "s-big", "tool_name": "Read",
+                   "tool_input": {"file_path": "f.txt"},
+                   "tool_response": {"type": "text", "file": {"content": body}}}
+        return subprocess.run([sys.executable, str(hook)],
+                              input=json.dumps(payload), capture_output=True,
+                              encoding="utf-8", env=env)
+
+    def count():
+        conn = sqlite3.connect(proj / "memory" / "memory.db")
+        n = conn.execute("SELECT COUNT(*) FROM observations").fetchone()[0]
+        conn.close()
+        return n
+
+    fire("x" * 100)
+    small = count()
+    r = fire("y" * (600 * 1024))
+    big = count()
+    assert r.returncode == 0 and r.stderr == "", \
+        f"the hook broke its own contract: rc={r.returncode} err={r.stderr[:200]}"
+    assert big == small + 1, (
+        f"a 600 KiB payload was DISCARDED: observations {small} -> {big}. The "
+        f"live-plan block below the parse is lost with it, silently")
+    shutil.rmtree(box, ignore_errors=True)
+    return big
+
+
+def _empty_prompt_clears_the_marker():
+    """(§9e) The prompt marker is per-SESSION and must be overwritten.
+
+    The whole prompt block sat under `if prompt and isinstance(prompt, str)`,
+    so a raw "" prompt skipped the write and left the PREVIOUS turn's text in
+    the marker — which hooks/stop.py splices VERBATIM into the Anthropic
+    observer request as "User request: …". The memories the observer then
+    writes are attributed to the wrong request and stored permanently. The
+    file's own comment states the invariant the guard defeated.
+    """
+    box = Path(tempfile.mkdtemp(prefix="ccm-emptyprompt-"))
+    proj, tmp = box / "proj", box / "tmp"
+    (proj / "memory").mkdir(parents=True)
+    (proj / ".git").mkdir()
+    tmp.mkdir()
+    MemoryDB(proj / "memory" / "memory.db").upsert_project(str(proj))
+    env = dict(os.environ, PYTHONIOENCODING="utf-8",
+               TMPDIR=str(tmp), TEMP=str(tmp), TMP=str(tmp))
+    hook = REPO / "cc_memory" / "hooks" / "user_prompt.py"
+    secret = "rotate the production API keys in config.yaml"
+    for prompt in (secret, ""):
+        subprocess.run([sys.executable, str(hook)],
+                       input=json.dumps({"cwd": str(proj),
+                                         "session_id": "sess-empty",
+                                         "prompt": prompt}),
+                       capture_output=True, encoding="utf-8", env=env)
+    markers = list(tmp.rglob("cc_mem_prompt_*"))
+    assert len(markers) == 1, f"expected one prompt marker, got {markers}"
+    left = markers[0].read_text(encoding="utf-8")
+    assert secret not in left, (
+        f"an empty prompt left the PREVIOUS turn's request in the marker "
+        f"stop.py ships to Anthropic: {left!r}")
+    shutil.rmtree(box, ignore_errors=True)
+    return len(markers)
+
+
+def _mcp_requires_the_jsonrpc_member():
+    """(§9f) JSON-RPC 2.0 §4: `jsonrpc` is mandatory and must be "2.0"."""
+    frames = ('{"id":1,"method":"ping"}\n'
+              '{"jsonrpc":"1.0","id":2,"method":"ping"}\n'
+              '{"jsonrpc":"2.0","id":3,"method":"ping"}\n')
+    r = subprocess.run(
+        [sys.executable, str(REPO / "cc_memory" / "mcp" / "server.py")],
+        input=frames, capture_output=True, encoding="utf-8",
+        env=dict(os.environ, PYTHONIOENCODING="utf-8"))
+    got = {}
+    for line in r.stdout.splitlines():
+        if line.strip():
+            msg = _strict_loads(line.encode("utf-8"))
+            got[msg.get("id")] = msg
+    for rid, label in ((1, "absent"), (2, '"1.0"')):
+        assert got.get(rid, {}).get("error", {}).get("code") == -32600, (
+            f"a frame with a {label} jsonrpc member was answered "
+            f"{got.get(rid)!r} instead of -32600 Invalid Request")
+    assert "result" in got.get(3, {}), \
+        f"a conforming frame was refused: {got.get(3)!r}"
+    return len(got)
+
+
+def _web_header_phase_is_deadline_bounded():
+    """(§9g) The header phase needs an ABSOLUTE budget, like the body has.
+
+    `timeout` is per-recv, so every byte resets it — the property this
+    module's docstring names as the reason a size bound is no bound. A peer
+    dripping one header line every 2 s never completed its header block,
+    never reached a body budget, and held one of the 16 admission permits
+    the whole time; 16 of them shed 100 % of real traffic indefinitely.
+    """
+    import ui.web_viewer as wv
+    box = Path(tempfile.mkdtemp(prefix="ccm-hdr-"))
+    (box / "memory").mkdir()
+    db = MemoryDB(box / "memory" / "memory.db")
+    pid = db.upsert_project(str(box))
+    wv.MemoryHandler.db, wv.MemoryHandler.pid = db, pid
+    wv.MemoryHandler.memory_dir = box / "memory"
+    assert wv._HEADER_DEADLINE_S <= 20, \
+        f"the header budget must stay short: {wv._HEADER_DEADLINE_S}"
+    srv = wv._BoundedServer(("127.0.0.1", 0), wv.MemoryHandler)
+    port = srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    stop = threading.Event()
+    drippers = []
+
+    def drip():
+        try:
+            s = socket.create_connection(("127.0.0.1", port), timeout=5)
+            drippers.append(s)
+            s.sendall(b"GET /api/stats HTTP/1.0\r\nX-a: b\r\n")
+            while not stop.is_set():
+                s.sendall(b"X-pad: y\r\n")
+                stop.wait(1.0)
+        except OSError:
+            # why: the server closing on us IS the expected outcome once the
+            # header deadline fires — this thread is the attacker side
+            pass
+
+    threads = [threading.Thread(target=drip, daemon=True)
+               for _ in range(wv._MAX_CONCURRENT)]
+    try:
+        for t in threads:
+            t.start()
+        time.sleep(1.0)
+        t0 = time.monotonic()
+        deadline = t0 + wv._HEADER_DEADLINE_S + 8
+        served, shed = None, 0
+        while time.monotonic() < deadline:
+            try:
+                probe = socket.create_connection(("127.0.0.1", port), timeout=4)
+                probe.sendall(b"GET /api/stats HTTP/1.1\r\n"
+                              b"Host: 127.0.0.1\r\nConnection: close\r\n\r\n")
+                data = probe.recv(4096)
+                probe.close()
+                # The status LINE, not a protocol-version prefix: this server
+                # answers HTTP/1.0 by default, and pinning "HTTP/1.1 200" made
+                # a working recovery look like a permanent lockout.
+                head = data.split(b"\r\n", 1)[0]
+                if b" 200 " in head:
+                    served = time.monotonic()
+                    break
+                if b" 503 " in head:
+                    shed += 1
+            except OSError:
+                # why: while the permits are held the probe is shed or reset;
+                # the loop is what measures whether that state ever CLEARS
+                pass
+            time.sleep(0.5)
+        assert served is not None, (
+            f"{wv._MAX_CONCURRENT} header-phase drippers locked the viewer out "
+            f"for longer than the {wv._HEADER_DEADLINE_S}s header budget + 8s "
+            f"— the permits are held by a phase nothing bounds")
+        assert shed, (
+            "the drippers never took the permits at all, so this probe proved "
+            "nothing about the header budget releasing them")
+    finally:
+        stop.set()
+        for s in drippers:
+            try:
+                s.close()
+            except OSError:
+                # why: teardown only; a dripper the server already closed is
+                # exactly the state this probe wants
+                pass
+        srv.shutdown()
+        srv.server_close()
+    for conn in [o for o in gc.get_objects() if isinstance(o, sqlite3.Connection)]:
+        try:
+            conn.close()
+        except sqlite3.Error:
+            # why: releasing the OS handle before rmtree is the only goal
+            pass
+    shutil.rmtree(box, ignore_errors=True)
+    return wv._HEADER_DEADLINE_S
+
+
+def test_dual_review_surfaces():
+    print("\n--- §9 v2.9.0 dual-review surfaces ---------------------------")
+    pkg = Path(tempfile.mkdtemp(prefix="ccm-r9-pkg-")) / "cc_memory"
+    shutil.copytree(REPO / "cc_memory", pkg,
+                    ignore=shutil.ignore_patterns("__pycache__", "*.pyc",
+                                                  "projects.json"))
+    assert REPO not in pkg.parents, "the fixture package must be a COPY"
+    n_scope = _cli_commands_are_project_scoped(pkg)
+    print(f"[OK] CLI project scope: {n_scope} probes — encoding-check --apply "
+          f"leaves a sibling project's rows active, supersedes refuses a "
+          f"foreign id, sessions/keywords list only this project, and status "
+          f"reports instead of crashing on 4 wrong-typed settings.json shapes")
+    n_hooks = _installer_preserves_a_user_hook_in_our_group()
+    print(f"[OK] installer settings.json: a user hook sharing OUR matcher "
+          f"group survives a reinstall ({n_hooks} Stop entries after), and a "
+          f"settings.json created inside the write window is detected rather "
+          f"than destroyed")
+    n_surf = _installer_manifest_keeps_earlier_surfaces()
+    print(f"[OK] surface manifest: a run that skips every surface cannot "
+          f"erase the {n_surf} already recorded, so uninstall still removes "
+          f"them")
+    n_obs = _post_tool_use_reads_a_large_payload()
+    print(f"[OK] PostToolUse stdin: a 600 KiB tool result is parsed, not "
+          f"discarded ({n_obs} observation rows), so the live-plan block "
+          f"below it still runs")
+    _empty_prompt_clears_the_marker()
+    print("[OK] UserPromptSubmit: an empty prompt OVERWRITES the per-session "
+          "marker instead of leaving the previous turn's request for the "
+          "Stop observer to ship to Anthropic")
+    n_rpc = _mcp_requires_the_jsonrpc_member()
+    print(f"[OK] MCP wire: {n_rpc} frames — an absent or non-\"2.0\" jsonrpc "
+          f"member is refused with -32600 instead of being answered as a "
+          f"valid Request")
+    hdr = _web_header_phase_is_deadline_bounded()
+    print(f"[OK] web header phase: {16} drippers cannot hold the admission "
+          f"permits past the {hdr:g}s absolute header budget; the viewer "
+          f"recovers on its own")
+    shutil.rmtree(pkg.parent, ignore_errors=True)
+
+
 def test_late_surfaces():
     print("\n--- §8 v2.8.0 surfaces ---------------------------------------")
     pkg = Path(tempfile.mkdtemp(prefix="ccm-late-pkg-")) / "cc_memory"
@@ -3361,6 +3882,7 @@ def main():
     test_settings_cas()
     test_project_root_anchoring()
     test_late_surfaces()
+    test_dual_review_surfaces()
     # Teardown is a GATE, not a courtesy: this suite creates ~475 KB of SQLite
     # per run under the real %TEMP% and used to hide its own failure to remove
     # it behind ignore_errors=True.

@@ -2,7 +2,7 @@
 
 ## Project: cc-memory
 
-**Claude Code persistent memory plugin (v2.8.0)** — anti-patch reconcile-on-write
+**Claude Code persistent memory plugin (v2.9.0)** — anti-patch reconcile-on-write
 + LLM-judged semantic de-duplication, forced PROGRESS.md handoff with
 per-session annotation, live PLAN.md anchor with plan-refiner / plan-guardian
 subagents + mandatory carryover gate, bounded transcript reads, injection
@@ -10,9 +10,82 @@ observability, FTS5 search, AI-judged extraction with Haiku (optional local
 Ollama fallback).
 
 - **Language**: Python 3.8+ (pure stdlib, zero pip dependencies at runtime)
-- **Version**: 2.8.0
+- **Version**: 2.9.0
 - **License**: MIT
 - **Platform**: Windows-primary, cross-platform compatible (Tkinter required for GUI)
+
+## What changed in v2.9.0 (over v2.8.0)
+
+**A dual-perspective review, not another audit round.** Two readers with
+disjoint file sets went over the shipped v2.8.0 tree at the same time — a
+six-scope fan-out of my own with adversarial refutation, and an independent
+read-only pass by codex — and 18 defects survived being reproduced here.
+Full narrative in `CHANGELOG.md`. The invariants a future change must not
+break:
+
+1. **`archive_obsolete` COALESCEs `supersedes_id`, never overwrites it.** A
+   loser produced by an earlier SUPERSEDE already carries a link to the row it
+   replaced; overwriting made the original unreachable from every chain walk
+   (chain `[2,1]` → `[2,3]`) while `/cc-mem supersedes` still labelled the
+   result "newest first". The slot records the FIRST lineage fact; a second is
+   logged.
+
+2. **`patch_progress` bootstraps and patches in ONE transaction.** The old
+   three-transaction shape (read → conditional `upsert_progress` → UPDATE, each
+   on its own connection) let a stale "row absent" verdict replay the default
+   row over a landed patch. `INSERT OR IGNORE` under `BEGIN IMMEDIATE` leans on
+   the PK and the schema DEFAULTs, which are verified identical to
+   `upsert_progress`'s defaults dict.
+
+3. **MEMORY.md's moved-under-us probe is `PRAGMA data_version` on a HELD
+   connection.** Every writer here commits on its own connection, so the
+   counter sees any concurrent commit. The retired fingerprint (row counts +
+   `MAX(id)` + `MAX(updated_at)`) was blind to an in-place UPDATE inside one
+   clock second, because `_now()` stamps whole seconds.
+
+4. **Every `/cc-mem` command that touches a table scopes it to the project.**
+   `memories.id` is global to the DB file and one file legitimately holds
+   several projects: `encoding-check --apply` archived another project's rows,
+   `supersedes` printed another project's content into the session, and
+   `sessions` / `keywords` listed it. `cmd_archive` had the guard; the rest did
+   not. A new command that reads a table without `WHERE project_id = ?` is a
+   cross-project leak, not a style nit.
+
+5. **The installer judges hook ownership per ENTRY on BOTH paths.** Register Y2
+   fixed the uninstall path and left the install path dropping whole matcher
+   groups, so a reinstall deleted a user hook sharing a group with ours. Do not
+   re-introduce `_is_ccm_group` as a strip criterion.
+
+6. **`_settings_fingerprint` returns a SENTINEL for an absent file, never
+   `None`.** Both halves of the compare-and-swap are gated on
+   `expect is not None`, so `None` disarmed the whole guard on exactly the
+   machines where settings.json does not exist yet.
+
+7. **Both fail-closed link guards use `core.markers._is_link`.**
+   `stat.S_ISLNK` is False for a Windows junction (`mklink /J`, no admin), so
+   the `is_symlink()`-only probes in `core/progress.py` and `core/roots.py`
+   were inert on the primary platform — a junctioned `memory/` was written
+   into and adopted as a project root.
+
+8. **Hooks read stdin to EOF.** `post_tool_use` was the only one with a prefix
+   cap; a payload over it truncated mid-JSON and the silent handler dropped the
+   whole event — the observation row AND the mode-independent live-plan block.
+
+9. **The web viewer bounds the HEADER phase by absolute wall clock**
+   (`_HEADER_DEADLINE_S`), not only the body. `timeout` is per-recv, so a
+   drip-feeder held an admission permit indefinitely; 16 of them shed all real
+   traffic. The shed 503 also half-closes and drains before closing, or Windows
+   answers with an RST that discards it.
+
+10. **MCP requires `jsonrpc == "2.0"`** and answers `-32600` otherwise.
+
+11. **The gates are subject to the same review as the code.** This round found
+    five holes in them: a `.py`-only citation regex (25 citations exempt, 2
+    already rotten), a `doc_claims` grammar that one modifier word defeated,
+    a `render_paths` probe missing `neutralize_document` and aliased imports,
+    a `verify_anchors` handler catching only `SystemExit` (a `BaseException` —
+    naming it is not naming `Exception`), and `_HOOK_ORDER` bound to nothing.
+    A gate that cannot go red is a gate that is lying.
 
 ## What changed in v2.8.0 (over v2.7.0)
 
@@ -362,7 +435,7 @@ not be imported at all — `cli/plan.py` now has a `main()`.
 
 **Residual limits, recorded rather than papered over:**
 
-- `core/db.py`'s three plan mutators — `update_plan_status` (`db.py:2734-2778`),
+- `core/db.py`'s three plan mutators — `update_plan_status` (`db.py:2788-2832`),
   `delete_plan` (`:1410`) and `update_plan_content` (`:1427`) — all accept
   `project_id`, and `cli/plan.py` + `ui/dashboard.py` pass it at every call
   site, but none of them *requires* it (it defaults to `None`). An unscoped raw
@@ -630,8 +703,8 @@ discovered via `enabledPlugins` + `extraKnownMarketplaces` in
 `~/.claude/settings.json` → the plugin manifest → `hooks/hooks.json`; the
 `hooks` key of `settings.json` stays untouched. Only the **standalone**
 installer (`ui/installer.py:_merge_into_settings`) writes hook entries there.
-`PreCompact` fires TWO command hooks (v2.3.2): a blocking sync leg + a
-background `async` leg.
+`PreCompact` fires TWO command hooks <!--ce:hooks:subset--> (v2.3.2): a
+blocking sync leg + a background `async` leg.
 
 | Hook | Entry | Timeout | Purpose |
 |------|-------|---------|---------|
@@ -739,7 +812,7 @@ The `plan_active` table (one row per project) backs PLAN.md. Lifecycle:
   only `plan.apply_refined_plan` may clear `needs_refine`.
 
 **All of the `PostToolUse` legs above run in EVERY mode, above the
-`should_observe` gate** (`hooks/post_tool_use.py:178`). They shipped below it
+`should_observe` gate** (`hooks/post_tool_use.py:191`). They shipped below it
 from v2.2 through v2.4.3, which made the entire anchor dead through its own
 hook — `TodoWrite` is in every mode's `skip_tools` and `ExitPlanMode` is in no
 mode's `observe_tools`. Plan control is not observation: mode selects what is
@@ -838,7 +911,7 @@ the three plan mutators, and the two DOC gates below.
 `tests/test_plan_carryover.py` covers the v2.4.0 carryover gate (20 checks) —
 the only coverage of that feature.
 
-`tests/test_surfaces.py` (v2.5.0, eight sections since v2.8.0) covers the
+`tests/test_surfaces.py` (v2.5.0, nine sections since v2.9.0) covers the
 surfaces neither of the others touches: §1 the MCP stdio server, §2 the web
 viewer's request guards, §3 the standalone installer (surfaces installed and
 removed by name, malformed-`settings.json` shapes, hook-timeout lockstep
@@ -851,8 +924,20 @@ pre_compact annotation guard, the doc-claims grammar, the plan anchor driven
 through its own hook in every mode, the MCP scope gate, the `memory_topics`
 bound, and `ui/dashboard.py` executed headlessly — its CLAUDE.md generator
 driven against a hostile `package.json` and its SQL read-only classifier
-both ways). It also asserts the source-level rule that every LLM-calling
-hook passes an absolute deadline.
+both ways), and §9 the v2.9.0 dual-review surfaces (CLI project scoping across
+four commands plus `status` on four wrong-typed `settings.json` shapes, the
+installer's per-entry strip and its absent-file compare-and-swap, the surface
+manifest union, a 600 KiB PostToolUse payload, the empty-prompt marker
+overwrite, the MCP `jsonrpc` member, and 16 header-phase drippers failing to
+hold the admission permits). It also asserts the source-level rule that every
+LLM-calling hook passes an absolute deadline.
+
+**§4 now opens by binding its own enumeration.** `_HOOK_ORDER` is the sole
+list behind the opt-out gate, §7's subdirectory drive, the
+is_excluded-then-`project_root` source rule and the junk-cwd probe, and
+nothing tied it to `hooks/hooks.json` — a seventh hook would have been covered
+by none of them while the banner still said "all 6". It is asserted equal to
+the `hooks` set `tools/contracts.py` computes from the manifest.
 
 **§7 is the twin of §4.** It drives the same six hooks <!--ce:hooks--> from a SUBDIRECTORY of
 a seeded project and asserts no second `memory/` appears down there while the
@@ -944,7 +1029,7 @@ python tests/smoke_test.py
 python tests/test_plan_carryover.py
 # expect: "RESULT: 20 passed, 0 failed"
 python tests/test_surfaces.py
-# expect: "===== ALL SURFACE TESTS PASSED ====="  (§1-§8)
+# expect: "===== ALL SURFACE TESTS PASSED ====="  (§1-§9)
 python tools/i18n_check.py
 # expect: "3 in-sync", exit 0
 python tools/citation_check.py
@@ -962,14 +1047,20 @@ python tools/falsify_fixes.py
 # `--list` shows what each case breaks; `--case <name>` runs one.
 ```
 
-No pytest / pip dependencies — all six scripts are stdlib and reflect the
+No pytest / pip dependencies — every script above is stdlib and reflects the
 runtime contract (pure stdlib, see Development guidelines below). When you add a
 behavior to `memory_writer`, `progress`, `extractor.load_transcript_window`, or
 `session_start._refresh_progress_row`, add a corresponding assertion block.
-Tests MUST use `tempfile` directories only; installer work must redirect
-`USERPROFILE`/`HOME` **and** `TMPDIR`/`TEMP`/`TMP`. Every subprocess capture
-needs an explicit `encoding="utf-8"` — the default codec on this box is gbk and
-the CLI emits real UTF-8.
+
+**Tests MUST use `tempfile` directories only, and MUST remove them.** All
+three suites redirect `USERPROFILE`/`HOME` **and** `TMPDIR`/`TEMP`/`TMP` into a
+sandbox before importing the package, assert `Path.home()` really moved, and
+tear the sandbox down in a `finally` — an uncleanable leak is a test FAILURE,
+not a warning. `test_plan_carryover.py` was the exception through v2.8.0: it
+ran against the real home and left two project directories per run in the real
+`%TEMP%` (found: 270 of them, 42 MB). Every subprocess capture needs an
+explicit `encoding="utf-8"` — the default codec on this box is gbk and the CLI
+emits real UTF-8.
 
 **`excluded_projects` is covered by `tests/test_surfaces.py` §4** — it drives
 all six hooks <!--ce:hooks--> against a fresh excluded directory, a
@@ -992,7 +1083,7 @@ Two limits to know before trusting a green result: a citation whose sentence
 names no resolvable symbol at all is reported **SKIP**, not OK (253 of 594
 today, down from 370 once v2.5.3 taught it to anchor CROSS-FILE citations on the
 text of the cited range — the `` `db.tag_progress_session(...)`
-(`user_prompt.py:207`) `` shape, which is the commonest in these docs). `--fix`
+(`user_prompt.py:214`) `` shape, which is the commonest in these docs). `--fix`
 rewrites a same-file citation to the **definition** site and a cross-file one to
 the occurrence NEAREST the stale number — a stated assumption (it was right when
 written; the file grew above it), not a proof. Ordinary variable
