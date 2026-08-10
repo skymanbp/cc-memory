@@ -36,3 +36,11 @@ projects.json
 # (cc-enslaver enforcement, personal skill toolkits, etc.) and stays local.
 .claude/
 
+.ce/
+
+# cc-tree audit output — working evidence for the v2.8.0 audit rounds
+# (adjudications, raw candidate JSON, the convergence report). Excluded by
+# user ruling (2026-08-09): the release notes carry the narrative inline,
+# and no tracked doc cites these files, so the citation gate never points
+# here. Anchored like /memory/ above, and for the same reason.
+/code-audit-out/

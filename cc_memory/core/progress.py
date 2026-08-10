@@ -70,28 +70,93 @@ def ensure_memory_gitignore(memory_dir: Path) -> None:
     """
     gi = memory_dir / ".gitignore"
     try:
-        existing = gi.read_text(encoding="utf-8") if gi.exists() else ""
-        have = {ln.strip() for ln in existing.splitlines()}
+        # errors="replace", not strict: a user who appended a line from a GBK
+        # editor makes strict UTF-8 raise UnicodeDecodeError — a ValueError,
+        # NOT an OSError, so the handler below never caught it. One caller
+        # (`hooks/pre_compact.py`) invokes this ABOVE the archive, the session
+        # row, the memories and PROGRESS.md, so a mis-encoded byte in a
+        # courtesy file silently cost the entire compaction. Same rationale as
+        # `core/atomic.py`: replace the undecodable byte, keep the content.
+        existing = gi.read_text(encoding="utf-8", errors="replace") \
+            if gi.exists() else ""
+        # rstrip, NOT strip: leading whitespace is SIGNIFICANT to git — a
+        # line reading ` memory.db` ignores nothing, yet `.strip()` made it
+        # count as the `memory.db` rule being present, so the migration
+        # declined to add the real one and the database stayed trackable
+        # (register D3). Trailing whitespace is insignificant to git unless
+        # escaped, so rstrip keeps matching the shapes that DO work.
+        have = {ln.rstrip() for ln in existing.splitlines()}
         missing = [ln for ln in MEMORY_GITIGNORE_LINES if ln not in have]
         if not missing:
             return
         prefix = existing if existing.endswith("\n") or not existing else existing + "\n"
         gi.write_text(prefix + "\n".join(missing) + "\n", encoding="utf-8")
-    except OSError:
+    except (OSError, ValueError):
         # why: .gitignore is a courtesy to the user's VCS; a read-only or
-        # missing memory dir must never break the hook that called us
+        # missing memory dir must never break the hook that called us.
+        # ValueError covers the decode family that `errors="replace"` above
+        # does not reach (an undecodable filename, a surrogate in the join).
         pass
+
+
+def ensure_memory_dir(memory_dir: Path) -> Path:
+    """Create memory/ + its subdirs + the ignore file INSIDE AN EXISTING project.
+
+    Raises FileNotFoundError if the project directory itself is gone.
+
+    ``mkdir(parents=True)`` materialises the whole chain, so a project the user
+    deleted or renamed mid-session was silently RECREATED as an empty shell —
+    memory.db, .gitignore, sessions/ and topics/ included — by whichever
+    surface touched it next. `ui/dashboard.py` already refused to do that, but
+    it refused in a private method, so the other six creators (both hooks,
+    cli/mem.py, cli/plan.py, and core/plan.py twice) each kept their own
+    parents=True copy and kept resurrecting. One function, seven callers, and
+    `core/db.py` dropped parents=True as a backstop for anything that opens a
+    database without coming through here.
+    """
+    memory_dir = Path(memory_dir)
+    if not memory_dir.parent.is_dir():
+        raise FileNotFoundError(
+            f"project directory not found: {memory_dir.parent}")
+    if memory_dir.is_symlink():
+        # Fail closed (register Y1, user-ratified): a symlinked memory/
+        # redirects every artifact — memory.db, PROGRESS.md, session archives
+        # — to wherever the link points, outside the project and outside
+        # every reporting path. core/roots._has_db refuses the same shape as
+        # project IDENTITY; this is the WRITE-side choke for a directory that
+        # already exists. is_symlink() is an lstat — the portable guard
+        # (O_NOFOLLOW is 0 on Windows; fstat-after-open describes the
+        # target). OSError so every caller's existing handler applies.
+        raise OSError(
+            f"memory/ at {memory_dir} is a symlink; cc-memory refuses to "
+            f"write through links (privacy fail-closed). Replace it with a "
+            f"real directory, or pin an exotic layout with .ccm-root.")
+    memory_dir.mkdir(exist_ok=True)
+    (memory_dir / "sessions").mkdir(exist_ok=True)
+    (memory_dir / "topics").mkdir(exist_ok=True)
+    ensure_memory_gitignore(memory_dir)
+    return memory_dir
+
 
 _PKG_ROOT = Path(__file__).resolve().parent.parent
 if str(_PKG_ROOT) not in sys.path:
     sys.path.insert(0, str(_PKG_ROOT))
 
-from core.atomic import write_atomic
+from core.atomic import write_atomic, _DERIVED_BUDGET_S
 from core.db import MemoryDB
 from core.logger import get_logger
-from core.privacy import neutralize_block, neutralize_inline, neutralize_markers
+from core.privacy import (neutralize_block, neutralize_document,
+                          neutralize_inline, neutralize_markers)
 
 _log = get_logger("progress")
+
+# ── PROGRESS.md render budgets (register D4) ───────────────────────────────
+# The progress ROW is the state; PROGRESS.md is a rendered VIEW of it, and a
+# view read at every session start must be readable, not exhaustive. Nothing
+# bounded §3: a 50k-entry open_todos rendered a 3.6 MiB document (measured).
+# Both caps announce themselves in the output — no silent truncation.
+_MAX_TODOS_RENDERED = 50
+_MAX_PROGRESS_BYTES = 256 * 1024
 
 
 def _coerce_entries(value, str_key: str) -> List[Dict]:
@@ -308,11 +373,13 @@ def write_progress_md(db: MemoryDB, project_id: int, memory_dir: Path) -> Path:
     "## 7. Pre-compact Transcript Pointer" in a document that has 1.
     """
     prog = db.get_progress(project_id) or {}
-    project_name = Path(db.get_project_by_path(
-        db.get_all_projects()[0]["path"] if db.get_all_projects() else "."
-    )["path"]).name if db.get_progress(project_id) else "(unknown)"
-
-    # Get project name properly
+    # A replacement query was added below without deleting the original, so
+    # this ran on the per-turn Stop path: five discarded round-trips (each
+    # opening a connection and running seven PRAGMAs) whose result the next
+    # assignment overwrote unconditionally. It was also the only unguarded
+    # subscript here — `get_project_by_path` returns None on a miss, and
+    # `None["path"]` is a TypeError that would take the whole PROGRESS.md
+    # rewrite down for a value nothing reads.
     with db._connect() as conn:
         row = conn.execute(
             "SELECT name, path FROM projects WHERE id = ?", (project_id,)
@@ -368,12 +435,16 @@ def write_progress_md(db: MemoryDB, project_id: int, memory_dir: Path) -> Path:
     if not todos:
         lines.append("*(no open todos)*")
     else:
-        for t in todos:
+        for t in todos[:_MAX_TODOS_RENDERED]:
             prio = neutralize_inline(str(t.get("priority", "medium")))
             status = t.get("status", "pending")
             mark = "[ ]" if status == "pending" else "[~]"
             lines.append(f"- {mark} `{prio}` "
                          f"{neutralize_inline(str(t.get('content','')))}")
+        if len(todos) > _MAX_TODOS_RENDERED:
+            lines.append(f"- … {len(todos) - _MAX_TODOS_RENDERED} more "
+                         f"(render capped at {_MAX_TODOS_RENDERED}; the "
+                         f"`progress` row holds the full list)")
     lines += [""]
 
     # --- Plan ----------------------------------------------------------------
@@ -447,7 +518,24 @@ def write_progress_md(db: MemoryDB, project_id: int, memory_dir: Path) -> Path:
     ]
 
     out = memory_dir / "PROGRESS.md"
-    _atomic_write(out, "\n".join(lines))
+    # neutralize_document, not a bare join: every slot above is already escaped
+    # individually, and that is exactly what a marker split across two slots
+    # survives — see its docstring for the measured PROGRESS.md forgery.
+    text = neutralize_document("\n".join(lines))
+    if len(text.encode("utf-8")) > _MAX_PROGRESS_BYTES:
+        # Line-boundary cut under the byte budget, with a LOUD notice. All
+        # content above is already neutralised, so the worst a cut can do is
+        # leave a fence open around the notice — cosmetic, never structural.
+        # The notice's own bytes are RESERVED out of the budget (register
+        # r6-C10): slicing at the full cap and then appending pushed the
+        # rendered file past the very limit the slice enforced.
+        notice = ("\n\n*(TRUNCATED: PROGRESS.md hit the "
+                  f"{_MAX_PROGRESS_BYTES // 1024} KiB render budget; the "
+                  "`progress` SQL row holds the full state.)*")
+        keep = max(0, _MAX_PROGRESS_BYTES - len(notice.encode("utf-8")))
+        cut = text.encode("utf-8")[:keep].decode("utf-8", errors="ignore")
+        text = cut.rsplit("\n", 1)[0] + notice
+    _atomic_write(out, text)
     return out
 
 
@@ -476,9 +564,33 @@ def write_session_archive(memory_dir: Path, project_name: str,
           if len(file_ts) >= 6 and file_ts[:6].isdigit()
           else datetime.now().strftime("%Y/%m"))
     archive_dir = memory_dir / "sessions" / ym
-    archive_dir.mkdir(parents=True, exist_ok=True)
+    # Component-by-component, NOT parents=True: parents=True materialises the
+    # whole chain, so a project deleted after the caller's ensure_memory_dir
+    # check was silently resurrected as an empty shell by this write. Without
+    # parents, a vanished memory_dir raises FileNotFoundError to the caller —
+    # the same refusal contract as ensure_memory_dir itself.
+    for part in (memory_dir / "sessions", memory_dir / "sessions" / ym.split("/")[0],
+                 archive_dir):
+        part.mkdir(exist_ok=True)
     archive_path = archive_dir / f"session_{file_ts}.md"
-    archive_path.write_text(archive_text, encoding="utf-8", errors="replace")
+    # write_atomic, not write_text: this was the LAST generated artifact in
+    # this module still using the truncate-then-write call that core/atomic.py
+    # exists to remove. Measured under three concurrent readers, 150 writes:
+    # `write_text` produced 332 EMPTY reads in 2,264 samples (14.7 %), against
+    # 0 empty in 3.4 M samples for `write_atomic`. And here a torn file is
+    # PERMANENT: `_reserve_archive_ts` has already claimed this exact path
+    # with O_CREAT|O_EXCL and `sessions.archive_path` already points at it, so
+    # the claim cannot be repeated and nothing rewrites it.
+    #
+    # `_DERIVED_BUDGET_S`, and it RAISES on exhaustion. `os.replace` onto a
+    # path another process holds open is a `PermissionError` on Windows, and
+    # the truncating write it replaces simply never failed — it tore instead.
+    # Reproduced here with three concurrent readers: the plain write raised 0
+    # times and produced 332 empty reads; the atomic one retries and then
+    # raises. The caller decides what a failure costs — see
+    # `hooks/pre_compact.py`, which keeps the compaction and its PROGRESS.md
+    # handoff rather than trading them for an archive.
+    write_atomic(archive_path, archive_text, budget_s=_DERIVED_BUDGET_S)
     return archive_path
 
 
@@ -491,9 +603,13 @@ def migrate_legacy_handoff(memory_dir: Path):
     if old.exists():
         bak = memory_dir / "SESSION_HANDOFF.md.v2.bak"
         try:
-            if bak.exists():
-                bak.unlink()
-            old.rename(bak)
+            # os.replace overwrites an existing backup ATOMICALLY. The old
+            # unlink-then-rename pair had a window where the previous backup
+            # was already gone while the rename could still fail (a sharing
+            # violation on the source) — measured operation order
+            # [unlink .v2.bak, rename FAILED], both generations lost
+            # (register Y7). One syscall has no such window.
+            os.replace(str(old), str(bak))
             _log.info(f"renamed legacy SESSION_HANDOFF.md → {bak.name}")
         except OSError as e:
             _log.error(f"could not rename legacy handoff: {e}")

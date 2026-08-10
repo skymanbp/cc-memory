@@ -53,6 +53,20 @@ def _get_surface_root():
 
 
 BUNDLE_DIR = _get_bundle_root()
+
+# Prime sys.path HERE, at module scope, the way every other surface does
+# (`cli/mem.py:25`, `cli/plan.py:32`, `ui/dashboard.py:40`, `ui/web_viewer.py:59`,
+# `mcp/server.py:92`). This file was the only one that primed it inside a
+# function — `_init_project` did it 34 lines AFTER its own opt-out and
+# anchoring guards, so on the first Initialize Project click of a process both
+# guards raised ModuleNotFoundError: the opt-out was swallowed by
+# `except ImportError: pass` and the anchoring degraded with a misleading
+# "root anchoring unavailable (No module named 'core')". An opted-out project
+# got a full scaffold anyway. A SECOND click worked, because the late insert
+# had leaked BUNDLE_DIR onto sys.path — which is why clicking twice hides it.
+if str(BUNDLE_DIR) not in sys.path:
+    sys.path.insert(0, str(BUNDLE_DIR))
+
 SURFACE_DIR = _get_surface_root()
 CLAUDE_DIR = Path.home() / ".claude"
 TARGET_DIR = CLAUDE_DIR / "hooks" / "cc-memory"
@@ -64,11 +78,12 @@ SUBPACKAGE_FILES = {
     "":      ["__init__.py", "config.json"],
     "core":  ["__init__.py", "atomic.py", "auth.py", "consolidate.py", "db.py",
               "encoding_setup.py", "extractor.py", "idle.py", "logger.py",
-              "modes.py", "plan.py", "privacy.py", "progress.py", "roots.py",
+              "markers.py", "modes.py", "plan.py", "privacy.py",
+              "progress.py", "roots.py", "textsim.py",
               "version.py"],
     "hooks": ["__init__.py", "consolidate_async.py", "post_tool_use.py",
               "pre_compact.py", "session_start.py", "stop.py", "user_prompt.py"],
-    "llm":   ["__init__.py", "ccl_backend.py", "memory_writer.py"],
+    "llm":   ["__init__.py", "ccl_backend.py", "memory_writer.py", "parse.py"],
     "cli":   ["__init__.py", "mem.py", "plan.py"],
     "mcp":   ["__init__.py", "server.py"],
     "ui":    ["__init__.py", "dashboard.py", "installer.py", "web_viewer.py"],
@@ -117,7 +132,12 @@ _SETTINGS_FIX_HINT = ("Fix that file (or move it aside) and re-run the "
 # The writers, one per prefix (grep the hooks for tempfile.gettempdir to audit):
 #   cc_mem_turns_        hooks/user_prompt.py  turn counter
 #   cc_mem_prompt_       hooks/user_prompt.py  last user prompt, for the observer
-#   cc_mem_eval_         hooks/stop.py         observer watermark
+#   cc_mem_eval_         NO live writer since v2.8.0 - the observer watermark
+#                        moved to projects.obs_watermark, because a per-SESSION
+#                        marker made every new session replay the project's
+#                        whole observation backlog. Kept here for the same
+#                        reason as cc_memory_reminded_ below: an uninstall must
+#                        still sweep what an older install left behind.
 #   cc_mem_refine_       hooks/stop.py         plan-refiner nudge cooldown
 #   cc_mem_idle_         core/idle.py          idle-reorg cooldown
 #   cc_memory_reminded_  NO live writer - retired together with the
@@ -559,10 +579,26 @@ def _remove_target_dir(log_fn=print):
 
 
 def _sweep_temp_markers(log_fn=print):
-    """Delete cc-memory's per-session temp markers (see _TEMP_MARKER_PREFIXES)."""
-    tmp = Path(tempfile.gettempdir())
+    """Delete cc-memory's per-session temp markers (see _TEMP_MARKER_PREFIXES).
+
+    BOTH locations. v2.8.0 moved markers into a per-uid 0700 subdirectory
+    (`core/markers.py`) because the shared temp dir is world-readable on Linux,
+    but an install that has been running since before that still has markers
+    sitting in the root — and uninstall has to remove those too, or the sweep
+    silently stops finding the files it was written to find.
+    """
+    roots = [Path(tempfile.gettempdir())]
+    try:
+        from core.markers import marker_dir
+        d = marker_dir()
+        if d not in roots:
+            roots.append(d)
+    except Exception:
+        # why: uninstall must work even against a package tree too damaged to
+        # import from; the legacy root sweep below still runs.
+        pass
     n = 0
-    for prefix in _TEMP_MARKER_PREFIXES:
+    for tmp, prefix in ((r, p) for r in roots for p in _TEMP_MARKER_PREFIXES):
         for f in tmp.glob(prefix + "*"):
             if not f.is_file():
                 continue
@@ -747,15 +783,70 @@ def _group_commands(matcher_group):
             if isinstance(h, dict) and isinstance(h.get("command"), str)]
 
 
+def _cmd_runs_ccm(cmd):
+    """True iff this command EXECUTES one of our hook scripts.
+
+    Ownership is the FIRST .py token — the script an interpreter invocation
+    actually runs — matching the install-path pattern (register r6-C4). A
+    bare regex-anywhere test claimed commands that merely MENTION a hook
+    path in argument position (`python audit.py --reference .../stop.py`),
+    and the uninstall deleted the user's own entry over its argument.
+    Mentions fall through to the kept-and-warned ambiguous channel.
+    """
+    try:
+        import shlex
+        toks = shlex.split(cmd, posix=False)
+    except ValueError:
+        toks = cmd.split()
+    for t in toks:
+        t2 = t.strip('"\'')
+        if t2.lower().endswith(".py"):
+            return bool(_CCM_COMMAND_RE.search(t2))
+    return False
+
+
 def _is_ccm_group(matcher_group):
     """True iff the group runs one of OUR hook scripts. Never raises."""
-    return any(_CCM_COMMAND_RE.search(c) for c in _group_commands(matcher_group))
+    return any(_cmd_runs_ccm(c) for c in _group_commands(matcher_group))
+
+
+def _strip_ccm_entries(matcher_group):
+    """Remove OUR hook entries from one matcher group; keep everything else.
+
+    Returns (surviving_group_or_None, n_removed). Ownership is judged
+    per-ENTRY (register Y2): the uninstall used to drop a whole matcher
+    group the moment ONE of its commands was ours, and a user hook sharing
+    that group — a perfectly legal settings.json shape — was deleted with it
+    (measured: the user's own Stop-hook script gone after uninstall). A
+    group that was entirely ours vanishes; a mixed group survives holding
+    only the user's entries; a group with no parseable command list is not
+    ours to touch at all.
+    """
+    if not isinstance(matcher_group, dict):
+        return matcher_group, 0
+    entries = matcher_group.get("hooks")
+    if not isinstance(entries, list):
+        return matcher_group, 0
+    kept, removed = [], 0
+    for h in entries:
+        cmd = h.get("command") if isinstance(h, dict) else None
+        if isinstance(cmd, str) and _cmd_runs_ccm(cmd):
+            removed += 1
+        else:
+            kept.append(h)
+    if not removed:
+        return matcher_group, 0
+    if not kept:
+        return None, removed
+    out = dict(matcher_group)
+    out["hooks"] = kept
+    return out, removed
 
 
 def _ambiguous_commands(matcher_group):
     """Commands that MENTION cc-memory but do not run a cc-memory hook script."""
     return [c for c in _group_commands(matcher_group)
-            if _CCM_MENTION_RE.search(c) and not _CCM_COMMAND_RE.search(c)]
+            if _CCM_MENTION_RE.search(c) and not _cmd_runs_ccm(c)]
 
 
 def _warn_ambiguous(pairs, log_fn):
@@ -879,6 +970,14 @@ def _write_settings_json(settings, log_fn=print, expect=None):
                 # why: a sharing violation from a transient reader clears on its
                 # own; retrying costs nothing and keeps the write atomic
                 last = e
+            # A holder releases in WALL-CLOCK time, not in loop iterations.
+            # Five back-to-back MoveFileEx calls finish inside a millisecond,
+            # so they sampled the same instant five times and the retry
+            # converted nothing — it fell straight through to the truncating
+            # write below, which is the exact window this function exists to
+            # close. Same discipline as core/atomic.py's backoff and as the
+            # two sibling loops in this file.
+            time.sleep(min(0.01 * (_attempt + 1), 0.02))
         if tmp is not None:
             log_fn(f"  [WARN] the OS refused an atomic replace of "
                    f"{SETTINGS_PATH.name} ({last}); writing in place instead - "
@@ -1038,8 +1137,13 @@ def _uninstall_settings_once(log_fn=print):
             if not isinstance(hook_list, list):
                 continue  # not ours and not parseable - leave the user's value
             # keep everything that is not demonstrably ours (malformed entries
-            # included: uninstall must not be a data-loss event)
-            cleaned = [mg for mg in hook_list if not _is_ccm_group(mg)]
+            # included: uninstall must not be a data-loss event). Per-ENTRY,
+            # not per-group — see _strip_ccm_entries (register Y2).
+            cleaned = []
+            for mg in hook_list:
+                survivor, _n = _strip_ccm_entries(mg)
+                if survivor is not None:
+                    cleaned.append(survivor)
             for mg in cleaned:
                 ambiguous += [(event, c) for c in _ambiguous_commands(mg)]
             if cleaned:
@@ -1089,10 +1193,51 @@ def _uninstall_settings_once(log_fn=print):
 
 
 def _init_project(project_path, log_fn=print):
-    """Create memory/ + DB + .gitignore in the given project directory."""
+    """Create memory/ + DB + .gitignore in the given project directory.
+
+    Returns ``("initialized", memory_dir)`` on success or
+    ``("refused", notice)`` when the opt-out declines — the GUI used to show
+    "Success! Memory initialized for X" for BOTH outcomes (and named the
+    RAW pick even when anchoring redirected to a different root), because
+    this function returned None either way and the caller could not tell.
+    """
     project = Path(project_path)
     if not project.exists():
         raise FileNotFoundError(project)
+    # Opt-out FIRST, on the raw pick. Every surface that can CREATE must ask,
+    # and this one had never asked: the privacy setting promises an excluded
+    # project's memories are "neither readable nor writable through any
+    # cc-memory tool", and a scaffold plus a database is the most writable
+    # thing there is. Before anchoring, so a per-subdirectory exclusion is not
+    # widened to its unexcluded parent.
+    try:
+        from core.modes import cli_opt_out_notice
+        notice = cli_opt_out_notice(str(project))
+        if notice:
+            log_fn(f"[skip] {notice}")
+            return ("refused", notice)
+    except ImportError:
+        # why: an installer that cannot load the opt-out check must still be
+        # able to install; the hooks and the MCP server enforce it on writes
+        pass
+    # Anchor the user's pick before creating anything. This is a CREATOR — it
+    # mkdirs memory/ and bootstraps the DB — so browsing to a subdirectory of
+    # an already-initialised project (easy: the folder Explorer last opened)
+    # planted a second, independent database there, and rung 0 (an existing
+    # database is terminal) then pinned every hook to that stray. The
+    # standalone/.exe path this button belongs to is the one the README
+    # recommends to Windows users, so it is not a rare route.
+    try:
+        from core.roots import anchor_project
+        anchored = Path(anchor_project(str(project)))
+        if anchored.resolve() != project.resolve():
+            log_fn(f"[init] {project} is inside a project rooted at "
+                   f"{anchored} — initializing that root instead")
+            project = anchored
+    except Exception as exc:
+        # why: a resolver that will not load must not block the install; the
+        # raw pick is exactly the pre-v2.8.0 behaviour
+        log_fn(f"[init] root anchoring unavailable ({exc}); using {project}")
     memory_dir = project / "memory"
     memory_dir.mkdir(exist_ok=True)
     (memory_dir / "sessions").mkdir(exist_ok=True)
@@ -1135,8 +1280,19 @@ def _init_project(project_path, log_fn=print):
         ".plan_raw.md", ".plan_history/", "*.tmp",
     ]
     try:
-        _existing = gi.read_text(encoding="utf-8") if gi.exists() else ""
-        _have = {ln.strip() for ln in _existing.splitlines()}
+        # errors="replace", mirroring core/progress.py's canonical read: a
+        # user line appended from a GBK editor or a PowerShell redirect makes
+        # strict UTF-8 raise UnicodeDecodeError — a ValueError the OSError
+        # handler below never caught, so init crashed over a courtesy file.
+        # The canonical implementation gained errors="replace" for exactly
+        # this; the literal copies missed it (the drift the parity gate now
+        # checks).
+        _existing = gi.read_text(encoding="utf-8", errors="replace") \
+            if gi.exists() else ""
+        # rstrip, not strip — leading whitespace is significant to git, so a
+        # ` memory.db` line ignores nothing yet counted as present (register
+        # D3/r6-C12; same fix as the canonical core.progress copy).
+        _have = {ln.rstrip() for ln in _existing.splitlines()}
         _missing = [ln for ln in _ignore_lines if ln not in _have]
         if _missing:
             _prefix = (_existing if _existing.endswith("\n") or not _existing
@@ -1147,6 +1303,7 @@ def _init_project(project_path, log_fn=print):
         # why: .gitignore is a courtesy to the user's VCS; failing to write it
         # must not abort an otherwise successful install
         log_fn(f"[WARN] .gitignore not written: {_e}")
+    return ("initialized", memory_dir)
 
 
 # ── GUI ─────────────────────────────────────────────────────────────────────
@@ -1345,9 +1502,20 @@ class Installer:
             messagebox.showwarning("No Project", "Please select a project directory.")
             return
         try:
-            _init_project(path, self._log)
-            self.project_info.set(f"Initialized: {Path(path) / 'memory'}")
-            messagebox.showinfo("Success", f"Memory initialized for {Path(path).name}!")
+            outcome, detail = _init_project(path, self._log)
+            if outcome == "refused":
+                # An opt-out refusal is a standing user setting honoured, not
+                # a success: the old unconditional "Success!" box reported
+                # memory initialized for a project where NOTHING was created.
+                self.project_info.set("Not initialized: project is opted out")
+                messagebox.showwarning("Opted out", str(detail))
+                return
+            # `detail` is the REAL memory_dir — after anchoring it can be a
+            # different root than the raw pick, and reporting the pick showed
+            # a path where nothing exists.
+            self.project_info.set(f"Initialized: {detail}")
+            messagebox.showinfo("Success",
+                                f"Memory initialized at {detail}!")
         except Exception as e:
             self._log(f"ERROR: {e}")
             messagebox.showerror("Error", str(e))

@@ -46,9 +46,10 @@ Wire contract
 
 Privacy
 -------
-config.json's `excluded_projects` is enforced HERE as well, not only in the six
-hooks. This server ships ENABLED BY DEFAULT (`.claude-plugin/plugin.json`
-`mcpServers`) on every marketplace / dev-checkout install and is model-driven
+config.json's `excluded_projects` is enforced HERE as well, not only in the
+six hooks <!--ce:hooks-->. This server ships ENABLED BY DEFAULT
+(`.claude-plugin/plugin.json` `mcpServers`) on every marketplace /
+dev-checkout install and is model-driven
 exactly like a hook, so through v2.5.1 a project the user had opted out of
 still answered memory_search / memory_get_details / memory_recent /
 memory_topics / memory_stats / progress_get with its stored content, and still
@@ -113,6 +114,7 @@ _original_stdout = sys.stdout
 _original_stdin = sys.stdin
 
 from core.logger import get_logger
+from core.db import CATEGORIES
 _log = get_logger("mcp")
 
 
@@ -171,7 +173,7 @@ _VERSION = _resolve_version()
 _PROTOCOL_DEFAULT = "2024-11-05"
 _PROTOCOL_SUPPORTED = ("2024-11-05", "2025-06-18")
 
-_CATEGORIES = ["decision", "result", "config", "bug", "task", "arch", "note"]
+_CATEGORIES = list(CATEGORIES)  # single source: core.db (register M3)
 
 # Devnull sink installed over sys.stdout in main(); module-level so it is never
 # garbage-collected out from under a late writer.
@@ -263,10 +265,17 @@ TOOLS = [
     },
     {
         "name": "memory_topics",
-        "description": "List all topic summaries for the project.",
+        "description": ("List topic summaries for the project, newest first. "
+                        "Bounded: at most `limit` topics (default 50, max 200) "
+                        "and 2000 characters of each body. The reply reports "
+                        "`total` and `truncated` so you can tell a complete "
+                        "list from a clipped one."),
         "inputSchema": {
             "type": "object",
-            "properties": {"project": {"type": "string", "minLength": 1}},
+            "properties": {
+                "project": {"type": "string", "minLength": 1},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 200},
+            },
         },
     },
     {
@@ -391,8 +400,9 @@ def _get_db(project_path=None):
     THE privacy choke point. All eight database-touching handlers reach the DB
     through here, so config.json's `excluded_projects` opt-out is applied once,
     in one place, via `core.modes.is_excluded` — the same single implementation
-    all six hooks call. Do not add a handler that opens a DB path itself; that
-    is a privacy regression, not a style nit (see core/modes.py).
+    all six hooks <!--ce:hooks--> call. Do not add a handler that opens a DB
+    path itself; that is a privacy regression, not a style nit (see
+    core/modes.py).
 
     The gate runs BEFORE the existence check, so it also covers an excluded
     project that has no DB yet, and it covers the `project`-omitted case
@@ -438,12 +448,115 @@ def _get_db(project_path=None):
             "through any cc-memory tool. This is a standing user setting, not "
             "a transient failure — do not retry, and do not try another "
             "cc-memory tool for this path.")
+    # Anchor AFTER is_excluded, never before — resolving first would widen a
+    # per-subdirectory opt-out to its unexcluded parent and serve a project the
+    # user opted out of. This is the same ordering rule test_surfaces asserts
+    # for all six hooks <!--ce:hooks-->. Until v2.7.1 this surface did not
+    # anchor at all: it is the one MODEL-FACING WRITE path, so `memory_add`
+    # with no `project` stored into whatever directory the server process
+    # happened to sit in, split from
+    # the database every hook was using for the same repo.
+    project = _anchor_mcp_project(project)
+    # SCOPE GATE (user-ratified). Every one of the eight tools takes a free-form
+    # `project` path and nothing compared it against the project this server was
+    # launched for, so a model that has been indirectly prompt-injected while
+    # working in project A could call
+    # `memory_add(project="<B>", importance=5, content=...)` and plant a
+    # permanent row that B's SessionStart renders into its "Critical (unmerged)"
+    # layer at every future session — while A's database stays empty and the
+    # session the user is watching records nothing. Driven over real stdio: A
+    # ended with 0 active memories, B with 1.
+    #
+    # Cross-project access was never a documented capability of this surface
+    # (`project`'s own schema description reads "default: cwd"), and `/cc-mem
+    # --project` still reaches any project from a human-driven CLI. Compared
+    # AFTER anchoring so a subdirectory of the server's own project resolves to
+    # the same root and is accepted.
+    own = _server_root()
+    if own is not None and not _same_root(project, own):
+        _log.info(f"refused: {project} is outside this server's project {own}")
+        return None, None, (
+            f"Out of scope: this cc-memory server serves {own}. The 'project' "
+            f"argument {project} names a different project, and cc-memory tools "
+            f"cannot read or write across projects. Drop the argument to use "
+            f"this project, or run the CLI with --project for another one.")
     db_path = Path(project) / "memory" / "memory.db"
     if not db_path.exists():
         return None, None, f"No memory database found for this project: {project}"
     db = MemoryDB(db_path)
     pid = db.upsert_project(project)
     return db, pid, None
+
+
+def _same_root(a, b) -> bool:
+    """Do two spellings name the same directory?
+
+    `Path(a) != Path(b)` was the first version and it refused the server's OWN
+    project whenever the model spelled it relatively. `core.roots.project_root`
+    deliberately returns the ORIGINAL, UNRESOLVED input when the answer is the
+    input itself — that is what keeps a symlinked project directory working —
+    so `anchor_project(".")` is the string `"."` while `_server_root()` is
+    absolute, and the gate then reported `.` as "a different project". Not a
+    hypothetical spelling: `commands/cc-mem.md` makes `--project .` the
+    plugin's own canonical invocation and this tool's `project` property is
+    documented as "default: cwd", so a model being explicit about "here"
+    writes `"."`. Driven over real stdio: `.` and `./` refused, absolute and
+    subdirectory spellings accepted.
+
+    `anchor_project` already resolves both sides for its own announce check;
+    this is the same comparison. normcase because the primary platform is
+    case-insensitive, realpath so two spellings through a link agree.
+    """
+    try:
+        return (os.path.normcase(os.path.realpath(str(a)))
+                == os.path.normcase(os.path.realpath(str(b))))
+    except (OSError, ValueError):
+        # why: an unresolvable spelling is not this project — refuse, do not
+        # crash. The caller's message already tells the user which project the
+        # server serves.
+        return False
+
+
+_SERVER_ROOT = None      # resolved once, on first use; None means "unknown"
+
+
+def _server_root():
+    """The project this server process was launched for, anchored, or None.
+
+    Resolved ONCE and cached: `os.getcwd()` is stable for the process, and
+    re-anchoring per call would make the gate above depend on a value a later
+    `os.chdir` could move. None (an unresolvable cwd) deliberately DISABLES the
+    gate rather than refusing everything — a server that cannot name its own
+    project must not become a server that answers nothing.
+    """
+    global _SERVER_ROOT
+    if _SERVER_ROOT is None:
+        try:
+            _SERVER_ROOT = Path(_anchor_mcp_project(os.getcwd()))
+        except Exception as exc:
+            # why: cwd can be gone (deleted directory) — fail OPEN to the
+            # pre-gate behaviour rather than taking every tool down.
+            _log.error_tb("could not resolve this server's own project", exc)
+            return None
+    return _SERVER_ROOT
+
+
+def _anchor_mcp_project(project):
+    """Anchor a project path for the MCP surface, announcing via the LOG.
+
+    Never `print`: this server speaks JSON-RPC on stdout, so a redirection
+    notice written there would corrupt the framing and break the session. The
+    caller still learns of the redirection — `_log` is the same channel this
+    module already uses for opt-out refusals.
+    """
+    try:
+        from core.roots import anchor_project
+        return anchor_project(project, announce=_log.info)
+    except Exception as exc:
+        # why: a resolver that will not load must not take the whole tool call
+        # down; the raw path is exactly the pre-v2.7.1 behaviour
+        _log.error_tb(f"project-root anchoring unavailable for {project}", exc)
+        return project
 
 
 def _resolve_session_id(db, pid):
@@ -459,7 +572,13 @@ def _resolve_session_id(db, pid):
     if recent:
         return recent[0]
     try:
-        return db.insert_session(pid, None, "mcp", 0, None, "MCP session")
+        sid = db.insert_session(pid, None, "mcp", 0, None, "MCP session")
+        # Complete at birth: this row is an attribution container with no
+        # pending transcript work behind it (insert_session now writes
+        # complete=0 as a claim for the hooks that DO have such work —
+        # register X6 — and this caller has none).
+        db.mark_session_complete(sid)
+        return sid
     except Exception as e:
         # why: attribution is a convenience for recall — failing to create the
         # session row must not lose the memory write itself.
@@ -532,9 +651,14 @@ def handle_memory_add(args):
         tags=["mcp"],
         topic=args.get("topic", ""),
     )
-    project = args.get("project") or os.getcwd()
+    # db.db_path.parent, NOT a re-derived `args.get("project") or os.getcwd()`:
+    # _get_db anchors, so recomputing the path here from the raw argument sent
+    # the row to the anchored ROOT database while regenerating MEMORY.md into
+    # the UNANCHORED subdirectory. `x or os.getcwd()` is also the exact idiom
+    # _get_db's own comment rejects. Deriving from the database that was
+    # actually opened makes the two structurally incapable of disagreeing.
     try:
-        regenerate_memory_index(db, pid, Path(project) / "memory")
+        regenerate_memory_index(db, pid, db.db_path.parent)
     except Exception as e:
         # why: MEMORY.md is a generated convenience artifact; a failure to
         # rewrite it must not fail (or hide) the write that already succeeded.
@@ -551,11 +675,41 @@ def handle_memory_stats(args):
     return stats
 
 
+_TOPICS_DEFAULT = 50
+_TOPIC_BODY_CHARS = 2000
+
+
 def handle_memory_topics(args):
+    """List topic summaries. BOUNDED — it was the one list tool that was not.
+
+    Every other list tool here caps its result; this one returned every topic
+    with its full body, measured at 272 KB / ~68 000 tokens against a real
+    project database and growing with the project. A tool result that size is a
+    context-window denial of service that reads like an answer, and the caller
+    is a model that cannot decline it. Rows are capped, each body is truncated
+    with a visible marker, and `truncated` tells the caller what it did not get
+    so it can ask for a narrower slice instead of silently reasoning on a
+    partial list.
+    """
     db, pid, err = _get_db(args.get("project"))
     if err:
         return {"error": err}
-    return {"topics": db.get_topics(pid)}
+    limit = args.get("limit", _TOPICS_DEFAULT)
+    try:
+        limit = max(1, min(int(limit), 200))
+    except (TypeError, ValueError):
+        limit = _TOPICS_DEFAULT
+    rows = db.get_topics(pid, limit=limit)
+    clipped = 0
+    for r in rows:
+        body = r.get("content") or ""
+        if len(body) > _TOPIC_BODY_CHARS:
+            r["content"] = body[:_TOPIC_BODY_CHARS] + "\n[... truncated]"
+            clipped += 1
+    total = db.get_stats(pid).get("n_topics", len(rows))
+    return {"topics": rows, "returned": len(rows), "total": total,
+            "truncated": {"rows": max(0, total - len(rows)),
+                          "bodies": clipped}}
 
 
 def handle_memory_recent(args):
@@ -586,8 +740,10 @@ def handle_progress_regenerate(args):
     if err:
         return {"error": err}
     from core.progress import write_progress_md
-    project = args.get("project") or os.getcwd()
-    path = write_progress_md(db, pid, Path(project) / "memory")
+    # Same reason as handle_memory_add: derive from the opened database, never
+    # re-derive from the raw argument, or PROGRESS.md lands in a directory the
+    # database it summarises does not live in.
+    path = write_progress_md(db, pid, db.db_path.parent)
     return {"path": str(path), "status": "regenerated"}
 
 
@@ -664,9 +820,48 @@ def _is_failed_result(result):
     return result.get("action") == "skipped" and result.get("id") is None
 
 
+def _defang(obj):
+    """Neutralise authority markers in every string a tool result carries.
+
+    THIS SERVER IS A RENDER PATH. `CLAUDE.md` states the marker defence "runs
+    on the write path via `clean_for_storage` and again on every render
+    path". When this function was added it named four renderers
+    <!--ce:render_paths:asof--> — `core/progress.py`,
+    `hooks/session_start.py`, `core/plan.py`, `llm/memory_writer.py` — and
+    this file was not among them; the set is computed now (`python
+    tools/contracts.py` render_paths) and this server is in it. Its `text`
+    block is read by the model as authoritative context exactly the
+    way SessionStart's stdout is. Measured on this repository's own database:
+    307 active rows, 2 of them armed; the same row renders as
+    `&lt;system-reminder&gt;` through SessionStart and as a live
+    `<system-reminder>` through here.
+
+    One choke point rather than a fifth hand-maintained call site: every tool
+    result goes out through `_send_tool_result`, so the four read handlers
+    cannot drift apart from each other the way the render paths already did.
+    Escape, never delete — `neutralize_markers` is reversible for a human
+    reader and keeps the row's meaning intact.
+    """
+    from core.privacy import neutralize_markers
+    if isinstance(obj, str):
+        return neutralize_markers(obj)
+    if isinstance(obj, dict):
+        # KEYS too (register r6-C6): json.dumps renders keys into the same
+        # model-facing text block as values, and a stored topic name — a
+        # model-reachable string — becomes a dict key in memory_topics /
+        # memory_stats results. Escaping values while emitting keys raw left
+        # half the surface armed.
+        return {_defang(k) if isinstance(k, str) else k: _defang(v)
+                for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_defang(v) for v in obj]
+    return obj
+
+
 def _send_tool_result(req_id, result, is_error=False):
     try:
-        text = json.dumps(result, ensure_ascii=False, allow_nan=False, default=str)
+        text = json.dumps(_defang(result), ensure_ascii=False,
+                          allow_nan=False, default=str)
     except ValueError as e:
         # why: a non-finite float inside a tool result would go out as bare NaN.
         # Report the failure in-band rather than hand the model JSON that its

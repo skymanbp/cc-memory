@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -46,7 +47,9 @@ from core.atomic import write_atomic, _DERIVED_BUDGET_S
 from core.logger import get_logger
 # Render-path marker defence. PLAN.md is read by Claude as the live plan
 # anchor, and every field it renders originates outside the plugin.
-from core.privacy import neutralize_block, neutralize_inline
+from core.privacy import (clean_for_storage, neutralize_block,
+                          neutralize_document, neutralize_inline)
+from core.progress import ensure_memory_dir
 
 # This module had no logger through v2.5.2, which is why every failure inside
 # it had to be either raised or silently swallowed. File-only by contract —
@@ -65,19 +68,29 @@ _log = get_logger("plan")
 _atomic_write_text = write_atomic
 
 
-# ── Similarity (re-uses the trigram-Jaccard from memory_writer) ─────────────
+# ── Similarity (core/textsim.py — the ONE substrate, CJK-aware) ─────────────
+# The private English-only trigram copy this replaced made the carryover gate
+# and TodoWrite step sync collapse on CJK step titles exactly the way
+# memory_writer's copy collapsed on CJK memories (see textsim's docstring).
+
+from core.textsim import (jaccard as _jaccard, shingle_set as _shingles,
+                          CJK_RUN as _CJK_RUN)
+
 
 def _trigram_set(text: str) -> set:
-    t = (text or "").lower().strip()
-    if len(t) < 3:
-        return {t} if t else set()
-    return {t[i:i + 3] for i in range(len(t) - 2)}
+    # Empty stays an EMPTY set, not {""}: an empty title must match nothing
+    # (jaccard's empty-set guard), where {""} would score 1.0 against another
+    # empty title. This is the one behavioural difference this module had
+    # from the other two retired copies, and it is load-bearing here.
+    t = (text or "").strip()
+    if not t:
+        return set()
+    return _shingles(t)
 
 
-def _jaccard(a: set, b: set) -> float:
-    if not a or not b:
-        return 0.0
-    return len(a & b) / len(a | b)
+def _has_cjk(*texts) -> bool:
+    """True when any argument contains a CJK run — see `_carryover_bar`."""
+    return any(_CJK_RUN.search(t or "") for t in texts)
 
 
 # Match threshold: a todo whose closest step similarity is below this is
@@ -88,6 +101,27 @@ MATCH_THRESHOLD = 0.35
 # ── Schema validation ───────────────────────────────────────────────────────
 
 _VALID_STATUSES = ("pending", "in_progress", "done", "blocked", "skipped")
+
+# Common LLM status aliases, shared by normalize_structured and the carryover
+# gate's candidate filter so both read a raw refiner dict identically.
+_STATUS_ALIASES = {"todo": "pending", "wip": "in_progress",
+                   "complete": "done", "completed": "done",
+                   "doing": "in_progress"}
+
+
+def _norm_status(status) -> str:
+    """A raw status value as a member of _VALID_STATUSES (default pending)."""
+    if status in _VALID_STATUSES:
+        return status
+    return _STATUS_ALIASES.get(str(status).lower(), "pending")
+
+
+def _s(x) -> str:
+    """None-safe str(). `str(plan.get("goal", ""))` turned a JSON null into
+    the LITERAL string "None" — goal='None', title='None' — and
+    is_valid_structured then accepted the plan (register A6). A missing key
+    and an explicit null must coerce identically: to ''."""
+    return "" if x is None else str(x)
 
 
 def is_valid_structured(plan: Optional[Dict]) -> bool:
@@ -122,16 +156,16 @@ def normalize_structured(plan: Dict) -> Dict:
         plan = {}
     out = {
         "version": 1,
-        "goal": str(plan.get("goal", "")).strip(),
+        "goal": _s(plan.get("goal")).strip(),
         "success_criteria": [],
         "steps": [],
-        "context": str(plan.get("context", "")).strip(),
+        "context": _s(plan.get("context")).strip(),
         "refined_at": plan.get("refined_at") or datetime.now().isoformat(timespec="seconds"),
-        "refined_by": plan.get("refined_by", "plan-refiner"),
+        "refined_by": _s(plan.get("refined_by")) or "plan-refiner",
     }
     sc = plan.get("success_criteria", [])
     if isinstance(sc, list):
-        out["success_criteria"] = [str(x).strip() for x in sc if str(x).strip()]
+        out["success_criteria"] = [_s(x).strip() for x in sc if _s(x).strip()]
 
     # R610: keep dispositions in the stored plan for audit (what happened
     # to the previous plan's unfinished steps, and why).
@@ -146,21 +180,27 @@ def normalize_structured(plan: Dict) -> Dict:
         for i, s in enumerate(raw_steps, start=1):
             if not isinstance(s, dict):
                 continue
-            title = str(s.get("title", "")).strip()
+            title = _s(s.get("title")).strip()
             if not title:
                 continue
-            status = s.get("status", "pending")
-            if status not in _VALID_STATUSES:
-                # tolerate common LLM aliases
-                aliases = {"todo": "pending", "wip": "in_progress",
-                           "complete": "done", "completed": "done",
-                           "doing": "in_progress"}
-                status = aliases.get(str(status).lower(), "pending")
+            status = _norm_status(s.get("status", "pending"))
+            try:
+                sid = int(s.get("id", i))
+            except (ValueError, TypeError, OverflowError):
+                # why: this function is DEFENSIVE normalisation of LLM output
+                # and its docstring promises callers only ValueError. A JSON
+                # overflow float (`1e999`) raises OverflowError and a list
+                # raises TypeError — neither is caught by the CLI, so
+                # `plan-set --from-refiner` answered a mostly-correct refiner
+                # payload with a raw traceback. An id we cannot read falls
+                # back to the enumeration index, which is what `id` defaults
+                # to when the field is absent entirely.
+                sid = i
             out["steps"].append({
-                "id": int(s.get("id", i)),
+                "id": sid,
                 "title": title,
                 "status": status,
-                "notes": str(s.get("notes", "")).strip(),
+                "notes": _s(s.get("notes")).strip(),
             })
     return out
 
@@ -242,11 +282,39 @@ def sync_todos_to_steps(structured: Dict, todos: List[Dict]) -> Tuple[Dict, Dict
         )
         if old_status == "done" and new_status != "done":
             continue  # don't regress completed steps
+        if (new_status not in _UNFINISHED_STATUSES
+                and old_status in _UNFINISHED_STATUSES
+                and not _carried(
+                    steps[step_idx].get("title", ""),
+                    todo.get("content", "") if isinstance(todo, dict) else str(todo))):
+            # `done` AND `skipped` both remove a step from the carryover
+            # gate's protection (`unfinished_steps`) — promoting to either on
+            # MATCH_THRESHOLD (0.35) let a todo about DIFFERENT work retire a
+            # step the gate itself would have refused to auto-carry at 0.50.
+            # Measured for done: 'Delete the legacy cron entry' (completed)
+            # retired 'Delete the legacy session store' at sim 0.4474.
+            # v2.7.0 gated done only, and a CANCELLED todo walked the same
+            # door: 「把超时设为三十秒」was skipped by「把超时设为六十秒」—
+            # opposite facts — at 0.5556 against a 0.6667 CJK bar (register
+            # A1), after which the replacement owed it no disposition. Any
+            # status that ESCAPES the gate must clear the gate's own bar; the
+            # statuses that stay unfinished keep the looser one.
+            continue
         steps[step_idx]["status"] = new_status
         if new_status == "in_progress" and not active_step_id:
             active_step_id = steps[step_idx].get("id", step_idx + 1)
 
-    # If nothing's in_progress, the next pending step is the active one
+    # If no todo set a step in_progress THIS sync, an existing in_progress
+    # step keeps the pointer — an UNMATCHED in_progress step used to lose it
+    # to the first pending step (register A2: step1 still in_progress,
+    # active_step_id=2), telling the reader work had moved on when it hadn't.
+    # Only when nothing at all is in flight does the next pending step become
+    # active.
+    if not active_step_id:
+        for s in steps:
+            if s.get("status") == "in_progress":
+                active_step_id = s.get("id", 0)
+                break
     if not active_step_id:
         for s in steps:
             if s.get("status") == "pending":
@@ -365,7 +433,10 @@ def render_pending_plan_md(raw: str, superseded: Optional[Dict] = None,
             "Full copies of replaced plans live in `memory/.plan_history/`.",
             "",
         ]
-    return "\n".join(lines)
+    # Assembled sweep: the raw plan and the superseded goal are separate,
+    # separately-escaped slots, and the join between them is where a split
+    # marker reassembles. See core.privacy.neutralize_document.
+    return neutralize_document("\n".join(lines))
 
 
 def render_plan_md(structured: Dict, active_step_id: int = 0,
@@ -447,7 +518,8 @@ def render_plan_md(structured: Dict, active_step_id: int = 0,
         lines.append(f"- Turns since last check: {meta['turns_since_last_guardian']}")
     lines.append("")
 
-    return "\n".join(lines)
+    # Assembled sweep — measured forgery across the Goal/Context join.
+    return neutralize_document("\n".join(lines))
 
 
 def write_plan_md(db, project_id: int, memory_dir: Path) -> Path:
@@ -480,9 +552,14 @@ def write_plan_md(db, project_id: int, memory_dir: Path) -> Path:
         "turns_since_last_guardian": row.get("turns_since_last_guardian"),
     }
     text = render_plan_md(structured, active_step_id=active_step_id, meta=meta)
-    memory_dir.mkdir(parents=True, exist_ok=True)
     out = memory_dir / "PLAN.md"
     try:
+        # Inside the try, not above it: the docstring promises this never
+        # raises, and the directory creation sat outside — so an OSError from
+        # it escaped the very guarantee the write below is wrapped to keep.
+        # ensure_memory_dir raises FileNotFoundError (an OSError) for a project
+        # directory that is gone, which is now absorbed like any write failure.
+        ensure_memory_dir(memory_dir)
         # A wall-clock budget, not the default try count: a failure here is
         # swallowed below, so it costs a STALE PLAN.md rather than an error
         # the caller sees. See core/atomic.py:_DERIVED_BUDGET_S.
@@ -514,8 +591,37 @@ def write_plan_md(db, project_id: int, memory_dir: Path) -> Path:
 # under memory/.plan_history/ so a wrong disposition is still recoverable.
 
 CARRYOVER_MATCH_THRESHOLD = 0.5
+# The SAME question asked of CJK titles, which `core/textsim.py` shingles as
+# BIGRAMS rather than trigrams. The constant above is trigram-calibrated, and
+# a bigram set of the same text is smaller, so an equal edit scores HIGHER —
+# which for THIS gate means "carried" where the trigram score said "flagged".
+# Derivation, not a fudge. One interior character substituted in a CJK title
+# of length L leaves, out of a set of size L-1 (bigrams) or L-2 (trigrams):
+#     bigrams   shared = L-3, union = L+1  ->  sim = (L-3)/(L+1)
+#     trigrams  shared = L-5, union = L+1  ->  sim = (L-5)/(L+1)
+# Under trigrams the 0.5 bar starts auto-carrying such an edit at L >= 11.
+# Reproducing that crossover under bigrams needs (11-3)/(11+1) = 2/3.
+# Measured before the fix: a sweep of 325 one-character CJK substitutions
+# moved 98 from FLAGGED to auto-carried and 0 the other way, including
+# `把超时设为三十秒` vs `把超时设为六十秒` — thirty seconds versus sixty,
+# opposite facts, at 0.3333 -> 0.5556. A gate that refuses is the one place
+# where a better similarity measure makes things WORSE, and the merge-side
+# argument in textsim's docstring does not transfer to it.
+CARRYOVER_MATCH_THRESHOLD_CJK = 2.0 / 3.0
 _UNFINISHED_STATUSES = ("pending", "in_progress", "blocked")
 _DISPOSITION_ACTIONS = ("done", "dropped", "merged", "carried")
+
+
+def _carryover_bar(*texts) -> float:
+    """The similarity bar to use when comparing these titles. See above."""
+    return (CARRYOVER_MATCH_THRESHOLD_CJK if _has_cjk(*texts)
+            else CARRYOVER_MATCH_THRESHOLD)
+
+
+def _carried(title: str, candidate: str) -> bool:
+    """True when `candidate` covers `title` well enough to count as carried."""
+    return _jaccard(_trigram_set(title), _trigram_set(candidate)) \
+        >= _carryover_bar(title, candidate)
 
 
 def unfinished_steps(structured: Optional[Dict]) -> List[Dict]:
@@ -535,6 +641,11 @@ def _best_title_match(title: str, candidates: List[str]) -> float:
     return best
 
 
+def _any_carried(title: str, candidates: List[str]) -> bool:
+    """Whether ANY candidate carries `title`, each judged at its own bar."""
+    return any(_carried(title, c) for c in candidates)
+
+
 def check_carryover(old_structured: Optional[Dict], new_plan: Dict) -> List[str]:
     """Return violation messages; empty list = replacement is allowed.
 
@@ -551,42 +662,102 @@ def check_carryover(old_structured: Optional[Dict], new_plan: Dict) -> List[str]
     # threshold and an IDENTICAL title failed to auto-carry (found on the
     # gate's second real replacement, R610). title+notes stays as a
     # candidate so a step folded into another step's notes still carries.
-    new_titles: List[str] = []
-    for s in (new_plan.get("steps") or []):
-        if isinstance(s, dict):
-            bare = str(s.get("title", "")).strip()
-            if bare:
-                new_titles.append(bare)
-            t = f"{s.get('title', '')} {s.get('notes', '')}".strip()
-            if t and t != bare:
-                new_titles.append(t)
-    dispositions = new_plan.get("dispositions") or []
+    #
+    # v2.8.0, two tightenings:
+    #   * Only UNFINISHED new steps are carry targets (register A4) — a step
+    #     born 'done'/'skipped' is a disguised retirement wearing a carry.
+    #   * Both strings map to their step's SLOT, and a slot is CONSUMED by
+    #     the old step it carries (register A3): one new step used to
+    #     discharge two old unfinished steps at once, which is the same
+    #     one-entry-retires-four hole the dispositions loop below already
+    #     closed on its side. A genuine merge of several old steps into one
+    #     new step is expressed with action:"merged" dispositions.
+    # `all_step_strings` keeps EVERY step's strings (status-agnostic) for the
+    # A5 'carried'-claims-presence check further down.
+    cand_slots: List[Tuple[str, int]] = []
+    all_step_strings: List[str] = []
+    for slot, s in enumerate(new_plan.get("steps") or []):
+        if not isinstance(s, dict):
+            continue
+        bare = _s(s.get("title")).strip()
+        joined = f"{_s(s.get('title'))} {_s(s.get('notes'))}".strip()
+        strings = [t for t in (bare, joined) if t]
+        if joined == bare and len(strings) == 2:
+            strings = [bare]
+        all_step_strings.extend(strings)
+        if _norm_status(s.get("status", "pending")) in _UNFINISHED_STATUSES:
+            cand_slots.extend((t, slot) for t in strings)
+    spent_slots: set = set()
+
+    def _consume_carry(title: str) -> bool:
+        """Best UNSPENT new-step slot that carries `title`; consumes it."""
+        grams = _trigram_set(title)
+        best_slot, best_sim = -1, 0.0
+        for cs, slot in cand_slots:
+            if slot in spent_slots:
+                continue
+            sim = _jaccard(grams, _trigram_set(cs))
+            if sim >= _carryover_bar(title, cs) and sim > best_sim:
+                best_sim, best_slot = sim, slot
+        if best_slot < 0:
+            return False
+        spent_slots.add(best_slot)
+        return True
+
+    dispositions = [d for d in (new_plan.get("dispositions") or [])
+                    if isinstance(d, dict)]
+    # A disposition is CONSUMED by the step it accounts for. Without this,
+    # the loop below took the FIRST fuzzy match and left the entry available
+    # to every later step: one entry reading `{"old_title": "Add unit tests
+    # for the auth module", "action": "done", "reason": "auth tests landed in
+    # PR #412"}` discharged four steps at once — auth / authz / audit / admin
+    # at 1.0000 / 0.8571 / 0.7778 / 0.7105 (measured). Three of those four
+    # drops then carried a reason that is about a different step, which is
+    # precisely "a drop without a recorded reason" wearing a costume.
+    spent: List[int] = []
     violations: List[str] = []
     for step in olds:
         title = str(step.get("title", ""))
-        if _best_title_match(title, new_titles) >= CARRYOVER_MATCH_THRESHOLD:
-            continue  # auto-carried into the new plan
-        matched = None
-        for d in dispositions:
-            if not isinstance(d, dict):
+        if _consume_carry(title):
+            continue  # auto-carried into (and consuming) one new step
+        # BEST match among the unspent entries, not the first: with fuzzy
+        # matching, "first" is an accident of list order.
+        matched, best_sim, best_i = None, 0.0, -1
+        for i, d in enumerate(dispositions):
+            if i in spent:
                 continue
-            if _jaccard(_trigram_set(title),
-                        _trigram_set(str(d.get("old_title", "")))) \
-                    >= CARRYOVER_MATCH_THRESHOLD:
-                matched = d
-                break
+            old_title = str(d.get("old_title", ""))
+            sim = _jaccard(_trigram_set(title), _trigram_set(old_title))
+            if sim >= _carryover_bar(title, old_title) and sim > best_sim:
+                matched, best_sim, best_i = d, sim, i
         if matched is None:
             violations.append(
                 f"step #{step.get('id')} {title!r} — not in the new plan "
                 f"and no disposition")
             continue
-        action = str(matched.get("action", "")).lower()
-        reason = str(matched.get("reason", "")
-                     or matched.get("detail", "")).strip()
+        spent.append(best_i)
+        action = _s(matched.get("action")).lower()
+        # _s, not str (register r6-B5): a disposition with `"reason": null`
+        # made str(None) the non-empty string "None" — a reasonless drop
+        # wearing four characters of costume, the exact thing this gate's
+        # reason check exists to refuse. Same null shape A6 fixed in
+        # normalize_structured.
+        reason = (_s(matched.get("reason")) or _s(matched.get("detail"))).strip()
         if action not in _DISPOSITION_ACTIONS:
             violations.append(
                 f"step #{step.get('id')} {title!r} — disposition action "
                 f"{action!r} not in {_DISPOSITION_ACTIONS}")
+        elif action == "carried" and not _any_carried(title, all_step_strings):
+            # "carried" is a CLAIM of presence in the new plan, and it used to
+            # be accepted with the step present nowhere (register A5) — a drop
+            # wearing the one action word that says nothing was dropped.
+            # Checked against every step string, spent or not: two old steps
+            # legitimately folded into one new step are the "merged" action's
+            # territory, but a stale-worded 'carried' for the second one is a
+            # recorded, reasoned entry — the gate's purpose is the RECORD.
+            violations.append(
+                f"step #{step.get('id')} {title!r} — disposition claims "
+                f"'carried' but no step in the new plan covers it")
         elif not reason:
             violations.append(
                 f"step #{step.get('id')} {title!r} — disposition has no "
@@ -611,7 +782,11 @@ def archive_plan(row: Optional[Dict], memory_dir: Optional[Path],
         return None
     try:
         hist_dir = memory_dir / ".plan_history"
-        hist_dir.mkdir(parents=True, exist_ok=True)
+        # No parents=True: it would materialise a DELETED project's whole
+        # directory chain just to archive a plan into the empty shell. A
+        # vanished memory_dir raises FileNotFoundError into the handler
+        # below instead — same refusal contract as ensure_memory_dir.
+        hist_dir.mkdir(exist_ok=True)
         now = datetime.now()
         payload = {
             "archived_at": now.isoformat(timespec="seconds"),
@@ -652,10 +827,16 @@ def archive_plan(row: Optional[Dict], memory_dir: Optional[Path],
         # why: the gate's dispositions are the primary anti-loss guarantee;
         # blocking every plan operation on an archive-disk hiccup would turn
         # the backstop into a denial-of-service on planning. Loudly warn.
-        import sys as _sys
-        print(f"[WARN] plan history archive failed ({e}) — proceeding; "
-              f"the carryover gate already enforced accounting",
-              file=_sys.stderr)
+        # _log, NOT stderr. This function is reachable from PostToolUse
+        # (capture_exit_plan_mode's recapture branch), and Claude Code renders
+        # a hook's stderr as error UI — the project's hardest hook rule, stated
+        # in CLAUDE.md and restated in core/logger.py, core/modes.py and
+        # core/roots.py. Driven through the REAL hook with `.plan_history`
+        # squatted by a file: rc=0, stdout empty, and this line on stderr, i.e.
+        # an error banner on an otherwise successful tool call. Still swallowed
+        # and still loud — just on the channel hooks are allowed to use.
+        _log.warn(f"plan history archive failed ({e}) — proceeding; "
+                  f"the carryover gate already enforced accounting")
         return None
 
 
@@ -680,14 +861,67 @@ def capture_exit_plan_mode(db, project_id: int, plan_text: str,
     plan_text = (plan_text or "").strip()
     if not plan_text:
         return False
+    # WRITE-path cleaning, same contract as every other stored column
+    # (register A7): the raw plan is ExitPlanMode output — model text — and it
+    # used to land verbatim in plan_active.raw, .plan_raw.md AND PLAN.md's
+    # fenced block, private spans included. strip_private removes those spans
+    # outright; neutralize_markers escapes rather than deletes, so the text
+    # the refiner Reads stays readable. A plan that was ALL private strips to
+    # nothing and is refused like any other empty capture.
+    plan_text = clean_for_storage(plan_text).strip()
+    if not plan_text:
+        return False
+    # ARCHIVE the outgoing raw before overwriting it. The contract above this
+    # section says "every outgoing plan is archived append-only", and this was
+    # the one replacement path that did not: `apply_refined_plan` and
+    # `plan-clear` archive, re-capture did not. Re-entering plan mode is the
+    # single most likely double-fire in the whole lifecycle, and the previous
+    # raw was then unrecoverable from `memory/` — measured: PLAN A absent from
+    # `plan_active.raw`, from `.plan_raw.md` and from `.plan_history/`, which
+    # did not even exist. Only on a genuine REPLACEMENT (different text), so
+    # an idempotent re-delivery of the same ExitPlanMode adds nothing.
+    _prev = db.get_plan_active(project_id)
+    if _prev and (_prev.get("raw") or "").strip() not in ("", plan_text):
+        archive_plan(_prev, memory_dir, event="recapture",
+                     reason="a new ExitPlanMode replaced this raw plan before "
+                            "it was refined")
+    if memory_dir is not None:
+        # BEFORE the row is written, not after. A gone project directory raises
+        # FileNotFoundError here rather than being recreated — and the ordering
+        # is the point: `upsert_plan_active` COMMITS, so validating afterwards
+        # left `needs_refine=1` durable with no `.plan_raw.md` beside it, and
+        # `hooks/stop.py` then told the user the raw plan had been captured.
+        # A precondition that runs after the commit is not a precondition.
+        ensure_memory_dir(memory_dir)
+        # write_atomic, not write_text: `.plan_raw.md` is read by a SEPARATE
+        # process — `agents/plan-refiner.md` is told to Read it — and
+        # `write_text` truncates first, so a refiner landing in that window
+        # gets 0 bytes and structures a plan out of nothing.
+        #
+        # ALSO BEFORE THE COMMIT, for the same reason the directory check is.
+        # This file is the refiner's INPUT; the row is not. With the commit
+        # first, a failed replacement left the row saying PLAN B while the
+        # refiner still read PLAN A off disk, and nothing could tell: the
+        # r6-B1 guard compares the row's raw across CAS retries and the row was
+        # already correct. Driven end to end with the destination made
+        # un-replaceable — the refinement of the STALE plan was ACCEPTED,
+        # `needs_refine` went to 0, `raw_pending_refinement` reported False,
+        # and PLAN B was reachable from nothing.
+        #
+        # The residual runs the other way and is the safe direction: if this
+        # write succeeds and `upsert_plan_active` then fails, the file is newer
+        # than the row, `needs_refine` is NOT armed, PLAN.md still renders the
+        # committed plan, and this function raises so PostToolUse logs it.
+        # Cross-resource atomicity would need the refiner's JSON bound to a
+        # raw-plan digest, which is a change to the subagent contract.
+        write_atomic(memory_dir / ".plan_raw.md", plan_text,
+                     budget_s=_DERIVED_BUDGET_S)
     db.upsert_plan_active(
         project_id,
         raw=plan_text,
         needs_refine=1,
     )
     if memory_dir is not None:
-        memory_dir.mkdir(parents=True, exist_ok=True)
-        (memory_dir / ".plan_raw.md").write_text(plan_text, encoding="utf-8")
         write_plan_md(db, project_id, memory_dir)
     return True
 
@@ -715,22 +949,13 @@ def apply_refined_plan(db, project_id: int, structured: Dict,
     # R610 carryover gate — the ONLY replacement door for plan_active.
     # Checked against the RAW input dict so top-level "dispositions" are
     # visible even though normalisation runs on a copy. No force flag.
-    old_row = db.get_plan_active(project_id) or {}
-    violations = check_carryover(
-        old_row.get("structured") or {},
-        structured if isinstance(structured, dict) else {})
-    if violations:
-        raise ValueError(
-            "carryover gate REFUSED — the outgoing plan still has "
-            "unfinished steps not accounted for in the replacement:\n  - "
-            + "\n  - ".join(violations)
-            + "\nEvery unfinished step must either appear in the new plan's "
-              "steps (auto-carry by title similarity) or be listed in the "
-              "new JSON's top-level \"dispositions\": [{\"old_title\": ..., "
-              "\"action\": \"done|dropped|merged|carried\", \"reason\": ...}]."
-              " There is no force flag by design.")
-    archive_plan(old_row, memory_dir, event="replace")
-
+    #
+    # v2.8.0: gate + write is a CAS loop. The check runs against a READ of
+    # the row, and the write used to land unconditionally — a plan that
+    # changed between the two (another refine, a recapture, a clear) was
+    # replaced on the strength of a gate that examined its PREDECESSOR. Each
+    # attempt re-reads, re-runs the gate against what is actually there, and
+    # writes only if the revision it read still stands.
     normalised["refined_at"] = datetime.now().isoformat(timespec="seconds")
     # Pick an initial active_step from the structured form
     active_step_id = 0
@@ -744,13 +969,71 @@ def apply_refined_plan(db, project_id: int, structured: Dict,
                 active_step_id = s["id"]
                 break
 
-    db.upsert_plan_active(
-        project_id,
-        structured=normalised,
-        active_step=active_step_id,
-        needs_refine=0,
-        last_refined_at=normalised["refined_at"],
-    )
+    first_raw = None
+    for _attempt in range(3):
+        old_row = db.get_plan_active(project_id) or {}
+        cur_raw = (old_row.get("raw") or "").strip()
+        if first_raw is None:
+            first_raw = cur_raw
+        elif old_row.get("needs_refine") and cur_raw != first_raw:
+            # register r6-B1 (BLOCKER): a CAS retry means SOMETHING changed —
+            # and when that something was a brand-new ExitPlanMode capture,
+            # committing this (older) refinement would set needs_refine=0
+            # over raw C, hiding the newest plan behind a structured form
+            # refined from raw B. The retry may only proceed while the raw it
+            # started from still stands; a newer capture wins.
+            raise ValueError(
+                "a NEWER raw plan was captured while this refinement was "
+                "being applied — run the refiner against the current "
+                "memory/.plan_raw.md and plan-set that output instead")
+        violations = check_carryover(
+            old_row.get("structured") or {},
+            structured if isinstance(structured, dict) else {})
+        if violations:
+            raise ValueError(
+                "carryover gate REFUSED — the outgoing plan still has "
+                "unfinished steps not accounted for in the replacement:\n  - "
+                + "\n  - ".join(violations)
+                + "\nEvery unfinished step must either appear in the new plan's "
+                  "steps (auto-carry by title similarity) or be listed in the "
+                  "new JSON's top-level \"dispositions\": [{\"old_title\": ..., "
+                  "\"action\": \"done|dropped|merged|carried\", \"reason\": ...}]."
+                  " There is no force flag by design.")
+        fields = dict(
+            structured=normalised,
+            active_step=active_step_id,
+            needs_refine=0,
+            last_refined_at=normalised["refined_at"],
+            # The drift counters describe how far work has wandered from the
+            # plan they were counted against. That plan is GONE, so carrying
+            # its counters onto the replacement makes the guardian nudge fire
+            # on turn 0 of a brand-new plan with nothing yet to drift from —
+            # measured, `should_nudge_guardian` returned `(True,
+            # 'turn_threshold (30 >= 8)')` immediately after a replan. A
+            # replacement IS a guardian event: the user just re-stated the
+            # plan, which is what the check would have asked them to do.
+            turns_since_last_guardian=0,
+            edits_since_last_guardian=0,
+        )
+        if not old_row:
+            # No row yet: an ATOMIC create-if-absent (register r6-B2). The
+            # old check-then-upsert let two first writers both "succeed" with
+            # silent last-write-wins; now exactly one wins the INSERT and the
+            # loser loops, reads the winner's row, and goes through the gate
+            # + CAS against it like any other replacement.
+            if db.insert_plan_if_absent(project_id, **fields):
+                archive_plan(old_row, memory_dir, event="replace")
+                break
+            continue
+        if db.update_plan_if_revision(project_id, old_row["revision"], **fields):
+            # Archive AFTER the CAS succeeded: the matched revision proves
+            # old_row is exactly the plan that was replaced.
+            archive_plan(old_row, memory_dir, event="replace")
+            break
+    else:
+        raise ValueError(
+            "plan changed concurrently 3 times during replacement — "
+            "re-read the live plan and re-run the refine against it")
     if memory_dir is not None:
         write_plan_md(db, project_id, memory_dir)
     return normalised
@@ -769,13 +1052,34 @@ def apply_todowrite_sync(db, project_id: int, todos: List[Dict],
     if not row or not is_valid_structured(row.get("structured")):
         return {"n_matched": 0, "n_unmatched": len(todos or []), "active_step_id": 0,
                 "skipped": "no_active_plan"}
+    if raw_pending_refinement(row):
+        # The structured plan is SUPERSEDED and awaiting replacement: every
+        # renderer refuses to show it (`render_pending_plan_md`) and
+        # `/cc-mem plan-check` refuses to check it, for the same reason. This
+        # was the one surface that kept MUTATING it — and the todos arriving
+        # in that window belong to the NEW plan, so they matched the old
+        # plan's titles loosely and flipped its steps to `done`. Measured:
+        # three unfinished steps retired, `unfinished_steps` emptied, and the
+        # replacement then passed the carryover gate with zero dispositions —
+        # one of the three would not even have auto-carried (sim 0.3902,
+        # under the bar). Syncing into a plan nobody is allowed to see is not
+        # sync; it is the silent-step-loss sink the gate exists to kill.
+        return {"n_matched": 0, "n_unmatched": len(todos or []),
+                "active_step_id": row.get("active_step") or 0,
+                "skipped": "pending_refinement"}
     structured = row["structured"]
     updated, info = sync_todos_to_steps(structured, todos)
-    db.upsert_plan_active(
-        project_id,
-        structured=updated,
-        active_step=info["active_step_id"],
-    )
+    # CAS on the revision this sync READ (register X4): a sync that stalled
+    # while the plan was replaced — every step dispositioned through the R610
+    # gate — used to write its stale copy back wholesale, resurrecting the
+    # replaced plan through the one door the gate cannot see. rowcount 0 now
+    # means "the plan moved on"; the todos belong to whatever replaced it and
+    # the NEXT TodoWrite will sync against that.
+    if not db.update_plan_if_revision(
+            project_id, row["revision"],
+            structured=updated, active_step=info["active_step_id"]):
+        return {"n_matched": 0, "n_unmatched": len(todos or []),
+                "active_step_id": 0, "skipped": "plan_changed"}
     if memory_dir is not None:
         write_plan_md(db, project_id, memory_dir)
     return info
@@ -804,10 +1108,19 @@ def should_nudge_guardian(plan_row: Dict, *,
 
 # Tool names that are "sensitive" and warrant an immediate guardian nudge
 # regardless of counters. Examples: pushing code, dropping DB, deleting files.
-SENSITIVE_TOOLS = {
-    # cc-memory does NOT block; it just flags. The Stop hook reads this set
-    # to surface a guardian-recommendation status line proactively.
-}
+# Commands whose EXECUTION is high-stakes enough to recommend a guardian
+# check. cc-memory does NOT block; it flags. See `is_sensitive_tool_call` for
+# why these are anchored rather than substring-matched.
+_SENSITIVE_COMMANDS = (
+    r"git\s+push", r"rm\s+-rf", r"drop\s+table", r"drop\s+database",
+    r"npm\s+publish", r"cargo\s+publish", r"twine\s+upload", r"pypi-upload",
+    r"kubectl\s+apply", r"terraform\s+apply", r"ansible-playbook",
+)
+# Start of string, or after a shell separator — so `cd x && git push` counts
+# and `grep "git push" docs/` does not.
+_SENSITIVE_CMD_RE = re.compile(
+    r"(?:^|[;&|(\n]|&&|\|\|)\s*(?:sudo\s+|env\s+\S+=\S+\s+)*(?:"
+    + "|".join(_SENSITIVE_COMMANDS) + r")\b")
 
 
 def is_sensitive_tool_call(tool_name: str, tool_input: Dict) -> bool:
@@ -820,14 +1133,20 @@ def is_sensitive_tool_call(tool_name: str, tool_input: Dict) -> bool:
     if tool_name not in ("Bash",):
         return False
     cmd = (tool_input or {}).get("command", "") if isinstance(tool_input, dict) else ""
-    cmd_lower = cmd.lower()
-    sensitive_patterns = (
-        "git push", "git push -f", "git push --force",
-        "rm -rf", "drop table", "drop database",
-        "npm publish", "cargo publish", "pypi-upload", "twine upload",
-        "kubectl apply", "terraform apply", "ansible-playbook",
-    )
-    return any(p in cmd_lower for p in sensitive_patterns)
+    # ANCHORED at a command position, not `pattern in cmd_lower`. A bare
+    # substring test fires on any command that merely MENTIONS the phrase, and
+    # this one bumps the drift counter by 20 against a threshold of 12 — so a
+    # single read-only `grep -rn "git push" docs/` demanded a guardian check.
+    # Measured True for all of: that grep, `echo "never run rm -rf /"`,
+    # `git log --grep="git push"`, and a `cat` of a file whose name mentions
+    # DROP TABLE. A nudge that fires when nothing happened is a nudge the
+    # reader learns to ignore, which costs the ones that matter.
+    #
+    # "Command position" = the start of the string or just after a shell
+    # separator (`;`, `&&`, `||`, `|`, newline, or a subshell paren). That
+    # still catches `cd x && git push`, and no longer catches the phrase
+    # inside a quoted argument.
+    return bool(_SENSITIVE_CMD_RE.search(cmd.lower()))
 
 
 # ── success_criteria carryover advisory (2026-08-05, v2.5.6) ────────────────

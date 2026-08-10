@@ -1,6 +1,6 @@
 > **English** · [简体中文](ARCHITECTURE.zh.md)
 
-# cc-memory — Architecture (v2.6.0)
+# cc-memory — Architecture (v2.8.0)
 
 cc-memory is a Claude Code plugin that gives Claude **persistent, structured
 memory across compactions and sessions**. This document is the overview: what
@@ -97,7 +97,7 @@ must NOT be reduced to English-only. See
 ```
 cc-memory/
 ├── .claude-plugin/
-│   ├── plugin.json              ← Plugin manifest (v2.5.5)
+│   ├── plugin.json              ← Plugin manifest (version = the release)
 │   └── marketplace.json         ← /plugin marketplace add entry
 ├── hooks/hooks.json             ← Hook declarations (6 commands / 5 events)
 ├── skills/                      ← THE canonical skills location
@@ -118,9 +118,11 @@ cc-memory/
 │   ├── config.json
 │   ├── core/                    ← Domain: db, extractor, consolidate, idle,
 │   │                              progress, plan, privacy, modes, roots,
-│   │                              auth, logger, encoding_setup, version
+│   │                              auth, logger, encoding_setup, version,
+│   │                              atomic, markers, textsim
 │   ├── hooks/                   ← Hook entry points (6 modules)
 │   ├── llm/                     ← ccl_backend (Haiku/Ollama) + memory_writer
+│   │                              + parse (tolerant LLM-JSON reader)
 │   ├── cli/                     ← mem.py, plan.py
 │   ├── mcp/                     ← server.py (MCP stdio)
 │   └── ui/                      ← installer, dashboard, web_viewer
@@ -191,7 +193,7 @@ would falsify the record.
 
 ## 3. Hooks
 
-**6 hook commands across 5 Claude Code events** are declared in
+**6 hook commands <!--ce:hooks--> across 5 Claude Code events** are declared in
 `hooks/hooks.json` — `PreCompact` declares two, a blocking sync leg
 (`hooks.json:9`, 120s) and a background `async` leg (`hooks.json:14`, 300s,
 `"async": true`):
@@ -243,10 +245,10 @@ the event:
 
 `hooks/hooks.json` is the marketplace/dev declaration and is the source of
 truth. `cc_memory/ui/installer.py` `HOOK_SCRIPTS` / `ASYNC_HOOK`
-(`installer.py:92-102`) is the standalone-install declaration. Since v2.5 those
+(`installer.py:108-114`) is the standalone-install declaration. Since v2.5 those
 entries carry the **final wire values** — PreCompact 120 (sync) / 300 (async),
 SessionStart 15, Stop 22, PostToolUse 8, UserPromptSubmit 8 — and
-`_declared_hook_timeouts()` (`installer.py:614-645`) *reads* `hooks/hooks.json`
+`_declared_hook_timeouts()` (`installer.py:646-677`) *reads* `hooks/hooks.json`
 whenever it is available (dev checkout, or `cc_memory_meta/hooks.json` inside a
 frozen build), falling back to the literal table only for a flat/frozen install
 where that file is absent.
@@ -305,39 +307,39 @@ project-local at `<project>/memory/memory.db`, WAL mode:
 
 | Table | Purpose |
 |-------|---------|
-| `projects` | One row per project path (`db.py:37`); carries `mode` since migration `v2_project_mode` (`db.py:159`) |
-| `sessions` | One row per compaction event (`db.py:45`) |
-| `memories` | Extracted facts (category, importance, topic, content_hash, **supersedes_id**, last_referenced_at) (`db.py:56`) |
-| `topics` | Consolidated summaries per topic name (versioned) (`db.py:70`) |
-| `keywords` | Auto-detected project vocabulary (`db.py:80`) |
-| `plans` | Plan queue (draft → ready → done) (`db.py:89`) |
-| `observations` | Raw PostToolUse events, cleaned up after extraction (`db.py:129`) |
-| `session_summaries` | 6-field structured summary per session (request / investigated / learned / completed / next_steps / notes) + files_read/files_modified (`db.py:143`) |
+| `projects` | One row per project path (`db.py:37`); carries `mode` since migration `v2_project_mode` (`db.py:144`) and the durable observer cursor `obs_watermark` since `v7_projects_obs_watermark` |
+| `sessions` | One row per compaction event (`db.py:46`); carries `complete` since `v7_sessions_complete` (backfilled, so pre-v7 rows read as complete) |
+| `memories` | Extracted facts (category, importance, topic, content_hash, **supersedes_id**, last_referenced_at) (`db.py:57`) |
+| `topics` | Consolidated summaries per topic name (versioned) (`db.py:71`) |
+| `keywords` | Auto-detected project vocabulary (`db.py:81`) |
+| `plans` | Plan queue (draft → ready → done) (`db.py:90`) |
+| `observations` | Raw PostToolUse events, cleaned up after extraction (`db.py:131`) |
+| `session_summaries` | 6-field structured summary per session (request / investigated / learned / completed / next_steps / notes) + files_read/files_modified (`db.py:144`) |
 | **`progress`** | NEW in v2.1 — single row per project. SOT for `memory/PROGRESS.md` (`db.py:188`). |
 | **`plan_active`** | NEW in v2.2 — single row per project. SOT for `memory/PLAN.md` (`db.py:210`). |
 | `_migrations` | Tracks applied migrations (`db.py:289`) |
 
 Eleven tables, matching `CLAUDE.md` § "Database schema (11 tables)".
 
-Plus `memories_fts` — an FTS5 virtual table over `memories` (`core/db.py:328`),
-kept in sync by three triggers (`core/db.py:332-350`, migration `v2_fts5` at
-`db.py:1271`). It is created only when the local SQLite build has FTS5; otherwise
-`db.search_fts` (`core/db.py:1271`) falls back to `LIKE ? ESCAPE '\'`
-(`core/db.py:1216-1226`). FTS5 is advertised in `.claude-plugin/plugin.json:4`
+Plus `memories_fts` — an FTS5 virtual table over `memories` (`core/db.py:455-458`),
+kept in sync by three triggers (`core/db.py:459-478`, migration `v2_fts5` at
+`db.py:2583-2617`). It is created only when the local SQLite build has FTS5; otherwise
+`db.search_fts` (`core/db.py:2583-2617`) falls back to `LIKE ? ESCAPE '\'`
+(`core/db.py:2583-2617`). FTS5 is advertised in `.claude-plugin/plugin.json:4`
 and `:12`, and `/cc-mem status` reports which path is live (`cli/mem.py`,
 `cmd_status`).
 
 The `supersedes_id` column on `memories` (migration `v3_supersedes`,
-`db.py:167`) makes the anti-patch chain explicit: when `upsert_smart` decides a
+`db.py:168`) makes the anti-patch chain explicit: when `upsert_smart` decides a
 new memory supersedes an old one, the new row links back to the old row's ID
 (and the old row is archived). Walking the chain via
-`db.get_supersede_chain(memory_id)` (`db.py:592`) shows the full update
-history. `content_hash` (migration `v2_content_hash`, `db.py:592`) is
+`db.get_supersede_chain(memory_id)` (`db.py:1340-1355`) shows the full update
+history. `content_hash` (migration `v2_content_hash`, `db.py:1340-1355`) is
 `sha256[:16]` of the normalized content, used for the cheap exact-duplicate
-check (`db.compute_content_hash` at `db.py:817`, `db.find_by_hash` at
-`db.py:817`).
+check (`db.compute_content_hash` at `db.py:1869-1871`, `db.find_by_hash` at
+`db.py:1869-1871`).
 
-Migrations are applied in order from the `_MIGRATIONS` list (`db.py:120`) and
+Migrations are applied in order from the `_MIGRATIONS` list (`db.py:121-284`) and
 recorded in `_migrations`. Levels shipped so far: **v1** (topic column +
 index), **v2** (content_hash, observations, session_summaries, project mode,
 FTS5, hash backfill), **v3** (anti-patch + forced handoff: `supersedes_id`,
@@ -347,7 +349,11 @@ multi-session workflow can tell from PROGRESS.md whether it is reading its own
 write, `db.py:230-233`), **v6** (reference-aware aging:
 `memories.last_referenced_at`, set on injection, so effective age is
 `now - COALESCE(last_referenced_at, created_at)` and a referenced fact stays
-"young", `db.py:244-248`).
+"young", `db.py:244-248`), **v7** (round-7/8 hardening: `plan_active.revision`
+for optimistic plan concurrency, `sessions.complete` + backfill,
+`projects.obs_watermark` for the durable observer cursor, and the two
+recency indexes `idx_memories_session` / `idx_sessions_sid` that turned two
+measured quadratics linear — 557.68 ms → 4.31 ms at 2 000 sessions).
 
 The `progress` row's user-facing fields are `current_request`, `status_done`,
 `status_in_flight`, `status_blocked`, `open_todos`, `plan`, `critical_context`,
@@ -356,7 +362,10 @@ The `progress` row's user-facing fields are `current_request`, `status_done`,
 in all). The `plan_active` row holds `raw`, `structured`, `active_step`,
 `edits_since_last_guardian`, `turns_since_last_guardian`, `last_guardian_at`,
 `last_refined_at`, `needs_refine`, `created_at`, `updated_at`
-(`db.py:210-222`).
+(`db.py:210-222`), plus `revision` since `v7_plan_revision` — every UPDATE
+bumps it, and a writer that computed its state from a read passes the
+revision it read (`update_plan_if_revision`), so a plan changed underneath
+is a refused write, not a silent overwrite.
 
 All queries use parameterized statements; string-formatted SQL is prohibited.
 
@@ -406,23 +415,23 @@ caller's responsibility, and there are exactly two shapes:
 - `upsert_batch` (`memory_writer.py:200-235`) loops `upsert_smart` per item and
   regenerates ONCE at the end, but only when a `memory_dir` is passed
   (`memory_writer.py:190-194`). All hook callers pass it
-  (`pre_compact.py:435`, `stop.py:166`, `session_start.py:972`); the sync
+  (`pre_compact.py:435`, `stop.py:166`, `session_start.py:1056`); the sync
   PreCompact leg additionally touches it again after the rest of its state
-  changes (`pre_compact.py:692`).
+  changes (`pre_compact.py:790`).
 - Single-shot callers call `regenerate_memory_index` explicitly:
-  `cli/mem.py:923` and `:584`, `mcp/server.py:525`, `ui/dashboard.py:1540`,
+  `cli/mem.py:1067` and `:584`, `mcp/server.py:644`, `ui/dashboard.py:1634`,
   `ui/web_viewer.py:325`, plus the `skills/ccm-load` inline script
-  (`SKILL.md:127, 137`). `core/idle.py:94` and
+  (`SKILL.md:127, 137`). `core/idle.py:96` and
   `hooks/consolidate_async.py:188` also refresh it after maintenance.
 
 (The pre-merge diagram showed regeneration as an unconditional step of
 `upsert_smart` and elided the `db` argument; both are corrected above against
-`memory_writer.py:200, 190, 199`. The caller list is likewise the full set found
+`memory_writer.py:223-258, 190, 199`. The caller list is likewise the full set found
 by grepping `upsert_smart|upsert_batch` across `cc_memory/`.)
 
 Thresholds live in ONE place — `memory_writer.HIGH_SIM = 0.80`,
 `MID_SIM = 0.50`, `MIN_CONTENT_LEN = 10`, `MAX_CANDIDATES_TO_SCAN = 50`
-(`memory_writer.py:58`). They are no longer mirrored in `config.json`: that
+(`memory_writer.py:73`). They are no longer mirrored in `config.json`: that
 `writer` block was read by nothing and was deleted in v2.5, because an inert
 tunable is worse than no tunable. See
 [docs/CONTRACTS.md](CONTRACTS.md#anti-patch-contract) for the full contract.
@@ -511,9 +520,9 @@ SessionStart:
 ```
 
 Call signatures above are the real ones: `write_progress_md(db, project_id,
-memory_dir)` (`core/progress.py:323`; call sites `pre_compact.py:677`,
-`stop.py:213`, `user_prompt.py:133`, `session_start.py:680`, `mcp/server.py:243`,
-`cli/mem.py:1089`). See
+memory_dir)` (`core/progress.py:331-490`; call sites `pre_compact.py:759`,
+`stop.py:292`, `user_prompt.py:133`, `session_start.py:912`, `mcp/server.py:243`,
+`cli/mem.py:1152`). See
 [docs/CONTRACTS.md](CONTRACTS.md#handoff-contract) for the PROGRESS.md
 schema.
 
@@ -524,7 +533,7 @@ A `PreCompact` killed by the host timeout dies on `TerminateProcess`: no
 successful run and the failure is invisible. The sync leg therefore writes
 `memory/.pre_compact_attempt.json` **before** the transcript load
 (`pre_compact.py:359-368`) and removes it only on a completed run
-(`pre_compact.py:536`) — including on its own error path (`pre_compact.py:731`),
+(`pre_compact.py:795`) — including on its own error path (`pre_compact.py:731`),
 so an *errored* run is never reported as a *killed* one. `SessionStart` reports
 a surviving marker, but only once it is at least 10 minutes old, so a run still
 in flight is never mislabelled (`session_start.py:187-206`).
@@ -550,16 +559,16 @@ its own memories.
 Three changes close it:
 
 1. `core.extractor.mangle_project_path` is the single source of truth for the
-   convention (`extractor.py:409`), used by `find_latest_transcript`,
+   convention (`extractor.py:535-571`), used by `find_latest_transcript`,
    `hooks/session_start.py` and `ui/dashboard.py` — which had carried a verbatim
    copy of the old resolver, fuzzy branch included.
 2. The fuzzy fallback is **deleted**. A miss returns `None`. Callers must treat
    that as "no transcript", never as licence to guess.
 3. Ownership is checked positively. `_transcript_belongs_to`
-   (`session_start.py:525-542`) reads the `cwd` the transcript's own records carry
+   (`session_start.py:673-690`) reads the `cwd` the transcript's own records carry
    and is **fail-closed** — no `cwd`, no ingest — and gates `retroactive_save`
    after the bounded window load. The tier-3 mine uses the deliberately weaker
-   `_transcript_is_foreign` (`session_start.py:545-572`): absent `cwd` is allowed,
+   `_transcript_is_foreign` (`session_start.py:693-720`): absent `cwd` is allowed,
    a *different* `cwd` is refused. The two differ on purpose — retroactive save
    persists LLM-extracted memories forever and should demand proof, while
    tier-3 must still work for the cwd-less transcript shape
@@ -582,10 +591,10 @@ normalises it to JSON, written back via `/cc-mem plan-set --from-refiner`;
 LLM); `Edit`/`Write`/`MultiEdit`/`NotebookEdit` bump
 `edits_since_last_guardian`, and sensitive Bash calls (`git push`, `rm -rf`,
 `DROP TABLE`, `npm publish`, `kubectl apply`, `terraform apply`, … —
-`core.plan.is_sensitive_tool_call`, `plan.py:810-827`) bump it by 20. The Stop hook
+`core.plan.is_sensitive_tool_call`, `plan.py:1126-1149`) bump it by 20. The Stop hook
 emits the guardian advisory once `turns_since_last_guardian >= 8` OR
 `edits_since_last_guardian >= 12` (`core.plan.should_nudge_guardian`,
-`plan.py:783-799`), and rate-limits the refiner nudge to once every 5 turns per
+`plan.py:1090-1106`), and rate-limits the refiner nudge to once every 5 turns per
 session. Hooks never spawn subagents themselves — they only nudge. Full spec:
 [docs/CONTRACTS.md](CONTRACTS.md#plan-contract). Every branch above runs in
 every mode since v2.5 — see
@@ -593,7 +602,7 @@ every mode since v2.5 — see
 for what used to shadow them.
 
 A raw plan that has not been refined yet is no longer invisible:
-`core.plan.raw_pending_refinement` (`plan.py:285-314`) is the shared predicate, and
+`core.plan.raw_pending_refinement` (`plan.py:352-381`) is the shared predicate, and
 both `write_plan_md` and `/cc-mem plan-status` lead with a PENDING REFINEMENT
 banner plus the verbatim raw text, labelling any older structured plan as
 superseded. The verbatim block's fence widens past the longest backtick run in
@@ -604,11 +613,11 @@ the raw text, because plan-mode output routinely contains code fences.
 ## 6. LLM backends and auth
 
 `llm.ccl_backend.call_llm` calls Anthropic Haiku (model
-`claude-haiku-4-5-20251001`, `ccl_backend.py:164`). Callers resolve one
+`claude-haiku-4-5-20251001`, `ccl_backend.py:222-326`). Callers resolve one
 credential up front with `core.auth.get_api_key()` and pass it in; `call_llm`
 tries that one FIRST, then FALLS THROUGH to the remaining
 `core.auth.get_api_candidates()` entries when a leg fails — bounded to 2
-Anthropic legs total (`ccl_backend.py:170`), so the worst-case wall-clock stays
+Anthropic legs total (`ccl_backend.py:264`), so the worst-case wall-clock stays
 a known quantity for the consolidation BudgetGate. Candidate order and wire
 format (`core/auth.py:20-57`, `_wire_for` at `core/auth.py:8-17`,
 `_call_haiku` headers at `ccl_backend.py:97-127`):
@@ -625,9 +634,9 @@ while the same token via Bearer + beta gets HTTP 200 (`core/auth.py:14-15`).
 `get_api_key()` is the single-credential back-compat view of that same list (it
 does not retry, `core/auth.py:60-93`); it also carries the `oauth_expired`
 signal behind SessionStart's "[WARNING: OAuth expired — LLM extraction
-disabled]" footer (`session_start.py:444`). Hook callers use it to *supply*
-the credential passed into `call_llm`: `pre_compact.py:80 → :166`,
-`stop.py:74`, `session_start.py:444`, `core/consolidate.py:326, 549, 724`.
+disabled]" footer (`session_start.py:592`). Hook callers use it to *supply*
+the credential passed into `call_llm`: `pre_compact.py:82 → :166`,
+`stop.py:82`, `session_start.py:592`, `core/consolidate.py:414, 549, 724`.
 
 Fall-through was added in v2.3.4 for a concrete failure: a dead env key (e.g.
 zero credit → HTTP 400) used to blackhole the healthy subscription token behind
@@ -636,7 +645,7 @@ model per consolidation batch (`core/auth.py:30-33`, `ccl_backend.py:10-12`).
 
 The local Ollama fallback is **opt-in and OFF by default**
 (`cc_memory/config.json` `ccl.enabled: false`;
-`ccl_backend.py:34` `_DEFAULT_OLLAMA_ENABLED = False`, so a missing key also
+`ccl_backend.py:36` `_DEFAULT_OLLAMA_ENABLED = False`, so a missing key also
 reads as False), alongside `ccl.ollama_url` / `ccl.local_model`. When disabled
 the leg is skipped and only recorded as the reason string
 `"ollama: disabled (config ccl.enabled=false)"`, so a default install has no
@@ -644,7 +653,7 @@ local fallback at all.
 
 ### Bounding wall-clock: `fallback_timeout` and `deadline`
 
-`call_llm` (`ccl_backend.py:164`) offers two independent bounds.
+`call_llm` (`ccl_backend.py:222-326`) offers two independent bounds.
 
 `fallback_timeout` bounds the Ollama leg. When `None` it defaults to
 `min(timeout*3, 120)`. The worst-case envelope of one call is then
@@ -653,7 +662,7 @@ local fallback at all.
 2 * timeout  +  (fallback_timeout if ccl.enabled else 0)
 ```
 
-because the Anthropic candidates are bounded at 2 (`ccl_backend.py:180`). That
+because the Anthropic candidates are bounded at 2 (`ccl_backend.py:274`). That
 arithmetic is what lets the consolidation `BudgetGate` guarantee completion —
 see `core.consolidate._worst_call_cost`.
 
@@ -666,7 +675,7 @@ exist, which lets a caller keep a generous per-leg `timeout` for the common
 single-candidate path instead of shrinking it to survive the pathological one.
 
 Through v2.4.3, `core/consolidate.py` was the *only* module that honoured any of
-this, and three hooks with hard host timeouts violated it — one of them with the
+this, and three hooks <!--ce:hooks:subset--> with hard host timeouts violated it — one of them with the
 shipped default config:
 
 | call site | host budget | pre-v2.5 envelope, `ccl` off | on |
@@ -677,7 +686,7 @@ shipped default config:
 
 `session_start`'s pre-v2.5 `_RETRO_DEADLINE_S` only decided whether to start
 another *file*; it could not interrupt a leg already in flight, so one hung
-socket was 40 s against a 15 s kill. All three hooks now capture `_HOOK_T0 =
+socket was 40 s against a 15 s kill. All three hooks <!--ce:hooks:subset--> now capture `_HOOK_T0 =
 time.monotonic()` **before** their package imports (so import cost is charged
 against the budget) and pass `deadline=_HOOK_T0 + <budget>` into `call_llm`:
 `stop.py` `_LLM_DEADLINE_S = 14.0`, `pre_compact.py` `75.0`,
@@ -692,7 +701,7 @@ final leg can still be in flight). At the measured `k ≈ 1.48` that is 17.4 s o
 Stop's 22 s and 87 s of PreCompact's 120 s.
 
 If every enabled leg fails, `call_llm` raises `RuntimeError` carrying the
-aggregated per-leg reasons (`ccl_backend.py:172-174`) and hooks degrade
+aggregated per-leg reasons (`ccl_backend.py:222-326`) and hooks degrade
 gracefully — extraction is skipped, but archives/handoff/observations still
 save. Hooks NEVER raise into Claude Code. (That last sentence only became true
 in v2.4.2: `_extract_via_llm`'s `except` tuple did not include `RuntimeError`,
@@ -726,10 +735,10 @@ Per-project state lives at `<project>/memory/`:
 ```
 
 Writers, for traceability: `MEMORY.md` ← `memory_writer.regenerate_memory_index`
-(`memory_writer.py:238`); `PROGRESS.md` ← `core.progress.write_progress_md`
-(`progress.py:323, 366`); `PLAN.md` ← `core.plan.write_plan_md`
-(`plan.py:453-493`); `.plan_history/` ← `plan.py:453-493`; `.last_save.json` ←
-`pre_compact.py:526, 556`; `.last_inject.json` ← `session_start.py:291-309`
+(`memory_writer.py:261-370`); `PROGRESS.md` ← `core.progress.write_progress_md`
+(`progress.py:331-490, 366`); `PLAN.md` ← `core.plan.write_plan_md`
+(`plan.py:520-568`); `.plan_history/` ← `plan.py:520-568`; `.last_save.json` ←
+`pre_compact.py:737, 771`; `.last_inject.json` ← `session_start.py:291-309`
 (tempfile + `os.replace`, genuinely atomic, unlike the plain write used for
 `.last_save.json`); `.last_consolidation.json` / `.consolidation.lock` ←
 `consolidate_async.py:112-128`; `.pre_compact_attempt.json` ←
@@ -747,7 +756,7 @@ artifacts**. Edit the SQL source of truth instead (`progress` for PROGRESS.md,
 session's CURRENT working directory and follows the agent's own `cd`, so a
 session launched at a repo root that ran one command inside `cli/` began
 reporting `<root>/cli` — and `_init_project_if_needed` (`user_prompt.py:50-78`)
-mkdir'd a second, fully independent database there. Four of the six hooks gate
+mkdir'd a second, fully independent database there. Four of the six hooks <!--ce:hooks:subset--> gate
 on `memory/memory.db` merely EXISTING, so once born the stray kept being
 written: measured 27 memories and its own `projects` row in one such database,
 against 161 in the real one two levels up. It also had no `.gitignore` (only
@@ -764,7 +773,7 @@ inside another one — `Claude-Code-Local/companion` alone holds 3725 memories
 and carries its own `.git`. A stray sub-database and a deliberate nested
 sub-project are **byte-for-byte indistinguishable on disk**: both have
 `memory/memory.db` whose `projects` row names their own directory, because
-`upsert_project` (`core/db.py:465-484`) records whatever cwd it was handed.
+`upsert_project` (`core/db.py:946-978`) records whatever cwd it was handed.
 Outermost-wins resolves that ambiguity unconditionally in the direction that
 destroys data, so the first post-upgrade session in `companion` would have
 moved 3725 memories out of reach, silently.
@@ -776,7 +785,7 @@ already exists means merging two SQLite files — destructive and irreversible �
 which belongs in an explicit, confirmed command, not in a hook that runs on
 every prompt.
 
-`project_root` (`core/roots.py:483-528`) resolves a root first. Every hook
+`project_root` (`core/roots.py:530-575`) resolves a root first. Every hook
 rebinds `cwd` to it immediately **after** `is_excluded` and never before:
 resolving first would widen a per-subdirectory exclusion away by climbing to
 its unexcluded parent. The chain of candidate ancestors stops below any home
@@ -791,7 +800,7 @@ levels (`_chain`, `core/roots.py:267-295`). First hit wins:
    `CodeEraser/cli` has no database while `CodeEraser` does. It needs no VCS
    and no manifest, which matters for projects that are not repositories.
 2. `CLAUDE_PROJECT_DIR`, when it names a directory in the chain (`_from_env`,
-   `core/roots.py:462-480`). Ranked *below* the database rungs deliberately:
+   `core/roots.py:509-527`). Ranked *below* the database rungs deliberately:
    it records where Claude Code was launched, which is not authority to orphan
    a database. Containment is likewise the point — a value left over from
    another project must not redirect this one.
@@ -811,7 +820,7 @@ database rung consulted nothing, so a `memory/` created by one session in a
 projects folder captured every uninitialised project under it; the marker rung
 never checked the FIRST marker it found, so one stray `package.json` there did
 the same; and neither had any notion of a dependency tree. `_candidates`
-(`core/roots.py:376-404`) now filters the chain once, before any rung reads it:
+(`core/roots.py:409-458`) now filters the chain once, before any rung reads it:
 
 - **Containers of projects are removed** (`_is_container`). Two asymmetric
   triggers: two or more children that are VCS roots is always decisive (the
@@ -859,13 +868,49 @@ directory named `users/` looked like a profile and truncated the chain, so a
 session in `<repo>/users/alice/sub` could reach no rung at all and planted a
 stray four levels down — the defect produced by the guard against it.
 
-**Every surface anchors, not just the hooks (v2.7.0).** `cc-mem`'s
-`--project` goes through `_anchor_project` (`cli/mem.py:1713-1741`) and the
-`/ccm-load` skill resolves before it builds the scaffold. Until then the hooks
-refused to create a stray while `/cc-mem add` from a subdirectory happily made
-one — and rung 0, being terminal, then pinned all six hooks to it forever. A
-redirection is always PRINTED: an explicit `--project` is an instruction, and
-quietly doing something else with it would be worse than the bug.
+**Every surface anchors, not just the hooks (v2.8.0).** v2.7.0 claimed this
+and delivered it for `cli/mem.py` alone; the audit that followed found seven
+more surfaces that turn a supplied string into a database path, none of them
+anchoring. They now share one implementation, `anchor_project`
+(`core/roots.py:551-612`):
+
+| Surface | Can it CREATE? | Announces via |
+|---|---|---|
+| six hooks <!--ce:hooks--> | yes (`user_prompt`, `pre_compact`) | `core.logger`, rare hooks only |
+| `cli/mem.py` | no — reports "no memory database at X" | `print` |
+| `cli/plan.py` | writing subcommands only (v2.8.0) | `print` |
+| `mcp/server.py` | yes, the one model-facing write path | `_log` — **never** `print` |
+| `ui/dashboard.py` | yes, via `_load_project` | UI dialog |
+| `ui/installer.py` | yes, *Initialize Project* | install log |
+| `ui/web_viewer.py` | no, read-only | `print` |
+| `skills/ccm-load`, `skills/save-memories` | yes | `print` |
+
+Two details that are easy to get wrong and were:
+
+- **`announce` is a parameter, not a `print`.** The MCP server speaks JSON-RPC
+  on stdout, so a redirection notice written there corrupts the framing and
+  kills the session; it passes `_log.info` instead. Every human-facing surface
+  passes a printer, because an explicit `--project` is an instruction and
+  quietly substituting something else would be worse than the bug.
+- **The opt-out is checked BEFORE anchoring, everywhere.** Anchoring is the
+  step that may move *upward*; running it first would resolve an excluded
+  subdirectory to its unexcluded parent and serve a project the user opted
+  out of. `test_surfaces` §7 asserts this ordering at source level for all six
+  hooks <!--ce:hooks-->.
+
+`anchor_project` compares **both sides resolved**. `project_root` returns the
+caller's own unresolved spelling whenever the answer is the input itself
+(that is what keeps symlinked project directories working), so a one-sided
+comparison could never match a relative path: `--project .` — exactly what the
+`/cc-mem` wrapper passes — announced `. is inside a project rooted at .` on
+every single call.
+
+`cli/plan.py` additionally stopped conjuring databases from read-only
+commands. `MemoryDB.__init__` mkdirs and creates, so `list` and `status` used
+to fabricate a 140 KB empty database — *without* `memory/.gitignore`, the one
+omission that let a stray ride into version control — merely for asking what
+was in the queue. `cli/mem.py` had always refused instead; two halves of one
+CLI pair must not disagree about that.
 
 A pre-existing stray is therefore left exactly where it is — and *reported*,
 so it is not invisible: `nested_databases` (`core/roots.py:386-424`) backs a
@@ -875,7 +920,7 @@ hook, because it walks the tree. `.ccm-root` — an empty file — pins a
 directory as a root in its own right, which is the escape hatch for a project
 deliberately nested inside another and for any layout these heuristics read
 wrong. `tests/test_surfaces.py` §7 pins all of it: the ladder over a real
-filesystem, all six hooks run from a subdirectory, and the source-level rule
+filesystem, all six hooks <!--ce:hooks--> run from a subdirectory, and the source-level rule
 that every hook resolves *after* the opt-out.
 
 ### .gitignore migrates, not just creates (v2.4.2)
@@ -895,14 +940,14 @@ exist because they cannot import this module and must be kept in sync:
 
 Old v2.0 `SESSION_HANDOFF.md` files are renamed to `SESSION_HANDOFF.md.v2.bak`
 on first PreCompact under v2.1 (one-shot migration
-`core.progress.migrate_legacy_handoff`, `progress.py:485`).
+`core.progress.migrate_legacy_handoff`, `progress.py:590-608`).
 
 ---
 
 ## 8. Install layouts
 
 Three layouts are recognised by `cli/mem.py` `_detect_install_layouts`
-(`cc_memory/cli/mem.py:272-349`). A machine can have more than one at once
+(`cc_memory/cli/mem.py:387-464`). A machine can have more than one at once
 (e.g. a dev checkout plus a stale marketplace-cache entry), so `/cc-mem status`
 reports on each:
 
@@ -917,9 +962,9 @@ reports on each:
   `installPath` that no longer exists is reported as a broken layout rather
   than skipped (`mem.py:158-170`).
 - **legacy / standalone install** — `~/.claude/hooks/cc-memory/`
-  (`mem.py:42`), written by the PyInstaller installer
-  (`ui/installer.py:58` `TARGET_DIR`). Hooks here are registered directly in
-  `~/.claude/settings.json` by `_merge_into_settings` (`installer.py:916-950+`),
+  (`mem.py:43`), written by the PyInstaller installer
+  (`ui/installer.py:72` `TARGET_DIR`). Hooks here are registered directly in
+  `~/.claude/settings.json` by `_merge_into_settings` (`installer.py:1010-1044+`),
   not via a plugin manifest.
 
 Under the marketplace layouts `~/.claude/hooks/cc-memory/` holds only `logs/`
@@ -945,13 +990,13 @@ shapes do not share a `cc_memory/` path segment.
 ```
 
 **Standalone installer (FLAT)** — `_copy_subpackages(TARGET_DIR)`
-(`installer.py:63`) writes each `SUBPACKAGE_FILES` key (`installer.py:63`)
-directly under `TARGET_DIR` (`installer.py:58`), with **no `cc_memory/`
-segment**, and `_make_hooks_config` (`installer.py:650`) builds commands as
+(`installer.py:77-89`) writes each `SUBPACKAGE_FILES` key (`installer.py:77-89`)
+directly under `TARGET_DIR` (`installer.py:72`), with **no `cc_memory/`
+segment**, and `_make_hooks_config` (`installer.py:664-686`) builds commands as
 `python "<TARGET_DIR>/hooks/<name>.py"`:
 
 ```
-~/.claude/hooks/cc-memory/           ← ui/installer.py:58 TARGET_DIR
+~/.claude/hooks/cc-memory/           ← ui/installer.py:72 TARGET_DIR
 ├── __init__.py
 ├── config.json
 ├── installed_surfaces.json  ← what was written into ~/.claude (v2.5)
@@ -986,14 +1031,14 @@ install contained `hooks/` and `settings.json` and nothing else — no `/cc-mem`
 command, no `plan-refiner` / `plan-guardian` agents, no skills. Everything the
 user actually interacts with was missing.
 
-`SURFACE_FILES` (`installer.py:81`) names exactly five paths —
+`SURFACE_FILES` (`installer.py:95-101`) names exactly five paths —
 `commands/cc-mem.md`, `agents/plan-refiner.md`, `agents/plan-guardian.md`,
 `skills/ccm-load/SKILL.md`, `skills/save-memories/SKILL.md` — and `_copy_surfaces`
-(`installer.py:453`) writes them into `~/.claude/` at install step [2/3],
+(`installer.py:467-501`) writes them into `~/.claude/` at install step [2/3],
 recording what it wrote in `installed_surfaces.json` (`installer.py:58`).
 
 Uninstall is **by name**, never `rmtree`: `~/.claude/{commands,agents,skills}`
-hold the user's own files. `_remove_surfaces` (`installer.py:490`) deletes only
+hold the user's own files. `_remove_surfaces` (`installer.py:504-538`) deletes only
 the recorded paths, removes an emptied `skills/<name>/` but never `commands/` or
 `agents/` themselves, and distinguishes "no manifest" (fall back to this build's
 `SURFACE_FILES`) from "a manifest recording nothing" (delete nothing, and say
@@ -1002,7 +1047,7 @@ seeded leaves exactly those two files behind.
 
 ### settings.json is validated before anything is copied (v2.5)
 
-`_read_settings` (`installer.py:675`) returns `(dict, None)` or `(None, error)`
+`_read_settings` (`installer.py:689-721`) returns `(dict, None)` or `(None, error)`
 and never raises; `cli_install` calls it at step **[0/3]** and returns 1 with
 `Nothing has been installed.` on a parse failure. Through v2.4.3 the parse
 happened *after* the copy, so a `settings.json` the installer could not read
@@ -1016,20 +1061,20 @@ UTF-8 BOM is tolerated, because PowerShell's `>` writes one; the three shapes
 that genuinely encode intent we cannot parse (JSONC comments, a trailing comma,
 a top-level array) refuse with rc=1 and copy nothing; a malformed hook group is
 **preserved verbatim** rather than shredded; and a hook command that merely
-mentions "cc-memory" without running one of this build's six hook scripts is
+mentions "cc-memory" without running one of this build's six hook scripts <!--ce:hooks--> is
 **kept and warned about** rather than deleted.
 
 ### Layout detection and inspection agree (fixed in v2.5)
 
-Detection accepts both shapes: `mem.py:181` tests
+Detection accepts both shapes: `mem.py:457` tests
 `(legacy / "cc_memory").exists() or (legacy / "core" / "db.py").exists()`.
 Inspection used to disagree with it. `_inspect_layout` (`mem.py:358-427`) resolved
-every `cc_memory/…`-prefixed entry of `_REQUIRED_PLUGIN_FILES` (`mem.py:138`)
+every `cc_memory/…`-prefixed entry of `_REQUIRED_PLUGIN_FILES` (`mem.py:237-277`)
 against the layout **root**, so a healthy flat install reported all 22 files
 missing, printed `[FAIL]`, and — because `/cc-mem status` only runs the API-key
 check against a "fully-functional" layout — skipped that check entirely.
 
-It now resolves `pkg_dir` once (`mem.py:274`:
+It now resolves `pkg_dir` once (`mem.py:441`:
 `root/"cc_memory"` if that directory exists, else `root`), strips the prefix
 accordingly, and requires `hooks/hooks.json` only for plugin-manifest installs —
 the standalone installer never copies it, and it is meaningless when the hooks
@@ -1039,7 +1084,7 @@ of a hardcoded `root/"cc_memory"`.
 
 The installer's own post-install instructions printed
 `TARGET_DIR/cc_memory/cli/mem.py`, a path it never creates; they now print
-`TARGET_DIR/cli/mem.py` (`installer.py:58`), which exists.
+`TARGET_DIR/cli/mem.py` (`installer.py:72`), which exists.
 
 ### Interpreter requirement
 
@@ -1052,7 +1097,7 @@ plugin. Otherwise hooks fail silently (logged to
 missing command).
 
 The standalone installer sidesteps this by **running** each candidate rather
-than probing for its existence: `_detect_python_cmd` (`installer.py:585`)
+than probing for its existence: `_detect_python_cmd` (`installer.py:621-641`)
 executes `<cand> -c "import sys;print(sys.version_info[0])"` with a 15 s timeout
 and takes the first that answers `3`. `shutil.which("python3")` was not enough —
 on Windows it resolves to a 0-byte App Execution Alias when Store Python is not
@@ -1215,8 +1260,8 @@ must be finalized *before* you emit the marker (see §9.6).
 
 `tools/i18n_check.py` is pure stdlib and lives outside the `cc_memory` package on
 purpose — it is a dev/CI tool and is deliberately absent from `ui/installer.py`
-`SUBPACKAGE_FILES` (`installer.py:61-73`), `build_exe.py`, and `cli/mem.py`
-`_REQUIRED_PLUGIN_FILES` (`mem.py:138-162`), so the packaged plugin is unchanged
+`SUBPACKAGE_FILES` (`installer.py:77-89`), `build_exe.py`, and `cli/mem.py`
+`_REQUIRED_PLUGIN_FILES` (`mem.py:237-277`), so the packaged plugin is unchanged
 by it.
 
 ```bash

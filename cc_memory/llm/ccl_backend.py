@@ -22,6 +22,8 @@ Reads ollama_url / local_model / enabled from cc_memory/config.json ``ccl``.
 """
 import json
 import re
+import socket
+import threading
 import time
 import urllib.request
 
@@ -94,7 +96,8 @@ def _load_local_config():
     return url, model, enabled
 
 
-def _call_haiku(system, user, api_key, max_tokens, timeout, wire="api_key"):
+def _call_haiku(system, user, api_key, max_tokens, timeout, wire="api_key",
+                resp_holder=None):
     body = json.dumps({
         "model": _HAIKU_MODEL,
         "max_tokens": max_tokens,
@@ -118,6 +121,10 @@ def _call_haiku(system, user, api_key, max_tokens, timeout, wire="api_key"):
     )
 
     with urllib.request.urlopen(req, timeout=timeout) as resp:
+        if resp_holder is not None:
+            # Published so a deadline-bounded caller (_leg_with_deadline) can
+            # close the response from OUTSIDE and unblock a dripping read.
+            resp_holder["resp"] = resp
         result = json.loads(resp.read().decode("utf-8"))
 
     text = ""
@@ -127,7 +134,8 @@ def _call_haiku(system, user, api_key, max_tokens, timeout, wire="api_key"):
     return text.strip()
 
 
-def _call_ollama(system, user, max_tokens, timeout, ollama_url, local_model):
+def _call_ollama(system, user, max_tokens, timeout, ollama_url, local_model,
+                 resp_holder=None):
     messages = []
     if system:
         messages.append({"role": "system", "content": system})
@@ -147,12 +155,98 @@ def _call_ollama(system, user, max_tokens, timeout, ollama_url, local_model):
     )
 
     with urllib.request.urlopen(req, timeout=timeout) as resp:
+        if resp_holder is not None:
+            resp_holder["resp"] = resp
         result = json.loads(resp.read().decode("utf-8"))
 
     text = result.get("message", {}).get("content", "").strip()
     # Strip <think>...</think> reasoning blocks from distilled models
     text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
     return text
+
+
+def _abort_response(resp):
+    """Unblock a stalled read by cutting the SOCKET. Never raises.
+
+    NOT ``resp.close()``. `http.client.HTTPResponse.close()` DRAINS the rest
+    of the declared body so the connection can be reused, so on the exact
+    input this exists for — a peer dripping bytes — closing blocks for the
+    remainder of the drip: measured 8.10 s of an 11.10 s total, which made a
+    3 s deadline no bound at all. ``shutdown(SHUT_RDWR)`` returns immediately
+    (measured 0.00 s) and the blocked recv raises inside the worker 0.06 s
+    later.
+
+    Reaching the socket goes through CPython-internal attributes
+    (``fp.raw._sock``), so every step is defensive: if the shape ever
+    changes, the leg is simply abandoned to its daemon thread rather than
+    the hook losing its deadline.
+    """
+    sock = getattr(getattr(getattr(resp, "fp", None), "raw", None),
+                   "_sock", None)
+    for closer in (lambda: sock.shutdown(socket.SHUT_RDWR),
+                   lambda: sock.close()):
+        if sock is None:
+            return
+        try:
+            closer()
+        except OSError:
+            # why: the peer may already be gone, or the socket already shut
+            # down by the first call. Either way the read is unblocked, which
+            # is the only thing this function is for.
+            pass
+
+
+def _leg_with_deadline(fn, kwargs, deadline):
+    """Run one backend leg with a HARD wall-clock bound. deadline may be None.
+
+    ``urlopen(req, timeout=t)`` sets a PER-SOCKET-OPERATION timeout: every
+    recv that makes progress resets it, so a peer dripping one byte per
+    (t - ε) seconds holds the leg alive indefinitely and the docstring's
+    promise that "total wall-clock is bounded by deadline" was simply false —
+    measured 11.07 s against a 3 s deadline. The clamp on the timeout VALUE
+    (``_budget``) bounds only the idle gap, not the total.
+
+    With a deadline, the leg runs in a daemon worker; this thread waits
+    (join is true wall-clock) and on expiry aborts the leg's socket — which
+    unblocks the dripping recv with an error inside the worker — and raises
+    TimeoutError so call_llm falls through to the next candidate. Callers
+    WITHOUT a deadline keep the exact old synchronous path: hooks all pass
+    deadlines, while the dashboard/CLI paths stay simple.
+
+    The worker is a DAEMON and is never joined without a bound, so a leg that
+    somehow stays stuck cannot hold the hook open past its host timeout —
+    which is the whole point.
+    """
+    if deadline is None:
+        return fn(**kwargs)
+    holder = {}
+    kwargs = dict(kwargs, resp_holder=holder)
+    outcome = {}
+
+    def work():
+        try:
+            outcome["result"] = fn(**kwargs)
+        except Exception as exc:
+            outcome["error"] = exc
+
+    worker = threading.Thread(target=work, daemon=True)
+    worker.start()
+    worker.join(max(0.0, deadline - time.monotonic()))
+    if worker.is_alive():
+        resp = holder.get("resp")
+        if resp is not None:
+            _abort_response(resp)
+        # NO post-deadline join. The old `worker.join(1.0)` here waited for
+        # the aborted worker to notice, ON TOP of an already-expired deadline
+        # — measured 1.06 s returned against a deadline with 0.05 s left
+        # (register C2), which un-bounds every caller that did its own budget
+        # arithmetic from this function's promise. The worker is a daemon,
+        # `_abort_response` has already unblocked its recv, and nothing reads
+        # `outcome` after a timeout — there is nothing to wait for.
+        raise TimeoutError("leg exceeded the absolute deadline")
+    if "error" in outcome:
+        raise outcome["error"]
+    return outcome.get("result", "")
 
 
 # Below this much remaining budget a leg cannot plausibly complete, so it is
@@ -185,11 +279,16 @@ def call_llm(system, user, api_key="", max_tokens=2000, timeout=30,
     core.consolidate._worst_call_cost.
 
     ``deadline`` is an absolute ``time.monotonic()`` instant by which this call
-    must be FINISHED. Every leg's effective timeout is clamped to the time
-    actually remaining, and a leg with less than ``_MIN_LEG_S`` left is skipped
-    outright. This is strictly stronger than the arithmetic above — total
-    wall-clock is bounded by ``deadline`` no matter how many candidates exist —
-    and it lets a caller keep a generous per-leg ``timeout`` for the common
+    must be FINISHED, and it is enforced as TRUE wall-clock: each leg runs
+    under `_leg_with_deadline`, which waits at most the time remaining and
+    then closes the leg's response and raises. Clamping the socket timeout
+    alone (the pre-v2.8.0 behaviour) bounded only the IDLE gap — the timeout
+    is per socket operation, so a peer dripping one byte per interval held a
+    "3 s deadline" leg for a measured 11.07 s. A leg with less than
+    ``_MIN_LEG_S`` left is still skipped outright rather than started. This
+    is strictly stronger than the arithmetic above — total wall-clock is
+    bounded by ``deadline`` no matter how many candidates exist — and it lets
+    a caller keep a generous per-leg ``timeout`` for the common
     single-candidate path instead of shrinking it to survive the pathological
     one. ``hooks/session_start.py`` needs exactly that: its host budget is 15s
     while a healthy Haiku extraction wants ~10s, so 2×timeout arithmetic alone
@@ -229,8 +328,11 @@ def call_llm(system, user, api_key="", max_tokens=2000, timeout=30,
             errors.append(f"{source}: skipped (deadline reached)")
             continue
         try:
-            return _call_haiku(system, user, key, max_tokens, leg_timeout,
-                               wire=wire)
+            return _leg_with_deadline(
+                _call_haiku,
+                dict(system=system, user=user, api_key=key,
+                     max_tokens=max_tokens, timeout=leg_timeout, wire=wire),
+                deadline)
         except Exception as e:
             # why: explicit fall-through to the NEXT candidate. Failure modes
             # captured (network, 400 low-credit, 401, 429, 5xx, json parse);
@@ -244,8 +346,12 @@ def call_llm(system, user, api_key="", max_tokens=2000, timeout=30,
             errors.append("ollama: skipped (deadline reached)")
         else:
             try:
-                return _call_ollama(system, user, max_tokens, leg_timeout,
-                                    ollama_url, local_model)
+                return _leg_with_deadline(
+                    _call_ollama,
+                    dict(system=system, user=user, max_tokens=max_tokens,
+                         timeout=leg_timeout, ollama_url=ollama_url,
+                         local_model=local_model),
+                    deadline)
             except Exception as ollama_err:
                 errors.append(f"ollama: {type(ollama_err).__name__}: {ollama_err}")
     else:

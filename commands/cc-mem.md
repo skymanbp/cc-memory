@@ -1,5 +1,5 @@
 ---
-description: Query and manage cc-memory state for the current project. Subcommands run the CLI in the installed plugin's cc_memory/cli/mem.py.
+description: Query and manage cc-memory state for the current project. Subcommands run the installed plugin's CLI (cc_memory/cli/mem.py on a marketplace/dev checkout, cli/mem.py on a flat standalone install — the resolver below probes both).
 argument-hint: "<subcommand> [args]    e.g. stats | search <q> | progress | consolidate | supersedes <id>"
 ---
 
@@ -27,9 +27,10 @@ someone who knows the command exists.
 | `sessions` | Compaction history with archive paths |
 | `observations` | Raw PostToolUse rows still awaiting extraction |
 | `schema` | Print the live SQLite schema (tables, indexes, migrations) |
-| `sql "<SELECT ...>"` | Run a **read-only** query. Non-`SELECT` statements are refused — including the `PRAGMA name(value)` setter form, which an `=`-only test used to let through |
+| `sql "<SELECT ...>"` | Run a **read-only** query. Write statements are refused — only plain `SELECT`, `WITH … SELECT`, `EXPLAIN` and read-only `PRAGMA` run, and the `PRAGMA name(value)` setter form is refused too (an `=`-only test used to let it through) |
 | `progress` | Force-regenerate `memory/PROGRESS.md` from DB and print it |
 | `supersedes <id>` | Walk the supersede chain for a memory ID (anti-patch history) |
+| `archive <id>... [--supersedes ID]` | Retire memories found to be WRONG: `is_active=0`, recoverable, never `DELETE`. The supported exit from "this stored fact is false" — `sql` is read-only and `add` reconciles only when the new text scores similar enough to the old. `--supersedes` records which memory replaced them, keeping the chain walkable. Refuses ids from another project (`memories.id` is global to the DB file) |
 | `consolidate` | Run full LLM-backed consolidation pipeline |
 | `cleanup` | Lightweight no-LLM cleanup + MEMORY.md regen |
 | `summary` | Latest session summary (request/done/next_steps) |
@@ -91,3 +92,8 @@ When adding a memory via `/cc-mem add <category> "<content>"`, the CLI routes
 through `llm.memory_writer.upsert_smart` automatically — so it will merge or
 supersede if a similar memory exists rather than stacking. See
 `docs/CONTRACTS.md#anti-patch-contract` for the contract.
+
+Reconciliation is similarity-driven, so it handles a **restatement** of a fact,
+not a **repudiation** of one. When a stored memory is simply wrong and no new
+wording is close enough to supersede it, `archive` is the supported exit —
+using it is not a failure of the anti-patch contract, it is the other half.

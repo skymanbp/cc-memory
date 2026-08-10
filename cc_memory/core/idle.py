@@ -8,16 +8,16 @@ the Stop hook's tight budget (≤2 seconds added).
 What runs:
   1. cleanup_garbage         — drop known junk patterns
   2. assign_topics_auto      — keyword-frequency topic assignment for new memories
-  3. regenerate_memory_index — refresh MEMORY.md so it never goes stale
+  3. gc_stale_claims         — delete old, trace-free unreceipted session claims
+  4. regenerate_memory_index — refresh MEMORY.md so it never goes stale
 
 What does NOT run here (deferred to PreCompact / manual consolidate):
   - LLM topic summarization (slow)
   - merge_near_duplicates    (O(N²), only at PreCompact)
-  - decay_importance         (intentionally infrequent)
+  - decay_and_archive        (intentionally infrequent)
   - archive_consolidated     (only meaningful after summarization)
 """
 import sys
-import tempfile
 from datetime import datetime
 from pathlib import Path
 
@@ -28,6 +28,10 @@ if str(_PKG_ROOT) not in sys.path:
 from core.db import MemoryDB
 from core.consolidate import cleanup_garbage, assign_topics_auto
 from core.logger import get_logger
+# safe_id replaces this module's private `[:16]` truncating copy (three
+# modules each had one; truncation cross-wired any two sessions sharing a
+# 16-char prefix). read_marker never raises and refuses a planted symlink.
+from core.markers import marker_path, read_marker, safe_id as _safe_id, write_marker
 from llm.memory_writer import regenerate_memory_index
 
 _log = get_logger("idle")
@@ -36,27 +40,21 @@ IDLE_INTERVAL_TURNS = 5  # run light reorg every N user turns
 _MARKER_PREFIX = "cc_mem_idle_"
 
 
-def _safe_id(session_id):
-    return session_id[:16].replace("/", "_").replace("\\", "_")
-
-
 def _last_idle_turn(session_id):
     """Read the last turn at which we ran idle reorg. Returns 0 if never."""
-    marker = Path(tempfile.gettempdir()) / f"{_MARKER_PREFIX}{_safe_id(session_id)}"
-    if not marker.exists():
-        return 0
+    marker = marker_path(_MARKER_PREFIX, _safe_id(session_id))
     try:
-        return int(marker.read_text(encoding="utf-8").strip())
-    except (ValueError, OSError):
+        return int(read_marker(marker, "0").strip() or 0)
+    except ValueError:
         # why: marker file corrupted — treat as never-run; will be overwritten
         # in this call so the corruption doesn't recur
         return 0
 
 
 def _record_idle_turn(session_id, turn):
-    marker = Path(tempfile.gettempdir()) / f"{_MARKER_PREFIX}{_safe_id(session_id)}"
+    marker = marker_path(_MARKER_PREFIX, _safe_id(session_id))
     try:
-        marker.write_text(str(turn), encoding="utf-8")
+        write_marker(marker, str(turn))
     except OSError:
         # why: tempfile write failure (read-only fs / disk full) — skip the
         # marker update; worst case we re-run idle reorg next turn, which
@@ -87,6 +85,10 @@ def maybe_run_idle(cwd: str, session_id: str, turn_count: int,
     results = {
         "garbage": cleanup_garbage(db, project_id),
         "topics_assigned": assign_topics_auto(db, project_id),
+        # Unreceipted claims from killed compactions, old enough that their
+        # writer is dead and provably trace-free (no memories / summary /
+        # archive attached). Single guarded DELETE — hook-budget cheap.
+        "stale_claims": db.gc_stale_claims(project_id),
         "memory_md_regen": False,
     }
 

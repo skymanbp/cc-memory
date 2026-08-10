@@ -48,22 +48,24 @@ sys.path.insert(0, str(_PKG_ROOT))
 from core.encoding_setup import enable_utf8_io
 enable_utf8_io()
 
-from core.db import MemoryDB
+from core.db import CATEGORIES, MemoryDB
 from core.extractor import (build_extraction, load_transcript_window, group_sentences,
+                            summarize_transcript, files_from_observations,
                             CATEGORY_ORDER, CATEGORY_LABELS)
 from core.logger import get_logger
 # Project opt-out. This USED to be a private literal copy in this file plus a
-# second byte-identical one in hooks/user_prompt.py; the other four hooks had no
-# check at all, so a project initialised BEFORE being listed stayed fully
-# captured. One implementation now, called by all six. See core/modes.py.
+# second byte-identical one in hooks/user_prompt.py; the other four hooks
+# <!--ce:hooks:asof--> had no check at all, so a project initialised BEFORE
+# being listed stayed fully captured. One implementation now, called by all
+# six. See core/modes.py.
 from core.modes import is_excluded
 from core.roots import project_root  # v2.6.0 root anchoring — core/roots.py
 # Privacy filter for the PROGRESS ingress below. The observation and memory
 # write paths honoured <private> from v2.5.0; this hook's progress ingress
 # never did (see _first_user_request).
-from core.privacy import clean_for_storage
+from core.privacy import clean_for_storage, strip_harness_blocks
 from core.progress import (write_progress_md, write_session_archive, collect_progress_state,
-                           migrate_legacy_handoff, ensure_memory_gitignore)
+                           migrate_legacy_handoff, ensure_memory_dir)
 from llm.memory_writer import upsert_batch, regenerate_memory_index
 
 _log = get_logger("pre_compact")
@@ -104,12 +106,35 @@ _API_TIMEOUT = 25
 _FALLBACK_TIMEOUT = 30
 _LLM_DEADLINE_S = 75.0
 
+# Oldest-first observation slice fed to one extraction. The bound used to be
+# an inline `[-50:]` INSIDE the prompt builder while the cleanup watermark
+# covered everything read — the two disagreeing is register B3.
+#
+# 50 was BELOW THE ARRIVAL RATE, which makes the queue a leak rather than a
+# buffer. Measured on this repository's own database: 1 575 observations over
+# 18 compactions = 88 per compaction against a service rate of 50, so the
+# backlog grew ~38 every time and `trim_observations` eventually deleted the
+# oldest rows at the 5 000 cap — unread. B3 fixed WHICH end got fed and left
+# the queue unable to drain, so the outcome its comment describes ("deleted
+# having never been shown to any model") still arrived, just later.
+#
+# Two bounds now, because a row count alone does not bound a prompt: the
+# character budget is what actually protects the 75 s LLM deadline, and the
+# row cap sits above any realistic arrival rate so the queue converges.
+# Measured on the same data: the oldest 300 rows truncated at 200 chars each
+# cost 43.6 KiB, and 24 KiB buys ~226 rows at the observed 106-chars-per-row
+# average — comfortably above 88, so the backlog shrinks every compaction.
+# 200 chars per line matches what hooks/stop.py already feeds its observer.
+_OBS_PER_EXTRACTION = 300
+_OBS_CHARS_BUDGET = 24000
+_OBS_LINE_CHARS = 200
+
 _EXTRACTION_PROMPT = """\
 You are a memory extraction system. Given a Claude Code conversation transcript, \
 extract the most important information worth remembering across sessions.
 
 Output a JSON array of objects with these fields:
-- "category": one of "decision", "result", "config", "bug", "task", "arch", "note"
+- "category": one of """ + ", ".join(f'"{c}"' for c in CATEGORIES) + """
 - "content": one concise, self-contained sentence with specific values (numbers, file names, parameters)
 - "importance": 1-5 (5=critical/never-forget, 4=important, 3=useful, 2=minor, 1=trivial)
 - "topic": a short lowercase keyword for grouping (e.g. "auth", "pipeline", "config", "ui")
@@ -125,74 +150,22 @@ Rules:
 Output ONLY a valid JSON array, no markdown, no explanation."""
 
 
-def _build_transcript_summary(messages, max_chars=12000, total_records=None):
-    """Render the most RECENT slice of the conversation, up to max_chars.
-
-    Fills from the NEWEST message BACKWARDS, then restores chronological order.
-    The previous version filled from the oldest message and broke at the budget,
-    so on a long-lived session the LLM only ever saw the session's opening
-    minutes: measured on a real 2.1 GiB transcript, the 12k budget was exhausted
-    after 329 of ~585,000 records, pinning every extraction to content 70 days
-    stale while all recent work went unseen. A handoff needs the recent end.
-
-    ``total_records`` is the transcript's REAL record count. Without it the
-    "earlier messages omitted" figure is window-relative and badly understates
-    reality — on that same transcript it would claim ~10,000 omitted when
-    ~575,000 were, which actively misleads the extracting model about how much
-    context it is missing.
-    """
-    parts, total, scanned = [], 0, 0
-    for msg in reversed(messages):
-        scanned += 1
-        message = msg.get("message", {})
-        if not isinstance(message, dict):
-            continue
-        role = message.get("role", "")
-        content = message.get("content", "")
-        if isinstance(content, str):
-            text = content
-        elif isinstance(content, list):
-            text_parts = []
-            for block in content:
-                if isinstance(block, dict):
-                    if block.get("type") == "text":
-                        text_parts.append(block.get("text", ""))
-                    elif block.get("type") == "tool_use":
-                        name = block.get("name", "")
-                        inp = block.get("input", {})
-                        if name in ("Edit", "Write", "MultiEdit"):
-                            text_parts.append(f"[Tool: {name} {inp.get('file_path', '')}]")
-                        elif name == "Bash":
-                            text_parts.append(f"[Bash: {inp.get('command', '')[:100]}]")
-                        elif name == "TodoWrite":
-                            text_parts.append(
-                                f"[TodoWrite: {json.dumps(inp.get('todos', [])[:5], ensure_ascii=False)[:200]}]"
-                            )
-                        else:
-                            text_parts.append(f"[Tool: {name}]")
-            text = "\n".join(text_parts)
-        else:
-            continue
-
-        if not text.strip():
-            continue
-        if len(text) > 800:
-            text = text[:400] + "\n...[truncated]...\n" + text[-400:]
-        line = f"[{role}] {text}\n"
-        if total + len(line) > max_chars:
-            scanned -= 1  # this one didn't make it in
-            break
-        parts.append(line)
-        total += len(line)
-    parts.reverse()  # newest-first accumulation → chronological for the LLM
-    universe = len(messages) if total_records is None else max(total_records, len(messages))
-    omitted = universe - scanned
-    if omitted > 0:
-        parts.insert(0, f"[...{omitted} earlier messages omitted, showing most recent...]\n")
-    return "\n".join(parts)
+# THE transcript summariser lives in core.extractor (register M2): this
+# file, session_start and the dashboard each carried a near-identical
+# copy, and the v2.4.2 fill-direction fix had to be applied three times.
+_build_transcript_summary = summarize_transcript
 
 
 def _extract_via_llm(messages, observations=None, total_records=None):
+    """Returns a (possibly EMPTY) list when extraction RAN, None when it did
+    not — no key, nothing to summarise, or a failed call. The distinction is
+    load-bearing (register C1): the caller deletes the observations it fed
+    ONLY on a list, because a None used to be coerced to [] and the cleanup
+    then destroyed every observation the model never saw.
+
+    `observations` must already be the caller's bounded, oldest-first slice —
+    every row passed in IS shown to the model, so the caller's consumption
+    watermark and this prompt cannot disagree (register B3)."""
     from core.auth import get_api_key
     api_key, source = get_api_key()
     if not api_key:
@@ -206,7 +179,9 @@ def _extract_via_llm(messages, observations=None, total_records=None):
 
     obs_context = ""
     if observations:
-        obs_lines = [f"[{o['tool_name']}] {o['tool_input']}" for o in observations[-50:]]
+        obs_lines = [f"[{o['tool_name']}] "
+                     f"{(o['tool_input'] or '')[:_OBS_LINE_CHARS]}"
+                     for o in observations]
         if obs_lines:
             obs_context = "\n\nTool observations (for context):\n" + "\n".join(obs_lines)
 
@@ -214,17 +189,13 @@ def _extract_via_llm(messages, observations=None, total_records=None):
 
     try:
         from llm.ccl_backend import call_llm
+        from llm.parse import extract_json
         text = call_llm(_EXTRACTION_PROMPT, user_content, api_key,
                         max_tokens=2500, timeout=_API_TIMEOUT,
                         fallback_timeout=_FALLBACK_TIMEOUT,
                         deadline=_HOOK_T0 + _LLM_DEADLINE_S)
-        text = text.strip()
-        if text.startswith("```"):
-            text = "\n".join(
-                l for l in text.split("\n") if not l.strip().startswith("```")
-            )
-        memories = json.loads(text)
-        if not isinstance(memories, list):
+        memories = extract_json(text, kind="array")
+        if memories is None:
             return None
 
         valid = []
@@ -237,7 +208,7 @@ def _extract_via_llm(messages, observations=None, total_records=None):
             topic = m.get("topic", "")
             if not content or len(content) < 10:
                 continue
-            if cat not in ("decision", "result", "config", "bug", "task", "arch", "note"):
+            if cat not in CATEGORIES:
                 cat = "note"
             imp = max(1, min(int(imp), 5))
             valid.append({
@@ -245,7 +216,10 @@ def _extract_via_llm(messages, observations=None, total_records=None):
                 "topic": topic if isinstance(topic, str) else "",
             })
         _log.info(f"LLM extracted {len(valid)} memories")
-        return valid if valid else None
+        # An empty list is a RESULT (the model ran and found nothing worth
+        # keeping), not a failure — see the docstring. `valid if valid else
+        # None` conflated the two and cost the observations either way.
+        return valid
 
     except (urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError,
             TimeoutError, OSError, KeyError, ValueError, RuntimeError,
@@ -353,6 +327,17 @@ def _first_user_request(messages, max_scan=200):
                     if (block.get("text") or "").strip():
                         candidate = block["text"]
                         break
+        # Claude Code wraps a slash command in its own `<local-command-*>` /
+        # `<command-*>` blocks and files them as a role=user record with
+        # non-empty text — so a session opened with `/model` or `/compact`
+        # made the FIRST match the harness's scaffolding, and its text
+        # ("Caveat: … DO NOT respond to these messages …") became the stored
+        # request. Seen in this repo's own committed PROGRESS.md §1, and
+        # unrepairable afterwards: `session_start._refresh_progress_row` is
+        # fill-only-empty by contract, so a wrong non-empty value is final.
+        # A record that is ENTIRELY scaffolding strips to "" and we keep
+        # scanning; a real request that merely FOLLOWS one keeps its words.
+        candidate = strip_harness_blocks(candidate)
         if candidate.strip():
             return clean_for_storage(candidate)[:500]
     return ""
@@ -437,7 +422,16 @@ def _reserve_archive_ts(memory_dir, now):
     base = now.strftime("%Y%m%d_%H%M%S_") + now.strftime("%f")[:3]
     try:
         archive_dir = memory_dir / "sessions" / now.strftime("%Y/%m")
-        archive_dir.mkdir(parents=True, exist_ok=True)
+        # Component-by-component, NOT parents=True: parents=True materialises
+        # the WHOLE chain, so a project deleted between ensure_memory_dir at
+        # hook entry and this line (the transcript load sits between them) was
+        # silently resurrected as an empty shell — the exact failure
+        # ensure_memory_dir exists to refuse. Without parents, a missing
+        # memory_dir raises FileNotFoundError into the handler below instead.
+        for part in (memory_dir / "sessions",
+                     memory_dir / "sessions" / now.strftime("%Y"),
+                     archive_dir):
+            part.mkdir(exist_ok=True)
         for n in range(_ARCHIVE_TS_TRIES):
             stem = base if n == 0 else f"{base}-{n}"
             try:
@@ -474,8 +468,55 @@ def main():
     trigger = data.get("trigger", "auto")
     claude_sid = data.get("session_id", "")
 
+    # Coerce, don't abort: these two fields are ANNOTATION (a sessions-row
+    # column and the PROGRESS.md §0 tag), while cwd/transcript_path below are
+    # load-bearing. A list-valued `trigger` used to travel all the way to
+    # db.insert_session, raise sqlite3.InterfaceError there, and the outer
+    # handler then dropped the ENTIRE compaction — extraction, session
+    # archive and the PROGRESS.md handoff — over a field whose only job is to
+    # say "auto" or "manual" (measured: last_save.success=false, no
+    # PROGRESS.md; session_id={} identically). stop.py/user_prompt.py exit
+    # early instead because THEIR session_id names the marker files; here the
+    # handoff is the point and must survive.
+    if not isinstance(trigger, str) or not trigger:
+        _log.warn(f"trigger is {type(trigger).__name__}; coercing to 'auto'")
+        trigger = "auto"
+    if not isinstance(claude_sid, str):
+        _log.warn(f"session_id is {type(claude_sid).__name__}; coercing to ''")
+        claude_sid = ""
+
+    if not isinstance(cwd, str) or not isinstance(transcript_path, str):
+        # The other five hooks <!--ce:hooks:subset--> all carry this
+        # isinstance check; this one did not, and it is the only hook that
+        # MKDIRS unconditionally. A payload
+        # carrying `{"cwd": 123}` therefore went: is_excluded -> False (it
+        # rejects non-strings by design), project_root -> raises -> _safe_path
+        # -> Path("."), and the try block below then created memory/memory.db
+        # in the HOOK PROCESS'S OWN directory — whatever the agent last cd'd
+        # to. Measured: cwd=123 and cwd=["a"] each planted a database; the
+        # other five hooks <!--ce:hooks:subset--> planted none. Exit 0 and
+        # silent, per hook contract.
+        _log.warn(f"cwd is {type(cwd).__name__}, transcript_path is "
+                  f"{type(transcript_path).__name__}; both must be strings")
+        sys.exit(0)
+
     if not cwd or not transcript_path:
         _log.warn("missing cwd or transcript_path")
+        sys.exit(0)
+
+    if "\x00" in cwd or "\x00" in transcript_path:
+        # A NUL is the one character no filesystem accepts, and every stdlib
+        # path call rejects it with `ValueError: embedded null character` —
+        # NOT an OSError. That is what let it walk through every handler here:
+        # the mkdir below raised, the outer `except Exception` caught it, and
+        # then the RECOVERY path wrote `.last_save.json` under the same
+        # poisoned cwd, raised the same ValueError, and escaped its narrower
+        # `except OSError` to module level. Measured rc=1 with 1780 bytes of
+        # traceback — the two things the hook contract forbids. Rejecting it
+        # at the entry is one check that covers every downstream use, instead
+        # of widening an except clause per call site.
+        _log.warn("cwd or transcript_path contains a NUL; no filesystem "
+                  "accepts it, so there is nothing this compaction can do")
         sys.exit(0)
 
     # Project opt-out — MUST precede the try block below, whose first act is to
@@ -497,20 +538,16 @@ def main():
     cwd = str(project_root(cwd, log=_log))
 
     try:
-        memory_dir = Path(cwd) / "memory"
-        memory_dir.mkdir(parents=True, exist_ok=True)
-        (memory_dir / "sessions").mkdir(exist_ok=True)
-        (memory_dir / "topics").mkdir(exist_ok=True)
+        # ensure_memory_dir refuses a project directory that no longer exists
+        # (FileNotFoundError -> the handler at the bottom of this try), and
+        # writes memory/.gitignore on EVERY compaction rather than only at
+        # project creation: user_prompt's initializer returns early once
+        # memory.db exists, so an install created before an artifact was
+        # introduced would otherwise never learn to ignore it.
+        memory_dir = ensure_memory_dir(Path(cwd) / "memory")
 
         # Migrate old SESSION_HANDOFF.md aside (one-shot)
         migrate_legacy_handoff(memory_dir)
-
-        # Ensure memory/.gitignore covers everything we generate — including the
-        # attempt marker written a few lines below. This runs on EVERY compaction
-        # rather than only at project creation: user_prompt's initializer returns
-        # early once memory.db exists, so an install created before an artifact
-        # was introduced would otherwise never learn to ignore it.
-        ensure_memory_gitignore(memory_dir)
 
         db = MemoryDB(memory_dir / "memory.db")
         project_id = db.upsert_project(cwd)
@@ -563,9 +600,28 @@ def main():
         # archive. See _reserve_archive_ts.
         file_ts = _reserve_archive_ts(memory_dir, now)
 
-        # Session archive
+        # Session archive. Written atomically since v2.8.0 — the plain write
+        # it replaced tore under a concurrent reader (332 empty reads in 2,264
+        # samples) and left a PERMANENT torn file, because `_reserve_archive_ts`
+        # has already claimed this exact path and nothing rewrites it.
+        #
+        # Atomic means it can now RAISE where the truncating write silently
+        # tore (a Windows sharing violation on `os.replace`). That must not
+        # cost the compaction: PROGRESS.md is the handoff contract and the
+        # archive is supporting evidence, so a failed archive downgrades to
+        # "no archive path recorded" and everything else proceeds. The 0-byte
+        # placeholder the reservation created stays on disk; the `sessions`
+        # row simply does not point at it.
         archive_text = _fmt_archive(ext, timestamp, trigger, project_name)
-        archive_path = write_session_archive(memory_dir, project_name, archive_text, file_ts)
+        try:
+            archive_path = write_session_archive(memory_dir, project_name,
+                                                 archive_text, file_ts)
+            archive_rel = str(archive_path.relative_to(memory_dir))
+        except OSError as exc:
+            _log.error(f"session archive not written ({exc}); the compaction "
+                       f"continues — PROGRESS.md is the contract, the archive "
+                       f"is evidence")
+            archive_rel = ""
 
         # Session row
         session_id = db.insert_session(
@@ -573,39 +629,52 @@ def main():
             claude_session_id=claude_sid,
             trigger_type=trigger,
             msg_count=ext["msg_count"],
-            archive_path=str(archive_path.relative_to(memory_dir)),
+            archive_path=archive_rel,
             brief_summary=archive_text[:1000],
         )
 
-        # Observations from this session (for LLM context)
-        last_session_ids = db.get_recent_session_ids(project_id, 2)
-        last_ts = ""
-        if len(last_session_ids) >= 2:
-            with db._connect() as conn:
-                row = conn.execute(
-                    "SELECT compacted_at FROM sessions WHERE id = ?",
-                    (last_session_ids[1],),
-                ).fetchone()
-                if row:
-                    last_ts = row["compacted_at"]
-        if last_ts:
-            observations = db.get_observations_since(project_id, last_ts)
-        else:
-            # FIRST compaction of a project: insert_session above already ran,
-            # so last_session_ids has exactly ONE entry (this session) and there
-            # is no previous compacted_at to bound by. The old `else []` threw
-            # away every observation the session had accumulated, blanking
-            # PROGRESS.md §6 ("*(no files touched)*") and the session summary's
-            # files_read/files_modified on the one compaction a fresh project
-            # gets. Fall back to the recent-N window — the same tier-2C fallback
-            # session_start.py uses. Returned newest-first; reversed so the
-            # downstream ordering (LLM context, files_read/modified) stays
-            # chronological like get_observations_since.
-            observations = list(reversed(db.get_recent_observations(project_id, 40)))
+        # Observations to feed this extraction. EVERYTHING still present for
+        # this project: `cleanup_observations` below deletes exactly what is
+        # consumed here, so whatever survives is by definition unconsumed.
+        #
+        # This used to bound on the PREVIOUS session's `compacted_at` — a
+        # naive-local-time string. A clock that stepped back (DST fall-back,
+        # NTP correction) put every subsequent observation BELOW that bound,
+        # so extraction saw none of them and the cleanup at the bottom of
+        # this function deleted them anyway: measured, 3 written, 0 seen, 3
+        # destroyed. Reading "everything not yet cleaned" removes the
+        # watermark from the read side entirely; the write side keeps one,
+        # and it is now a monotonic row id.
+        observations = db.get_observations_since(project_id, 0)
+        # Feed the OLDEST prefix and watermark EXACTLY what was fed (register
+        # B3): the prompt used to take the newest 50 while the cleanup bound
+        # was the highest id READ, so on a >50-observation backlog the oldest
+        # rows were deleted having never been shown to any model. Rows past
+        # the prefix keep their ids above the watermark and are fed by the
+        # next compaction; the deferral is logged (no silent caps). The
+        # watermark also predates the slow LLM leg, so anything a concurrent
+        # PostToolUse writes meanwhile survives too.
+        obs_fed, _obs_chars = [], 0
+        for _o in observations[:_OBS_PER_EXTRACTION]:
+            _cost = len((_o["tool_input"] or "")[:_OBS_LINE_CHARS]) + len(
+                _o["tool_name"] or "") + 4
+            if obs_fed and _obs_chars + _cost > _OBS_CHARS_BUDGET:
+                break
+            obs_fed.append(_o)
+            _obs_chars += _cost
+        consumed_through = obs_fed[-1]["id"] if obs_fed else 0
+        if len(observations) > len(obs_fed):
+            _log.info(f"observations: feeding oldest {len(obs_fed)} of "
+                      f"{len(observations)} ({_obs_chars} chars); the rest "
+                      f"wait for the next run")
 
-        # LLM extraction → upsert through memory_writer (anti-patch path)
-        extracted = _extract_via_llm(messages, observations,
-                                     total_records=window.total_records) or []
+        # LLM extraction → upsert through memory_writer (anti-patch path).
+        # None = did not run / failed; a list (even empty) = ran. Register C1:
+        # the observations below are deleted only when extraction RAN.
+        extracted = _extract_via_llm(messages, obs_fed,
+                                     total_records=window.total_records)
+        llm_ok = extracted is not None
+        extracted = extracted or []
         method = "llm" if extracted else "none"
 
         counts = upsert_batch(db, project_id, session_id, extracted, memory_dir=memory_dir)
@@ -619,14 +688,7 @@ def main():
             db.upsert_keywords(project_id, ext["keywords"])
 
         # Session summary (structured)
-        obs_files_read = list(dict.fromkeys(
-            o["tool_input"] for o in observations
-            if o["tool_name"] == "Read" and o["tool_input"]
-        ))
-        obs_files_modified = list(dict.fromkeys(
-            o["tool_input"] for o in observations
-            if o["tool_name"] in ("Edit", "Write", "MultiEdit") and o["tool_input"]
-        ))
+        obs_files_read, obs_files_modified =             files_from_observations(observations)
         # HEAD slice, not `messages`: the session's opening request lives in the
         # first records. A tail-only window would lose it entirely.
         first_user_msg = _first_user_request(window.head)
@@ -643,18 +705,38 @@ def main():
             else "; ".join(task_mems[:5])
         )
 
+        summary_ok = True
         try:
+            # `completed` and `learned` feed PROGRESS.md §2's **Done** and
+            # **In-flight** through core/progress.py, so filling them with a
+            # comma-joined path list and a hard-coded "" made the handoff
+            # contract's status section a path dump and a permanently empty
+            # line — visible in this repo's own committed PROGRESS.md. The
+            # files already have their own columns two lines below; what §2
+            # is asking for is what was CONCLUDED, and this function already
+            # holds it in `extracted`. Split by category: outcomes vs. things
+            # now known about the system.
+            _done = [m["content"] for m in extracted
+                     if m.get("category") in ("result", "decision")]
+            _learned = [m["content"] for m in extracted
+                        if m.get("category") in ("arch", "config", "bug")]
             db.insert_session_summary(session_id, project_id, {
                 "request": first_user_msg,
                 "investigated": ", ".join(obs_files_read[:10]),
-                "learned": "",
-                "completed": ", ".join(obs_files_modified[:10]),
+                "learned": "; ".join(_learned[:5]),
+                "completed": ("; ".join(_done[:5]) if _done
+                              else ", ".join(obs_files_modified[:10])),
                 "next_steps": next_steps_str,
                 "notes": "",
                 "files_read": obs_files_read[:20],
                 "files_modified": obs_files_modified[:20],
             })
         except Exception as e:
+            # The receipt below is conditional on this flag (register r6-B4):
+            # swallowing the failure AND receipting made the transcript
+            # permanently ineligible for retroactive repair while its summary
+            # row simply did not exist.
+            summary_ok = False
             _log.error(f"session summary save error: {e}")
 
         # === PROGRESS.md: FULL REWRITE from authoritative state ===========
@@ -676,20 +758,50 @@ def main():
         db.upsert_progress(project_id, **progress_state)
         progress_path = write_progress_md(db, project_id, memory_dir)
 
-        # Clean up observations consumed by this extraction.
-        # NOTE the format: observations.timestamp is written by db._now() as
-        # `datetime.now().isoformat(timespec="seconds")` — "2026-08-05T14:03:11"
-        # — and db.cleanup_observations compares it as a STRING. `timestamp`
-        # above is space-separated ("2026-08-05 14:03:11") and ord(' ')=32 <
-        # ord('T')=84, so every row from the SAME DAY sorted ABOVE the bound and
-        # survived: the rows this extraction just consumed were exactly the ones
-        # never cleaned. Pass the same ISO shape the rows are stored in.
-        if observations:
-            db.cleanup_observations(project_id, now.isoformat(timespec="seconds"))
+        # Clean up exactly the observations this extraction consumed — by ROW
+        # ID, the same watermark the read used. The bound used to be a
+        # wall-clock string, which needed the two formats to agree (they did
+        # not: `timestamp` here is space-separated while rows store the `T`
+        # form, and ord(' ') < ord('T') meant same-day rows survived) and
+        # still deleted rows a backwards clock had hidden from extraction. An
+        # id bound cannot disagree with itself, and anything written while
+        # the LLM leg ran has a HIGHER id and is left for the next run.
+        #
+        # Only when extraction RAN (register C1): a failed or skipped call
+        # used to delete every observation unread — a credential outage
+        # measured 4 -> 0 rows with 0 memories extracted. Kept rows are
+        # bounded by trim_observations below, and hitting that cap is logged.
+        if llm_ok and consumed_through:
+            db.cleanup_observations(project_id, consumed_through)
+        elif not llm_ok and observations:
+            _log.warn(f"extraction did not run; keeping "
+                      f"{len(observations)} observation(s) for the next "
+                      f"compaction")
+        trimmed = db.trim_observations(project_id)
+        if trimmed:
+            _log.warn(f"observations over the {MemoryDB._MAX_OBSERVATIONS} "
+                      f"cap: deleted the oldest {trimmed} row(s) that were "
+                      f"NEVER fed to extraction. Arrival is outrunning "
+                      f"_OBS_PER_EXTRACTION={_OBS_PER_EXTRACTION} / "
+                      f"_OBS_CHARS_BUDGET={_OBS_CHARS_BUDGET}")
 
         # MEMORY.md was already regenerated by upsert_batch. Touch again
         # to make sure it reflects any non-batch state changes.
         regenerate_memory_index(db, project_id, memory_dir)
+
+        # The RECEIPT half of insert_session's claim (register X6): the row
+        # went in complete=0 up top, and readers that mean "this transcript
+        # was saved" (_get_saved_session_ids) only believe complete=1. Every
+        # dependent write — memories, summary, progress, cleanup — has landed
+        # by this line, so a kill anywhere above leaves the row incomplete
+        # and the next retroactive save re-transcribes instead of skipping.
+        # A FAILED summary withholds the receipt too (register r6-B4): the
+        # re-transcription is idempotent, a missing summary row is not.
+        if summary_ok:
+            db.mark_session_complete(session_id)
+        else:
+            _log.warn("summary write failed; session left incomplete so the "
+                      "retroactive pass re-transcribes it")
 
         # Save status (consumed by SessionStart for the footer warning)
         status = {
@@ -722,7 +834,7 @@ def main():
         # NOT here — see module docstring. This sync leg is done.
         _log.info(
             f"pre_compact OK: ins={n_inserted} mrg={n_merged} sup={n_super} skp={n_skipped} "
-            f"obs={len(observations)} archive={archive_path.name}"
+            f"obs={len(observations)} archive={archive_rel or '(none)'}"
         )
         # One-line visible status for the next session
         print(
@@ -752,9 +864,14 @@ def main():
             # confidently wrong cause. Retire it; .last_save.json carries the
             # real story.
             _clear_attempt(memory_dir)
-        except OSError:
-            # why: status write also failing means disk is unavailable; we
-            # can't surface anything further without breaking the hook contract
+        except Exception:
+            # why: this is the LAST-RESORT handler, and a last-resort handler
+            # that can itself raise is not one. It runs on the same `cwd` that
+            # just failed, so whatever broke the main path breaks this one too
+            # — measured with a NUL-bearing cwd, where the retry raised
+            # `ValueError: embedded null character`, sailed past the previous
+            # `except OSError`, and took the hook to rc=1 with a traceback.
+            # Nothing further can be surfaced without breaking the contract.
             pass
 
     sys.exit(0)

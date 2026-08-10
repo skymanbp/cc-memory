@@ -1,4 +1,4 @@
-<!-- i18n-source: CONTRACTS.md | sha256: 21e1b6a641fd2759 | version: 2.7.0 | translated: 2026-08-07 -->
+<!-- i18n-source: CONTRACTS.md | sha256: 8994328946999d81 | version: 2.8.0 | translated: 2026-08-09 -->
 > [English](CONTRACTS.md) · **简体中文**
 
 # cc-memory — 契约（Contracts）
@@ -73,58 +73,58 @@ v2.0 有四条互相独立的保存路径（`pre_compact`、`stop` 观察者、`
 （`llm/memory_writer.py:95-158`）。
 
 ```
-0. content = clean_for_storage(content.strip()).           (memory_writer.py:57)
+0. content = clean_for_storage(content.strip()).           (memory_writer.py:66)
    若 len < MIN_CONTENT_LEN (10) 则 SKIP（reason: too_short）。   (:110-111)
    把 {decision,result,config,bug,task,arch,note} 之外的 category
      强制为 "note"。                                             (:113-114)
    把 importance 钳制到 1-5；tags 默认为 []。                     (:115-116)
 
+0b. 从这里到第 5 步的全部逻辑运行在同一个 `BEGIN IMMEDIATE` 事务里 ——
+   `db.reconcile_upsert`（core/db.py:1162）。`upsert_smart` 以参数形式提供
+   策略：阈值、最佳候选函数（`_make_pick`）与标签并集规则
+   （`_merge_fields`）；原子性归数据库所有。在这个事务出现之前，两个并发
+   保存同一句话的写入方会同时看到空表并各自插入（实测：
+   actions=['inserted','inserted']，同一哈希两条活跃行）。
+
 1. 计算 content_hash = sha256(content.strip().lower())[:16]。
-                                                     (db.compute_content_hash,
-                                                      core/db.py:817-819)
-   若 db.find_by_hash(project_id, content_hash) 命中：            (:120-124)
+                                                     (db.compute_content_hash)
+   精确哈希命中由事务**内部**的 SQL 检查：
        → SKIP。Action: "skipped"。Reason: hash_match。
        理由：文本完全重复。
+   （`db.find_by_hash` 只作为 IntegrityError 的恢复路径存在——竞态的
+   落败方重读胜者，而不是抛异常。）
 
-2. 在作用域内查找最相似的 ACTIVE 记忆
-   (_find_similar, memory_writer.py:102-131)：
-       主作用域：  topic == new_topic  (db.get_memories_by_topic)
+2. 在作用域内查找最相似的 ACTIVE 记忆（`_make_pick`）：
+       主作用域：  topic == new_topic
        兜底作用域：category == new_category, is_active = 1,
-                   ORDER BY updated_at DESC LIMIT 50
+                   ORDER BY updated_at DESC LIMIT max_candidates
                    —— 在 topic 为空，或按 topic 的查询没有返回任何行时触发
-   在 content 与候选之间基于字符三元组计算 Jaccard 相似度；
-   至多对 MAX_CANDIDATES_TO_SCAN (50) 个候选打分。
-   令 sim = 最大相似度。
+   相似度是基于 `core.textsim.shingle_set` 的 Jaccard —— 非 CJK 文本用
+   字符三元组，CJK 连续段用字符**二元组**（十个汉字里改一个字在三元组下
+   只得 0.4545，低于 MID_SIM，永远无法 merge 或 supersede）。至多对
+   MAX_CANDIDATES_TO_SCAN (500) 个候选打分。令 sim = 最大相似度。
 
-3. 若 sim >= HIGH_SIM (0.80)：                                (:129-139)
-       → MERGE_IN_PLACE。
-       db.update_memory(existing.id,
-                         content=new_content,
-                         importance=max(new_imp, existing_imp),
-                         topic=new_topic or existing_topic,
-                         tags=new_tags ∪ {"merged"})   # 注意：db.update_memory
-                                                       # 会整体替换 tags 列
-                                                       # (db.py:480-482) ——
-                                                       # 原有行的 tags 会丢失
-       Action: "merged"。不新增行。content_hash 会被重算 (db.py:470-473)。
+3. 若 sim >= HIGH_SIM (0.80)：
+       → MERGE_IN_PLACE，由同一事务内的 SQL 完成。
+       content=new_content, importance=max(new_imp, existing_imp),
+       topic=new_topic or existing_topic,
+       tags=_merged_tags(existing_tags, new_tags, ["merged"])
+       # 与**存活行**的 tags 做并集，绝不整体替换 —— 来源标签
+       # （["observer","realtime"]、["mcp"] 等）得以继承 —— 并以
+       # MAX_TAGS (32) 封顶，因为 memory_add 是模型可调用的。
+       Action: "merged"。不新增行。content_hash 会被重算。
        理由：“本质上是同一句话”—— 保留最新的措辞。
 
-4. 否则若 sim >= MID_SIM (0.50)：                            (:141-150)
-       → SUPERSEDE。
-       new_id = db.supersede_memory(existing.id, new_content,
-                                     project_id, session_id, category,
-                                     importance=max(new_imp, existing_imp),
-                                     tags=new_tags ∪ {"supersedes"},
-                                     topic=new_topic or existing_topic)
-       # 内部会归档 existing.id (db.py:723) —— 写入器自己
-       # 从不调用 db.archive_memory
+4. 否则若 sim >= MID_SIM (0.50)：
+       → SUPERSEDE：在**同一个事务**里插入带 supersedes_id=existing.id
+       的新行**并**归档旧行（拆成两个事务时，中途被杀会留下两条活跃行）。
+       tags=_merged_tags(existing_tags, new_tags, ["supersedes"])，同样封顶。
        Action: "superseded"。
        理由：同一事实的精炼 / 整合版本；
        通过取代链保留历史，这样才能审计究竟改了什么。
 
-5. 否则：                                                    (:153-158)
-       → INSERT NEW。
-       db.insert_memory(...)
+5. 否则：
+       → INSERT NEW（仍在事务内）。
        Action: "inserted"。
        理由：独立事实。
 
@@ -143,12 +143,11 @@ v2.0 有四条互相独立的保存路径（`pre_compact`、`stop` 观察者、`
 
 ### 阈值与常量
 
-`HIGH_SIM` / `MID_SIM` 是 `cc_memory/llm/memory_writer.py:55-56` 中的模块常量
-（0.80 / 0.50），与之并列的还有 `:46-47` 的 `MIN_CONTENT_LEN`（10）和
-`MAX_CANDIDATES_TO_SCAN`（50）。`cc_memory/config.json:12-18` 中镜像的 `writer.*`
-键（`:13-16` 那四个数值键）**不会**被任何代码路径读取——`memory_writer.py` 从不打开
-`config.json`，而在全仓库 grep `high_similarity_threshold` /
-`mid_similarity_threshold` 只能找到那个 JSON 块和 README 的散文，没有任何读取方。
+`HIGH_SIM` / `MID_SIM` 是 `cc_memory/llm/memory_writer.py:64` 中的模块常量
+（0.80 / 0.50），与之并列的还有 `MIN_CONTENT_LEN`（10）、
+`MAX_CANDIDATES_TO_SCAN`（500）和 `MAX_TAGS`（32）。`cc_memory/config.json`
+里**没有** `writer.*` 键——它们与其他 34 个惰性键一起在 v2.5.0 被删除
+（`config.json` 的 `removed_keys` 注记有案），原因正是从来没人读它们。
 **要改就改常量，不要改配置。** 默认值（0.80 / 0.50）是凭经验选定的：0.80 要求新内容
 本质上就是同一句话（措辞不同，事实相同）；0.50 能抓住“精炼过”的版本，同时仍让真正
 相关但彼此不同的事实通过。
@@ -163,73 +162,85 @@ v2.0 有四条互相独立的保存路径（`pre_compact`、`stop` 观察者、`
 
 2. **没有历史的补丁式更新。** 如果一个事实真的发生了变化（“我们把 lr=3e-4 换成了
    lr=1e-4，因为……”），取代路径会把旧事实以 `is_active=0` 保留下来，并通过
-   `supersedes_id` 链接。`db.get_supersede_chain(id)`（`core/db.py:592`）可以走一遍
+   `supersedes_id` 链接。`db.get_supersede_chain(id)`（`core/db.py:1340-1355`）可以走一遍
    历史。不需要什么“记忆版 git blame”的黑魔法。
 
 3. **MEMORY.md 过期。** 每次批量写入之后自动重新生成，避免了 v2.0 中观察到的“过期
    50 天”失效模式（当时 PreCompact 会写 MEMORY.md，而 Stop / 技能 / MCP / CLI 不
    会）。保存路径之外还有若干刷新点让它保持诚实：PreCompact 的尾部
-   （`hooks/pre_compact.py:509`）、Stop 钩子的空闲整理（`core/idle.py:94`）、异步
+   （`hooks/pre_compact.py:509`）、Stop 钩子的空闲整理（`core/idle.py:96`）、异步
    整理支路（`hooks/consolidate_async.py:187-188`）、`/cc-mem cleanup`
-   （`cli/mem.py:584`）以及 `ccm-load` 技能（`skills/ccm-load/SKILL.md:137`）。
+   （`cli/mem.py:1100`）以及 `ccm-load` 技能（`skills/ccm-load/SKILL.md:137`）。
 
 4. **只做哈希去重从而掩盖语义重复。** 哈希去重是第 1 步，但第 2-5 步才抓得住
    “fix bug” 与 “fix bug.”（同一事实，标点不同）这种 v2.0 会漏掉的情况。
 
 ### 各条保存路径如何遵守它
 
-下面是树内 `llm/memory_writer` 的每一个调用方，以及它使用的确切入口。写入器自身之外
-已经没有任何直接调用 `db.insert_memory` 的地方（`core/db.py:527` 把它记为仅供迁移 /
-批量装载使用；树内唯一另一处调用是 `db.supersede_memory` 自己在 `core/db.py:576` 的
-插入）。
+下面是树内 `llm/memory_writer` 的每一个调用方，以及它使用的确切入口。
+`core/db.py` 与写入器之外没有任何直接调用 `db.insert_memory` 的地方——
+而且自 v2.8.0 起这是一条**计算出来**的契约，不再是散文：
+`tools/contracts.py` 从代码树推导 `insert_memory_callers`，`smoke_test.py`
+断言它为空，`tools/falsify_fixes.py --case r8antipatch` 证明出现绕行调用方
+时该断言会变红。
 
 | 保存路径 | 入口函数 |
 |-----------|---------------|
-| `PreCompact` 钩子 | `upsert_batch(db, pid, sid, extracted_list, memory_dir)`（`hooks/pre_compact.py:611`） |
-| `Stop` 观察者 | `upsert_batch(db, pid, None, observer_list, memory_dir)`（`hooks/stop.py:257`） |
-| `SessionStart` 追溯保存 | `upsert_batch(db, pid, sid, memories, memory_dir=memory_dir)` —— 处理此前未保存的会话（`hooks/session_start.py:973`） |
+| `PreCompact` 钩子 | `upsert_batch(db, pid, sid, extracted_list, memory_dir)`（`hooks/pre_compact.py:680`） |
+| `Stop` 观察者 | `upsert_batch(db, pid, None, observer_list, memory_dir)`（`hooks/stop.py:277`） |
+| `SessionStart` 追溯保存 | `upsert_batch(db, pid, sid, memories, memory_dir=memory_dir)` —— 处理此前未保存的会话（`hooks/session_start.py:1071`） |
 | `/save-memories` 技能 | `upsert_batch(db, pid, None, memories, memory_dir=Path(project) / 'memory')`（`skills/save-memories/SKILL.md:100`） |
-| `mem.py add` CLI | `upsert_smart(...)` + `regenerate_memory_index(...)`（`cli/mem.py:923,524`） |
-| `mcp/server.py handle_memory_add` | `upsert_smart(...)` + `regenerate_memory_index(...)`（`mcp/server.py:520,192`） |
-| Dashboard UI 的 “Add Memory” | `upsert_smart(...)` + `regenerate_memory_index(...)` —— 自 v2.2 起改为路由（`ui/dashboard.py:1540,956`）。`ui/dashboard.py` 中没有任何 `db.insert_memory` 调用。 |
-| Dashboard UI 的 “Save Session” | `upsert_batch(...)`（`ui/dashboard.py:2122`） |
-| Dashboard UI 的 “Init Project” 扫描 | `upsert_batch(db, pid, None, batch, memory_dir=memory_dir)`（`ui/dashboard.py:2122`） |
-| web_viewer 的 POST `/api/memory` | `upsert_smart(...)` + `regenerate_memory_index(...)`（`ui/web_viewer.py:64`） |
+| `mem.py add` CLI | `upsert_smart(...)` + `regenerate_memory_index(...)`（`cli/mem.py:1067,524`） |
+| `mcp/server.py handle_memory_add` | `upsert_smart(...)` + `regenerate_memory_index(...)`（`mcp/server.py:629-656,192`） |
+| Dashboard UI 的 “Add Memory” | `upsert_smart(...)` + `regenerate_memory_index(...)` —— 自 v2.2 起改为路由（`ui/dashboard.py:1634,956`）。`ui/dashboard.py` 中没有任何 `db.insert_memory` 调用。 |
+| Dashboard UI 的 “Save Session” | `upsert_batch(...)`（`ui/dashboard.py:2216`） |
+| Dashboard UI 的 “Init Project” 扫描 | `upsert_batch(db, pid, None, batch, memory_dir=memory_dir)`（`ui/dashboard.py:2216`） |
+| web_viewer 的 POST `/api/memory` | `upsert_smart(...)` + `regenerate_memory_index(...)`（`ui/web_viewer.py:65`） |
 
 ### 整理兜底的例外（Consolidation backstop，v2.3）
 
 **整理**流水线（`core/consolidate.py`）是“每一次写入都经由 `memory_writer` 路由”这条
 规则的成文例外。它是清理兜底，不是保存路径，而且它操作的是**已经存在**的记忆：
 
-- `semantic_dedup`（LLM 判定的同事实归并，`consolidate.py:337-404`）与
-  `detect_obsolete_llm`（新事实与旧事实矛盾，`:714-795`）直接调用 `db.update_memory`
+- `semantic_dedup`（LLM 判定的同事实归并，`consolidate.py:405-492`）与
+  `detect_obsolete_llm`（新事实与旧事实矛盾，`:817-897`）直接调用 `db.update_memory`
   + `db.archive_obsolete`。它们绝不从零创造面向用户的内容——幸存行本来就已经存在；
   落败者被归档（`is_active=0`），并带一个向前的 `supersedes_id` 链接
-  （`db.archive_obsolete`，`core/db.py:765-793`），因此血缘依然可追溯、可恢复。与
-  `upsert_smart` 不同，`semantic_dedup` 在写入之前*确实*会并上幸存行原有的 tags
-  （`consolidate.py:663-696`）。
-- `decay_and_archive`（引用感知的陈旧度安全网，`consolidate.py:655-689`）**只**归档
+  （`db.archive_obsolete`，`core/db.py:1671-1774`），因此血缘依然可追溯、可恢复。
+  `semantic_dedup` 在写入之前会并上幸存行原有的 tags（`consolidate.py:479-487`）；
+  自 v2.8.0 起 `upsert_smart` 也这样做（`llm/memory_writer.py:_merged_tags`），所以
+  这已经不再是两者的差别——归并分支此前写的是 `set(incoming + ["merged"])`，把幸存
+  行自己的来源 tags 整个销毁了。
+- `decay_and_archive`（引用感知的陈旧度安全网，`consolidate.py:822-861`）**只**归档
   非常老 + 低重要度 + 从未被注入过的行——一张零误归档的安全网。有效年龄是
   `now - COALESCE(last_referenced_at, created_at)`（`core/db.py:224-234`；
   `consolidate.effective_age_days`，`:56`）。
-- 除 `cleanup_garbage` 之外，每一个整理阶段都是可逆的（`is_active=0`，绝不
-  `DELETE`）。`cleanup_garbage`（`consolidate.py:841-897`，`run_consolidation` 的
-  第 1 阶段，位于 `:857`；也经由 `cli/mem.py:999` 由 `/cc-mem cleanup` 调用）是唯一
-  的例外：它通过 `db.delete_memories` → `DELETE FROM memories WHERE id IN (...)`
-  （`core/db.py:741-746`）硬删除短于 20 字符（`_MIN_CONTENT_LEN`，`:155`）或匹配垃圾
-  正则（`_GARBAGE_RE`，`:154`）的行。`merge_near_duplicates`（`:188-220`）经由
-  `bulk_archive`（`core/db.py:730-739`）归档，也就是说可逆，但**没有**
-  `supersedes_id` 链接。
+- **每一个整理阶段都是可逆的**（`is_active=0`，绝不 `DELETE`），自 v2.8.0 起
+  `cleanup_garbage` 也包含在内。它曾经是唯一的例外，而且例外得很不是地方：它由 Stop
+  钩子每五轮无人值守地跑，并按自己私有的 20 字符下限硬删除——而写入器的下限是 10，
+  于是它销毁的正是四个入口刚刚接受下来的内容。实测：`/cc-mem add note "lr=3e-4 wins"`
+  报告 `[inserted]`，五轮之后表里一行不剩。它现在从 `llm.memory_writer` 导入那唯一的
+  下限，并经由 `db.archive_if_unchanged`（`core/db.py:1499-1534`）归档，与另外两个
+  「快照判决」阶段一致。用这个变体而不是 `bulk_archive` 的原因是：本阶段的判决来自
+  一次**独立事务**里的快照读，而 PreCompact 写入器是并发跑的，所以一行在这个窗口里
+  被修好之后仍然会被归档——实测，刚刚归并进去的好内容被置为 `is_active=0`。以判决
+  当时那个 `content_hash` 作为条件，就把陈旧判决变成了空操作。
+  `db.delete_memories` 只保留给用户主动清除，代码树里没有调用方——这是 `core/db.py`
+  给自己写下的契约。`/cc-mem archive <id>...` 是 v2.8.0 新增的**用户侧**退役入口，
+  它同样只归档：`sql` 是只读的，`add` 只在相似度够高时才归并，所以一条被发现是**错**
+  的记忆此前根本没有受支持的出口。
+  `merge_near_duplicates`（`:243-296`）同样经由 `archive_if_unchanged` 归档，可逆，
+  但**没有** `supersedes_id` 链接。
 
 这是有意为之且边界清晰的；它并不放松对**保存**路径的规则。
 
 ### 不应该做什么
 
 - 不要在任何保存路径里直接调用 `db.insert_memory`。（它仍然暴露出来用于迁移 / 批量
-  装载，但不用于日常写入——`core/db.py:527`。）
+  装载，但不用于日常写入——`core/db.py:1070-1085`。）
 - 不要自己撸一套 `"SELECT content FROM memories ..."` 去重。那正是
-  `db.find_by_hash`（`core/db.py:830`）和写入器的 `_find_similar`
-  （`llm/memory_writer.py:102`）的职责。（并不存在 `db.find_similar`；匹配器就住在
+  `db.find_by_hash`（`core/db.py:1882-1890`）和写入器的 `_find_similar`
+  （`llm/memory_writer.py:174`）的职责。（并不存在 `db.find_similar`；匹配器就住在
   写入器里，按设计是私有的。）
 - 不要手工“打补丁”改 MEMORY.md，也不要指望别的路径去刷新它。任何非平凡的状态变更
   之后都要调用 `regenerate_memory_index`。生成出的文件自带一条 DO-NOT-EDIT 横幅，
@@ -251,7 +262,7 @@ v2.0 有四条互相独立的保存路径（`pre_compact`、`stop` 观察者、`
 `${CLAUDE_PLUGIN_ROOT}`，然后是 `$HOME/.claude/hooks/cc-memory`，并且在每一个根目录
 下先尝试**嵌套**布局 `<root>/cc_memory/cli/mem.py`（市场 / 开发检出），再尝试**扁平**
 布局 `<root>/cli/mem.py`。独立安装器把每一个子包直接拷进 `TARGET_DIR/<subdir>/`
-（`cc_memory/ui/installer.py:63` 的 `TARGET_DIR`、`:37-48` 的 `SUBPACKAGE_FILES`、
+（`cc_memory/ui/installer.py:77-89` 的 `TARGET_DIR`、`:37-48` 的 `SUBPACKAGE_FILES`、
 `:74` 的 `_copy_subpackages`），因此独立安装**没有** `cc_memory/` 这一段路径——它的
 CLI 是 `~/.claude/hooks/cc-memory/cli/mem.py`。在市场安装下，那棵树只保留 `logs/`
 （已在本机核实），所以任何硬编码的 `python ~/.claude/hooks/cc-memory/.../mem.py`
@@ -276,40 +287,40 @@ v2.0 把 `memory/SESSION_HANDOFF.md` 写成一份*追加式*文档——每次 P
 v2.1 用 **PROGRESS.md**（始终从一条 SQL 行整篇重写）+ **SessionStart 处强制注入的
 `<system-reminder>`** 修掉了这一点。旧的 `SESSION_HANDOFF.md` 会在 v2.1+ 下的首次
 PreCompact 时被重命名为 `SESSION_HANDOFF.md.v2.bak`（一次性迁移
-`migrate_legacy_handoff`，`core/progress.py:485-499`，从 `hooks/pre_compact.py:506`
+`migrate_legacy_handoff`，`core/progress.py:590-608`，从 `hooks/pre_compact.py:550`
 调用）。
 
 ### PROGRESS.md 就是唯一真相来源（SOT）
 
 `memory/PROGRESS.md` 由 `cc_memory/core/progress.py:write_progress_md` 从 `progress`
 SQL 行生成。Schema 见 `cc_memory/core/db.py:_MIGRATIONS:v3_progress`（`db.py:176-190`），
-外加 `db.py:1081-1103` 处的两个 v5 会话标注列。§0 还会经 `db.get_recent_sessions`
-读取 `sessions` / `session_summaries` 表（`core/progress.py:228`；`core/db.py:1081-1103`）：
+外加 `db.py:2248-2302` 处的两个 v5 会话标注列。§0 还会经 `db.get_recent_sessions`
+读取 `sessions` / `session_summaries` 表（`core/progress.py:293`；`core/db.py:2248-2302`）：
 
 | 列 | 类型 | 主来源 · 兜底 |
 |--------|------|---------------------------|
 | `project_id` | INTEGER PK | `upsert_project` |
-| `current_request` | TEXT | UserPromptSubmit 第 1 回合（`user_prompt.py:197`）→ PreCompact 的 `_first_user_request(window.head)`（`pre_compact.py:316-358`）—— 它会扫描至多 200 条记录，越过开头的 `queue-operation` / `attachment` 元数据行，并跳过内容为空的 user 行（`pre_compact.py:315-357`，v2.4.2）→ `session_summaries.request`（`progress.py:143`） |
-| `status_done` | TEXT | `session_summaries.completed`（`progress.py:137`），PreCompact 用 `", ".join(<观察到的 Edit/Write/MultiEdit 路径>[:10])` 填充它（`pre_compact.py:315-357`）—— 所以 §2 的 “Done” 渲染出来是一份**文件列表**，而不是散文。若为空，SessionStart 会补上（`session_start.py:589-590`） |
-| `status_in_flight` | TEXT | `session_summaries.learned` —— 注意：PreCompact 把这个字段写成**空**（`pre_compact.py:474`），因此它今天是惰性的；§2 的 “In-flight” 永远渲染成 `*(none active)*` |
-| `status_blocked` | TEXT | 显式的 `patch_progress(status_blocked=...)` —— 今天树内没有任何调用方这样做；它是留给外部工具的 API。全仓库 grep 只能找到 schema 默认值（`core/db.py:1028,853`）、空播种（`core/progress.py:180`）和读取处（`core/progress.py:180`） |
-| `open_todos` | JSON | PreCompact 经 `ext["latest_todos"]` 调用 `extract_latest_todo_state(window)`（`core/extractor.py:352,558`；`pre_compact.py:630,656`）→ SessionStart 第 3 级：挖掘上一次会话的 transcript（`session_start.py:703`）→ **最后手段**：把 `session_summary.next_steps` 按 `;` 切分（`session_start.py:703`）。只保留非 `completed` 的 todo（`progress.py:180`） |
-| `plan` | TEXT | `session_summaries.next_steps` —— 若有最新 TodoWrite 的 pending 项则取自它，否则取自 LLM 抽取出的 `task` 类记忆（`pre_compact.py:462-468`）；在 `progress.py:148` 传播，在 `session_start.py:703` 按“空则填”补齐 |
-| `critical_context` | JSON | importance ≥ 4 的前 10 条记忆，内容截断到 200 字符（`progress.py:107-113`；`session_start.py:704`） |
-| `files_touched` | JSON | `observations` 表（`pre_compact.py:446-453` → `progress.py:128-134`；Stop 每回合打补丁 `stop.py:193-211`；SessionStart 第 2C 级 `session_start.py:704`）→ 第 3 级：对上一次会话 transcript 跑 `extract_file_changes`（`session_start.py:704`） |
-| `transcript_ptr` | TEXT | PreCompact 解析为绝对路径的 `transcript_path`（`pre_compact.py:670`）→ 第 3 级 `find_latest_transcript(cwd, exclude_session_id=...)`（`session_start.py:781`） |
-| `updated_at` | TEXT | ISO 时间戳，由 `upsert_progress` / `patch_progress` 打戳（`db.py:948-1008`、`:937-943`） |
-| `trigger_type` | TEXT | "auto" \| "manual"（PreCompact 把宿主自己的触发字符串原样透传 —— `pre_compact.py:65,492`；`"precompact"` 只是 `collect_progress_state` 在 `progress.py:127` 的默认关键字参数，且总会被覆盖）\| "stop"（`stop.py:376`）\| "user_prompt" \| "resume_request"（`user_prompt.py:202`）\| "session_start_refresh"（`session_start.py:719`） |
-| `current_session_id` | TEXT | 只由 `db.tag_progress_session` 写入（`db.py:945-969`）—— 由 PreCompact（`pre_compact.py:675`）、Stop（`stop.py:376`）、SessionStart（`session_start.py:719`）、UserPromptSubmit（`user_prompt.py:202`）打标签 |
-| `session_started_at` | TEXT | `db.tag_progress_session` —— 只在存储的 sid 发生变化时重置；`upsert_progress` 在整篇重写时会把这两个字段一并保留（`db.py:1055-1079`） |
+| `current_request` | TEXT | UserPromptSubmit 第 1 回合（`user_prompt.py:165`）→ PreCompact 的 `_first_user_request(window.head)`（`pre_compact.py:269-311`）—— 它会扫描至多 200 条记录，越过开头的 `queue-operation` / `attachment` 元数据行，并跳过内容为空的 user 行（`pre_compact.py:269-311`，v2.4.2）→ `session_summaries.request`（`progress.py:241`） |
+| `status_done` | TEXT | `session_summaries.completed`（`progress.py:236`），PreCompact 用抽取结果里 `result` / `decision` 类的记忆填充（`pre_compact.py:666-700`），仅当抽取没给出任何结论时才退回到观察到的 Edit/Write 路径列表。v2.8.0 以前**永远**走那条路径列表，于是 §2 的 “Done” 渲染出来是一份文件清单，而不是“做完了什么”。若为空，SessionStart 会补上（`session_start.py:589-590`） |
+| `status_in_flight` | TEXT | `session_summaries.learned`，由抽取结果里 `arch` / `config` / `bug` 类的记忆填充（`pre_compact.py:666-700`）。v2.8.0 以前 PreCompact 把它硬编码成 `""`，所以 §2 的 “In-flight” 无条件渲染成 `*(none active)*` —— 那是结构性的，不是因为真的没有在办事项 |
+| `status_blocked` | TEXT | 显式的 `patch_progress(status_blocked=...)` —— 今天树内没有任何调用方这样做；它是留给外部工具的 API。全仓库 grep 只能找到 schema 默认值（`core/db.py:2195-2220,853`）、空播种（`core/progress.py:245`）和读取处（`core/progress.py:245`） |
+| `open_todos` | JSON | PreCompact 经 `ext["latest_todos"]` 调用 `extract_latest_todo_state(window)`（`core/extractor.py:478-513,558`；`pre_compact.py:630,656`）→ SessionStart 第 3 级：挖掘上一次会话的 transcript（`session_start.py:880`）→ **最后手段**：把 `session_summary.next_steps` 按 `;` 切分（`session_start.py:880`）。只保留非 `completed` 的 todo（`progress.py:245`） |
+| `plan` | TEXT | `session_summaries.next_steps` —— 若有最新 TodoWrite 的 pending 项则取自它，否则取自 LLM 抽取出的 `task` 类记忆（`pre_compact.py:462-468`）；在 `progress.py:148` 传播，在 `session_start.py:880` 按“空则填”补齐 |
+| `critical_context` | JSON | importance ≥ 4 的前 10 条记忆，内容截断到 200 字符（`progress.py:107-113`；`session_start.py:880`） |
+| `files_touched` | JSON | `observations` 表（`pre_compact.py:446-453` → `progress.py:128-134`；Stop 每回合打补丁 `stop.py:193-211`；SessionStart 第 2C 级 `session_start.py:880`）→ 第 3 级：对上一次会话 transcript 跑 `extract_file_changes`（`session_start.py:880`） |
+| `transcript_ptr` | TEXT | PreCompact 解析为绝对路径的 `transcript_path`（`pre_compact.py:752`）→ 第 3 级 `find_latest_transcript(cwd, exclude_session_id=...)`（`session_start.py:879`） |
+| `updated_at` | TEXT | ISO 时间戳，由 `upsert_progress` / `patch_progress` 打戳（`db.py:2099-2175`、`:937-943`） |
+| `trigger_type` | TEXT | "auto" \| "manual"（PreCompact 把宿主自己的触发字符串原样透传 —— `pre_compact.py:67,492`；`"precompact"` 只是 `collect_progress_state` 在 `progress.py:137-197` 的默认关键字参数，且总会被覆盖）\| "stop"（`stop.py:395`）\| "user_prompt" \| "resume_request"（`user_prompt.py:207`）\| "session_start_refresh"（`session_start.py:823`） |
+| `current_session_id` | TEXT | 只由 `db.tag_progress_session` 写入（`db.py:2222-2246`）—— 由 PreCompact（`pre_compact.py:757`）、Stop（`stop.py:395`）、SessionStart（`session_start.py:823`）、UserPromptSubmit（`user_prompt.py:207`）打标签 |
+| `session_started_at` | TEXT | `db.tag_progress_session` —— 只在存储的 sid 发生变化时重置；`upsert_progress` 在整篇重写时会把这两个字段一并保留（`db.py:2222-2246`） |
 
 渲染出的 Markdown（[`cc_memory/core/progress.py`](../cc_memory/core/progress.py)
 中的第 0-7 节）就是从这一行生成的。手工编辑 PROGRESS.md 毫无意义：四条自动更新路径
 （PreCompact / Stop / UserPromptSubmit / SessionStart 刷新）中的任何一条——加上两个
-手动重新生成入口 `/cc-mem progress`（`cli/mem.py:1089`）和 MCP 的
-`progress_regenerate` 工具（`mcp/server.py:588`）——都会覆盖它。全部六处
-`write_progress_md` 调用点：`pre_compact.py:677`、`stop.py:304`、`user_prompt.py:195`、
-`session_start.py:848`、`cli/mem.py:1091`、`mcp/server.py:588`。
+手动重新生成入口 `/cc-mem progress`（`cli/mem.py:1238`）和 MCP 的
+`progress_regenerate` 工具（`mcp/server.py:742`）——都会覆盖它。全部六处
+`write_progress_md` 调用点：`pre_compact.py:759`、`stop.py:323`、`user_prompt.py:200`、
+`session_start.py:946`、`cli/mem.py:1250`、`mcp/server.py:742`。
 
 ### 渲染布局（§0-§7）
 
@@ -345,21 +356,21 @@ sid），每一行形如
    - 触发：Claude Code 的自动压缩，或手动 `/compact`。
    - `collect_progress_state(...)` 从
      `extracted_memories + observations + session_summaries` 构建完整状态
-     （`progress.py:259`）。
+     （`progress.py:324`）。
    - `db.tag_progress_session(...)` **先**运行，这样标签才能存活
-     （`pre_compact.py:675`；保留逻辑见 `db.py:1055-1079`）。
-   - `db.upsert_progress(**all_fields)` 覆盖整行（`pre_compact.py:670`）。
+     （`pre_compact.py:757`；保留逻辑见 `db.py:2222-2246`）。
+   - `db.upsert_progress(**all_fields)` 覆盖整行（`pre_compact.py:752`）。
    - `write_progress_md(db, pid, memory_dir)` 重写文件（`:501`）。
 
 2. **Stop**（部分更新，每回合）：
    - 先 `db.tag_progress_session(...)`，再
      `db.patch_progress(files_touched=<来自 observations>, trigger_type="stop")`
-     （`stop.py:284`、`:211`）。
+     （`stop.py:309`、`:211`）。
    - `write_progress_md(...)` 用打过补丁的状态重写文件（`:213`）。
    - 这让 “Files Touched This Session” 保持最新，无需等到下一次压缩。
 
 3. **UserPromptSubmit**（仅第 1 回合）：
-   - 先 `db.tag_progress_session(...)`（`user_prompt.py:202`），再
+   - 先 `db.tag_progress_session(...)`（`user_prompt.py:207`），再
      `db.patch_progress(current_request=<prompt>, trigger_type="user_prompt" | "resume_request")`
      （`:132`）。
    - `write_progress_md(...)` 重写（`:133`）。
@@ -472,7 +483,7 @@ SessionStart、Stop、PostToolUse、UserPromptSubmit）——这条提醒依然�
 
 ```bash
 # 1. 显示 PROGRESS.md 当前的内容（这同时也会从 SQL 强制重新生成该文件 ——
-#    cli/mem.py:1089 在每次调用时都会重写它）
+#    cli/mem.py:1238 在每次调用时都会重写它）
 /cc-mem progress
 
 # 2. 显示 SQL 行里是不是当前数据
@@ -515,7 +526,7 @@ cc-memory 的**实时计划锚点**：每个项目一份 `memory/PLAN.md`，它�
 回合、单个会话活得更久。把两者混在一起会让 PROGRESS.md 过长，也会让 PLAN.md 不稳定。
 
 两者共用同一个 SQLite 数据库（分别是 `plan_active` 和 `progress` 表），因此它们不
-可能与自己的真相来源漂移开。`write_plan_md`（`core/plan.py:473-492`）是从行里做的
+可能与自己的真相来源漂移开。`write_plan_md`（`core/plan.py:520-568`）是从行里做的
 整篇重写，生成出的文件自带一条 DO-NOT-EDIT 横幅，写明那张 SQL 表和三个合法的编辑
 入口（`core/plan.py:257-260`）。
 
@@ -625,7 +636,7 @@ cc-memory 的**实时计划锚点**：每个项目一份 `memory/PLAN.md`，它�
 ```
 
 合法的 `status` 取值：`pending`、`in_progress`、`done`、`blocked`、`skipped`
-（`core/plan.py:132`）。`normalize_structured`（`core/plan.py:89-134`）是防御性的：
+（`core/plan.py:145-204`）。`normalize_structured`（`core/plan.py:89-134`）是防御性的：
 它容忍常见的 LLM 状态别名（`todo`→`pending`，`wip`/`doing`→`in_progress`，
 `complete`/`completed`→`done`），丢弃没有 title 的步骤条目，并按位置为缺失的 `id`
 重新编号。`is_valid_structured`（`:70-86`）要求非空的 `goal` 和 ≥1 个格式良好的
@@ -642,10 +653,11 @@ cc-memory 的**实时计划锚点**：每个项目一份 `memory/PLAN.md`，它�
 当观察到 `TodoWrite` 时，`core.plan.sync_todos_to_steps`
 （`core/plan.py:235-280`，匹配器在 `:139-170`）会：
 
-1. 对每一条 todo，计算它与每一个步骤 title 的三元组 Jaccard 相似度。
-2. 在相似度 ≥ `MATCH_THRESHOLD`（0.35，`core/plan.py:85`）时挑出最佳匹配的步骤。
+1. 对每一条 todo，基于 `core.textsim.shingle_set` 的 shingle（非 CJK 用
+   三元组，CJK 连续段用二元组）计算它与每一个步骤 title 的 Jaccard 相似度。
+2. 在相似度 ≥ `MATCH_THRESHOLD`（0.35，`core/plan.py:98`）时挑出最佳匹配的步骤。
 3. 用 todo 的状态更新步骤状态，映射关系为
-   （`_TODO_TO_STEP_STATUS`，`core/plan.py:205-212`）：
+   （`_TODO_TO_STEP_STATUS`，`core/plan.py:244-251`）：
    - `completed` → `done`
    - `in_progress` → `in_progress`
    - `pending` → `pending`
@@ -660,7 +672,7 @@ cc-memory 的**实时计划锚点**：每个项目一份 `memory/PLAN.md`，它�
    则取第一个 `pending` 步骤（`:215-223`）。
 
 整条路径都是机械的——不调用 LLM。`apply_todowrite_sync`
-（`core/plan.py:757-777`）会持久化更新后的计划并重写 PLAN.md，但如果没有那一行、
+（`core/plan.py:1044-1085`）会持久化更新后的计划并重写 PLAN.md，但如果没有那一行、
 或存储的 `structured` 不符合 schema，它会原样返回 `{"skipped": "no_active_plan"}`
 而不改动任何东西（`:551-554`）。
 
@@ -677,16 +689,21 @@ cc-memory 的**实时计划锚点**：每个项目一份 `memory/PLAN.md`，它�
 
 #### 入口 1 —— REPLACE（`/cc-mem plan-set --from-refiner` → `core.plan.apply_refined_plan`）
 
-`check_carryover(old_structured, new_plan)`（`core/plan.py:482-539`）收集旧计划的
+`check_carryover(old_structured, new_plan)`（`core/plan.py:614-683`）收集旧计划的
 未完成步骤——状态属于 `pending | in_progress | blocked`（`_UNFINISHED_STATUSES`，
 `:461`；选择器 `unfinished_steps` 在 `:465-472`）——并要求其中每一个要么
 
-  (a) **被自动结转**：与新步骤的裸 `title`，或与其 `title + notes` 的三元组 Jaccard
-      相似度 ≥ `CARRYOVER_MATCH_THRESHOLD = 0.5`（`:460`）（自 v2.4.1 起两者都是
-      候选，`:492-506` —— 只与 `title+notes` 比较，会让一段很长的 notes 把一个完全
-      相同的 title 稀释到阈值以下，这是在该门禁的第二次真实替换 R610 中发现的；
-      `title+notes` 这个候选被保留下来，是为了让一个被折叠进另一步骤 notes 里的步骤
-      仍能被结转），要么
+  (a) **被自动结转**：与新步骤的裸 `title`，或与其 `title + notes` 的
+      shingle-Jaccard 相似度达到 `_carryover_bar` —— 非 CJK 标题为 0.5
+      （`CARRYOVER_MATCH_THRESHOLD`），任一标题含 CJK 连续段时为 2/3
+      （`CARRYOVER_MATCH_THRESHOLD_CJK`）：帮了合并侧写入器的 CJK 二元组
+      底层会**放松**这道门，而门的误匹配意味着静默丢步骤（实测：325 个
+      单字替换里 98 个从 FLAGGED 翻成自动结转，包括三十秒 vs 六十秒——
+      相反的事实）（自 v2.4.1 起两者都是候选，`:492-506` —— 只与
+      `title+notes` 比较，会让一段很长的 notes 把一个完全相同的 title
+      稀释到阈值以下，这是在该门禁的第二次真实替换 R610 中发现的；
+      `title+notes` 这个候选被保留下来，是为了让一个被折叠进另一步骤
+      notes 里的步骤仍能被结转），要么
 
   (b) **被 disposition 记录**：存在一条顶层 `"dispositions"` 条目，其 `old_title`
       以 ≥ 0.5 的相似度匹配上，`action` 属于 `done | dropped | merged | carried`，
@@ -710,8 +727,9 @@ docstring，`:485-487`）：schema 保持只增不减，因此更老的 refiner 
 
 `unmatched_criteria(old_structured, new_plan)`（**有意追加在 `core/plan.py` 末尾**——
 放在 `check_carryover` 旁边会让本文档里约 60 条行号引用集体腐烂）返回每一条
-「其对替换方 `success_criteria` **加上 `goal` 与 `context`** 的最佳 trigram-Jaccard
-低于同一个 `CARRYOVER_MATCH_THRESHOLD = 0.5`」的旧判据。被并进新 context 的判据
+「其对替换方 `success_criteria` **加上 `goal` 与 `context`** 的最佳
+shingle-Jaccard 低于同一个 `_carryover_bar`（0.5，CJK 为 2/3）」的旧判据。
+被并进新 context 的判据
 算作已继承：有损的存活仍是存活，把它也报出来只会训练读者忽略这条播报。
 
 这**刻意不是**第二道拒写门。判据会被改写、合并、翻译、因达成而退役；一份英文计划
@@ -759,8 +777,8 @@ There is no force flag by design.
 **如何解决一次拒绝。** 不要试图绕过去；没有路可绕。针对每一个被点名的步骤，从下面
 选一种：
 
-- 这个步骤依然成立 → 把它加进新计划的 `steps`（任何与旧标题有 ≥0.5 三元组重叠的
-  标题都会自动结转；原样复用旧标题一定有效）。
+- 这个步骤依然成立 → 把它加进新计划的 `steps`（任何超过结转阈值的标题都会
+  自动结转；原样复用旧标题一定有效）。
 - 这个步骤其实已经交付了 → 添加
   `{"old_title": "<旧计划中的确切标题>", "action": "done", "reason": "<证据 —— commit、file:line、测试>"}`。
   refiner 被明确要求：在原始文档或当前 PLAN.md 中没有证据时，绝不宣称 `done`
@@ -776,7 +794,7 @@ There is no force flag by design.
 #### 入口 2 —— CLEAR（`/cc-mem plan-clear`）
 
 当 `unfinished_steps(row["structured"])` 非空且没有给出 `--reason` 时，
-`cmd_plan_clear`（`cli/mem.py:1320-1349`）会拒绝并以 1 退出（`:788-798`）：
+`cmd_plan_clear`（`cli/mem.py:1562-1591`）会拒绝并以 1 退出（`:788-798`）：
 
 ```
 [FAIL] carryover gate: the active plan still has 2 unfinished step(s):
@@ -788,19 +806,19 @@ There is no force flag by design.
 
 解决办法是带上 `--reason "<why>"` 重新运行。这个理由不是装饰品——它会被写进归档
 载荷。只有在门禁通过之后，命令才会归档、执行 `db.clear_plan_active(pid)`，并删除
-`memory/PLAN.md` + `memory/.plan_raw.md`（`cli/mem.py:1342`）。
+`memory/PLAN.md` + `memory/.plan_raw.md`（`cli/mem.py:1595`）。
 
 #### 兜底 —— 只追加的计划历史
 
 每一份被替换掉的计划——哪怕它的 disposition 记录得干干净净——都会由 `archive_plan`
-（`core/plan.py:599-655`）归档到
+（`core/plan.py:765-825`）归档到
 
 ```
 memory/.plan_history/plan_<YYYYmmddTHHMMSS>_<replace|clear>.json
 ```
 
 其中包含 `archived_at`、`event`、`reason`、`structured` 形式、`raw` 文本和
-`active_step`（`:556-563`）。调用点在 `core/plan.py:648`（替换，无理由字符串）与
+`active_step`（`:556-563`）。调用点在 `core/plan.py:1025`（替换，无理由字符串）与
 `cli/mem.py` 的 `cmd_plan_clear`（清除，带用户的 `--reason`）。既没有 `structured`
 也没有非空白 `raw` 的行会被跳过（`:549-550`）。
 
@@ -812,7 +830,7 @@ already enforced accounting` 并返回 `None`（`core/plan.py:567-575`）。代�
 
 ### 提示阈值
 
-硬编码的默认值在 `core/plan.py:782-798`（`turn_threshold=8`、`edit_threshold=12`）；
+硬编码的默认值在 `core/plan.py:1090-1106`（`turn_threshold=8`、`edit_threshold=12`）；
 Stop 钩子调用 `should_nudge_guardian(plan_row)` 时不传任何覆盖值
 （`hooks/stop.py`）。这些**没有** `config.json` 键——要改就改函数签名的默认值，
 或者显式传关键字参数。敏感调用的 `+20` 加分同样是硬编码的
@@ -882,7 +900,7 @@ Stop 钩子对计划**绝不**发出 `<system-reminder>`——只有一行软性
 
 ### 敏感工具清单
 
-`core.plan.is_sensitive_tool_call`（`core/plan.py:809-826`）会标记以下 Bash 模式
+`core.plan.is_sensitive_tool_call`（`core/plan.py:1126-1149`）会标记以下 Bash 模式
 ——对 `command` 输入做大小写不敏感的子串匹配，且仅限 `Bash` 工具——从而立即触发一次
 guardian 提示加分（+20 次编辑）：
 

@@ -122,12 +122,24 @@ def _acquire_lock(lock_path):
             age = time.time() - lock_path.stat().st_mtime
             if age < _STALE_LOCK_S:
                 return False
-            # Stale — a previous worker died holding it. Reclaim.
-            _log.info(f"reclaiming stale consolidation lock (age {age:.0f}s)")
+            # Stale — a previous worker died holding it. Reclaim ATOMICALLY:
+            # os.replace of the lock onto a tomb name succeeds for exactly ONE
+            # contender (the loser raises FileNotFoundError), where the old
+            # stat-then-unlink let two workers both pass the age check, both
+            # unlink (the second a no-op), and BOTH acquire (register X5,
+            # measured: results {'A': True, 'B': True}).
+            tomb = lock_path.with_name(lock_path.name + f".stale-{os.getpid()}")
             try:
-                lock_path.unlink()
+                os.replace(str(lock_path), str(tomb))
+            except FileNotFoundError:
+                return False  # another contender reclaimed it first
+            try:
+                tomb.unlink()
             except OSError:
-                return False
+                # why: the tomb is inert debris carrying this pid; the next
+                # reclaim by this pid overwrites it via os.replace anyway
+                pass
+            _log.info(f"reclaimed stale consolidation lock (age {age:.0f}s)")
         fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             fh.write(f"{os.getpid()} {datetime.now().isoformat(timespec='seconds')}")
@@ -219,6 +231,23 @@ def main():
         n_sessions = db.get_session_count(project_id)
         interval = _auto_interval()
         marker = _read_marker(marker_path)
+        # The marker follows the DIRECTORY, but session counts follow the
+        # project ROW, which is keyed by path — so after a rename the same
+        # memory/ carried a marker counted against the OLD row while the new
+        # row's count restarted at 0, and `n_sessions - last` went negative:
+        # consolidation silently stalled for interval+last more sessions
+        # (register C4, measured: marker last=6, new row sessions=0, next
+        # run at session 11). Any marker not stamped for THIS path — a
+        # different path OR no path at all — is treated as never-run
+        # (register r6-B8): grandfathering pathless legacy markers kept the
+        # rename residual open for exactly the upgrade-then-rename sequence,
+        # and the price of not grandfathering is ONE early consolidation per
+        # project, async and budget-gated.
+        if marker and str(marker.get("project_path") or "") != cwd:
+            _log.info(f"consolidation marker is for "
+                      f"{marker.get('project_path')!r}, project is at "
+                      f"{cwd!r} — treating as never run")
+            marker = {}
         last = int(marker.get("last_session_count", 0) or 0)
 
         # Interval-since-last gate (race-immune; see module docstring).
@@ -248,6 +277,7 @@ def main():
 
         _write_marker(marker_path, {
             "last_session_count": n_sessions,
+            "project_path": cwd,
             "ts": datetime.now().isoformat(timespec="seconds"),
             "final_active": results.get("final_active"),
             "final_topics": results.get("final_topics"),

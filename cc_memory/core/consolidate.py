@@ -2,11 +2,11 @@
 Topic-based memory consolidation pipeline.
 
 Pipeline:
-  1. cleanup_garbage()           delete known junk patterns
+  1. cleanup_garbage()           archive known junk patterns (recoverable)
   2. merge_near_duplicates()     fuzzy dedup within active memories (trigram Jaccard)
   3. assign_topics_auto()        keyword-based topic tagging
   4. consolidate_topics()        LLM summarize each topic -> topics table
-  5. decay_importance()          reduce importance of old memories
+  5. decay_and_archive()         reference-aware decay + zero-false-archive net
   6. archive_consolidated()      archive memories captured in summaries
 
 Anti-patch design: consolidation is the cleanup *backstop*. The primary
@@ -116,6 +116,22 @@ class BudgetGate:
     def can_spend(self, cost_s: float) -> bool:
         return self.unbounded or self.remaining() >= cost_s
 
+    def deadline(self) -> Optional[float]:
+        """Absolute time.monotonic() instant a budgeted call must FINISH by
+        (total_s - safety_s past this gate's own start), or None when
+        unbounded.
+
+        Passed to call_llm(deadline=...) so the bound is enforced as true
+        wall-clock INSIDE the leg. `can_spend` alone reserves worst-case cost
+        before starting a call but cannot interrupt one in flight — the three
+        LLM stages here had the reservation and no in-flight bound (register
+        C3: call sites 3, `deadline=` 0), so a single dripping response could
+        still carry a stage past the arithmetic the gate's guarantee rests on.
+        """
+        if self.unbounded:
+            return None
+        return self._start + self.total_s - self.safety_s
+
 
 # Budgeted LLM call bounds. Each budgeted stage caps BOTH call_llm legs so the
 # gate knows the exact worst-case wall-clock of one call up front (see
@@ -160,46 +176,108 @@ _GARBAGE_PATTERNS = [
     r"^The (TodoWrite|Agent|Read|Bash|Grep|Glob) tool",
 ]
 _GARBAGE_RE = [re.compile(p, re.IGNORECASE) for p in _GARBAGE_PATTERNS]
-_MIN_CONTENT_LEN = 20
+
+
+def _min_content_len():
+    """The ONE length floor, taken from the writer that enforces it.
+
+    This used to be a second literal, `_MIN_CONTENT_LEN = 20`, against the
+    writer's 10 — so the janitor destroyed what four surfaces had just
+    accepted. `/cc-mem add note "lr=3e-4 wins"` (12 chars) printed
+    `[inserted] #1`, appeared in MEMORY.md, and was gone five turns later.
+    Import it; a copied threshold is a threshold that drifts.
+    """
+    try:
+        from llm.memory_writer import MIN_CONTENT_LEN
+        return MIN_CONTENT_LEN
+    except Exception:
+        # why: consolidation must still run if the writer cannot be imported;
+        # 10 is that module's value, restated only for this unreachable path
+        return 10
 
 
 def cleanup_garbage(db, project_id):
+    """Archive transcript noise. NEVER deletes — see `core/db.py`'s contract.
+
+    `db.py:176-180` states that every delete path must archive, because a hard
+    DELETE strands any `supersedes_id` pointing at the row and nothing catches
+    it; `delete_memories()` is reserved there for USER-DRIVEN purges. This
+    function is neither user-driven nor a purge — it runs unattended from the
+    Stop hook every 5 turns (`core/idle.py`) and as stage 1 of every
+    consolidation — and it was `delete_memories`'s only caller in the tree.
+    Archived rows stay recoverable and keep the supersede chain walkable.
+    """
+    floor = _min_content_len()
     memories = db.get_all_active_memories(project_id)
-    to_delete = []
+    to_archive = []
     for m in memories:
         content = m["content"].strip()
-        if len(content) < _MIN_CONTENT_LEN:
-            to_delete.append(m["id"])
+        if len(content) < floor:
+            to_archive.append((m["id"], m["content"]))
             continue
         if any(pat.search(content) for pat in _GARBAGE_RE):
-            to_delete.append(m["id"])
+            to_archive.append((m["id"], m["content"]))
             continue
-    if to_delete:
-        db.delete_memories(to_delete)
-    return len(to_delete)
+    if to_archive:
+        # Conditional on content_hash, not a blind bulk_archive: this runs
+        # unattended from the Stop hook's idle reorg CONCURRENT with the
+        # PreCompact writer, and the verdict above was computed from a
+        # snapshot. A row whose garbage content was repaired (merged into)
+        # between the read and this write used to be archived anyway —
+        # measured: the freshly-written good content went inactive. The hash
+        # guard makes the write apply only to the content the verdict saw.
+        return db.archive_if_unchanged(to_archive)
+    return 0
 
 
-# ── 2. Near-duplicate merging (trigram Jaccard) ─────────────────────────────
-def _trigram_set(text):
-    t = text.lower().strip()
-    if len(t) < 3:
-        return {t}
-    return {t[i:i+3] for i in range(len(t) - 2)}
+# ── 2. Near-duplicate merging (shingle Jaccard) ─────────────────────────────
+# ONE substrate (core/textsim.py) shared with llm/memory_writer.py and
+# core/plan.py. The private English-only trigram copy this replaced made every
+# CJK near-duplicate invisible to this stage (see textsim's module docstring
+# for the measured collapse); the aliases keep the call sites readable.
+from core.textsim import jaccard as _jaccard, shingle_set as _trigram_set
 
 
-def _jaccard(a, b):
-    if not a or not b:
-        return 0.0
-    return len(a & b) / len(a | b)
+# Row cap for the pairwise stages. `BudgetGate` bounds the three LLM stages in
+# SECONDS and nothing bounds these in anything: N(N-1)/2 Jaccard comparisons
+# over ~200-element trigram sets. At the 3,725-memory project this codebase has
+# measured in the field that is ~6.9M comparisons before the first network
+# call, and the async worker's 300 s hook timeout kills the process mid-stage —
+# which runs no `finally`, so neither the cadence marker nor the lock is
+# released and the identical doomed run is re-attempted at every compaction
+# from then on. Bounding by ROWS is the analogue of bounding the LLM legs by
+# seconds.
+#
+# The slice is not arbitrary: `get_all_active_memories` orders by
+# `topic, importance DESC, created_at DESC`, so taking the head keeps whole
+# topic runs together with each topic's most important rows first — and
+# near-duplicates cluster inside a topic, which is exactly what this stage
+# looks for. Only the topic straddling the boundary is split.
+_MAX_PAIRWISE_ROWS = 1500
 
 
 def merge_near_duplicates(db, project_id, threshold=0.65):
     memories = db.get_all_active_memories(project_id)
     if len(memories) < 2:
         return 0
+    if len(memories) > _MAX_PAIRWISE_ROWS:
+        # Newest-UPDATED slice, not the alphabetical head (register r6-A11):
+        # a fixed (topic, importance) head re-examined the SAME 1500 rows on
+        # every run, so a duplicate pair in a late-alphabet topic was never
+        # compared, permanently. Recency-of-change is where fresh duplicates
+        # appear, and archived rows leave the active set — so over runs the
+        # slice ROTATES through the population instead of pinning to one end.
+        # A heuristic (updated_at is wall time), not an identity; the id
+        # tiebreak keeps it deterministic within one second.
+        _log.info(f"merge_near_duplicates: {len(memories)} active rows, "
+                  f"comparing the {_MAX_PAIRWISE_ROWS} most recently updated")
+        memories = sorted(memories,
+                          key=lambda m: (m.get("updated_at") or "", m["id"]),
+                          reverse=True)[:_MAX_PAIRWISE_ROWS]
 
     trigrams = [(m, _trigram_set(m["content"])) for m in memories]
     to_archive = set()
+    content_of = {m["id"]: m["content"] for m in memories}
 
     for i in range(len(trigrams)):
         if trigrams[i][0]["id"] in to_archive:
@@ -218,14 +296,24 @@ def merge_near_duplicates(db, project_id, threshold=0.65):
                 elif mj["importance"] > mi["importance"]:
                     to_archive.add(mi["id"])
                 else:
-                    if mi["created_at"] >= mj["created_at"]:
-                        to_archive.add(mj["id"])
-                    else:
-                        to_archive.add(mi["id"])
+                    # Survivor by id, NOT by the created_at STRING: `_now()`
+                    # is naive local wall time, which repeats an hour at DST
+                    # fall-back and steps back on NTP corrections — the
+                    # "newer by clock" row was the OLDER fact, so the
+                    # CORRECTION was archived and the superseded wording
+                    # kept (register X8, measured at sim 0.9531 after a
+                    # stepped-back clock). id is creation order by
+                    # construction; keep the higher one.
+                    to_archive.add(min(mi["id"], mj["id"]))
 
     if to_archive:
-        db.bulk_archive(list(to_archive))
-    return len(to_archive)
+        # Hash-guarded, same rationale as cleanup_garbage: the pairwise loop
+        # above can run for seconds on a large set, and a row rewritten by a
+        # concurrent PreCompact merge in that window is no longer the row this
+        # verdict judged near-duplicate.
+        return db.archive_if_unchanged(
+            [(mid, content_of[mid]) for mid in to_archive])
+    return 0
 
 
 # ── 2b. Semantic de-duplication (word-Jaccard nominate + LLM judge) ─────────
@@ -237,14 +325,12 @@ def merge_near_duplicates(db, project_id, threshold=0.65):
 # on the live DB), and asks Haiku to confirm before archiving. Same-category
 # only; decodable only; survivor keeps history via supersedes_id.
 
-def _word_set(text):
-    return set(re.findall(r"[a-z0-9_]{3,}", (text or "").lower()))
-
-
-def _word_jaccard(a, b):
-    if not a or not b:
-        return 0.0
-    return len(a & b) / len(a | b)
+# CJK-aware word sets (core/textsim.py). The old `[a-z0-9_]{3,}` grammar here
+# produced an EMPTY set for a pure-CJK memory, so word-Jaccard returned 0.0
+# and a Chinese duplicate could never even be NOMINATED to the LLM judge —
+# the stage existed and simply never saw the rows it was for.
+from core.textsim import word_set as _word_set
+_word_jaccard = _jaccard
 
 
 def _nominate_groups(memories, floor=0.30, max_group=4, max_groups=12):
@@ -314,8 +400,11 @@ DISTINCT fact (different file, different decision, different number), output fal
 - Be conservative: when unsure, output false (keep them separate)."""
 
 
-def _judge_group_llm(group, api_key):
-    """Ask Haiku whether a group is one fact. Returns dict or None on failure."""
+def _judge_group_llm(group, api_key, deadline=None):
+    """Ask Haiku whether a group is one fact. Returns dict or None on failure.
+
+    `deadline` is the caller's BudgetGate.deadline() — enforced as true
+    wall-clock inside the leg (register C3)."""
     import json as _json
     mem_text = "\n".join(
         f"[{i}] (id={m['id']}, imp={m['importance']}) {m['content']}"
@@ -323,20 +412,15 @@ def _judge_group_llm(group, api_key):
     )
     try:
         from llm.ccl_backend import call_llm
+        from llm.parse import extract_json
         raw = call_llm(
             _DEDUP_JUDGE_PROMPT,
             f"Memories (same category '{group[0]['category']}'):\n\n{mem_text}",
             api_key, max_tokens=400,
             timeout=_JUDGE_HAIKU_S, fallback_timeout=_JUDGE_FALLBACK_S,
+            deadline=deadline,
         )
-        raw = raw.strip()
-        if raw.startswith("```"):
-            raw = raw.split("```")[1] if "```" in raw[3:] else raw.strip("`")
-            raw = raw.lstrip("json").strip()
-        start, end = raw.find("{"), raw.rfind("}")
-        if start < 0 or end < 0:
-            return None
-        return _json.loads(raw[start:end + 1])
+        return extract_json(raw, kind="object")
     except Exception as e:
         _log.error(f"dedup judge error: {e}")
         return None
@@ -365,6 +449,16 @@ def semantic_dedup(db, project_id, budget=None, use_llm=True,
         return result
 
     memories = db.get_all_active_memories(project_id)
+    if len(memories) > _MAX_PAIRWISE_ROWS:
+        # `_nominate_groups` is the second pairwise stage and is bounded by the
+        # same cap for the same reason: it runs BEFORE the first `can_spend`,
+        # so the budget that guards the judge calls cannot reach it. Same
+        # newest-updated rotation as merge_near_duplicates (register r6-A11).
+        _log.info(f"semantic_dedup: {len(memories)} active rows, nominating "
+                  f"from the {_MAX_PAIRWISE_ROWS} most recently updated")
+        memories = sorted(memories,
+                          key=lambda m: (m.get("updated_at") or "", m["id"]),
+                          reverse=True)[:_MAX_PAIRWISE_ROWS]
     groups = _nominate_groups(memories, max_groups=max_groups)
     if not groups:
         return result
@@ -374,14 +468,24 @@ def semantic_dedup(db, project_id, budget=None, use_llm=True,
         if not budget.can_spend(PER_CALL_COST):
             _log.info("dedup: budget exhausted, deferring remaining groups")
             break
-        verdict = _judge_group_llm(group, api_key)
+        verdict = _judge_group_llm(group, api_key, deadline=budget.deadline())
         result["groups_judged"] += 1
         if not verdict or not verdict.get("duplicates"):
             continue
         canonical = (verdict.get("canonical_content") or "").strip()
         if not canonical or len(canonical) < 10:
             continue
-        survivor = max(group, key=lambda m: (m["importance"], -m["id"]))
+        # Survivor selection prefers a member whose content ALREADY IS the
+        # canonical (register r6-A8): the judge routinely picks one member's
+        # text verbatim, and rewriting a DIFFERENT member to it would collide
+        # with the still-active hash-twin on the unique index — the
+        # IntegrityError path below. When the canonical matches a member,
+        # that member survives and the rewrite is a near-no-op.
+        canon_hash = MemoryDB.compute_content_hash(canonical)
+        hash_twins = [m for m in group
+                      if MemoryDB.compute_content_hash(m["content"]) == canon_hash]
+        pool = hash_twins or group
+        survivor = max(pool, key=lambda m: (m["importance"], -m["id"]))
         losers = [m["id"] for m in group if m["id"] != survivor["id"]]
         proposal = {
             "survivor": survivor["id"],
@@ -394,20 +498,45 @@ def semantic_dedup(db, project_id, budget=None, use_llm=True,
                   f"{verdict.get('reason','')}")
         if dry_run:
             continue
-        # Apply: refresh survivor content to the merged canonical, tag, then
-        # archive losers pointing forward to the survivor.
+        # Re-read the survivor before writing. The candidate set was read
+        # before `_judge_group_llm`, which blocks on the network for tens of
+        # seconds, and the Stop hook's idle reorg (`core/idle.py`) mutates the
+        # same tables without consulting this worker's lock — that lock is
+        # scoped to other consolidation workers, not to the data. If the
+        # survivor was archived OR REWRITTEN in that window, the verdict no
+        # longer describes it. The is_active-only version of this check let a
+        # concurrent correction be clobbered by the stale canonical (register
+        # X2: survivor ended as the verdict text, the correction gone).
+        fresh = db.get_memory(survivor["id"])
+        if (not fresh or not fresh["is_active"]
+                or fresh["content"] != survivor["content"]):
+            _log.warn(f"dedup group skipped: survivor #{survivor['id']} was "
+                      f"archived or rewritten during the judge call")
+            continue
         existing_tags = []
         try:
             import json as _json
-            existing_tags = _json.loads(survivor.get("tags") or "[]")
+            existing_tags = _json.loads(fresh.get("tags") or "[]")
         except (ValueError, TypeError):
             existing_tags = []
-        db.update_memory(
-            survivor["id"], content=canonical,
-            tags=list(set(existing_tags + ["llm-dedup", "merged"])),
-        )
-        n = db.archive_obsolete(losers, canonical_id=survivor["id"])
-        result["memories_archived"] += n
+        # The whole write phase — survivor re-verify, loser archive (losers
+        # FIRST, for the active-hash unique index), survivor rewrite — is ONE
+        # transaction in db.apply_dedup_verdict. Three separate transactions
+        # used to let a survivor write fail AFTER the losers were archived,
+        # leaving the group half-applied (the r6 triage's recorded limit).
+        loser_contents = {m["id"]: m["content"] for m in group
+                          if m["id"] != survivor["id"]}
+        outcome = db.apply_dedup_verdict(
+            survivor["id"], survivor["content"], canonical,
+            list(set(existing_tags + ["llm-dedup", "merged"])),
+            losers, loser_contents)
+        result["memories_archived"] += outcome["archived"]
+        if outcome["skipped"] == "survivor_changed":
+            _log.warn(f"dedup group skipped: survivor #{survivor['id']} was "
+                      f"rewritten during the judge call; nothing applied")
+        elif outcome["skipped"] == "canonical_collision":
+            _log.warn(f"dedup: canonical for #{survivor['id']} collides with "
+                      f"another active row; survivor keeps its own wording")
 
     return result
 
@@ -451,13 +580,28 @@ def canonicalize_topics(db, project_id):
     """Merge fragmented topic LABELS (e.g. 'cc-memory','cc-memory backend',
     'cc-memory-fixes' -> 'cc-memory') so topic-based views are coherent.
 
-    CONSERVATIVE pairwise only: requires word-Jaccard>=0.6 on topic tokens AND
-    refuses to merge anything whose normalized key is a single bare token
-    (bare tokens like 'memory'/'git' are hubs that chain unrelated topics —
-    the live DB's 26-node blow-up). Does NOT chain transitively through a hub.
-    Re-points memories to the canonical label (the variant with most memories).
-    DECOUPLED from archiving: only relabels, never removes a memory.
-    Returns the number of variant topics merged away.
+    STAR-SHAPED clustering around a SEED. The contract is "variants of ONE
+    canonical label", so each member must clear the 0.6 bar against the
+    cluster's most-representative key — most memories, then fewest tokens
+    (most general), then shortest — which approximates the canonical.
+    Members never recruit, so a sub-bar PAIR can share a cluster only
+    through a strong seed ('cc-memory-fixes' + 'cc-memory backend' under
+    'cc-memory' is the legitimate case), never through an accidental middle
+    key: the previous union-find was transitive despite its own docstring —
+    A~B 0.75 and B~C 0.75 chained A to C at 0.50 (register Y6, measured:
+    three labels collapsed to one). Bare single-token keys are refused
+    entirely (hubs like 'memory'/'git' chain unrelated topics — the live
+    DB's 26-node blow-up).
+
+    Re-points memories to the canonical label (the variant with most
+    memories), then DELETES the topics-table summary rows of merged-away
+    variants: they described a label no memory carries any more, yet stayed
+    rendered into MEMORY.md and the SessionStart topics layer as if live
+    (register Y6's second half — 3 stranded summaries measured). The
+    canonical label's summary is regenerated by consolidate_topics, which
+    runs AFTER this stage in run_consolidation.
+    DECOUPLED from archiving: relabels and drops summaries, never removes a
+    memory. Returns the number of variant topics merged away.
     """
     counts = db.get_topic_memory_counts(project_id)
     topics = [t for t in counts if t and t != "_unassigned"]
@@ -470,37 +614,30 @@ def canonicalize_topics(db, project_id):
         norm_to_orig[_normalize_topic(t)].append(t)
     keys = list(norm_to_orig.keys())
 
-    parent = {k: k for k in keys}
+    token_of = {k: _topic_tokens(k) for k in keys}
+    variant_count = {k: sum(counts.get(v, 0) for v in norm_to_orig[k])
+                     for k in keys}
+    order = sorted(keys, key=lambda k: (-variant_count[k],
+                                        len(token_of[k]), len(k)))
+    unplaced = [k for k in order if len(token_of[k]) > 1]  # refuse bare hubs
+    clusters = []  # each a list of keys; members >= 0.6 vs their cluster SEED
+    while unplaced:
+        seed = unplaced.pop(0)
+        cl, rest = [seed], []
+        for k in unplaced:
+            if _word_jaccard(token_of[seed], token_of[k]) >= 0.6:
+                cl.append(k)
+            else:
+                rest.append(k)
+        unplaced = rest
+        clusters.append(cl)
 
-    def find(x):
-        while parent[x] != x:
-            parent[x] = parent[parent[x]]
-            x = parent[x]
-        return x
-
-    def union(a, b):
-        ra, rb = find(a), find(b)
-        if ra != rb:
-            parent[rb] = ra
-
-    for i in range(len(keys)):
-        ta = _topic_tokens(keys[i])
-        if len(ta) <= 1:
-            continue  # refuse bare-token hub merges
-        for j in range(i + 1, len(keys)):
-            tb = _topic_tokens(keys[j])
-            if len(tb) <= 1:
-                continue
-            if _word_jaccard(ta, tb) >= 0.6:
-                union(keys[i], keys[j])
-
-    # cluster -> all original variants; pick canonical = most memories
-    clusters = defaultdict(list)
-    for k in keys:
-        clusters[find(k)].extend(norm_to_orig[k])
-
+    summaries = {t["name"] for t in db.get_topics(project_id)}
     merged = 0
-    for _, variants in clusters.items():
+    for cluster in clusters:
+        variants = []
+        for k in cluster:
+            variants.extend(norm_to_orig[k])
         if len(variants) < 2:
             continue
         canonical = max(variants, key=lambda t: (counts.get(t, 0), -len(t)))
@@ -508,8 +645,13 @@ def canonicalize_topics(db, project_id):
             if v == canonical:
                 continue
             ids = [m["id"] for m in db.get_memories_by_topic(project_id, v)]
+            if ids or v in summaries:
+                # Relabel + summary drop are ONE transaction (the r6 triage
+                # recorded the two-commit version as a limit: a kill between
+                # them stranded a summary for a label no memory carries).
+                db.merge_topic_variant(project_id, ids, canonical,
+                                       v if v in summaries else None)
             if ids:
-                db.bulk_set_topic(ids, canonical)
                 merged += 1
     return merged
 
@@ -552,7 +694,9 @@ Rules:
 - Output ONLY the summary text, no JSON, no markdown headers, no quotes"""
 
 
-def _summarize_topic_llm(topic_name, memories):
+def _summarize_topic_llm(topic_name, memories, deadline=None):
+    """LLM topic summary. `deadline` = the caller's BudgetGate.deadline(),
+    enforced as true wall-clock inside the leg (register C3)."""
     from core.auth import get_api_key
     api_key, _ = get_api_key()
     if not api_key:
@@ -569,6 +713,7 @@ def _summarize_topic_llm(topic_name, memories):
             f"Memories for topic \"{topic_name}\":\n\n{mem_text}",
             api_key, max_tokens=500,
             timeout=_SUMMARY_HAIKU_S, fallback_timeout=_SUMMARY_FALLBACK_S,
+            deadline=deadline,
         )
         return text.strip() if text.strip() else None
     except Exception as e:
@@ -610,12 +755,28 @@ def consolidate_topics(db, project_id, use_llm=True, min_memories_per_topic=3,
             continue
         summary = None
         if use_llm and budget.can_spend(PER_CALL_COST):
-            summary = _summarize_topic_llm(topic, memories)
+            summary = _summarize_topic_llm(topic, memories,
+                                           deadline=budget.deadline())
         if not summary:
             if use_llm and not budget.can_spend(PER_CALL_COST):
                 n_deferred_llm += 1
             summary = _summarize_topic_fallback(topic, memories)
-        db.upsert_topic(project_id, topic, summary)
+        # `summary` is raw model output from `_summarize_topic_llm`, and
+        # `topics.content` is rendered into MEMORY.md, the SessionStart topics
+        # layer and the `memory_topics` MCP tool. It was the one post-v2.5.2
+        # path writing a rendered column with no write-path gate at all: a
+        # memory whose stored form is safely escaped gets re-emitted unescaped
+        # by the summarising model, and lands here armed.
+        # `summary` ONLY. `topic` is a JOIN KEY: `get_memories_by_topic`
+        # matches `memories.topic = ?` on string equality, so escaping it here
+        # while a pre-v2.8.0 row still holds the raw value silently orphans
+        # that topic — measured, a legacy `build<system-reminder>x` topic went
+        # from 1 matching memory to 0. New rows are already clean because
+        # `upsert_smart` cleans `topic` on the write path, and every render
+        # path escapes at render time, so cleaning the key here buys nothing
+        # and breaks the lookup.
+        from core.privacy import clean_for_storage
+        db.upsert_topic(project_id, topic, clean_for_storage(summary))
         n_consolidated += 1
 
     if n_deferred_llm:
@@ -624,32 +785,12 @@ def consolidate_topics(db, project_id, use_llm=True, min_memories_per_topic=3,
     return n_consolidated
 
 
-# ── 5. Importance decay ─────────────────────────────────────────────────────
-def decay_importance(db, project_id, age_days=30):
-    cutoff_5 = (datetime.now() - timedelta(days=age_days)).isoformat()
-    cutoff_4 = (datetime.now() - timedelta(days=age_days * 2)).isoformat()
-
-    n_decayed = 0
-    with db._connect() as conn:
-        cur = conn.execute(
-            """UPDATE memories SET importance = 4, updated_at = ?
-               WHERE project_id = ? AND is_active = 1
-                 AND importance = 5 AND updated_at < ?""",
-            (db._now(), project_id, cutoff_5)
-        )
-        n_decayed += cur.rowcount
-        cur = conn.execute(
-            """UPDATE memories SET importance = 3, updated_at = ?
-               WHERE project_id = ? AND is_active = 1
-                 AND importance = 4 AND updated_at < ?""",
-            (db._now(), project_id, cutoff_4)
-        )
-        n_decayed += cur.rowcount
-    return n_decayed
-
-
-# ── 5b. Staleness net + LLM obsolescence ────────────────────────────────────
-# decay_importance only LOWERS importance; stale/contradicted facts live
+# ── 5. Staleness net + LLM obsolescence ─────────────────────────────────────
+# (The standalone `decay_importance` this section replaced — updated_at-keyed,
+# superseded by decay_and_archive's reference-aware decay in v2.3 — sat here
+# dead through v2.8.0 while the module docstring still listed it as pipeline
+# stage 5. Deleted; register G10.)
+# Importance decay only LOWERS importance; stale/contradicted facts live
 # forever as is_active=1 (e.g. old 2-hook arch, "uninstalled cc-memory").
 # Two layers:
 #   (A) SQL safety net — zero false-archive: only very old + low-importance +
@@ -674,12 +815,12 @@ def decay_and_archive(db, project_id, decay_age_days=30, archive_age_days=180):
     mems = db.get_all_active_memories(project_id)
 
     decayed = 0
-    archived = []
+    archived = {}  # id -> the content the verdict saw (register r6-A7)
     for m in mems:
         age = effective_age_days(m, now)
         # (A) archive net: very old AND low-importance AND never injected
         if age > archive_age_days and m["importance"] <= 2 and m["id"] not in referenced:
-            archived.append(m["id"])
+            archived[m["id"]] = m["content"]
             continue
         # (B) reference-aware importance decay (lower, don't remove)
         imp = m["importance"]
@@ -692,7 +833,18 @@ def decay_and_archive(db, project_id, decay_age_days=30, archive_age_days=180):
             db.update_importance(m["id"], new_imp)
             decayed += 1
 
-    n_arch = db.archive_obsolete(archived) if archived else 0
+    # ALL THREE snapshot predicates re-asserted in the write's WHERE clause:
+    # `require_never_referenced` covers a SessionStart injecting the row
+    # mid-verdict (register X3, measured), `expected_contents` covers a
+    # concurrent merge writing valuable content into it (register r6-A7 — the
+    # reference guard alone still archived a repaired row), and
+    # `max_importance` covers an importance-only bump with content unchanged
+    # (the r6 triage's recorded limit, closed: the verdict selected on
+    # importance <= 2, so the write re-asserts exactly that).
+    n_arch = (db.archive_obsolete(list(archived), require_never_referenced=True,
+                                  expected_contents=archived,
+                                  max_importance=2)
+              if archived else 0)
     return {"importance_decayed": decayed, "archived_stale": n_arch}
 
 
@@ -741,12 +893,10 @@ def detect_obsolete_llm(db, project_id, budget=None, use_llm=True,
 
     PER_CALL_COST = _worst_call_cost(_JUDGE_HAIKU_S, _JUDGE_FALLBACK_S)
     valid_ids = {m["id"] for m in mems}
-    # Temporal guard (validated on the live DB): obsolescence flows FORWARD in
-    # time — a fact can only be made obsolete by a NEWER one. Without this, the
-    # LLM treats a historical EVENT (e.g. "uninstalled cc-memory") as current
-    # state and wrongly archives older still-valid facts. Key on created_at
-    # with id as tiebreaker.
-    created = {m["id"]: (m.get("created_at") or "", m["id"]) for m in mems}
+    # `contents` feeds archive_obsolete's expected_contents guard below: the
+    # verdict is computed from THIS snapshot across a network round-trip, so
+    # the write re-asserts it (same contract as the dedup stage).
+    contents = {m["id"]: m["content"] for m in mems}
     to_archive = {}  # stale_id -> current_id
     for cat, group in by_cat.items():
         if len(group) < 3:
@@ -762,18 +912,17 @@ def detect_obsolete_llm(db, project_id, budget=None, use_llm=True,
         mem_text = "\n".join(f"(id={m['id']}) {m['content']}" for m in sample)
         try:
             from llm.ccl_backend import call_llm
+            from llm.parse import extract_json
             raw = call_llm(
                 _OBSOLETE_PROMPT,
                 f"Category '{cat}':\n\n{mem_text}",
                 api_key, max_tokens=500,
                 timeout=_JUDGE_HAIKU_S, fallback_timeout=_JUDGE_FALLBACK_S,
-            ).strip()
-            if raw.startswith("```"):
-                raw = raw.split("```")[1].lstrip("json").strip() if "```" in raw[3:] else raw.strip("`")
-            s, e = raw.find("["), raw.rfind("]")
-            if s < 0 or e < 0:
+                deadline=budget.deadline(),
+            )
+            pairs = extract_json(raw, kind="array")
+            if pairs is None:
                 continue
-            pairs = _json.loads(raw[s:e + 1])
         except Exception as ex:
             _log.error(f"obsolete judge error ({cat}): {ex}")
             continue
@@ -781,9 +930,15 @@ def detect_obsolete_llm(db, project_id, budget=None, use_llm=True,
             sid, cid = p.get("stale_id"), p.get("current_id")
             if not (sid in valid_ids and cid in valid_ids and sid != cid):
                 continue
-            # temporal guard: the superseding memory MUST be newer than the
-            # one it obsoletes. Rejects "historical event obsoletes older fact".
-            if created.get(cid, ("", 0)) <= created.get(sid, ("", 0)):
+            # Temporal guard (validated on the live DB): obsolescence flows
+            # FORWARD — a fact can only be made obsolete by a NEWER one, else
+            # the LLM treats a historical EVENT as current state and archives
+            # older still-valid facts. Compared on id, not the created_at
+            # STRING: naive local wall time repeats/steps back (DST, NTP), so
+            # the string order inverted across a clock step and the guard
+            # passed exactly the pair it exists to reject (register X8's
+            # clock, this stage's guard). id is creation order.
+            if cid <= sid:
                 _log.info(f"obsolete REJECTED (not newer): #{sid} <- #{cid}")
                 continue
             to_archive[sid] = cid
@@ -793,12 +948,15 @@ def detect_obsolete_llm(db, project_id, budget=None, use_llm=True,
 
     result["pairs_found"] = len(to_archive)
     if to_archive and not dry_run:
-        # group by canonical for forward-linking
+        # group by canonical for forward-linking; content-guarded because the
+        # verdict snapshot predates the judge round-trips (see `contents`)
         by_canon = defaultdict(list)
         for sid, cid in to_archive.items():
             by_canon[cid].append(sid)
         for cid, sids in by_canon.items():
-            result["archived"] += db.archive_obsolete(sids, canonical_id=cid)
+            result["archived"] += db.archive_obsolete(
+                sids, canonical_id=cid,
+                expected_contents={s: contents[s] for s in sids})
     return result
 
 
@@ -823,18 +981,21 @@ def archive_consolidated(db, project_id, keep_per_topic=5, dup_threshold=0.65):
     for topic, memories in by_topic.items():
         if len(memories) <= keep_per_topic:
             continue
-        sorted_mems = sorted(memories, key=lambda m: (-m["importance"], m["created_at"]))
+        # Tiebreak on id (creation order), not the created_at string — same
+        # clock-step reasoning as merge_near_duplicates' survivor choice.
+        sorted_mems = sorted(memories, key=lambda m: (-m["importance"], m["id"]))
         kept = sorted_mems[:keep_per_topic]
         kept_tri = [_trigram_set(k["content"]) for k in kept]
         for m in sorted_mems[keep_per_topic:]:
             mt = _trigram_set(m["content"])
             # only archive if it's near-duplicate of something we're keeping
             if any(_jaccard(mt, kt) >= dup_threshold for kt in kept_tri):
-                to_archive.append(m["id"])
+                to_archive.append((m["id"], m["content"]))
 
     if to_archive:
-        db.bulk_archive(to_archive)
-    return len(to_archive)
+        # Hash-guarded like the other two snapshot-verdict stages above.
+        return db.archive_if_unchanged(to_archive)
+    return 0
 
 
 # ── Master orchestration ────────────────────────────────────────────────────
@@ -862,7 +1023,11 @@ def run_consolidation(cwd, use_llm=True, verbose=True, budget=None):
 
     results = {}
     # 1. cheap, deterministic, no-LLM cleanup first
-    results["garbage_deleted"] = cleanup_garbage(db, project_id)
+    # "archived", not "deleted": cleanup_garbage stopped calling
+    # delete_memories, and a caller reading `garbage_deleted` would report an
+    # irreversible purge for rows that are still recoverable and still on the
+    # supersede chain. The key IS the report on every consumer.
+    results["garbage_archived"] = cleanup_garbage(db, project_id)
     # 2. lexical near-dup (verbatim restatement) — content, category-gated
     results["duplicates_archived"] = merge_near_duplicates(db, project_id)
     # 3. SEMANTIC dedup (reworded same-fact) — LLM-judged, budget-gated.

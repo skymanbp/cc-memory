@@ -13,25 +13,53 @@ import os
 from datetime import datetime, timedelta
 from pathlib import Path
 
-_LOG_DIR = Path.home() / ".claude" / "hooks" / "cc-memory" / "logs"
 _LOG_LEVELS = {"DEBUG": 0, "INFO": 1, "WARN": 2, "ERROR": 3, "SILENT": 4}
 _DEFAULT_LEVEL = "INFO"
 _MAX_LOG_DAYS = 7
 
 
-def _ensure_log_dir():
+def _log_dir():
+    """Resolve the log directory lazily; None when there is no home to use.
+
+    Path.home() RAISES RuntimeError when no home can be determined — on
+    Windows with USERPROFILE and HOMEDRIVE+HOMEPATH all unset, on POSIX with
+    HOME unset and no passwd entry. Binding it to a module constant therefore
+    made `from core.logger import get_logger` itself a raising statement, and
+    four hooks <!--ce:hooks:subset--> import it at module top level: stop,
+    pre_compact, session_start and consolidate_async each exited rc=1 with a
+    RuntimeError traceback on stderr — the two things the hook contract
+    forbids (see the
+    module docstring). user_prompt and post_tool_use survived only because
+    they happen to import it lazily inside try/except.
+
+    Returning None instead of raising lets every caller no-op, which is the
+    same degradation this module already applies to an unwritable log dir.
+    """
     try:
-        _LOG_DIR.mkdir(parents=True, exist_ok=True)
+        return Path.home() / ".claude" / "hooks" / "cc-memory" / "logs"
+    except Exception:
+        # why: a hook with no resolvable home must still run; it just cannot
+        # write a log file, which is exactly the no-op path below
+        return None
+
+
+def _ensure_log_dir():
+    log_dir = _log_dir()
+    if log_dir is None:
+        return None
+    try:
+        log_dir.mkdir(parents=True, exist_ok=True)
     except Exception:
         # why: logger init must never crash a hook; if log dir can't be created
         # (perm error / read-only fs / disk full), we silently degrade to no-op
-        pass
+        return None
+    return log_dir
 
 
-def _cleanup_old_logs():
+def _cleanup_old_logs(log_dir):
     try:
         cutoff = datetime.now() - timedelta(days=_MAX_LOG_DAYS)
-        for f in _LOG_DIR.glob("cc-memory-*.log"):
+        for f in log_dir.glob("cc-memory-*.log"):
             try:
                 date_str = f.stem.replace("cc-memory-", "")
                 file_date = datetime.strptime(date_str, "%Y-%m-%d")
@@ -63,8 +91,12 @@ class Logger:
                 except Exception:
                     # why: old handle close failure shouldn't stop us rotating to a new one
                     pass
-            _ensure_log_dir()
-            log_path = _LOG_DIR / f"cc-memory-{today}.log"
+            log_dir = _ensure_log_dir()
+            if log_dir is None:
+                # why: no resolvable home, or an uncreatable log dir — the same
+                # no-op every other failure path here takes, never a raise
+                return None
+            log_path = log_dir / f"cc-memory-{today}.log"
             try:
                 self._file_handle = open(str(log_path), "a", encoding="utf-8", errors="replace")
                 self._today = today
@@ -72,7 +104,7 @@ class Logger:
                 # why: open() failure (perm/disk) — return None so callers no-op
                 # instead of raising into the hook entry point
                 return None
-            _cleanup_old_logs()
+            _cleanup_old_logs(log_dir)
         return self._file_handle
 
     def _write(self, level: str, msg: str):
@@ -99,9 +131,6 @@ class Logger:
         import traceback
         tb = traceback.format_exc() if exc is None else str(exc)
         self._write("ERROR", f"{msg}\n{tb}")
-
-    def timing(self, label: str, ms: float):
-        self._write("INFO", f"{label}: {ms:.1f}ms")
 
     def tool(self, tool_name: str, detail: str = ""):
         self._write("DEBUG", f"{tool_name}({detail})" if detail else tool_name)

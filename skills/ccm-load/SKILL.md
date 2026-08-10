@@ -51,6 +51,16 @@ deliberately disjoint (see the table at the end of this file).
 
 ```bash
 python3 -c "
+# NO BACKTICKS ANYWHERE BELOW, not even inside a comment. This whole body is
+# a shell DOUBLE-quoted string, so a backtick opens command substitution and
+# bash executes the text between them before python ever sees it. The fix for
+# the best['pkg'] KeyError briefly carried two prose backticks in its comment,
+# and bash dutifully ran them ('from: command not found', 'active: command not
+# found'); output was empty so the run limped on, but the shape is arbitrary
+# command execution. Caught in review before it was ever committed. For the
+# same reason the block contains no dollar sign either, so bash has nothing
+# to expand at all. Enforced by test_surfaces §7, which is why this very
+# comment spells both characters out in words instead of quoting them.
 import json, os, sys
 from pathlib import Path
 
@@ -126,7 +136,11 @@ def _settings_events():
     return got
 
 layouts = []
-mp_enabled = _d(settings.get('enabledPlugins')).get('cc-memory@cc-memory') is True
+# Prefix match, DELIBERATE MIRROR of cli/mem.py:_marketplace_enabled_key:
+# cc-memory@<any marketplace> is the same plugin; testing only the literal
+# cc-memory@cc-memory key reported a healthy install as disabled.
+mp_enabled = any(isinstance(k, str) and k.split('@')[0] == 'cc-memory' and bool(v)
+                 for k, v in _d(settings.get('enabledPlugins')).items())
 mp_roots = []
 mp_src = _d(_d(_d(settings.get('extraKnownMarketplaces')).get('cc-memory')).get('source'))
 if mp_src.get('path'):
@@ -145,7 +159,7 @@ for r in dict.fromkeys(mp_roots):
     if pd is None:
         probs.append(f'no cc-memory package tree under {r}')
     if not mp_enabled:
-        probs.append('settings.json enabledPlugins[\"cc-memory@cc-memory\"] is not true')
+        probs.append('settings.json enabledPlugins has no enabled cc-memory@* key')
     if len(evs) < 5:
         probs.append(f'{Path(r) / \"hooks\" / \"hooks.json\"} declares {len(evs)}/5 events')
     layouts.append({'name': 'marketplace', 'root': Path(r), 'pkg': pd, 'n': len(evs),
@@ -210,8 +224,35 @@ print(f'[OK] cc-memory ACTIVATED ({best[\"name\"]} layout) - bootstrapping proje
 # terminal, all six hooks would then be pinned to it permanently. Falls back
 # to cwd if the resolver cannot be imported (flat installs predating it).
 project = Path('.').resolve()
+# 'pkg', not 'root': _pkg_dir returns the directory that CONTAINS core/,
+# which is what the imports below need on sys.path — under the nested
+# layout that is <root>/cc_memory, not <root>. And never None here: a None
+# pkg always appends a probs entry (marketplace and standalone both), and
+# 'active' keeps only the layouts whose probs list came out empty.
+sys.path.insert(0, str(Path(best['pkg'])))
 try:
-    sys.path.insert(0, str(Path(best['path'])))
+    # The opt-out gate lives in its OWN try, SEPARATE from the anchoring try
+    # below and BEFORE it. It used to sit after the core.roots import inside
+    # one shared try, so a package tree missing core/roots.py (an older or
+    # partial flat install) raised ImportError PAST the gate, the except arm
+    # said 'root anchoring unavailable', and an EXCLUDED project was then
+    # fully initialized — database, PROGRESS.md, MEMORY.md, .gitignore
+    # (reproduced both ways: intact tree refuses, roots-less tree created
+    # everything). The gate must not share a failure domain with a module it
+    # does not need. Checked on the pre-anchor path so a per-subdirectory
+    # exclusion is not widened. cli_opt_out_notice itself never raises; this
+    # try only covers the import, and failing OPEN on an unimportable
+    # core.modes is the documented convention shared with cli/mem.py and
+    # ui/installer.py (the hooks and the MCP server enforce the opt-out
+    # independently on every write).
+    from core.modes import cli_opt_out_notice
+    _refusal = cli_opt_out_notice(str(project))
+    if _refusal:
+        print('[cc-memory] ' + _refusal)
+        sys.exit(0)
+except ImportError as _gate_err:
+    print(f'[init] opt-out check unavailable ({_gate_err}); continuing')
+try:
     from core.roots import project_root
     anchored = Path(project_root(str(project))).resolve()
     if anchored != project:
@@ -241,8 +282,14 @@ if not db_path.exists():
             'memory.db-shm', 'sessions/', '.last_save.json', '.last_inject.json',
             '.last_consolidation.json', '.consolidation.lock',
             '.pre_compact_attempt.json', '.plan_raw.md', '.plan_history/', '*.tmp']
-    _cur = gi.read_text(encoding='utf-8') if gi.exists() else ''
-    _have = {l.strip() for l in _cur.splitlines()}
+    # errors='replace', mirroring core/progress.py's canonical read: a user
+    # line appended from a GBK editor or a PowerShell redirect makes strict
+    # UTF-8 raise UnicodeDecodeError, which aborted this whole skill with a
+    # traceback (reproduced with a UTF-16 .gitignore: rc=1). The canonical
+    # implementation gained errors='replace' for exactly this and the two
+    # literal copies missed it — the drift the parity gate now checks.
+    _cur = gi.read_text(encoding='utf-8', errors='replace') if gi.exists() else ''
+    _have = {l.rstrip() for l in _cur.splitlines()}  # rstrip: leading space is significant to git (D3)
     _miss = [l for l in _ign if l not in _have]
     if _miss:
         _pre = _cur if _cur.endswith('\n') or not _cur else _cur + '\n'

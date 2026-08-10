@@ -2,7 +2,7 @@
 
 # cc-memory
 
-**Claude Code persistent memory plugin (v2.7.0)** — anti-patch reconcile-on-write
+**Claude Code persistent memory plugin (v2.8.0)** — anti-patch reconcile-on-write
 with LLM-judged semantic de-duplication, forced PROGRESS.md handoff, live PLAN.md
 anchor with plan-refiner / plan-guardian subagents and a mandatory carryover
 gate, bounded transcript reads, injection observability, FTS5 search, AI-judged
@@ -17,7 +17,109 @@ disappear. Conversations that end normally (terminal closed) also lose context.
 cc-memory captures structured memories at every conversation boundary AND
 **forces the next session to read a handoff document** before it starts work.
 
-## What's new in v2.7.0
+## What's new in v2.8.0
+
+**The anti-patch contract did not work in Chinese.** Character trigrams
+collapse on CJK: a one-character correction to a ten-character Chinese fact
+scores **0.4545** where the equivalent English edit scores 0.7317 — under the
+0.50 threshold that decides MERGE and SUPERSEDE, so every Chinese correction
+was filed as a NEW fact and the two contradictory rows both stayed active.
+Found on a live database, not constructed (a correction of memory #294 scored
+0.23 and became #301). The second layer could not help either: the LLM-judged
+de-duplicator tokenised with `[a-z0-9_]{3,}`, so a pure-CJK memory produced an
+empty word set and was never even nominated. `core/textsim.py` is now the one
+similarity substrate — character bigrams inside CJK runs, trigrams everywhere
+else, and ASCII output byte-identical to what it replaced so no tuned
+threshold moves. For a project whose memory is mostly Chinese, stacked
+contradictions were the normal case rather than an edge one.
+
+Alongside it: MERGE was destroying the surviving row's provenance tags, a
+0.95-similar row ranked 51st was invisible to the writer, `supersede_memory`
+was two transactions (a kill between them published both facts at once), five
+`id IN (...)` writers died past the SQLite variable cap, and there was **no
+supported way to retire a memory discovered to be wrong** — `/cc-mem archive`
+is that path now. Full list in [CHANGELOG.md](CHANGELOG.md).
+
+**v2.7.0 taught the six hooks where a project's root is, and left every other
+surface behind.** Three further adversarial rounds — each finding reproduced
+independently before it was accepted, two rejected as irreproducible —
+confirmed 22 defects. It is the same shape v2.7.0 was released to fix, one
+level up: a guard attached to *some* callers rather than to the thing they all
+pass through.
+
+Not hypothesised — measured on the reporting machine: a `memory/memory.db`
+sat at the root of drive `D:`, planted by this project's **own test suite**
+on every run (`test_surfaces` fed the pathological cwd `D:*b`, the resolver
+answered `D:\`, and the hook initialised a database there). While it existed,
+every uninitialised project on that drive resolved to it.
+
+- **Nine surfaces anchor now, not two.** `cli/plan.py` planted a stray even
+  for the read-only `list`; the MCP server — the one model-facing *write*
+  path — used raw `os.getcwd()`; the dashboard anchored only `--project`
+  while four GUI routes did not; the installer's *Initialize Project*, the
+  web viewer and `/save-memories` never anchored at all. The web viewer's
+  symptom was the inverse: it *refused* an initialised project when started
+  from a subdirectory.
+- **The privacy opt-out is finally what its own message promised.**
+  `is_excluded` appeared zero times in the two CLIs and the dashboard, while
+  the MCP refusal said memories were "neither readable nor writable through
+  **any** cc-memory tool". All hand-run surfaces now share one gate, checked
+  *before* anchoring so a per-subdirectory exclusion is never widened to its
+  parent. A blank `--project` had slipped past even that — measured, it wrote
+  a row into an opted-out project one command after `--project .` was refused.
+  And the installer's gate, once added, turned out to be **unreachable**: it
+  imported `core.modes` 34 lines above the only `sys.path` setup in the file,
+  so the first Initialize Project click of a process raised
+  `ModuleNotFoundError` into `except ImportError: pass` and scaffolded the
+  project anyway. A *second* click worked, which is why clicking twice hides
+  it. A grep-based test green-lit that gate; a behavioural one, driving each
+  creator in a fresh subprocess, is what caught it.
+- **The filesystem root is no longer a candidate**, which is what `_chain`'s
+  docstring had always claimed and the code never did — with an exemption for
+  a root carrying `.ccm-root`, without which this rule silently overruled the
+  pin. And `.ccm-root` now outranks the container heuristic: a pinned
+  directory that merely looked container-shaped was dropped, so the documented
+  escape hatch did nothing.
+- **Two hook-contract violations.** `core/logger.py` bound `Path.home()` at
+  module scope, and `Path.home()` raises when no home resolves — so importing
+  the logger took four hooks to rc=1 with a stderr traceback. And
+  `pre_compact` was the only hook without an `isinstance(cwd, str)` guard and
+  the only one that mkdirs unconditionally, so `{"cwd": 123}` created a
+  database in the hook process's own directory.
+- **Databases were created without `memory/.gitignore`** — the single
+  omission that let a 184 KB `memory.db` ride into three commits of a sibling
+  repository. Writing it was every caller's job and every caller forgot
+  (`cli/mem.py` alone opens the database in thirteen places), so it now
+  happens in `MemoryDB.__init__`, the line that creates the directory.
+
+### And a full adversarial code audit on top
+
+Twelve framings — security, concurrency, resource exhaustion, the LLM trust
+boundary — every finding reproduced before it was accepted, two rejected as
+irreproducible. The three that mattered most:
+
+- **The automatic janitor was destroying memories the writer had just
+  accepted.** `core/consolidate.py` carried a second length floor, 20
+  characters against the writer's 10, and *deleted* rather than archived.
+  Measured: `/cc-mem add note "lr=3e-4 wins"` printed `[inserted] #1` and five
+  turns later the `memories` table held zero rows — on the plugin's own hot
+  path, with no adversary involved.
+- **Two render paths did not escape authority markers.** `CLAUDE.md` promises
+  the defence runs on "every render path" and then names four; the MCP server
+  and the CLI were not among them. This repository's own database has 307
+  active rows and **2 of them are already armed** — the same row rendering
+  escaped through SessionStart and live through the MCP server.
+- **A single NUL byte turned a read into a full-text index rebuild**, reachable
+  from the viewer's `?q=%00` and from the `memory_search` tool, whose
+  `minLength: 1` a lone NUL satisfies.
+
+Also fixed: a cross-transaction lost update on the session tag, per-session
+markers that were world-readable and symlink-followable on Linux, an
+unbounded thread set in the viewer, unbounded pairwise stages in
+consolidation, and a `PRAGMA journal_mode` whose refusal was indistinguishable
+from success.
+
+## Previously — What's new in v2.7.0
 
 **v2.6.0 hung its safety guards off one rung's inner loop instead of off the
 candidate set — so every rung that did not inherit them became its own
@@ -409,7 +511,10 @@ Recorded honestly, because each was measured rather than assumed:
   connection. It is loopback-only. HTTP/1.0 pipelining is unchanged (browsers
   do not pipeline). The DNS-rebinding fix was verified with forged `Host`
   headers, not with real DNS control, and the SPA escaping hardening is
-  defence-in-depth: no XSS was executed.
+  defence-in-depth: no XSS was executed. *(The cap half closed in v2.8.0:
+  `_MAX_CONCURRENT = 16` admission, excess connections shed with a 503 —
+  `tests/test_surfaces.py` drives both halves. The loopback-only and
+  forged-`Host` caveats still stand.)*
 - MCP still echoes array/object `id`s (non-conforming but valid JSON; answering
   beats orphaning), and an unparsable or over-length frame is answered with
   `"id": null` because its id is genuinely unknowable. `MemoryError` from a huge
@@ -419,6 +524,8 @@ Recorded honestly, because each was measured rather than assumed:
   `update_plan_content`) all accept `project_id` and every shipped caller now
   passes it, but none of them *requires* it — an unscoped raw call from new code
   would still cross projects, because `plans.id` is global to the DB file.
+  *(Closed in v2.5.3: `project_id` is REQUIRED and keyword-only on all three,
+  and `tests/smoke_test.py` asserts the signatures.)*
 - Searching for a bare `%` or `_` now returns 0 rows instead of the whole table.
   That is the fix, but it is a visible result change.
 - **Doc `file:line` citations are enforced since v2.5.2** by
@@ -876,15 +983,15 @@ because editing it looks like it does something. What remains:
   Anthropic legs are the only backends.
 - `excluded_projects` — absolute paths that opt OUT of cc-memory entirely. A
   listed directory *and everything beneath it* gets no `memory/` directory, no
-  DB, no observations, no extraction and no PROGRESS.md: **all six hooks, plus
+  DB, no observations, no extraction and no PROGRESS.md: **all six hooks <!--ce:hooks-->, plus
   the MCP server**, call `core.modes.is_excluded(cwd)` as their first act after
   resolving `cwd` and exit 0 (MCP answers `isError`). That is one shared
   implementation, not a copy per caller — v2.5.0 shipped it as two private
-  copies in the only two hooks that *create* `memory/`, which left a project
+  copies in the only two hooks <!--ce:hooks:subset--> that *create* `memory/`, which left a project
   that was initialised BEFORE it was listed fully instrumented: observations
   kept accumulating, PROGRESS.md kept naming its files, and with a live
   credential the Stop observer kept POSTing them to the Anthropic API. v2.5.1
-  fixed the six hooks and missed the seventh caller: **the MCP server had no
+  fixed the six hooks <!--ce:hooks:asof--> and missed the seventh caller: **the MCP server had no
   check at all** through v2.5.1 — it is loaded by default from the shipped
   manifest and every call is model-initiated, so a listed project stayed fully
   readable and writable by the model. v2.5.2 gates it in `_get_db`, the single
@@ -917,7 +1024,7 @@ Resolution order: `ANTHROPIC_API_KEY` env var → Claude OAuth token.
 
 ## Tests
 
-Five stdlib scripts, no pytest and no pip dependencies. **Eight release gates —
+Six stdlib scripts, no pytest and no pip dependencies. **Nine release gates —
 run all of them.**
 
 ```bash
@@ -928,16 +1035,17 @@ python tests/smoke_test.py
 # expect a series of [OK] lines ending with "===== ALL SMOKE TESTS PASSED ====="
 
 python tests/test_plan_carryover.py
-# expect "RESULT: 14 passed, 0 failed"
+# expect "RESULT: 20 passed, 0 failed"
 
 python tests/test_surfaces.py
-# expect "===== ALL SURFACE TESTS PASSED ====="   (§1-§6)
+# expect "===== ALL SURFACE TESTS PASSED ====="   (§1-§8)
 
 python tools/i18n_check.py       # translation drift; nonzero exit on drift
 python tools/citation_check.py   # doc file:line citations; "0 unchecked, 0 stale"
+python tools/doc_claims.py       # prose counts vs tools/contracts.py; "0 problem(s)"
 ```
 
-The eighth gate is version-site agreement: `pyproject.toml`, both
+The ninth gate is version-site agreement: `pyproject.toml`, both
 `.claude-plugin/*.json`, `cc_memory/config.json` and `cc_memory/core/version.py`
 must all carry the same string, which `smoke_test.py` asserts.
 
@@ -948,23 +1056,36 @@ must all carry the same string, which `smoke_test.py` asserts.
   shape, the bounded transcript window, the i18n drift gate, and — since v2.5.2
   — `.gitignore` three-copy parity, the sqlite handle-count regression, PLAN.md
   / MEMORY.md forgery resistance, the single-atomic-writer rule, the
-  keyword-only `project_id` on the plan mutators, and the two doc gates.
+  keyword-only `project_id` on the plan mutators, and the three doc gates.
 - `tests/test_plan_carryover.py` — the v2.4.0 carryover gate (20 checks); the
   only coverage of that feature.
-- `tests/test_surfaces.py` — new in v2.5, six sections, for the surfaces
-  neither of the others touches: §1 the MCP stdio server, §2 the web viewer's
-  request guards, §3 the standalone installer (surface install/uninstall by
-  name, malformed-`settings.json` handling, hook-timeout lockstep with
-  `hooks/hooks.json`), §4 `excluded_projects` across all six hooks, §5 the
-  config.json parser shapes plus the MCP half of the same opt-out, §6 the
-  `settings.json` compare-and-swap. Plus the rule that every LLM-calling hook
-  passes an absolute deadline.
+- `tests/test_surfaces.py` — new in v2.5, eight sections since v2.8.0, for
+  the surfaces neither of the others touches: §1 the MCP stdio server, §2 the
+  web viewer's request guards, §3 the standalone installer (surface
+  install/uninstall by name, malformed-`settings.json` handling, hook-timeout
+  lockstep with `hooks/hooks.json`), §4 `excluded_projects` across all six
+  hooks <!--ce:hooks-->, §5 the config.json parser shapes plus the MCP half
+  of the same opt-out, §6 the `settings.json` compare-and-swap, §7
+  project-root anchoring (the ladder over a real filesystem, the same hooks
+  driven from a subdirectory, and the source rule that every hook resolves
+  *after* the opt-out), §8 the v2.8.0 surfaces (the MCP launch-project scope
+  gate, the bounded `memory_topics`, the plan anchor driven through its own
+  hook in every mode, and `ui/dashboard.py` executed headlessly against a
+  hostile `package.json`). Plus the rule that every LLM-calling hook passes
+  an absolute deadline.
 - `tools/i18n_check.py` — translation drift, by normalized content hash.
 - `tools/citation_check.py` — every `file.py:LINE` citation in all 13 markdown
   files. `--fix` repairs; `--list` shows every verdict.
+- `tools/doc_claims.py` — prose that COUNTS something, checked against the set
+  `tools/contracts.py` computes from the tree. A citation gate proves a line
+  number still points at its symbol; this one proves the sentence around it is
+  still true. Since v2.8.0 it scans three surfaces with one grammar: the
+  tracked markdown, `cc_memory/config.json`, and the shipped package's
+  docstrings and comment runs — the first sweep of the latter two caught
+  three counts that were already wrong.
 
-Both dev checkers also run *inside* `smoke_test.py`, so a green suite already
-implies a green doc state:
+All three dev checkers also run *inside* `smoke_test.py`, so a green suite
+already implies a green doc state:
 
 ```bash
 python tools/i18n_check.py --list       # every English/翻译 pair + recorded vs current hash

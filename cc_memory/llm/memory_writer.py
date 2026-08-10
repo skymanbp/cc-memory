@@ -24,6 +24,7 @@ After every successful upsert, `regenerate_memory_index(project_id, memory_dir)`
 is called so memory/MEMORY.md is always fresh (anti the 50-day-stale failure
 mode observed in v2.0).
 """
+import json
 import os
 import sys
 from pathlib import Path
@@ -35,10 +36,18 @@ _PKG_ROOT = Path(__file__).resolve().parent.parent
 if str(_PKG_ROOT) not in sys.path:
     sys.path.insert(0, str(_PKG_ROOT))
 
-from core.db import MemoryDB
+from core.db import CATEGORIES, MemoryDB
 from core.atomic import write_atomic, _DERIVED_BUDGET_S
-from core.privacy import clean_for_storage, neutralize_inline
+from core.privacy import clean_for_storage, neutralize_document, neutralize_inline
 from core.logger import get_logger
+# ONE similarity substrate (core/textsim.py). This module, core/consolidate.py
+# and core/plan.py each carried a private English-only `_trigram_set` copy;
+# character trigrams collapse on CJK (a one-character correction in a
+# 10-character Chinese fact scored 0.4545 — and 0.23 on a live database —
+# where the equivalent English edit scores 0.7317), so every CJK correction
+# fell below MID_SIM and was INSERTED beside the fact it corrects. The old
+# names are kept as aliases so the decision tree below reads unchanged.
+from core.textsim import jaccard as _jaccard, shingle_set as _trigram_set
 
 _log = get_logger("memory_writer")
 
@@ -55,52 +64,79 @@ _atomic_write_text = write_atomic
 HIGH_SIM = 0.80
 MID_SIM = 0.50
 MIN_CONTENT_LEN = 10
-MAX_CANDIDATES_TO_SCAN = 50
+# 500, up from 50. The scan is a set-intersection per candidate (~µs each);
+# what 50 actually bounded was CORRECTNESS, not cost: get_memories_by_topic
+# orders by (importance DESC, created_at DESC), so on a 51-memory topic a
+# 0.95-similar row ranked 51st was simply never compared and the "new" fact
+# was inserted beside it — measured, reported similarity 0.036 against a true
+# 0.952. Topics larger than 500 log the truncation instead of hiding it.
+MAX_CANDIDATES_TO_SCAN = 500
+
+# Tag-list ceiling. `memory_add` is a model-invokable MCP tool and nothing
+# bounded `tags`: a 10,000-entry list was stored verbatim (measured), and
+# every render of the row pays for it forever. 32 is far above any organic
+# use (the largest emitter ships 3).
+MAX_TAGS = 32
+
+# How many topic summaries MEMORY.md lists. The Memory Distribution block one
+# section below has capped at 30 since it was written; this one had no cap at
+# all, in the file SessionStart's forced reminder orders the next Claude to
+# read first.
+_MEMORY_MD_TOPICS = 40
 
 
-def _trigram_set(text: str) -> set:
-    t = text.lower().strip()
-    if len(t) < 3:
-        return {t}
-    return {t[i:i+3] for i in range(len(t) - 2)}
+def _merged_tags(*groups):
+    """Order-preserving union of tag lists, capped at MAX_TAGS.
+
+    The MERGE branch used to write ``set(incoming + ["merged"])`` — the
+    SURVIVING row's own tags were destroyed, so a memory born as
+    ``["observer","realtime"]`` lost its provenance on the first merge
+    (measured: tags collapsed to ``["merged"]``). Existing tags come first so
+    the cap can only ever drop the newest excess, never provenance.
+    """
+    out = []
+    for group in groups:
+        for tag in group or []:
+            if isinstance(tag, str) and tag and tag not in out:
+                out.append(tag)
+    if len(out) > MAX_TAGS:
+        _log.warn(f"tag list capped at {MAX_TAGS} (got {len(out)})")
+        out = out[:MAX_TAGS]
+    return out
 
 
-def _jaccard(a: set, b: set) -> float:
-    if not a or not b:
-        return 0.0
-    return len(a & b) / len(a | b)
+def _row_tags(row):
+    """A memory row's stored tags as a list, [] on any malformed shape."""
+    try:
+        tags = json.loads(row.get("tags") or "[]")
+        return tags if isinstance(tags, list) else []
+    except (ValueError, TypeError):
+        return []
 
 
-def _find_similar(db: MemoryDB, project_id: int, content: str, topic: str,
-                  category: str) -> Tuple[Optional[Dict], float]:
-    """Find the most similar active memory. Search scope: same topic (if any)
-    OR same category. Returns (memory, similarity) or (None, 0.0)."""
-    candidates: List[Dict] = []
-    if topic:
-        candidates = db.get_memories_by_topic(project_id, topic)
-    if not candidates:
-        # Fall back to category-scoped scan
-        with db._connect() as conn:
-            rows = conn.execute(
-                """SELECT * FROM memories
-                   WHERE project_id = ? AND is_active = 1 AND category = ?
-                   ORDER BY updated_at DESC LIMIT ?""",
-                (project_id, category, MAX_CANDIDATES_TO_SCAN)
-            ).fetchall()
-            candidates = [dict(r) for r in rows]
-
-    if not candidates:
-        return None, 0.0
-
+def _make_pick(content: str):
+    """Build the pure best-candidate function `reconcile_upsert` calls INSIDE
+    its transaction. Replaces the old `_find_similar`, whose reads ran on
+    their own self-committing connections — the decision was made from a
+    snapshot no write boundary protected (register X1). The scan itself is
+    unchanged: trigram-Jaccard, first MAX_CANDIDATES_TO_SCAN candidates,
+    truncation logged (no silent caps — a candidate beyond the slice is a
+    candidate the decision never saw, and the cost is a duplicate row)."""
     target = _trigram_set(content)
-    best = None
-    best_sim = 0.0
-    for c in candidates[:MAX_CANDIDATES_TO_SCAN]:
-        s = _jaccard(target, _trigram_set(c["content"]))
-        if s > best_sim:
-            best_sim = s
-            best = c
-    return best, best_sim
+
+    def pick(candidates: List[Dict]) -> Tuple[Optional[Dict], float]:
+        if len(candidates) > MAX_CANDIDATES_TO_SCAN:
+            _log.info(f"similarity scan truncated: {len(candidates)} "
+                      f"candidates, scanning first {MAX_CANDIDATES_TO_SCAN}")
+        best, best_sim = None, 0.0
+        for c in candidates[:MAX_CANDIDATES_TO_SCAN]:
+            s = _jaccard(target, _trigram_set(c["content"]))
+            if s > best_sim:
+                best_sim = s
+                best = c
+        return best, best_sim
+
+    return pick
 
 
 def upsert_smart(db: MemoryDB,
@@ -121,52 +157,56 @@ def upsert_smart(db: MemoryDB,
     if not content or len(content) < MIN_CONTENT_LEN:
         return {"action": "skipped", "id": None, "reason": "too_short"}
 
-    if category not in ("decision", "result", "config", "bug", "task", "arch", "note"):
+    if category not in CATEGORIES:
         category = "note"
     importance = max(1, min(5, int(importance)))
     tags = tags or []
-    topic = (topic or "").strip()
+    # Same gate as `content` above. `topic` is model-supplied through the
+    # `memory_add` MCP tool (its schema declares a free-form string with no
+    # pattern), and it is rendered into MEMORY.md, PROGRESS.md §5, the
+    # SessionStart topics layer and every MCP result — so an armed value here
+    # is a permanent forgery re-injected as authoritative context every
+    # session. It was the one model-controlled column with no write-path gate.
+    topic = clean_for_storage((topic or "").strip())
 
-    # 1. Hash exact match → skip
-    h = MemoryDB.compute_content_hash(content)
-    existing = db.find_by_hash(project_id, h)
-    if existing:
-        return {"action": "skipped", "id": existing["id"],
-                "similarity": 1.0, "reason": "hash_match"}
+    # 1-4. The WHOLE decision tree — hash-skip, similarity scan, and the
+    # branch write — runs inside one BEGIN IMMEDIATE transaction
+    # (MemoryDB.reconcile_upsert). It used to be find_by_hash + _find_similar
+    # + the write across 3+ self-committing connections, so two concurrent
+    # savers of the same sentence both observed an empty table and both
+    # INSERTed — the anti-patch contract's "never stacks" was false exactly
+    # when two hooks <!--ce:hooks:asof--> ran at once (register X1; measured
+    # actions=['inserted','inserted'], 2 active rows with one hash). This
+    # module keeps the POLICY: thresholds, the similarity function, and the
+    # tag-union rule below all go in as parameters.
+    def _merge_fields(row: Dict) -> Dict:
+        # Union with the SURVIVING row's tags, never replace: merge rewrites
+        # the row in place and supersede carries the fact forward, so both
+        # inherit its provenance (["observer","realtime"], ["mcp"], …).
+        return {"importance": max(importance, row["importance"]),
+                "topic": topic or row.get("topic"),
+                "tags": _merged_tags(_row_tags(row), tags, ["merged"])}
 
-    # 2/3. Similarity-based reconcile
-    similar, sim = _find_similar(db, project_id, content, topic, category)
-    if similar:
-        if sim >= HIGH_SIM:
-            db.update_memory(
-                similar["id"],
-                content=content,
-                importance=max(importance, similar["importance"]),
-                topic=topic or similar.get("topic"),
-                tags=list(set(tags + ["merged"])),
-            )
-            _log.info(f"merged into #{similar['id']} sim={sim:.2f}")
-            return {"action": "merged", "id": similar["id"],
-                    "similarity": sim, "old_id": similar["id"]}
+    def _supersede_fields(row: Dict) -> Dict:
+        return {"importance": max(importance, row["importance"]),
+                "topic": topic or row.get("topic"),
+                "tags": _merged_tags(_row_tags(row), tags, ["supersedes"])}
 
-        if sim >= MID_SIM:
-            new_id = db.supersede_memory(
-                similar["id"], content, project_id, session_id,
-                category, importance=max(importance, similar["importance"]),
-                tags=list(set(tags + ["supersedes"])),
-                topic=topic or similar.get("topic"),
-            )
-            _log.info(f"superseded #{similar['id']} -> #{new_id} sim={sim:.2f}")
-            return {"action": "superseded", "id": new_id,
-                    "similarity": sim, "old_id": similar["id"]}
-
-    # 4. New independent fact
-    new_id = db.insert_memory(
+    result = db.reconcile_upsert(
         project_id, session_id, category, content,
-        importance=importance, tags=tags, topic=topic,
+        importance=importance, tags=_merged_tags(tags), topic=topic,
+        high_sim=HIGH_SIM, mid_sim=MID_SIM,
+        max_candidates=MAX_CANDIDATES_TO_SCAN,
+        pick=_make_pick(content),
+        merge_fields=_merge_fields,
+        supersede_fields=_supersede_fields,
     )
-    return {"action": "inserted", "id": new_id, "similarity": sim if similar else 0.0,
-            "old_id": None}
+    if result["action"] == "merged":
+        _log.info(f"merged into #{result['id']} sim={result['similarity']:.2f}")
+    elif result["action"] == "superseded":
+        _log.info(f"superseded #{result['old_id']} -> #{result['id']} "
+                  f"sim={result['similarity']:.2f}")
+    return result
 
 
 def upsert_batch(db: MemoryDB,
@@ -207,12 +247,66 @@ def upsert_batch(db: MemoryDB,
     return counts
 
 
+_RENDER_ATTEMPTS = 3
+
+
+def _index_generation(db: MemoryDB, project_id: int) -> tuple:
+    """Cheap fingerprint of every DB fact MEMORY.md projects.
+
+    The render below is a SNAPSHOT verdict — several separate queries, each on
+    its own connection — and `write_atomic` makes the replacement atomic
+    without making it ORDERED. Two surfaces (a hook, the MCP server, the
+    dashboard, the viewer) routinely render concurrently, and the slower
+    renderer replaced the faster one's newer file: measured, the DB held 2
+    memories while MEMORY.md announced 1, and MEMORY.md is re-injected as
+    authoritative context. The same multi-query read could also STRADDLE a
+    commit and project a state that never existed.
+
+    One fingerprint before and after the read closes both: unequal means the
+    DB moved under us, so the render is re-done rather than written. This is
+    the `archive_if_unchanged` shape (re-assert the predicate the verdict
+    rests on) applied to a file instead of a row.
+    """
+    with db._connect() as conn:
+        return tuple(conn.execute(
+            """SELECT (SELECT COUNT(*) FROM memories WHERE project_id = ?),
+                      (SELECT COALESCE(MAX(id), 0) FROM memories
+                        WHERE project_id = ?),
+                      (SELECT COALESCE(MAX(updated_at), '') FROM memories
+                        WHERE project_id = ?),
+                      (SELECT COUNT(*) FROM topics WHERE project_id = ?),
+                      (SELECT COALESCE(MAX(updated_at), '') FROM topics
+                        WHERE project_id = ?),
+                      (SELECT COUNT(*) FROM keywords WHERE project_id = ?),
+                      (SELECT COALESCE(MAX(last_seen), '') FROM keywords
+                        WHERE project_id = ?),
+                      (SELECT COUNT(*) FROM sessions WHERE project_id = ?)""",
+            (project_id,) * 8).fetchone())
+
+
 def regenerate_memory_index(db: MemoryDB, project_id: int, memory_dir: Path) -> None:
     """Rewrite memory/MEMORY.md from the current DB state.
 
     Called automatically after every batch upsert AND on consolidation /
     Stop-hook idle reorg, so MEMORY.md never goes stale.
+
+    The render is retried while the DB moves under it (`_index_generation`),
+    so a slow renderer cannot replace a newer projection with an older one.
     """
+    for _attempt in range(_RENDER_ATTEMPTS):
+        _gen_before = _index_generation(db, project_id)
+        _rendered = _render_memory_index(db, project_id, memory_dir)
+        if _index_generation(db, project_id) == _gen_before:
+            break
+    # After _RENDER_ATTEMPTS of continuous churn the last render is written
+    # anyway: it projects a state that really existed moments ago, every
+    # writer regenerates again on its next save, and refusing to write at all
+    # would strand MEMORY.md at a much older generation.
+    _write_memory_index(memory_dir, _rendered)
+
+
+def _render_memory_index(db: MemoryDB, project_id: int, memory_dir: Path) -> str:
+    """The pure render half of regenerate_memory_index: DB + dir -> text."""
     from datetime import datetime
 
     stats = db.get_stats(project_id)
@@ -256,7 +350,16 @@ def regenerate_memory_index(db: MemoryDB, project_id: int, memory_dir: Path) -> 
     # newline would also escape from.
     if topics:
         lines += ["## Topic Summaries", ""]
-        for t in topics:
+        # Bounded, like the Memory Distribution block below it. This list was
+        # the one unbounded section of a file SessionStart's forced reminder
+        # tells the next Claude to read: measured 42 KB on this project today
+        # and ~298 KB at 2 000 topics, which is context budget spent on a
+        # listing rather than on the facts.
+        if len(topics) > _MEMORY_MD_TOPICS:
+            lines.append(f"_(newest {_MEMORY_MD_TOPICS} of {len(topics)}; "
+                         f"`/cc-mem topics` lists them all)_")
+            lines.append("")
+        for t in topics[:_MEMORY_MD_TOPICS]:
             preview = t["content"][:120] + "..." if len(t["content"]) > 120 else t["content"]
             lines.append(f"- **{neutralize_inline(t['name'])}** "
                          f"(v{t['version']}): {neutralize_inline(preview)}")
@@ -284,15 +387,38 @@ def regenerate_memory_index(db: MemoryDB, project_id: int, memory_dir: Path) -> 
 
     sessions_dir = memory_dir / "sessions"
     if sessions_dir.exists():
-        archive_files = sorted(
-            sessions_dir.rglob("*.md"),
-            key=lambda p: p.stat().st_mtime,
-            reverse=True,
-        )[:5]
+        # Newest-first WITHOUT rglob + stat over the whole archive. The old
+        # shape walked every session file ever written and called `stat()` on
+        # each one to pick five, on every MEMORY.md regeneration — work
+        # proportional to a project's entire history for a five-line display
+        # block. `core.progress.write_session_archive` lays archives out as
+        # `sessions/YYYY/MM/<YYYYmmddTHHMMSS_mmm>…md`, so descending name order
+        # IS descending time order and only the newest month has to be opened.
+        archive_files = []
+        try:
+            for year in sorted((d for d in sessions_dir.iterdir() if d.is_dir()),
+                               key=lambda d: d.name, reverse=True):
+                for month in sorted((d for d in year.iterdir() if d.is_dir()),
+                                    key=lambda d: d.name, reverse=True):
+                    archive_files += sorted(month.glob("*.md"),
+                                            key=lambda p: p.name, reverse=True)
+                    if len(archive_files) >= 5:
+                        break
+                if len(archive_files) >= 5:
+                    break
+        except OSError:
+            # why: the archive is a display convenience; an unreadable
+            # directory must not cost the whole MEMORY.md rewrite.
+            archive_files = []
+        archive_files = archive_files[:5]
         if archive_files:
             lines += ["## Recent Archives", ""]
             for af in archive_files:
-                rel = af.relative_to(memory_dir).as_posix()
+                # neutralize_inline like every other value under the comment
+                # above: this one is a FILENAME off disk, and `<` is a legal
+                # POSIX filename character, so the "every interpolated value
+                # below is neutralised" claim was false for exactly one slot.
+                rel = neutralize_inline(af.relative_to(memory_dir).as_posix())
                 lines.append(f"- `memory/{rel}`")
             lines.append("")
 
@@ -302,11 +428,17 @@ def regenerate_memory_index(db: MemoryDB, project_id: int, memory_dir: Path) -> 
         "*Consolidate:  `python -m cc_memory.cli.mem --project <path> consolidate`*",
         "*Anti-patch contract:  see `docs/CONTRACTS.md#anti-patch-contract`*",
     ]
+    # Assembled sweep — measured forgery across two adjacent topic labels
+    # in the "## Memory Distribution" list.
+    return neutralize_document("\n".join(lines))
+
+
+def _write_memory_index(memory_dir: Path, rendered: str) -> None:
     try:
         # A wall-clock budget, not the default try count: a failure here is
         # swallowed below, so it costs a STALE MEMORY.md rather than an error
         # the caller sees. See core/atomic.py:_DERIVED_BUDGET_S.
-        _atomic_write_text(memory_dir / "MEMORY.md", "\n".join(lines),
+        _atomic_write_text(memory_dir / "MEMORY.md", rendered,
                            budget_s=_DERIVED_BUDGET_S)
     except OSError as e:
         # why: MEMORY.md is a projection of the DB, which is already committed

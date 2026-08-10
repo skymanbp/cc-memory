@@ -54,11 +54,20 @@ _MAX_BACKOFF_S = 0.02
 # the previous complete file, so for them a failure means "the artifact is one
 # write stale" rather than "the caller is told" — and the destination is
 # unavailable for as long as someone else holds it open, which is a duration.
-# Measured, 3 readers at 100 % duty cycle over 150 write rounds: 12 fixed tries
-# (0.78 s) lost 2 renames, a 3 s budget lost 0. Worst case 3 s against an 8 s
-# PostToolUse budget and a 120 s PreCompact one, and it is only ever paid while
-# the OS is actively refusing. PROGRESS.md keeps the short count because its
-# writer RAISES — there the caller finds out and can act.
+#
+# What the budget buys, HONESTLY (register D5 — an earlier revision of this
+# comment claimed the 3 s budget "lost 0" of 150 renames, and re-measurement
+# showed 20-28 lost depending on machine load; a number used as justification
+# was itself the unverified-claim class this project treats as most serious).
+# Re-measured 2026-08-09, 3 readers at 100 % duty cycle, 150 write rounds
+# each: 12 fixed tries lost 125/150; the 3 s budget lost 28/150. The budget
+# bounds the WAIT and sharply improves the odds; it does NOT guarantee the
+# rename against a reader that never yields — no finite wait can. The
+# CONTRACT is what guarantees correctness: fail means the previous COMPLETE
+# artifact stays, never a torn one. Worst case 3 s against an 8 s PostToolUse
+# budget and a 120 s PreCompact one, paid only while the OS is actively
+# refusing. PROGRESS.md keeps the short count because its writer RAISES —
+# there the caller finds out and can act.
 _DERIVED_BUDGET_S = 3.0
 
 
@@ -70,9 +79,12 @@ def write_atomic(path: Path, text: str, retries: int = _RETRIES,
     have elapsed instead of stopping after `retries` attempts. A fixed count is
     the wrong shape for this failure: the destination is unavailable for as
     long as some other process holds it open, which is a DURATION, not a number
-    of tries. Measured with three readers at 100 % duty cycle, 150 write rounds:
-    12 fixed tries (0.78 s) lost 2 renames; a 3 s budget lost none.
-    Only the derived artifacts use it — see `_DERIVED_RETRIES`.
+    of tries. Re-measured 2026-08-09 with three readers at 100 % duty cycle,
+    150 write rounds each: 12 fixed tries lost 125 renames, the 3 s budget
+    lost 28 — a large improvement, NOT a guarantee (see `_DERIVED_BUDGET_S`
+    for why the earlier "lost none" claim was retracted). Correctness comes
+    from the contract: on failure the previous complete artifact stays.
+    Only the derived artifacts use it — see `_DERIVED_BUDGET_S`.
 
     `errors="replace"` on the encode: a lone surrogate — reachable from a
     `surrogateescape`-decoded filename that lands in `files_touched` — would
@@ -91,6 +103,22 @@ def write_atomic(path: Path, text: str, retries: int = _RETRIES,
     try:
         with os.fdopen(fd, "w", encoding="utf-8", errors="replace") as fh:
             fh.write(text)
+            # fsync BEFORE the rename publishes the name. `close()` flushes to
+            # the OS page cache, not to stable storage, and `os.replace` orders
+            # the metadata operation only — so a host crash between the rename
+            # and writeback leaves the new directory entry pointing at zero or
+            # partial bytes. That is the same torn read this module's contract
+            # ("replaces the file completely or raises") promises to eliminate,
+            # merely moved from a truncating write to the page cache.
+            fh.flush()
+            try:
+                os.fsync(fh.fileno())
+            except OSError:
+                # why: some filesystems and some Windows handles refuse fsync.
+                # A durability guarantee that cannot be obtained is not a
+                # reason to abandon a write that is otherwise correct — the
+                # replace below is still atomic with respect to readers.
+                pass
         last_err = None
         deadline = (time.monotonic() + budget_s) if budget_s > 0 else None
         attempt = 0

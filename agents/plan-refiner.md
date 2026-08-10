@@ -61,10 +61,11 @@ trailing prose. Stdout must parse with `json.loads()` directly:
 8. **Carryover gate (R610 — MANDATORY when a plan is being REPLACED).**
    Before producing output, run
    `python <mem.py path from your instructions> --project . plan-show`
-   (or read `memory/PLAN.md`) to see the CURRENT plan. If it has steps that
-   are not `done`, the storage layer will REFUSE your JSON unless every one
-   of those unfinished steps is either (a) present in your `steps` (title
-   similarity is auto-detected), or (b) explicitly accounted for in a
+   (or read `memory/PLAN.md`) to see the CURRENT plan. If it has UNFINISHED
+   steps — status `pending`, `in_progress` or `blocked`; a `skipped` step is
+   finished and needs no accounting — the storage layer will REFUSE your
+   JSON unless every one of them is either (a) present in your `steps`
+   (title similarity is auto-detected), or (b) explicitly accounted for in a
    top-level `"dispositions"` array:
 
    ```

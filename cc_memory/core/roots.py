@@ -3,8 +3,9 @@ r"""Project-root resolution for the `cwd` a Claude Code hook is handed.
 RAW docstring on purpose: this module's whole subject is Windows paths, and a
 plain one turns `D:\Projects` into the invalid escape `\P`. Python answers
 that with a SyntaxWarning on **stderr**, and Claude Code renders any hook
-stderr as an error — so the prose below would have broken all six hooks the
-first time they were compiled from a fresh copy. Caught by test_surfaces §4.
+stderr as an error — so the prose below would have broken all six hooks
+<!--ce:hooks--> the first time they were compiled from a fresh copy. Caught
+by test_surfaces §4.
 
 WHY THIS EXISTS
 ---------------
@@ -17,9 +18,10 @@ directory, which follows the agent's own `cd` — so a session launched at
 `cwd = D:\Projects\CodeEraser\cli`, and `hooks/user_prompt.py` dutifully
 mkdir'd a SECOND, fully independent database there.
 
-That stray then self-sustains: the other five hooks gate on
-`memory/memory.db` merely EXISTING at `cwd`, so once born it keeps being
-written. Measured on the reporting machine before the fix: 27 memories, its
+That stray then self-sustains: the other five hooks <!--ce:hooks:subset-->
+gate on `memory/memory.db` merely EXISTING at `cwd`, so once born it keeps
+being written. Measured on the reporting machine before the fix: 27 memories,
+its
 own `projects` row, a `PROGRESS.md` titled "PROGRESS — cli", still receiving
 writes — while the real database two levels up had 161 and knew nothing about
 them. The same directory also had no `.gitignore` (the init path writes one
@@ -296,7 +298,29 @@ def _chain(start):
 
 
 def _has_db(directory):
-    return _exists(directory / "memory" / "memory.db")
+    """memory/memory.db exists AND neither component is a symlink.
+
+    The link check is fail-closed identity hygiene (register Y1): a symlinked
+    memory/ redirected every write to wherever the link pointed — this
+    predicate returned True THROUGH the link, rung 0 adopted the directory as
+    a project root, and memory.db landed at the link's target, outside the
+    project and outside every reporting path. `is_symlink()` is an lstat, the
+    portable guard core/markers already uses (O_NOFOLLOW is 0 on Windows and
+    an fstat after open describes the TARGET). A deliberately linked layout
+    is refused as project IDENTITY — `.ccm-root` in a real directory is the
+    supported spelling for exotic layouts. Note the module docstring's
+    symlink support is for the PROJECT directory itself, which stays intact:
+    the probe below never resolves `directory`.
+    """
+    mem = directory / "memory"
+    try:
+        if mem.is_symlink() or (mem / "memory.db").is_symlink():
+            return False
+    except OSError:
+        # why: a probe that cannot even lstat proves nothing — treat as no
+        # database, same degradation as _exists on an unreadable ancestor
+        return False
+    return _exists(mem / "memory.db")
 
 
 def _has_marker(directory):
@@ -333,6 +357,13 @@ def _is_container(directory):
     which carries its own `.git` plus three nested project databases — would
     be refused and a new subdirectory of it could no longer resolve to it.
 
+    A `.ccm-root` pin is exempt for the same reason, only more so: it is the
+    documented escape hatch for precisely the case where the heuristics get it
+    wrong, so letting a heuristic overrule it is self-defeating. Measured
+    before this clause: a pinned directory with three repository children was
+    judged a container, dropped from the candidate set, and a plain
+    subdirectory under it resolved to ITSELF — the pin silently did nothing.
+
     Owning a `memory/` is deliberately NOT such a statement. A container that
     has acquired a stray database is exactly the damage shape being guarded
     against: measured, a projects folder with a stray `memory/memory.db`
@@ -349,7 +380,7 @@ def _is_container(directory):
     Reads the directory once and counts both; an unreadable directory is not
     a container.
     """
-    if _is_vcs_root(directory):
+    if _is_vcs_root(directory) or _exists(directory / PIN_MARKER):
         return False
     vcs_children = 0
     db_children = 0
@@ -394,6 +425,22 @@ def _candidates(chain):
        occurrence: everything nearer the cwd than a dependency directory is
        that dependency's internals.
     2. Containers of projects — see `_is_container`.
+    3. The FILESYSTEM ROOT itself. `_chain` documents that it stops "below the
+       filesystem root" and never did: it appends each parent and only breaks
+       once the parent equals the child, so `D:\\` was the last element of
+       every chain on that drive. It is not a container either (a drive root
+       rarely holds two VCS-root or two database-owning children), so it
+       survived every rung — and a single `D:\\memory\\memory.db`, which any
+       one mis-anchored session could have created, would then have been the
+       nearest-database answer for EVERY project on the drive. A drive root is
+       never a project; excluding it here is the contract the docstring
+       already promised. TWO exemptions: `start` itself (a session genuinely
+       opened at `D:\\` still resolves to itself through the unresolved rung),
+       and a root carrying `.ccm-root`. Without the second, this rule silently
+       overruled the pin exemption added to `_is_container` in the same
+       change — a repository living AT a volume root (a dedicated drive, a
+       `net use` share, a USB stick) could not be pinned at all, so a cwd one
+       level down lost every upward rung and resolved to itself.
 
     Filtering rather than truncating is deliberate: the walk must continue
     PAST a dependency directory to reach the project that owns it.
@@ -408,7 +455,9 @@ def _candidates(chain):
             # remaining exclusions still apply to it
             continue
     return [d for i, d in enumerate(chain)
-            if i > dep_cut and not _is_container(d)]
+            if i > dep_cut
+            and (i == 0 or not _is_fs_root(d) or _exists(d / PIN_MARKER))
+            and not _is_container(d)]
 
 
 def _nearest(chain, predicate):
@@ -526,6 +575,62 @@ def project_root(cwd, log=None):
         # falls back to exactly what every hook did before this module
         # existed, so the worst case is the old behaviour, never a crash.
         return _safe_path(cwd)
+
+
+def anchor_project(raw, announce=None):
+    """Anchor a caller-supplied project path, for every non-hook entry point.
+
+    Hooks call `project_root` directly; everything a *user* can point at a
+    directory calls this. It exists because v2.7.0 anchored `mem.py` alone and
+    left the other two surfaces behind, which is the same "the guard hung off
+    one call site" mistake the resolver itself was rewritten to end:
+
+      * `plan.py --project <subdir>` created `<subdir>/memory/memory.db` on
+        the spot — even for the READ-ONLY `list` — and rung 0 (an existing
+        database is terminal) then pinned all six hooks <!--ce:hooks:asof-->
+        to that stray.
+      * `mcp/server.py` fed raw `os.getcwd()` to three tools, so the one
+        model-facing write surface wrote wherever the server happened to sit.
+
+    `announce`, when given, is called with a one-line message. It is a
+    parameter and not a `print` because the MCP server speaks JSON-RPC on
+    stdout — printing there would corrupt the protocol, so that caller passes
+    a logger instead. A redirection is never silent for a human-facing CLI: an
+    explicit `--project` is an instruction, and quietly substituting something
+    else would be worse than the bug this fixes.
+
+    NEVER RAISES, for the same reason `project_root` does not.
+    """
+    try:
+        root = project_root(raw)
+        # BOTH sides resolved. `project_root` returns the ORIGINAL, UNRESOLVED
+        # value whenever the answer is the input itself (see its docstring —
+        # that is what keeps symlinked project directories working), so
+        # comparing it against a resolved `raw` can never match for a relative
+        # spelling. `--project .` is the documented primary invocation
+        # (commands/cc-mem.md tells the wrapper to pass exactly that), so the
+        # one-sided comparison announced ". is inside a project rooted at ."
+        # on 100% of /cc-mem calls — inverting this function's own promise that
+        # an announcement means a redirection actually happened.
+        if announce is not None and \
+                _norm(Path(root).resolve()) != _norm(Path(raw).resolve()):
+            # An empty --project is legal and resolves to the caller's cwd;
+            # echoing it verbatim produced "  is inside a project rooted at X",
+            # a redirection notice that never said what it redirected FROM.
+            shown = raw if str(raw).strip() else (
+                f"{Path(raw).resolve()} (empty --project, so the current "
+                f"directory)")
+            announce(f"{shown} is inside a project rooted at {root} — using "
+                     f"that root, so this command and the hooks share one "
+                     f"database.")
+        return str(root)
+    except Exception as exc:
+        if announce is not None:
+            announce(f"project-root anchoring unavailable ({exc}); "
+                     f"using {raw} as given")
+        # why: an entry point must keep working even if anchoring cannot; the
+        # raw value is exactly the pre-v2.7.0 behaviour, never a crash
+        return raw
 
 
 def _safe_path(cwd):

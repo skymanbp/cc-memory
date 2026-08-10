@@ -16,7 +16,6 @@ the work; spamming Claude with "remember to call /save-memories" was noise.
 """
 import json
 import sys
-import tempfile
 import time
 import urllib.error
 from datetime import datetime
@@ -37,8 +36,14 @@ sys.path.insert(0, str(_PKG_ROOT))
 from core.encoding_setup import enable_utf8_io
 enable_utf8_io()
 
-from core.db import MemoryDB
+from core.db import CATEGORIES, MemoryDB
 from core.logger import get_logger
+# read_marker, not bare read_text: it refuses to follow a planted symlink —
+# load-bearing for the PROMPT marker below, whose content is spliced into the
+# Anthropic request. safe_id replaces this hook's private `[:16]` truncating
+# copy (three hooks <!--ce:hooks:asof--> each had one, and truncation
+# cross-wired any two sessions sharing a 16-char prefix).
+from core.markers import marker_path, read_marker, safe_id as _safe_id, write_marker
 from core.modes import is_excluded
 from core.roots import project_root  # v2.6.0 root anchoring — core/roots.py
 from core.idle import maybe_run_idle
@@ -49,9 +54,17 @@ from llm.memory_writer import upsert_batch
 _log = get_logger("stop")
 
 _MIN_OBS_FOR_EVAL = 3
+# Oldest-first slice fed to ONE Stop-observer call. Named, because the
+# fetch bound and the fed bound must be the SAME number: when they were
+# two literal 20s in two branches they silently disagreed about which end
+# of the queue they meant (register r7-B2).
+_OBS_FED_PER_STOP = 20
 _TURN_FILE_PREFIX = "cc_mem_turns_"
 _PROMPT_FILE_PREFIX = "cc_mem_prompt_"
-_LAST_EVAL_PREFIX = "cc_mem_eval_"
+# (the observer watermark used to live in a `cc_mem_eval_` marker here; it is
+# `projects.obs_watermark` since v2.8.0 — see _observer_evaluate. The prefix
+# stays in ui/installer.py's sweep list so an uninstall still removes the
+# files an older install wrote.)
 _REFINE_NUDGE_PREFIX = "cc_mem_refine_"
 
 # The plan-refiner nudge is advisory. `needs_refine` is cleared ONLY by
@@ -98,7 +111,7 @@ You are a memory observer. Given a user's request and a batch of tool observatio
 from a Claude Code session, extract ONLY the observations worth remembering long-term.
 
 Output a JSON array of objects:
-- "category": decision|result|config|bug|task|arch|note
+- "category": """ + "|".join(CATEGORIES) + """
 - "content": one concise, self-contained sentence with specific values
 - "importance": 1-5 (5=critical, 4=important, 3=useful, 2=minor)
 - "topic": short keyword for grouping
@@ -112,18 +125,11 @@ Rules:
 - Output ONLY valid JSON array."""
 
 
-def _safe_id(session_id):
-    return session_id[:16].replace("/", "_").replace("\\", "_")
-
-
 def _read_turn_count(session_id):
-    safe = _safe_id(session_id)
-    f = Path(tempfile.gettempdir()) / f"{_TURN_FILE_PREFIX}{safe}"
-    if not f.exists():
-        return 0
+    f = marker_path(_TURN_FILE_PREFIX, _safe_id(session_id))
     try:
-        return int(f.read_text(encoding="utf-8").strip())
-    except (ValueError, OSError):
+        return int(read_marker(f, "0").strip() or 0)
+    except ValueError:
         # why: corrupted turn counter file — treat as 0 (best-effort; the
         # next UserPromptSubmit will overwrite it correctly)
         return 0
@@ -141,19 +147,20 @@ def _claim_refine_nudge(session_id, turn_count):
     marker still records it, so a burst of Stops with no intervening user
     prompt yields exactly one nudge.
     """
-    f = Path(tempfile.gettempdir()) / f"{_REFINE_NUDGE_PREFIX}{_safe_id(session_id)}"
-    if f.exists():
+    f = marker_path(_REFINE_NUDGE_PREFIX, _safe_id(session_id))
+    raw = read_marker(f, "").strip()
+    if raw:
         try:
-            last = int(f.read_text(encoding="utf-8").strip())
+            last = int(raw)
             if turn_count - last < _REFINE_NUDGE_COOLDOWN_TURNS:
                 return False
-        except (ValueError, OSError):
-            # why: corrupt/unreadable marker — fall through and nudge once,
-            # rewriting the marker below (degrades to "nudge now", never to
-            # "nudge every turn")
+        except ValueError:
+            # why: corrupt marker — fall through and nudge once, rewriting
+            # the marker below (degrades to "nudge now", never to "nudge
+            # every turn")
             pass
     try:
-        f.write_text(str(turn_count), encoding="utf-8")
+        write_marker(f, str(turn_count))
     except OSError:
         # why: cannot persist the cooldown marker (read-only temp). Degrading
         # to the old every-turn nudge is noisy but harmless; suppressing the
@@ -178,44 +185,59 @@ def _observer_evaluate(cwd, session_id, memory_dir):
     project_id = db.upsert_project(cwd)
 
     safe = _safe_id(session_id)
-    eval_file = Path(tempfile.gettempdir()) / f"{_LAST_EVAL_PREFIX}{safe}"
-    last_eval_ts = ""
-    if eval_file.exists():
-        try:
-            last_eval_ts = eval_file.read_text(encoding="utf-8").strip()
-        except OSError:
-            # why: eval marker unreadable — fall back to "scan recent"
-            # rather than skip evaluation entirely
-            last_eval_ts = ""
+    # The watermark is a PROJECT column, not a per-session temp marker. It held
+    # the last-evaluated observation ROW ID (an ISO timestamp hid every row
+    # written after a backwards clock step — see db.get_observations_since),
+    # but it was keyed by `safe_id(session_id)` while observations are
+    # per-project and are deleted only by PreCompact. Every new session
+    # therefore began with no watermark and replayed the project's whole
+    # unconsumed backlog at one Anthropic call per Stop, and a marker directory
+    # that `core.markers` refuses (which that module explicitly designs for)
+    # made the replay permanent. `observer_watermark` seeds a never-run project
+    # at the live end of the queue rather than at row 0, so an upgrade does not
+    # re-walk a 5 000-row history to reach what the user is doing now.
+    last_eval = db.observer_watermark(project_id, window=_OBS_FED_PER_STOP)
 
-    if last_eval_ts:
-        observations = db.get_observations_since(project_id, last_eval_ts)
-    else:
-        observations = db.get_recent_observations(project_id, limit=20)
+    # ONE reader, oldest-first, for both cases. The `else` branch used to call
+    # `get_recent_observations`, which is `ORDER BY id DESC` — so on the FIRST
+    # Stop of every session (no marker yet, which is the branch every session
+    # takes exactly once) the model was shown the NEWEST 20 and the watermark
+    # below was then set to their maximum. Every older unevaluated row was
+    # recorded as evaluated without ever entering a prompt: measured 30 rows
+    # in, ids 1-10 skipped permanently. That is the same defect register r6-B3
+    # fixed in `hooks/pre_compact.py`, left standing in one of this hook's two
+    # branches — and `_as_row_id` already maps an absent/legacy watermark to
+    # "from the start", so the two branches were never needed.
+    observations = db.get_observations_since(project_id, last_eval or 0,
+                                             limit=_OBS_FED_PER_STOP)
 
     if len(observations) < _MIN_OBS_FOR_EVAL:
         return 0
 
-    prompt_file = Path(tempfile.gettempdir()) / f"{_PROMPT_FILE_PREFIX}{safe}"
-    user_prompt = ""
-    if prompt_file.exists():
-        try:
-            # clean_for_storage on the INPUT too (v2.5.2). The observer's OUTPUT
-            # has always been cleaned (see the `cleaned` loop below), but this
-            # marker was spliced RAW into the Anthropic request at `user_context`
-            # — so `<private>…</private>` typed by the user left the machine.
-            # hooks/user_prompt.py now writes the marker already cleaned; this
-            # stays because the marker is a plain temp file with a predictable
-            # per-session name that OUTLIVES a plugin upgrade, so one written by
-            # a pre-2.5.2 UserPromptSubmit (or by anything else) must not leak.
-            user_prompt = clean_for_storage(
-                prompt_file.read_text(encoding="utf-8").strip())
-        except OSError:
-            # why: prompt context is enrichment, not required for extraction
-            user_prompt = ""
+    prompt_file = marker_path(_PROMPT_FILE_PREFIX, safe)
+    # clean_for_storage on the INPUT too (v2.5.2). The observer's OUTPUT
+    # has always been cleaned (see the `cleaned` loop below), but this
+    # marker was spliced RAW into the Anthropic request at `user_context`
+    # — so `<private>…</private>` typed by the user left the machine.
+    # hooks/user_prompt.py now writes the marker already cleaned; this
+    # stays because the marker is a plain temp file with a predictable
+    # per-session name that OUTLIVES a plugin upgrade, so one written by
+    # a pre-2.5.2 UserPromptSubmit (or by anything else) must not leak.
+    # read_marker (v2.8.0) additionally refuses to follow a symlink: this
+    # is the one marker whose content reaches the Anthropic API, so a
+    # planted link would otherwise exfiltrate any file the user can read.
+    user_prompt = clean_for_storage(read_marker(prompt_file, "").strip())
 
+    # OLDEST prefix, and the watermark below covers exactly this slice
+    # (register r6-B3 — the same shape pre_compact fixed as B3): the prompt
+    # used to take the newest 20 while the marker advanced over everything
+    # fetched, so on a >20 backlog the oldest rows were marked evaluated
+    # having never been shown to the model. Feeding oldest-first catches the
+    # backlog up one Stop at a time; rows past the slice keep ids above the
+    # watermark and are fed next turn.
+    obs_fed = observations[:_OBS_FED_PER_STOP]
     obs_lines = []
-    for o in observations[-20:]:
+    for o in obs_fed:
         tool = o["tool_name"]
         inp = (o.get("tool_input", "") or "")[:200]
         out = (o.get("tool_output", "") or "")[:100]
@@ -227,15 +249,13 @@ def _observer_evaluate(cwd, session_id, memory_dir):
 
     try:
         from llm.ccl_backend import call_llm
+        from llm.parse import extract_json
         text = call_llm(_OBSERVER_PROMPT, user_msg, api_key,
                         max_tokens=1000, timeout=_API_TIMEOUT,
                         fallback_timeout=_FALLBACK_TIMEOUT,
                         deadline=_HOOK_T0 + _LLM_DEADLINE_S)
-        text = text.strip()
-        if text.startswith("```"):
-            text = "\n".join(l for l in text.split("\n") if not l.strip().startswith("```"))
-        memories = json.loads(text)
-        if not isinstance(memories, list):
+        memories = extract_json(text, kind="array")
+        if memories is None:
             return 0
 
         # Sanitize content and route through memory_writer
@@ -257,21 +277,26 @@ def _observer_evaluate(cwd, session_id, memory_dir):
         counts = upsert_batch(db, project_id, None, cleaned, memory_dir=memory_dir)
         n_total = sum(counts.get(k, 0) for k in ("inserted", "merged", "superseded"))
 
-        try:
-            eval_file.write_text(
-                datetime.now().isoformat(timespec="seconds"), encoding="utf-8"
-            )
-        except OSError:
-            # why: marker write is best-effort; next eval will scan from
-            # last_session boundary instead of last_eval — degraded but works
-            pass
+        # write_marker, not write_text: it never raises, and it refuses to
+        # follow a symlink. Marker write is best-effort either way; the next
+        # eval scans the recent window instead of resuming from the
+        # watermark — degraded but works.
+        #
+        # The HIGHEST id actually FED to the model, not the highest fetched
+        # (register r6-B3) and not the clock. A timestamp watermark went
+        # backwards whenever the system clock did; a fetched-max watermark
+        # marked rows evaluated that the prompt never contained. Rows beyond
+        # the fed slice — and any PostToolUse landing during the LLM call —
+        # keep higher ids and are picked up next turn.
+        db.advance_observer_watermark(
+            project_id, max((o["id"] for o in obs_fed), default=0))
 
         if n_total:
             _log.info(
                 f"observer: {counts.get('inserted',0)} new, "
                 f"{counts.get('merged',0)} merged, "
                 f"{counts.get('superseded',0)} superseded "
-                f"from {len(observations)} obs"
+                f"from {len(obs_fed)} of {len(observations)} obs"
             )
         return n_total
 
@@ -284,14 +309,8 @@ def _observer_evaluate(cwd, session_id, memory_dir):
 def _patch_progress_from_recent_obs(db, project_id, memory_dir):
     """Drip-update PROGRESS.md files_touched from the latest observations."""
     obs = db.get_recent_observations(project_id, limit=40)
-    files_read = list(dict.fromkeys(
-        o["tool_input"] for o in obs
-        if o["tool_name"] == "Read" and o["tool_input"]
-    ))[:20]
-    files_modified = list(dict.fromkeys(
-        o["tool_input"] for o in obs
-        if o["tool_name"] in ("Edit", "Write", "MultiEdit") and o["tool_input"]
-    ))[:20]
+    from core.extractor import files_from_observations
+    files_read, files_modified = files_from_observations(obs, cap=20)
 
     files_touched = (
         [{"path": p, "action": "edit"} for p in files_modified] +

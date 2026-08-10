@@ -2,7 +2,7 @@
 
 ## Project: cc-memory
 
-**Claude Code persistent memory plugin (v2.7.0)** — anti-patch reconcile-on-write
+**Claude Code persistent memory plugin (v2.8.0)** — anti-patch reconcile-on-write
 + LLM-judged semantic de-duplication, forced PROGRESS.md handoff with
 per-session annotation, live PLAN.md anchor with plan-refiner / plan-guardian
 subagents + mandatory carryover gate, bounded transcript reads, injection
@@ -10,9 +10,80 @@ observability, FTS5 search, AI-judged extraction with Haiku (optional local
 Ollama fallback).
 
 - **Language**: Python 3.8+ (pure stdlib, zero pip dependencies at runtime)
-- **Version**: 2.7.0
+- **Version**: 2.8.0
 - **License**: MIT
 - **Platform**: Windows-primary, cross-platform compatible (Tkinter required for GUI)
+
+## What changed in v2.8.0 (over v2.7.0)
+
+Full narrative in `CHANGELOG.md` — including rounds 4 through 8 (state
+machines / clock / injection budgets, two hazard-closure passes, and the
+two-round cc-tree radial audit), whose invariants are enforced by the gates
+and the falsify register rather than restated here. The list below is the
+round-3 set, which attacked memory CONTENT rather than paths:
+
+1. **`core/textsim.py` is THE similarity substrate.** `llm/memory_writer.py`,
+   `core/consolidate.py` and `core/plan.py` import from it; none may re-grow a
+   private `_trigram_set` (`smoke_test.py` asserts identity, not equality).
+   Character trigrams collapse on CJK — a one-character correction to a
+   ten-character Chinese fact scored **0.4545**, under `MID_SIM`, so neither
+   MERGE nor SUPERSEDE could fire and every Chinese correction was filed as a
+   new fact (measured at 0.23 on a live database). CJK runs shingle as
+   BIGRAMS; everything else keeps trigrams, and ASCII output is
+   byte-identical to the retired copies — do not "simplify" that to one
+   granularity, because every tuned threshold in the tree was calibrated on
+   the ASCII numbers. `_word_set` is CJK-aware for the same reason: the old
+   `[a-z0-9_]{3,}` grammar returned an EMPTY set for a Chinese memory, so
+   `semantic_dedup` could never nominate one to the judge.
+
+2. **Tags are UNIONED with the surviving row's, never replaced, and capped.**
+   MERGE wrote `set(incoming + ["merged"])` and destroyed provenance
+   (`["observer","realtime"]` → `["merged"]`). `MAX_TAGS` exists because
+   `memory_add` is model-invokable and an unbounded list was stored verbatim.
+
+3. **`supersede_memory` is ONE transaction**, and every `id IN (...)` writer
+   chunks through `MemoryDB._id_chunks`. A kill between a separate insert and
+   archive left BOTH rows active; an unchunked statement raised
+   `too many SQL variables` past the cap.
+
+4. **A verdict computed from a SNAPSHOT writes through
+   `archive_if_unchanged`, not `bulk_archive`.** `cleanup_garbage`,
+   `merge_near_duplicates` and `archive_consolidated` all read in one
+   transaction and write in another while the PreCompact writer runs
+   concurrently; the `content_hash` condition is what makes a stale verdict a
+   no-op instead of data loss.
+
+5. **`supersedes_id` stays a DAG.** `archive_obsolete` refuses a link that
+   would close a cycle and logs it.
+
+6. **Both loaders drop non-record JSONL lines.** `json.loads` succeeds on
+   `null` / `42` / `"s"` / `[1,2]` / `true`, and one such line used to abort
+   an entire compaction — including the PROGRESS.md handoff.
+
+7. **`core.markers.safe_id` hashes the WHOLE session id**, and BOTH marker
+   paths refuse a symlink. The truncating `[:16]` copies cross-wired any two
+   sessions sharing a prefix. `O_NOFOLLOW` is 0 on Windows and an `fstat`
+   after the open describes the TARGET — `os.lstat` is the portable guard,
+   and dropping it re-opens an exfiltration channel into the Anthropic
+   request (the prompt marker is spliced into it).
+
+8. **`call_llm`'s `deadline` is TRUE wall-clock.** Clamping the socket
+   timeout bounds only the idle gap; a drip held a "3 s" leg for 11.07 s.
+   `_abort_response` cuts the socket rather than calling `resp.close()`,
+   which DRAINS the body and blocked for 8.10 s of that.
+
+9. **`pre_compact` COERCES `trigger` / `session_id` and exits early only on
+   `cwd` / `transcript_path`.** The first two are annotation; abandoning a
+   compaction over them costs the handoff, which is not optional.
+
+10. **`/cc-mem archive` is the user-facing retirement path**, and it archives
+    — `db.delete_memories` still has no caller. Reconciliation handles a
+    RESTATEMENT of a fact; nothing else handled a REPUDIATION of one.
+
+11. **`tools/contracts.py` must count the BACKSTOP creators too**
+    (`_BACKSTOP_CREATORS`, verified against each module's source). Counting
+    `ensure_memory_dir` callers alone certified 6 of 8 — the prose-enumeration
+    disease recurring inside its own cure.
 
 ## What changed in v2.5.4 (over v2.5.3)
 
@@ -96,17 +167,24 @@ future change must not break:
    on the write path via `clean_for_storage` **and again on every render path**,
    because rows written by v2.5.1 and earlier are already armed in users' DBs.
    `neutralize_inline` for single-line slots, `neutralize_block` for slots whose
-   newlines are real structure. Four renderers are covered: `core/progress.py`,
-   `hooks/session_start.py`, `core/plan.py`, `llm/memory_writer.py`. If you add
-   a fifth, neutralise there too. `core/consolidate.py`'s
-   `^</?(ide_opened_file|system-reminder|antml)` list is garbage cleanup, **not**
-   this defence — it is anchored at position 0 and one leading word evades it.
+   newlines are real structure. **`python tools/contracts.py` lists the render
+   paths covered today** — do not restate the list here. This paragraph named
+   four while the tree had six, went on saying so for three releases, and each
+   convergence round rediscovered it as a new defect; enumerating a set in
+   prose IS the defect, so the enumeration now lives in the generator and
+   `tools/doc_claims.py` fails the build when a bound count disagrees with it.
+   `core/consolidate.py`'s `^</?(ide_opened_file|system-reminder|antml)` list is
+   garbage cleanup, **not** this defence — it is anchored at position 0 and one
+   leading word evades it.
 
-2. **`core.modes.is_excluded` has SEVEN callers, not six.** The six hooks plus
-   `mcp/server.py:_get_db`, the single choke point every MCP tool reaches. MCP
-   is loaded by default from the shipped manifest and every call is
-   model-initiated, which makes it the *least* optional of the seven. Do not add
-   an MCP handler that opens a DB path itself.
+2. **`core.modes.is_excluded` is consulted by every surface that can open a
+   project**, hooks and hand-run tools alike — `python tools/contracts.py`
+   prints which. The MCP server's `_get_db` is the one to keep in mind: it is
+   the single choke point every MCP tool reaches, it is loaded by default from
+   the shipped manifest, and every call is model-initiated, which makes it the
+   *least* optional of them. Do not add an MCP handler that opens a DB path
+   itself. (This entry used to assert "SEVEN callers, not six". It was seven
+   when written and is twelve now — the same prose-enumeration defect as §1.)
 
 3. **`core.modes.read_config` is THE runtime reader of `config.json`.** It reads
    `utf-8-sig` (a BOM — PowerShell's `Out-File` default — used to switch the
@@ -175,7 +253,7 @@ were closed too. Nine things that were silently wrong in shipped code:
    docstring now forbids re-inverting this. Per mode: ExitPlanMode → plan rows
    0/0/0 → 1/1/1; Edit counter 1/0/1 → 1/1/1; `git push` 21/20/1 → 21/21/21.
    A raw plan awaiting refinement is also no longer invisible:
-   `core.plan.raw_pending_refinement` (`plan.py:285-314`) makes PLAN.md and
+   `core.plan.raw_pending_refinement` (`plan.py:352-381`) makes PLAN.md and
    `plan-status` lead with a PENDING REFINEMENT banner + the raw text.
 
 3. **`core/privacy.py` failed OPEN.** `strip_private` was a non-greedy `re.sub`
@@ -284,7 +362,7 @@ not be imported at all — `cli/plan.py` now has a `main()`.
 
 **Residual limits, recorded rather than papered over:**
 
-- `core/db.py`'s three plan mutators — `update_plan_status` (`db.py:1417`),
+- `core/db.py`'s three plan mutators — `update_plan_status` (`db.py:2734-2778`),
   `delete_plan` (`:1410`) and `update_plan_content` (`:1427`) — all accept
   `project_id`, and `cli/plan.py` + `ui/dashboard.py` pass it at every call
   site, but none of them *requires* it (it defaults to `None`). An unscoped raw
@@ -292,10 +370,13 @@ not be imported at all — `cli/plan.py` now has a `main()`.
   global to the DB file. This is the wording `README.md` § "What is *not* fixed"
   uses; the pre-v2.5.1 text here claimed `delete_plan` / `update_plan_content`
   "take no `project_id`", which contradicted both the code and the README.
+  *(Closed in v2.5.3 — see § "What changed in v2.5.3" item 2: `project_id` is
+  REQUIRED and keyword-only on all three, asserted by `smoke_test.py`.)*
 - `ThreadingHTTPServer` has no worker cap — body reads are deadline-bounded, the
   thread count is not. Loopback-only. DNS rebinding was verified with forged
   `Host` headers, not real DNS; the SPA escaping hardening is defence-in-depth
-  (no XSS was executed).
+  (no XSS was executed). *(The cap half closed in v2.8.0 — `_MAX_CONCURRENT =
+  16` admission, excess shed with a 503; the other caveats stand.)*
 - MCP still echoes array/object `id`s, and an unparsable/over-length frame is
   answered with `"id": null` because its id is unknowable. The 1 MiB frame cap
   is justified by the escape class — `MemoryError` was never reproduced.
@@ -542,7 +623,7 @@ cc-memory/
 └── LICENSE
 ```
 
-## Hooks (6)
+## Hooks (6) <!--ce:hooks-->
 
 Declared in `hooks/hooks.json`. A **marketplace / dev-checkout** install is
 discovered via `enabledPlugins` + `extraKnownMarketplaces` in
@@ -711,10 +792,10 @@ standalone installs.
   - `["observer","realtime"]` — `hooks/stop.py`
   - `["mcp"]` — `mcp/server.py`
   - `["manual"]` — `cli/mem.py`
-  - `["manual","dashboard"]` — `ui/dashboard.py:1599` (Add-Memory dialog)
+  - `["manual","dashboard"]` — `ui/dashboard.py:1737` (Add-Memory dialog)
   - `[method, "manual"]` where `method` is `"llm"` or `"regex"` —
     `ui/dashboard.py:2125` (Save Session)
-  - `["regex","manual"]` — `ui/dashboard.py:2151` (Save Session, regex leg)
+  - `["regex","manual"]` — `ui/dashboard.py:2208` (Save Session, regex leg)
   - `["metric","manual"]` — `ui/dashboard.py:2156` (Save Session, metric leg)
   - `["auto-detected","init"]` — `ui/dashboard.py:2301` (new-project init)
   - `["web"]` — `ui/web_viewer.py`
@@ -731,10 +812,15 @@ standalone installs.
 
 ## Tests
 
-**EIGHT release gates. Run all eight — three suites, two dev checkers,
+**NINE release gates. Run all nine — three suites, three dev checkers,
 `compileall`, a `tomllib` parse of `pyproject.toml`, and version-site
 agreement.** `tests/smoke_test.py` asserts that this section names every gate
 script, so the list below cannot silently fall behind the list you must run.
+(It said EIGHT / two dev checkers while its own closing paragraph said "all
+six scripts" and the runnable block below listed nine commands: `doc_claims`
+joined in v2.8.0 and this arithmetic was not updated. "gates" is not a
+`doc_claims` trigger noun and there is no contract to bind it to, so the
+number is stated once, here, and derived from the block below.)
 
 `tests/smoke_test.py` is the canonical end-to-end check. In a throwaway temp
 project it exercises: v3/v6 migrations, `upsert_smart` decisions
@@ -752,17 +838,23 @@ the three plan mutators, and the two DOC gates below.
 `tests/test_plan_carryover.py` covers the v2.4.0 carryover gate (20 checks) —
 the only coverage of that feature.
 
-`tests/test_surfaces.py` (v2.5.0, seven sections) covers the surfaces neither
-of the others touches: §1 the MCP stdio server, §2 the web viewer's request
-guards, §3 the standalone installer (surfaces installed and removed by name,
-malformed-`settings.json` shapes, hook-timeout lockstep against
-`hooks/hooks.json`, manifest parity so a new runtime module cannot ship
-unpackaged), §4 `excluded_projects` across all six hooks, §5 the config.json
+`tests/test_surfaces.py` (v2.5.0, eight sections since v2.8.0) covers the
+surfaces neither of the others touches: §1 the MCP stdio server, §2 the web
+viewer's request guards, §3 the standalone installer (surfaces installed and
+removed by name, malformed-`settings.json` shapes, hook-timeout lockstep
+against `hooks/hooks.json`, manifest parity so a new runtime module cannot
+ship unpackaged), §4 `excluded_projects` across all six hooks <!--ce:hooks-->, §5 the config.json
 parser shapes plus the MCP half of the same opt-out, §6 the `settings.json`
-compare-and-swap, §7 project-root anchoring (v2.6.0). It also asserts the
-source-level rule that every LLM-calling hook passes an absolute deadline.
+compare-and-swap, §7 project-root anchoring (v2.6.0), §8 the v2.8.0 surfaces
+(installer init outcomes, `/cc-mem archive`, the wall-clock LLM deadline, the
+pre_compact annotation guard, the doc-claims grammar, the plan anchor driven
+through its own hook in every mode, the MCP scope gate, the `memory_topics`
+bound, and `ui/dashboard.py` executed headlessly — its CLAUDE.md generator
+driven against a hostile `package.json` and its SQL read-only classifier
+both ways). It also asserts the source-level rule that every LLM-calling
+hook passes an absolute deadline.
 
-**§7 is the twin of §4.** It drives the same six hooks from a SUBDIRECTORY of
+**§7 is the twin of §4.** It drives the same six hooks <!--ce:hooks--> from a SUBDIRECTORY of
 a seeded project and asserts no second `memory/` appears down there while the
 root database receives the writes, walks the resolution ladder over a real
 filesystem, and asserts the source rule that every hook calls
@@ -770,7 +862,30 @@ filesystem, and asserts the source rule that every hook calls
 resolver is a split-brain regression, not a style nit — the same way one that
 skips `is_excluded` is a privacy regression.
 
-Two of its 18 ladder cases are the ones that cost a design round, and neither
+v2.8.0 added the checks below, each verified to FAIL against the state it
+exists to catch before being kept. (This used to say "four checks" while
+naming five functions in four bullets; `git diff v2.7.0 -- tests/
+test_surfaces.py | grep '^+def'` is the actual count and reports nine new §7
+functions. The bullets are the interesting subset, not the whole — stating a
+total here was the prose-enumeration disease one more time.)
+
+- `_hooks_never_plant_on_junk_cwd` — 48 (hook, malformed-cwd) pairs assert
+  rc **and** stderr **and** that no database appears in the hook's own
+  directory. Asserting only rc is precisely how `pre_compact`'s side effect
+  survived one round of review: it exited 0, wrote nothing to stderr, and
+  created `memory/memory.db` where the hook process happened to be standing.
+- `_cli_opt_out_gate` — drives the real CLIs as subprocesses against a COPY
+  of the package, over five `--project` spellings including the blank ones,
+  and asserts all three surfaces route through the one shared gate rather
+  than calling `is_excluded` directly. Three inline copies is how it drifted.
+- `_roots_anchor_announce` — a redirection is announced exactly when one
+  occurred, never for `.`, an absolute root, or a trailing `/.`.
+- `_roots_skill_bootstrap` / `_skill_shell_metachars` — the `/ccm-load` body
+  is a shell double-quoted `python3 -c` blob, so `compileall` cannot see a bad
+  layout key (it becomes a swallowed `KeyError`) and a backtick in a *comment*
+  is command substitution. Both are static, so they cost no sandbox.
+
+Two of its 23 ladder cases are the ones that cost a design round, and neither
 may be weakened: **a directory that already owns a `memory/memory.db` is never
 re-rooted** (a stray and a deliberate nested sub-project are byte-for-byte
 identical on disk — this machine has four genuinely nested ones, the largest
@@ -782,15 +897,46 @@ beneath it, and the boundary is deliberately doubled — environment *and*
 platform-conventional structure — because the sandbox this suite runs in
 redirects the environment.
 
-**Two DOC gates, both inside `smoke_test.py`.** `tools/citation_check.py`
+**Three DOC gates, all inside `smoke_test.py`.** `tools/citation_check.py`
 resolves every `file.py:LINE` citation in **all 13** tracked markdown files —
 symbol-anchored where a symbol can be resolved, bounds-checked (inside the
 file, non-blank) where it cannot — and no citation may be unchecked. A second
-block asserts the docs' countable claims against the code: that
-`commands/cc-mem.md` names every subcommand `cli/mem.py` defines, that this
-section names every gate script, and that the "11 tables" claim matches
-`core/db.py`. Prose facts rot exactly like line numbers do; nothing checked
-them until v2.5.5, and three had already drifted.
+block asserts hand-picked doc facts: that `commands/cc-mem.md` names every
+subcommand `cli/mem.py` defines, that this section names every gate script,
+and that the "11 tables" claim matches `core/db.py`. Prose facts rot exactly
+like line numbers do; nothing checked them until v2.5.5, and three had already
+drifted.
+
+**`tools/doc_claims.py` (v2.8.0) generalises that third check.** A citation
+gate proves `file.py:LINE` still points at its symbol and says nothing about
+the sentence around it, which is why "four renderers <!--ce:render_paths:asof-->
+are covered" survived three releases with six in the tree and why five
+convergence rounds each
+rediscovered the same class of defect. `tools/contracts.py` COMPUTES each set
+from the tree — run it to see which sets and their members; this sentence
+used to enumerate five of them while the tree had six, which is the disease
+this paragraph documents — and prose binds to one with an HTML comment:
+
+```markdown
+all six hooks <!--ce:hooks--> resolve after the opt-out
+Four of the six hooks <!--ce:hooks:subset--> gate on memory.db
+v2.5.1 fixed the six hooks <!--ce:hooks:asof--> and missed the seventh
+```
+
+Whole set, strict subset, or a statement about the past. **Do not enumerate a
+set in prose** — name the count, bind it, and point at `python
+tools/contracts.py` for the members. Version-titled `## What's new in vX`
+sections and fenced diagrams are exempt: a history edited to stay current is
+not a history, and an HTML comment is literal inside a fence. Since the A5
+close of cc-tree round 2 the gate scans THREE surfaces with one grammar: the
+tracked markdown, `cc_memory/config.json`, and the docstrings + comment runs
+of the shipped package — because the first sweep of the latter two found
+three counts already wrong ("the seventh caller" with twelve surfaces
+consulting the opt-out, "66 call sites" in a file holding 80, and a comment
+claiming three hooks <!--ce:hooks:asof--> imported a module that two hooks
+<!--ce:hooks:asof--> and core/idle.py import). `tools/` and
+`tests/` are deliberately unscanned; their numbers are examples and expected
+output.
 
 ```bash
 python tests/smoke_test.py
@@ -798,14 +944,25 @@ python tests/smoke_test.py
 python tests/test_plan_carryover.py
 # expect: "RESULT: 20 passed, 0 failed"
 python tests/test_surfaces.py
-# expect: "===== ALL SURFACE TESTS PASSED ====="  (§1-§7)
+# expect: "===== ALL SURFACE TESTS PASSED ====="  (§1-§8)
 python tools/i18n_check.py
 # expect: "3 in-sync", exit 0
 python tools/citation_check.py
 # expect: "0 unchecked, 0 stale", exit 0 (also asserted in smoke_test.py)
+python tools/doc_claims.py
+# expect: "0 problem(s)", exit 0 (also asserted in smoke_test.py)
+python tools/contracts.py
+# not a gate — prints what the code currently says each set contains
+python tools/falsify_fixes.py
+# not a gate either, and the one to run when you doubt a check. It reverts
+# each registered fix on a TEMPORARY COPY and asserts the gate goes RED —
+# every case in the register was verified RED individually before being
+# kept, and `--anchors` proves the register itself has not rotted. A green
+# case means the check is vacuous: fix the check, not the case.
+# `--list` shows what each case breaks; `--case <name>` runs one.
 ```
 
-No pytest / pip dependencies — all five scripts are stdlib and reflect the
+No pytest / pip dependencies — all six scripts are stdlib and reflect the
 runtime contract (pure stdlib, see Development guidelines below). When you add a
 behavior to `memory_writer`, `progress`, `extractor.load_transcript_window`, or
 `session_start._refresh_progress_row`, add a corresponding assertion block.
@@ -815,7 +972,8 @@ needs an explicit `encoding="utf-8"` — the default codec on this box is gbk an
 the CLI emits real UTF-8.
 
 **`excluded_projects` is covered by `tests/test_surfaces.py` §4** — it drives
-all six hooks against a fresh excluded directory, a subdirectory of one, and a
+all six hooks <!--ce:hooks--> against a fresh excluded directory, a
+subdirectory of one, and a
 project that was initialised BEFORE it was listed (the case the two-copy v2.5.0
 implementation got wrong). Keep that block in step with any hook you add: a hook
 that does not call `core.modes.is_excluded` is a privacy regression, not a style
@@ -834,7 +992,7 @@ Two limits to know before trusting a green result: a citation whose sentence
 names no resolvable symbol at all is reported **SKIP**, not OK (253 of 594
 today, down from 370 once v2.5.3 taught it to anchor CROSS-FILE citations on the
 text of the cited range — the `` `db.tag_progress_session(...)`
-(`user_prompt.py:202`) `` shape, which is the commonest in these docs). `--fix`
+(`user_prompt.py:207`) `` shape, which is the commonest in these docs). `--fix`
 rewrites a same-file citation to the **definition** site and a cross-file one to
 the occurrence NEAREST the stale number — a stated assumption (it was right when
 written; the file grew above it), not a proof. Ordinary variable

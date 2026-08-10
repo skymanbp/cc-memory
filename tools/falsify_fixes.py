@@ -1,0 +1,1511 @@
+#!/usr/bin/env python3
+"""Counterfactual falsification for the v2.8.0 fixes (rounds 3 through 6).
+
+DISCIPLINE: every breakage is applied to a TEMPORARY COPY of the repo, never
+to the working tree. A check that cannot go red against the state it exists
+to catch is not a check — it is a comment that costs CI time.
+
+Each case reverts ONE fix in the copy and asserts the corresponding gate
+FAILS there, while the same gate passes on the untouched tree.
+
+    python tools/falsify_fixes.py             # every case
+    python tools/falsify_fixes.py --list      # what each one breaks
+    python tools/falsify_fixes.py --case tags # just one
+"""
+import argparse
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parent.parent
+PKG = "cc_memory"
+
+# Anchor-building constants. A breakage anchor has to quote SOURCE text
+# verbatim — including its quotes, backslashes and newlines — and doing
+# that with ordinary escapes makes the anchors unreadable and, worse,
+# easy to get wrong by one level (a doubled backslash matches nothing and
+# reports as ROT). Composing them keeps each anchor legible.
+BS = chr(92)      # a literal backslash
+Q = chr(34)       # a literal double quote
+N = chr(10)       # a real newline: anchors quote whole source LINES.
+                  # A literal backslash-n INSIDE a source string is
+                  # spelled Q + BS + "n" + Q, e.g. the .join(lines) sites.
+
+
+
+def _copy_repo():
+    box = Path(tempfile.mkdtemp(prefix="ccm-falsify-"))
+    dst = box / "cc-memory"
+    shutil.copytree(
+        REPO, dst,
+        ignore=shutil.ignore_patterns("__pycache__", "*.pyc", ".git",
+                                      "dist", "build", "memory"))
+    return box, dst
+
+
+def _patch(root, rel, old, new, count=1):
+    path = root / rel
+    text = path.read_text(encoding="utf-8")
+    found = text.count(old)
+    if found != count:
+        raise SystemExit(
+            f"BREAKAGE ANCHOR ROTTED: {rel} contains {found} copies of "
+            f"{old[:70]!r}, expected {count}. Fix this script, not the tree.")
+    path.write_text(text.replace(old, new), encoding="utf-8")
+
+
+def _run(root, *args, timeout=900):
+    env = dict(os.environ)
+    env["PYTHONIOENCODING"] = "utf-8"
+    return subprocess.run([sys.executable, *args], cwd=str(root),
+                          capture_output=True, encoding="utf-8",
+                          errors="replace", env=env, timeout=timeout)
+
+
+# name -> (breakage(root), gate argv, one-line description)
+CASES = {}
+
+
+def case(name, gate, description):
+    def register(fn):
+        CASES[name] = (fn, gate, description)
+        return fn
+    return register
+
+
+@case("cjk", ["tests/smoke_test.py"],
+      "restore the English-only trigram set -> CJK correction falls below MID_SIM")
+def _break_cjk(root):
+    # anchor repaired 2026-08-09: r5 made the constant public (_CJK_RUN ->
+    # CJK_RUN) and the old anchor aborted every full run
+    _patch(root, "cc_memory/core/textsim.py",
+           "    if not CJK_RUN.search(t):",
+           "    if True:  # BREAKAGE: pretend nothing is CJK")
+
+
+@case("tags", ["tests/smoke_test.py"],
+      "MERGE replaces tags again -> the surviving row's provenance is destroyed")
+def _break_tags(root):
+    # anchor repaired 2026-08-09: r5 moved the merge into a merge_fields
+    # callable handed to reconcile_upsert
+    _patch(root, "cc_memory/llm/memory_writer.py",
+           '"tags": _merged_tags(_row_tags(row), tags, ["merged"])}',
+           '"tags": list(set(tags + ["merged"]))}  # BREAKAGE')
+
+
+@case("tagcap", ["tests/smoke_test.py"],
+      "remove the tag ceiling -> a 10,000-entry model-supplied list is stored")
+def _break_tagcap(root):
+    _patch(root, "cc_memory/llm/memory_writer.py",
+           "MAX_TAGS = 32", "MAX_TAGS = 100000  # BREAKAGE")
+
+
+@case("scan", ["tests/smoke_test.py"],
+      "scan cap back to 50 -> a 0.95 match ranked 51st is inserted as new")
+def _break_scan(root):
+    _patch(root, "cc_memory/llm/memory_writer.py",
+           "MAX_CANDIDATES_TO_SCAN = 500",
+           "MAX_CANDIDATES_TO_SCAN = 50  # BREAKAGE")
+
+
+@case("supersede", ["tests/smoke_test.py"],
+      "split supersede back into two transactions -> a kill leaves both active")
+def _break_supersede(root):
+    path = root / "cc_memory" / "core" / "db.py"
+    text = path.read_text(encoding="utf-8")
+    start = text.index("        now = self._now()\n        content_hash = "
+                       "self.compute_content_hash(new_content)")
+    end = text.index("    _journal_warned = False")
+    text = text[:start] + (
+        "        new_id = self.insert_memory(\n"
+        "            project_id, session_id, category, new_content,\n"
+        "            importance=importance, tags=tags, topic=topic,\n"
+        "            supersedes_id=old_id,\n"
+        "        )\n"
+        "        self.archive_memory(old_id)   # BREAKAGE: second transaction\n"
+        "        return new_id\n\n") + text[end:]
+    path.write_text(text, encoding="utf-8")
+
+
+@case("sqlvars", ["tests/smoke_test.py"],
+      "un-chunk bulk_archive -> 'too many SQL variables' past 32766 ids")
+def _break_sqlvars(root):
+    _patch(root, "cc_memory/core/db.py", "    _SQL_VAR_CHUNK = 900",
+           "    _SQL_VAR_CHUNK = 10 ** 9  # BREAKAGE")
+
+
+@case("hashguard", ["tests/smoke_test.py"],
+      "drop the snapshot condition -> a repaired row is archived anyway")
+def _break_hashguard(root):
+    # anchor repaired 2026-08-09: r5-X7 moved this guard from content_hash to
+    # full content; the r3 revert (no condition at all) still applies
+    _patch(root, "cc_memory/core/db.py",
+           '"WHERE id = ? AND is_active = 1 AND content = ?",\n'
+           "                    (now, mid, content)",
+           '"WHERE id = ? AND is_active = 1",\n'
+           "                    (now, mid)  # BREAKAGE")
+
+
+@case("cycle", ["tests/smoke_test.py"],
+      "remove the DAG guard -> archive_obsolete closes an A->B->A cycle")
+def _break_cycle(root):
+    _patch(root, "cc_memory/core/db.py",
+           "                looped = [i for i in ids if i in chain_ids]\n"
+           "                linked = [i for i in ids if i not in chain_ids]",
+           "                looped = []  # BREAKAGE\n"
+           "                linked = list(ids)")
+
+
+@case("nonrecord", ["tests/smoke_test.py"],
+      "accept non-record JSONL again -> build_extraction raises, handoff lost")
+def _break_nonrecord(root):
+    _patch(root, "cc_memory/core/extractor.py",
+           "        if isinstance(record, dict):\n            out.append(record)",
+           "        out.append(record)  # BREAKAGE")
+
+
+@case("markerid", ["tests/smoke_test.py"],
+      "truncate the session id again -> two sessions share every marker")
+def _break_markerid(root):
+    _patch(root, "cc_memory/core/markers.py",
+           'return hashlib.sha256(session_id.encode("utf-8", "replace"))'
+           '.hexdigest()[:16]',
+           'return session_id[:16].replace("/", "_")  # BREAKAGE')
+
+
+@case("symlink", ["tests/smoke_test.py"],
+      "drop the portable link check -> read_marker follows a planted symlink")
+def _break_symlink(root):
+    # anchor repaired 2026-08-09 (r7-C1): _is_link gained a junction probe,
+    # so zeroing only the S_ISLNK half no longer follows a planted link.
+    _patch(root, "cc_memory/core/markers.py",
+           "        if stat.S_ISLNK(os.lstat(str(path)).st_mode):\n"
+           "            return True",
+           "        if False:  # BREAKAGE\n            return True")
+    _patch(root, "cc_memory/core/markers.py",
+           "    isj = getattr(os.path, \"isjunction\", None)",
+           "    isj = None  # BREAKAGE")
+
+
+@case("creators", ["tests/smoke_test.py"],
+      "forget the backstop creators -> the contract certifies 6 of 8")
+def _break_creators(root):
+    _patch(root, "tools/contracts.py",
+           '    f"{PKG}/core/db.py": "self.db_path.parent.mkdir(",\n'
+           '    f"{PKG}/ui/installer.py": "memory_dir.mkdir(",',
+           "    # BREAKAGE: backstops removed")
+
+
+@case("shed", ["tests/test_surfaces.py"],
+      "shed without a response -> the client sees ConnectionResetError")
+def _break_shed(root):
+    _patch(root, "cc_memory/ui/web_viewer.py",
+           "            _shed_response(request)\n",
+           "            # BREAKAGE: no HTTP response\n")
+
+
+@case("initret", ["tests/test_surfaces.py"],
+      "return None from _init_project -> a refusal reports Success")
+def _break_initret(root):
+    _patch(root, "cc_memory/ui/installer.py",
+           '            return ("refused", notice)',
+           "            return None  # BREAKAGE")
+
+
+@case("deadline", ["tests/test_surfaces.py"],
+      "close instead of aborting the socket -> the drain blocks past the deadline")
+def _break_deadline(root):
+    _patch(root, "cc_memory/llm/ccl_backend.py",
+           "            _abort_response(resp)",
+           "            resp.close()  # BREAKAGE: drains the rest of the body")
+
+
+@case("trigger", ["tests/test_surfaces.py"],
+      "drop the annotation coercion -> a list trigger costs the whole compaction")
+def _break_trigger(root):
+    _patch(root, "cc_memory/hooks/pre_compact.py",
+           '    if not isinstance(trigger, str) or not trigger:\n'
+           '        _log.warn(f"trigger is {type(trigger).__name__}; coercing '
+           "to 'auto'\")\n"
+           '        trigger = "auto"',
+           "    pass  # BREAKAGE: no trigger coercion")
+
+
+@case("skillgate", ["tests/test_surfaces.py"],
+      "put the opt-out back inside the anchoring try -> excluded project inited")
+def _break_skillgate(root):
+    path = root / "skills" / "ccm-load" / "SKILL.md"
+    text = path.read_text(encoding="utf-8")
+    text = text.replace(
+        "    from core.modes import cli_opt_out_notice",
+        "    from core.roots import project_root  # BREAKAGE: gate now shares\n"
+        "    from core.modes import cli_opt_out_notice", 1)
+    path.write_text(text, encoding="utf-8")
+
+
+@case("gitignore", ["tests/test_surfaces.py"],
+      "strict-decode .gitignore again -> a GBK line aborts the surface")
+def _break_gitignore(root):
+    _patch(root, "skills/ccm-load/SKILL.md",
+           "_cur = gi.read_text(encoding='utf-8', errors='replace') "
+           "if gi.exists() else ''",
+           "_cur = gi.read_text(encoding='utf-8') if gi.exists() else ''")
+
+
+@case("claimword", ["tests/test_surfaces.py"],
+      "un-bound the back-scan -> 'done' binds as 1 and 'often' as 10")
+def _break_claimword(root):
+    _patch(root, "tools/doc_claims.py",
+           'nums = re.findall(rf"({_NUM_BOUNDED})", head, re.IGNORECASE)',
+           'nums = re.findall(rf"({_NUM})", head, re.IGNORECASE)  # BREAKAGE')
+
+
+@case("claimof", ["tests/test_surfaces.py"],
+      "remove the quantifier pattern -> 'seven of the hooks' is not a claim")
+def _break_claimof(root):
+    _patch(root, "tools/doc_claims.py",
+           "        (hit for pattern in (TRIGGER_OF_RE, TRIGGER_RE, "
+           "TRIGGER_ZH_RE,\n                             TRIGGER_PAREN_RE)",
+           "        (hit for pattern in (TRIGGER_RE, TRIGGER_ZH_RE,\n"
+           "                             TRIGGER_PAREN_RE)  # BREAKAGE")
+
+
+@case("pendingsync", ["tests/smoke_test.py"],
+      "let TodoWrite sync into a plan pending refinement -> the gate empties")
+def _break_pendingsync(root):
+    _patch(root, f"{PKG}/core/plan.py",
+           "    if raw_pending_refinement(row):",
+           "    if False:  # BREAKAGE")
+
+
+@case("recapture", ["tests/smoke_test.py"],
+      "drop the re-capture archive -> an unrefined raw plan is lost silently")
+def _break_recapture(root):
+    _patch(root, f"{PKG}/core/plan.py",
+           '    _prev = db.get_plan_active(project_id)\n'
+           '    if _prev and (_prev.get("raw") or "").strip() not in ("", plan_text):',
+           "    _prev = None  # BREAKAGE\n    if False:")
+
+
+@case("dispreuse", ["tests/smoke_test.py"],
+      "stop consuming dispositions -> one reason discharges four steps")
+def _break_dispreuse(root):
+    _patch(root, f"{PKG}/core/plan.py",
+           "            if i in spent:\n                continue",
+           "            pass  # BREAKAGE: dispositions are never consumed")
+
+
+@case("donebar", ["tests/smoke_test.py"],
+      "promote to done at 0.35 again -> a step exits the 0.50 gate one-way")
+def _break_donebar(root):
+    # anchor repaired 2026-08-09: r5-A1 widened the gate to every promotion
+    # OUT of _UNFINISHED_STATUSES (done AND skipped) and rewrote the line
+    _patch(root, f"{PKG}/core/plan.py",
+           "        if (new_status not in _UNFINISHED_STATUSES\n"
+           "                and old_status in _UNFINISHED_STATUSES\n"
+           "                and not _carried(",
+           "        if (False  # BREAKAGE: promote out of the gate at 0.35 again\n"
+           "                and old_status in _UNFINISHED_STATUSES\n"
+           "                and not _carried(")
+
+
+@case("cjkbar", ["tests/smoke_test.py"],
+      "share one bar with the writer -> the CJK refusal gate loosens")
+def _break_cjkbar(root):
+    _patch(root, f"{PKG}/core/plan.py",
+           "CARRYOVER_MATCH_THRESHOLD_CJK = 2.0 / 3.0",
+           "CARRYOVER_MATCH_THRESHOLD_CJK = 0.5  # BREAKAGE")
+
+
+@case("planid", ["tests/smoke_test.py"],
+      "un-guard the step id coercion -> a 1e999 id raises OverflowError")
+def _break_planid(root):
+    _patch(root, f"{PKG}/core/plan.py",
+           '            try:\n                sid = int(s.get("id", i))',
+           '            if True:\n                sid = int(s.get("id", i))')
+
+
+@case("obswatermark", ["tests/smoke_test.py"],
+      "bound observations by timestamp -> a backwards clock destroys them")
+def _break_obswatermark(root):
+    _patch(root, f"{PKG}/core/db.py",
+           # anchor repaired 2026-08-09 (r7-B2): the reader gained LIMIT ?
+           "                   WHERE project_id = ? AND id > ? AND is_private = 0\n"
+           '                   ORDER BY id ASC LIMIT ?""",',
+           "                   WHERE project_id = ? AND timestamp > ? "
+           'AND is_private = 0\n                   ORDER BY timestamp ASC LIMIT ?""",')
+
+
+@case("sessionorder", ["tests/smoke_test.py"],
+      "order sessions by compacted_at -> the newest ranks last after a step back")
+def _break_sessionorder(root):
+    # anchor repaired 2026-08-09: r6-A6 added the complete=1 predicate; the
+    # r3 revert (timestamp identity instead of id) keeps it
+    # anchor repaired 2026-08-09 (r7-A1): the predicate is now
+    # "receipted OR carrying an active memory"; the r3 revert (order by a
+    # wall-clock string instead of the monotonic id) is unchanged.
+    _patch(root, f"{PKG}/core/db.py",
+           '                "ORDER BY s.id DESC LIMIT ?",',
+           '                "ORDER BY s.compacted_at DESC LIMIT ?",')
+
+
+@case("ftsrepair", ["tests/smoke_test.py"],
+      "make _detect_fts5 observe only -> a missing index is never rebuilt")
+def _break_ftsrepair(root):
+    _patch(root, f"{PKG}/core/db.py",
+           "        try:\n            with self._connect() as conn:\n"
+           "                self._setup_fts5(conn)",
+           "        try:\n            with self._connect() as conn:\n"
+           "                pass  # BREAKAGE: observe, never repair")
+
+
+@case("snapguard", ["tests/smoke_test.py"],
+      "guard the snapshot archive on the dedup hash -> a case-only rewrite passes")
+def _break_snapguard(root):
+    _patch(root, f"{PKG}/core/db.py",
+           '                    "WHERE id = ? AND is_active = 1 AND content = ?",\n'
+           "                    (now, mid, content)",
+           '                    "WHERE id = ? AND is_active = 1 AND content_hash = ?",\n'
+           "                    (now, mid, MemoryDB.compute_content_hash(content))")
+
+
+@case("queueback", ["tests/smoke_test.py"],
+      "drop the approve/set-eval status predicate -> a DONE plan re-enters the queue")
+def _break_queueback(root):
+    _patch(root, f"{PKG}/cli/plan.py",
+           "    _require_plans(db, pid, [args.id], statuses=_APPROVABLE_STATUSES)",
+           "    _require_plans(db, pid, [args.id])  # BREAKAGE")
+
+
+@case("execflag", ["tests/smoke_test.py"],
+      "let a flag silently override the positional id -> the wrong plan runs")
+def _break_execflag(root):
+    _patch(root, f"{PKG}/cli/plan.py",
+           "    if args.id is not None and (args.next or args.all):",
+           "    if False:  # BREAKAGE")
+
+
+@case("sensitive", ["tests/smoke_test.py"],
+      "substring-match sensitive commands -> a read-only grep demands a check")
+def _break_sensitive(root):
+    _patch(root, f"{PKG}/core/plan.py",
+           "    return bool(_SENSITIVE_CMD_RE.search(cmd.lower()))",
+           '    return any(p in cmd.lower() for p in ("git push", "rm -rf",\n'
+           '                                          "drop table"))  # BREAKAGE')
+
+
+@case("guardreset", ["tests/smoke_test.py"],
+      "carry drift counters across a replan -> the nudge fires on turn 0")
+def _break_guardreset(root):
+    # anchor repaired 2026-08-09: r5 folded the reset into the CAS-loop
+    # fields dict (one indent deeper)
+    _patch(root, f"{PKG}/core/plan.py",
+           "            turns_since_last_guardian=0,\n"
+           "            edits_since_last_guardian=0,\n",
+           "")
+
+
+@case("crheading", ["tests/smoke_test.py"],
+      "split on '\\n' only -> a CR smuggles a forged '## 7.' heading through")
+def _break_crheading(root):
+    _patch(root, f"{PKG}/core/privacy.py",
+           'for ln in re.split(r"\\r\\n|[\\n\\r  ]",\n'
+           "                       neutralize_markers(text or \"\")):",
+           'for ln in neutralize_markers(text or "").split("\\n"):')
+
+
+@case("joinedtag", ["tests/smoke_test.py"],
+      "neutralise per value only -> two rows reassemble a live authority tag")
+def _break_joinedtag(root):
+    # anchor repaired 2026-08-09 (round 8): the sweep moved off the whole join
+    # onto parts[1:], so the plugin's own frame banners stop being escaped.
+    _patch(root, f"{PKG}/hooks/session_start.py",
+           'body = neutralize_document("\\n".join(parts[1:]))',
+           'body = ("\\n".join(parts[1:]))  # BREAKAGE')
+
+
+@case("layerbreak", ["tests/smoke_test.py"],
+      "break instead of continue -> one oversized row empties a whole layer")
+def _break_layerbreak(root):
+    path = root / PKG / "hooks" / "session_start.py"
+    text = path.read_text(encoding="utf-8")
+    old = "            continue   # skip THIS entry; see _LAYER_SKIP_NOTE"
+    if text.count(old) != 3:
+        raise SystemExit(f"BREAKAGE ANCHOR ROTTED: {text.count(old)} skip sites")
+    path.write_text(text.replace(old, "            break  # BREAKAGE"),
+                    encoding="utf-8")
+
+
+@case("footerbudget", ["tests/smoke_test.py"],
+      "drop the footer clamp -> the one 'bounded' layer is the unbounded one")
+def _break_footerbudget(root):
+    _patch(root, f"{PKG}/hooks/session_start.py",
+           "    if budget is not None and len(text) > budget:",
+           "    if False:  # BREAKAGE")
+
+
+@case("previewdecode", ["tests/smoke_test.py"],
+      "strict-decode PROGRESS.md -> one GBK byte deletes the whole injection")
+def _break_previewdecode(root):
+    _patch(root, f"{PKG}/hooks/session_start.py",
+           '        text = progress.read_text(encoding="utf-8", errors="replace")\n'
+           "    except (OSError, ValueError):",
+           '        text = progress.read_text(encoding="utf-8")\n'
+           "    except OSError:")
+
+
+@case("archiveatomic", ["tests/smoke_test.py"],
+      "truncate-write session archives -> 14.7% of concurrent reads see 0 bytes")
+def _break_archiveatomic(root):
+    _patch(root, f"{PKG}/core/progress.py",
+           "    write_atomic(archive_path, archive_text, budget_s=_DERIVED_BUDGET_S)",
+           "    archive_path.write_text(archive_text, encoding=\"utf-8\", "
+           "errors=\"replace\")")
+
+
+@case("claimzh", ["tests/test_surfaces.py"],
+      "narrow the Chinese trigger -> 六条钩子 and `6 个 hook` go unseen")
+def _break_claimzh(root):
+    # anchor repaired 2026-08-09: the package-prose scan gave TRIGGER_ZH_RE
+    # the same dot/hyphen/word guards as the English patterns (it re-matched
+    # every false positive they had just learned to decline)
+    _patch(root, "tools/doc_claims.py",
+           r'rf"(?<![每任这哪意第])(?<![A-Za-z.])(?P<n>{_NUM})\s*[个条道处项]?\s*"'
+           "\n    "
+           r'rf"(?P<noun>钩子|渲染路径|hooks?|render\s*paths?|renderers?)(?!\s*[-/])",',
+           r'rf"(?<![每任这哪意第])(?P<n>{_NUM})\s*个?\s*(?P<noun>钩子|渲染路径)(?!\s*/)",')
+
+
+# ── v2.8.0 rounds 5/6 ───────────────────────────────────────────────────────
+
+@case("r6planrace", ["tests/smoke_test.py"],
+      "bare INSERT for first-plan creation -> the losing creator raises")
+def _break_r6planrace(root):
+    _patch(root, f"{PKG}/core/db.py",
+           '               ON CONFLICT(project_id) DO NOTHING""",',
+           '               """,  # BREAKAGE: bare INSERT, the loser raises')
+
+
+@case("r6rawguard", ["tests/smoke_test.py"],
+      "retry a refine blindly -> an older refinement buries a newer capture")
+def _break_r6rawguard(root):
+    _patch(root, f"{PKG}/core/plan.py",
+           '        elif old_row.get("needs_refine") and cur_raw != first_raw:',
+           "        elif False:  # BREAKAGE: retry against whatever raw is there")
+
+
+@case("r6failopen", ["tests/smoke_test.py"],
+      "emit the remainder after a dangling open -> the scanner fails OPEN")
+def _break_r6failopen(root):
+    # anchor repaired 2026-08-09 (round 8): see r5spnopen.
+    _patch(root, f"{PKG}/core/privacy.py",
+           "    if all(d == 0 for d in depths) or not fail_closed:\n        out.append(text[pos:])",
+           "    if True:  # BREAKAGE: fail OPEN\n        out.append(text[pos:])")
+
+
+@case("r6quadratic", ["tests/smoke_test.py"],
+      "re-search the suffix per token -> 32k dangling opens cost seconds again")
+def _break_r6quadratic(root):
+    _patch(root, f"{PKG}/core/privacy.py",
+           "    events = []  # (position, token_length, family, is_open)\n"
+           "    for fi, (o, c) in enumerate(families):\n"
+           "        for tok, is_open in ((o, True), (c, False)):\n"
+           "            start = text.find(tok)\n"
+           "            while start >= 0:\n"
+           "                events.append((start, len(tok), fi, is_open))\n"
+           "                start = text.find(tok, start + len(tok))\n"
+           "    events.sort()",
+           "    events = []  # BREAKAGE: per-step suffix re-search (quadratic)\n"
+           "    _scan = 0\n"
+           "    while True:\n"
+           "        best = None\n"
+           "        for fi, (o, c) in enumerate(families):\n"
+           "            for tok, is_open in ((o, True), (c, False)):\n"
+           "                j = text.find(tok, _scan)\n"
+           "                if j >= 0 and (best is None or j < best[0]):\n"
+           "                    best = (j, len(tok), fi, is_open)\n"
+           "        if best is None:\n"
+           "            break\n"
+           "        events.append(best)\n"
+           "        _scan = best[0] + best[1]")
+
+
+@case("r5x1idx", ["tests/smoke_test.py"],
+      "skip the unique-index heal -> the engine-level dup backstop is gone")
+def _break_r5x1idx(root):
+    _patch(root, "cc_memory/core/db.py",
+           '            with self._connect() as conn:\n                conn.execute(\n                    f"CREATE UNIQUE INDEX IF NOT EXISTS "\n                    f"{self._ACTIVE_HASH_INDEX} "\n                    f"ON memories(project_id, content_hash) "\n                    f"WHERE is_active = 1")\n',
+           '            # BREAKAGE (r5-X1a revert): the presence-check heal no longer\n            # creates the engine-level uniqueness backstop, so any path that\n            # bypasses reconcile_upsert can re-grow duplicate active rows.\n            pass\n')
+
+
+@case("r5x3ref", ["tests/smoke_test.py"],
+      "drop the never-referenced predicate -> an injected row is archived")
+def _break_r5x3ref(root):
+    _patch(root, "cc_memory/core/db.py",
+           '        if require_never_referenced:\n            guard += " AND last_referenced_at IS NULL"\n',
+           '        if False:  # BREAKAGE (r5-X3 revert): the WRITE no longer re-asserts\n            # the never-referenced predicate the snapshot verdict rests on\n            guard += " AND last_referenced_at IS NULL"\n')
+
+
+@case("r5x7cnt", ["tests/smoke_test.py"],
+      "ignore expected_contents -> a repaired row is archived on a stale verdict")
+def _break_r5x7cnt(root):
+    _patch(root, "cc_memory/core/db.py",
+           '                if expected_contents is None:\n',
+           '                if True:  # BREAKAGE (r5-X7/X2 revert): the write no longer\n                    # re-asserts the content the verdict was computed FROM\n')
+
+
+@case("r6a1dflt", ["tests/smoke_test.py"],
+      "sessions.complete DEFAULT 1 again -> an old hook's insert reads as a receipt")
+def _break_r6a1dflt(root):
+    _patch(root, "cc_memory/core/db.py",
+           '    ("v7_sessions_complete",\n     "ALTER TABLE sessions ADD COLUMN complete INTEGER NOT NULL DEFAULT 0"),\n',
+           '    # BREAKAGE (r6-A1a revert): DEFAULT 1 — during the mixed-version upgrade\n    # window a still-running v2.7 hook INSERTs without naming the column and\n    # the default becomes a receipt it never earned (X6 re-opened).\n    ("v7_sessions_complete",\n     "ALTER TABLE sessions ADD COLUMN complete INTEGER NOT NULL DEFAULT 1"),\n')
+
+
+@case("r6a1bfil", ["tests/smoke_test.py"],
+      "drop the backfill -> pre-upgrade rows are unreceipted claims forever")
+def _break_r6a1bfil(root):
+    _patch(root, "cc_memory/core/db.py",
+           '    ("v7_sessions_complete_backfill",\n     "UPDATE sessions SET complete = 1"),\n',
+           '    # BREAKAGE (r6-A1b revert): no one-shot backfill — every PRE-upgrade\n    # sessions row stays an unreceipted claim forever, so its transcript is\n    # eligible for retroactive re-save and its memories drop out of recency.\n')
+
+
+@case("r6a6recid", ["tests/smoke_test.py"],
+      "drop complete=1 from recency -> killed claims evict saved sessions")
+def _break_r6a6recid(root):
+    # anchor repaired 2026-08-09 (r7-A1): r6-A6's bare complete=1 became
+    # "receipted OR carrying an active memory". Reverting to NO predicate
+    # is still exactly the r6-A6 breakage: an EMPTY killed claim consumes a
+    # recency slot and evicts a truly-saved session.
+    _patch(root, "cc_memory/core/db.py",
+           '                "AND (s.complete = 1 OR EXISTS (SELECT 1 FROM memories m "\n'
+           '                "     WHERE m.session_id = s.id AND m.is_active = 1)) "\n',
+           '                # BREAKAGE (r6-A6 revert): unreceipted CLAIM rows consume\n'
+           '                # recency slots again, so killed compactions push truly-saved\n'
+           '                # sessions (and their memories) out of the window.\n')
+
+
+@case("r6a13rai", ["tests/smoke_test.py"],
+      "swallow every IntegrityError as a skip -> an FK violation loses the write")
+def _break_r6a13rai(root):
+    _patch(root, "cc_memory/core/db.py",
+           '            winner = self.find_by_hash(project_id, h)\n            if winner is None:\n',
+           '            winner = self.find_by_hash(project_id, h) or {"id": None}\n            if False:  # BREAKAGE (r6-A13 revert): EVERY IntegrityError is\n                # treated as the benign duplicate race again, so a foreign-key\n                # or CHECK violation is reported as a successful-looking skip\n                # for a write that was silently LOST\n')
+
+
+@case("r5d8fld", ["tests/smoke_test.py"],
+      "drop unknown plan fields silently again -> a typo'd field write vanishes")
+def _break_r5d8fld(root):
+    _patch(root, "cc_memory/core/db.py",
+           '        unknown = set(fields) - cls._PLAN_ACTIVE_FIELDS\n        if unknown:\n            raise ValueError(\n                f"unknown plan_active field(s): {sorted(unknown)} — writable "\n                f"columns are {sorted(cls._PLAN_ACTIVE_FIELDS)}")',
+           '        # BREAKAGE: pre-fix INSERT-branch silent drop\n        for _k in set(fields) - cls._PLAN_ACTIVE_FIELDS:\n            fields.pop(_k, None)')
+
+
+@case("r5spnopen", ["tests/smoke_test.py"],
+      "fail OPEN on a dangling open tag -> the tail leaks past the span")
+def _break_r5spnopen(root):
+    # anchor repaired 2026-08-09 (round 8): the tail guard gained `or not
+    # fail_closed`, for strip_harness_blocks only. `<private>` still fails
+    # closed, which is exactly what this case proves.
+    _patch(root, "cc_memory/core/privacy.py",
+           '    if all(d == 0 for d in depths) or not fail_closed:\n        out.append(text[pos:])',
+           '    if True:  # BREAKAGE: fail OPEN again on a dangling open tag\n        out.append(text[pos:])')
+
+
+@case("r5spndepth", ["tests/smoke_test.py"],
+      "first close ends the span again -> a nested open escapes early")
+def _break_r5spndepth(root):
+    _patch(root, "cc_memory/core/privacy.py",
+           '        elif depths[fam] > 0:\n            depths[fam] -= 1',
+           '        elif depths[fam] > 0:\n            depths[fam] = 0  # BREAKAGE: first close ends the span, no depth')
+
+
+@case("r6c8split", ["tests/smoke_test.py"],
+      "splitlines() in the small branch -> CR-separated counts disagree")
+def _break_r6c8split(root):
+    _patch(root, "cc_memory/core/extractor.py",
+           '                total = sum(1 for l in data.split(b"\\n") if l.strip())',
+           '                total = sum(1 for l in data.splitlines() if l.strip())  # BREAKAGE')
+
+
+@case("r5d7parsed", ["tests/smoke_test.py"],
+      "count parsed instead of present records -> the two branches disagree")
+def _break_r5d7parsed(root):
+    _patch(root, "cc_memory/core/extractor.py",
+           '                total = sum(1 for l in data.split(b"\\n") if l.strip())',
+           '                total = len(msgs)  # BREAKAGE: parsed count, not present count')
+
+
+@case("r5y1roots", ["tests/smoke_test.py"],
+      "follow a symlinked memory/ in _has_db -> rung 0 adopts a linked identity")
+def _break_r5y1roots(root):
+    _patch(root, "cc_memory/core/roots.py",
+           '    mem = directory / "memory"\n    try:\n        if mem.is_symlink() or (mem / "memory.db").is_symlink():\n            return False\n',
+           '    mem = directory / "memory"\n    try:\n        if False:  # BREAKAGE: pre-fix, a symlinked memory/ was followed\n            return False\n')
+
+
+@case("r5y1emd", ["tests/smoke_test.py"],
+      "write through a linked memory/ again -> ensure_memory_dir stops refusing")
+def _break_r5y1emd(root):
+    _patch(root, "cc_memory/core/progress.py",
+           '    if memory_dir.is_symlink():\n',
+           '    if False:  # BREAKAGE: pre-fix, ensure_memory_dir wrote through links\n')
+
+
+@case("r6c2db", ["tests/smoke_test.py"],
+      "drop the constructor reparse probe -> MemoryDB opens through a link")
+def _break_r6c2db(root):
+    _patch(root, "cc_memory/core/db.py",
+           '        for probe in (self.db_path.parent, self.db_path):\n            if self._is_reparse(probe):\n',
+           '        for probe in ():  # BREAKAGE: pre-fix, MemoryDB opened through a link\n            if self._is_reparse(probe):\n')
+
+
+@case("r6c4own", ["tests/smoke_test.py"],
+      "own any command that MENTIONS the path -> a user hook is claimed as ours")
+def _break_r6c4own(root):
+    _patch(root, "cc_memory/ui/installer.py",
+           '        if t2.lower().endswith(".py"):\n            return bool(_CCM_COMMAND_RE.search(t2))\n    return False\n',
+           '        if t2.lower().endswith(".py"):\n            pass  # BREAKAGE: ownership was a regex match ANYWHERE in the command\n    return bool(_CCM_COMMAND_RE.search(cmd))\n')
+
+
+@case("r6c6keys", ["tests/smoke_test.py"],
+      "emit dict keys raw from MCP -> a stored topic name reaches the model live")
+def _break_r6c6keys(root):
+    _patch(root, "cc_memory/mcp/server.py",
+           '        return {_defang(k) if isinstance(k, str) else k: _defang(v)\n                for k, v in obj.items()}\n',
+           '        # BREAKAGE: pre-fix, only VALUES were neutralised\n        return {k: _defang(v) for k, v in obj.items()}\n')
+
+
+@case("r5d2supp", ["tests/smoke_test.py"],
+      "drop the supplementary CJK intervals -> Ext-B corrections fall to trigrams")
+def _break_r5d2supp(root):
+    _patch(root, "cc_memory/core/textsim.py",
+           '    "\U00020000-\U0002EE5D"   # Extensions B-F + I (r6-C5: I begins at U+2EBF0)\n'
+           '    "\U0002F800-\U0002FA1F"   # Compatibility Supplement\n'
+           '    "\U00030000-\U000323AF"   # Extensions G-H\n'
+           '"]+")',
+           '"]+")  # BREAKAGE: BMP only — supplementary planes fall to trigrams')
+
+
+@case("r6c5exti", ["tests/smoke_test.py"],
+      "end the first interval before Ext-I -> Ext-I alone falls through")
+def _break_r6c5exti(root):
+    _patch(root, "cc_memory/core/textsim.py",
+           '    "\U00020000-\U0002EE5D"   # Extensions B-F + I (r6-C5: I begins at U+2EBF0)',
+           '    "\U00020000-\U0002EBE0"   # BREAKAGE: ends before Ext-I (U+2EBF0)')
+
+
+@case("r6l4txn", ["tests/smoke_test.py"],
+      "archive losers before the survivor check -> a stale verdict half-applies")
+def _break_r6l4txn(root):
+    _patch(root, "cc_memory/core/db.py",
+           '        with self._connect() as conn:\n'
+           '            conn.execute("BEGIN IMMEDIATE")\n'
+           '            row = conn.execute(\n'
+           '                "SELECT content FROM memories WHERE id = ? AND is_active = 1",\n'
+           '                (survivor_id,)).fetchone()',
+           '        self.archive_obsolete(  # BREAKAGE: losers in their own txn\n'
+           '            losers, canonical_id=survivor_id,\n'
+           '            expected_contents=expected_loser_contents)\n'
+           '        with self._connect() as conn:\n'
+           '            conn.execute("BEGIN IMMEDIATE")\n'
+           '            row = conn.execute(\n'
+           '                "SELECT content FROM memories WHERE id = ? AND is_active = 1",\n'
+           '                (survivor_id,)).fetchone()')
+
+
+@case("r6l3imp", ["tests/smoke_test.py"],
+      "drop the importance predicate -> an importance-only bump is archived")
+def _break_r6l3imp(root):
+    _patch(root, "cc_memory/core/db.py",
+           '        if max_importance is not None:\n'
+           '            guard += " AND importance <= ?"\n'
+           '            guard_params.append(max_importance)',
+           '        if False:  # BREAKAGE: importance-only bumps archived again\n'
+           '            guard += " AND importance <= ?"\n'
+           '            guard_params.append(max_importance)')
+
+
+@case("r6l5topic", ["tests/smoke_test.py"],
+      "split relabel and summary drop into two transactions again")
+def _break_r6l5topic(root):
+    _patch(root, "cc_memory/core/db.py",
+           '            if drop_summary is not None:\n'
+           '                conn.execute(\n'
+           '                    "DELETE FROM topics WHERE project_id = ? AND name = ?",\n'
+           '                    (project_id, drop_summary))',
+           '        if drop_summary is not None:  # BREAKAGE: second transaction\n'
+           '            with self._connect() as conn2:\n'
+           '                conn2.execute(\n'
+           '                    "DELETE FROM topics WHERE project_id = ? AND name = ?",\n'
+           '                    (project_id, drop_summary))')
+
+
+@case("r6l2gc", ["tests/smoke_test.py"],
+      "drop the trace guards -> a claim with attached memories is deleted")
+def _break_r6l2gc(root):
+    # anchor repaired 2026-08-09 (r7-H2): the archive_path clause is gone —
+    # an archive FILE is not database lineage, and requiring it made the
+    # collector a no-op against its own dominant input. The two lineage
+    # guards below are what must still refuse.
+    _patch(root, "cc_memory/core/db.py",
+           '                     AND id NOT IN (SELECT session_id FROM memories\n'
+           '                                    WHERE session_id IS NOT NULL)\n'
+           '                     AND id NOT IN (SELECT session_id FROM session_summaries\n'
+           '                                    WHERE session_id IS NOT NULL)""",',
+           '                     """,  # BREAKAGE: trace guards dropped')
+
+
+@case("r5a1skip", ["tests/smoke_test.py"],
+      "gate done only -> a cancelled todo retires a step below the bar")
+def _break_r5a1skip(root):
+    _patch(root, f"{PKG}/core/plan.py",
+           "        if (new_status not in _UNFINISHED_STATUSES\n"
+           "                and old_status in _UNFINISHED_STATUSES\n"
+           "                and not _carried(",
+           '        if (new_status == "done"  # BREAKAGE: skipped exits ungated\n'
+           "                and old_status in _UNFINISHED_STATUSES\n"
+           "                and not _carried(")
+
+
+@case("r5a2fall", ["tests/smoke_test.py"],
+      "skip the in_progress fallback -> an unmatched step loses the pointer")
+def _break_r5a2fall(root):
+    _patch(root, f"{PKG}/core/plan.py",
+           "    if not active_step_id:\n"
+           "        for s in steps:\n"
+           '            if s.get("status") == "in_progress":\n'
+           '                active_step_id = s.get("id", 0)\n'
+           "                break",
+           "    if not active_step_id:\n"
+           "        for s in steps:\n"
+           "            if False:  # BREAKAGE: pointer falls to first pending\n"
+           '                active_step_id = s.get("id", 0)\n'
+           "                break")
+
+
+@case("r5a3slot", ["tests/smoke_test.py"],
+      "stop consuming carry slots -> one new step discharges two old steps")
+def _break_r5a3slot(root):
+    _patch(root, f"{PKG}/core/plan.py",
+           "        if best_slot < 0:\n"
+           "            return False\n"
+           "        spent_slots.add(best_slot)\n"
+           "        return True",
+           "        if best_slot < 0:\n"
+           "            return False\n"
+           "        pass  # BREAKAGE: slot never consumed\n"
+           "        return True")
+
+
+@case("r5a4born", ["tests/smoke_test.py"],
+      "let steps born done be carry targets -> a disguised retirement passes")
+def _break_r5a4born(root):
+    _patch(root, f"{PKG}/core/plan.py",
+           '        if _norm_status(s.get("status", "pending")) '
+           "in _UNFINISHED_STATUSES:\n"
+           "            cand_slots.extend((t, slot) for t in strings)",
+           "        if True:  # BREAKAGE: born-done steps are carry targets\n"
+           "            cand_slots.extend((t, slot) for t in strings)")
+
+
+@case("r5a5claim", ["tests/smoke_test.py"],
+      "trust the carried label -> a drop wearing 'carried' passes the gate")
+def _break_r5a5claim(root):
+    _patch(root, f"{PKG}/core/plan.py",
+           '        elif action == "carried" and not _any_carried'
+           "(title, all_step_strings):",
+           "        elif False and not _any_carried"
+           "(title, all_step_strings):  # BREAKAGE")
+
+
+@case("r5a6null", ["tests/smoke_test.py"],
+      "str(None) again -> a null goal/title validates as the string 'None'")
+def _break_r5a6null(root):
+    _patch(root, f"{PKG}/core/plan.py",
+           '    return "" if x is None else str(x)',
+           "    return str(x)  # BREAKAGE: JSON null becomes the word None")
+
+
+@case("r5a7clean", ["tests/smoke_test.py"],
+      "store the ExitPlanMode raw unwashed -> private spans reach PLAN.md")
+def _break_r5a7clean(root):
+    _patch(root, f"{PKG}/core/plan.py",
+           "    plan_text = clean_for_storage(plan_text).strip()",
+           '    plan_text = (plan_text or "").strip()  # BREAKAGE: unwashed')
+
+
+@case("r5x4site", ["tests/smoke_test.py"],
+      "write blind when the CAS misses -> a stale sync resurrects the plan")
+def _break_r5x4site(root):
+    _patch(root, f"{PKG}/core/plan.py",
+           "    if not db.update_plan_if_revision(\n"
+           '            project_id, row["revision"],\n'
+           '            structured=updated, active_step=info["active_step_id"]):\n'
+           '        return {"n_matched": 0, "n_unmatched": len(todos or []),\n'
+           '                "active_step_id": 0, "skipped": "plan_changed"}',
+           "    if not db.update_plan_if_revision(  # BREAKAGE: blind write\n"
+           '            project_id, row["revision"],\n'
+           '            structured=updated, active_step=info["active_step_id"]):\n'
+           "        db.upsert_plan_active(project_id, structured=updated,\n"
+           '                              active_step=info["active_step_id"])')
+
+
+@case("r6b5null", ["tests/smoke_test.py"],
+      "accept str(None) as a reason -> a reasonless drop wears four letters")
+def _break_r6b5null(root):
+    _patch(root, f"{PKG}/core/plan.py",
+           '        reason = (_s(matched.get("reason")) or '
+           '_s(matched.get("detail"))).strip()',
+           '        reason = (str(matched.get("reason", "")) or '
+           'str(matched.get("detail", ""))).strip()  # BREAKAGE')
+
+
+@case("r6m1slice", ["tests/smoke_test.py"],
+      "drop the outer-pair slice -> prose-wrapped and one-line-fenced payloads die")
+def _break_r6m1slice(root):
+    # 2026-08-09: this case replaced `r6a12fence`, whose target (a
+    # fences-to-spaces variant) falsification proved UNREACHABLE — the slice
+    # here is what actually carries both the A12 one-line-fence shape and
+    # the prose-tolerance behaviour, so it is the thing worth breaking.
+    _patch(root, f"{PKG}/llm/parse.py",
+           "        if s >= 0 and e > s:\n"
+           "            candidates.append(v[s:e + 1])",
+           "        if False:  # BREAKAGE: no outer-pair slice\n"
+           "            candidates.append(v[s:e + 1])")
+
+
+@case("r5y5limit", ["tests/smoke_test.py"],
+      "pass limits through unclamped -> --limit -1 dumps the whole table")
+def _break_r5y5limit(root):
+    _patch(root, f"{PKG}/cli/mem.py",
+           "    n = int(value)\n"
+           "    if n < 1:\n"
+           "        raise argparse.ArgumentTypeError(\n"
+           '            f"--limit must be >= 1 (SQLite reads a negative LIMIT as "\n'
+           '            f"unbounded); got {n}")\n'
+           "    return min(n, MemoryDB._MAX_SEARCH_LIMIT)",
+           "    n = int(value)\n"
+           "    if False:  # BREAKAGE: negative + oversized limits pass through\n"
+           "        raise argparse.ArgumentTypeError(\n"
+           '            f"--limit must be >= 1 (SQLite reads a negative LIMIT as "\n'
+           '            f"unbounded); got {n}")\n'
+           "    return n")
+
+
+@case("r7idxname", ["tests/smoke_test.py"],
+      "probe the index NAME again -> a wrong-shape index self-certifies")
+def _break_r7idxname(root):
+    _patch(root, f"{PKG}/core/db.py",
+           '        row = conn.execute(\n'
+           '            "SELECT sql FROM sqlite_master WHERE type = \'index\' AND name = ?",\n'
+           "            (cls._ACTIVE_HASH_INDEX,)).fetchone()\n"
+           '        if row is None:\n'
+           '            return "absent"',
+           '        row = conn.execute(  # BREAKAGE: name probe only\n'
+           '            "SELECT sql FROM sqlite_master WHERE type = \'index\' AND name = ?",\n'
+           "            (cls._ACTIVE_HASH_INDEX,)).fetchone()\n"
+           '        return "absent" if row is None else "canonical"\n'
+           '        if row is None:\n'
+           '            return "absent"')
+
+
+@case("r7wrote", ["tests/smoke_test.py"],
+      "report wrote=1 after a rollback -> the result contradicts the DB")
+def _break_r7wrote(root):
+    _patch(root, f"{PKG}/core/db.py",
+           '                return {"archived": n, "wrote": 0,\n'
+           '                        "skipped": "canonical_collision"}',
+           '                return {"archived": n, "wrote": 1,  # BREAKAGE\n'
+           '                        "skipped": "canonical_collision"}')
+
+
+@case("r7render", ["tests/smoke_test.py"],
+      "drop the render generation check -> an older MEMORY.md overwrites a newer")
+def _break_r7render(root):
+    _patch(root, f"{PKG}/llm/memory_writer.py",
+           "        if _index_generation(db, project_id) == _gen_before:\n"
+           "            break",
+           "        break  # BREAKAGE: write whatever was rendered, unordered")
+
+
+
+# ── round 7 (cc-tree audit) ─────────────────────────────────────────────────
+# One case per fix. Each was run individually and confirmed RED before being
+# kept; `--anchors` verifies every anchor below still exists in the tree.
+
+@case("r7dirpriv", ["tests/smoke_test.py"],
+      "trust any directory -> the marker fallback lands in shared /tmp")
+def _break_r7dirpriv(root):
+    _patch(root, f"{PKG}/core/markers.py",
+           "        return st.st_uid == getuid() and not (st.st_mode & 0o022)",
+           "        return True  # BREAKAGE")
+
+
+@case("r7junc", ["tests/smoke_test.py"],
+      "drop the junction probe -> a planted reparse point reads as 'not a link'")
+def _break_r7junc(root):
+    _patch(root, f"{PKG}/core/markers.py",
+           "    isj = getattr(os.path, " + Q + "isjunction" + Q + ", None)",
+           "    isj = None  # BREAKAGE")
+
+
+@case("r7ndprog", ["tests/smoke_test.py"],
+      "escape per slot only -> PROGRESS.md reassembles a marker at the join")
+def _break_r7ndprog(root):
+    _patch(root, f"{PKG}/core/progress.py",
+           "    text = neutralize_document(" + Q + BS + "n" + Q + ".join(lines))",
+           "    text = " + Q + BS + "n" + Q + ".join(lines)  # BREAKAGE")
+
+
+@case("r7ndplan", ["tests/smoke_test.py"],
+      "escape per slot only -> PLAN.md reassembles a marker at the join")
+def _break_r7ndplan(root):
+    _patch(root, f"{PKG}/core/plan.py",
+           "    # Assembled sweep — measured forgery across the Goal/Context join." + N
+           + "    return neutralize_document(" + Q + BS + "n" + Q + ".join(lines))",
+           "    return " + Q + BS + "n" + Q + ".join(lines)  # BREAKAGE")
+
+
+@case("r7ndmem", ["tests/smoke_test.py"],
+      "escape per slot only -> MEMORY.md reassembles a marker at the join")
+def _break_r7ndmem(root):
+    _patch(root, f"{PKG}/llm/memory_writer.py",
+           "    return neutralize_document(" + Q + BS + "n" + Q + ".join(lines))",
+           "    return " + Q + BS + "n" + Q + ".join(lines)  # BREAKAGE")
+
+
+@case("r7arcname", ["tests/smoke_test.py"],
+      "interpolate the archive filename raw -> the 'all values escaped' comment lies")
+def _break_r7arcname(root):
+    _patch(root, f"{PKG}/llm/memory_writer.py",
+           "                rel = neutralize_inline(af.relative_to(memory_dir).as_posix())",
+           "                rel = af.relative_to(memory_dir).as_posix()  # BREAKAGE")
+
+
+@case("r7wordset", ["tests/smoke_test.py"],
+      "Latin-only word grammar -> Cyrillic/Greek/Arabic nominate nothing")
+def _break_r7wordset(root):
+    _patch(root, f"{PKG}/core/textsim.py",
+           "        words.update(w for w in re.findall(r" + Q + "[^" + BS + "W" + BS + "d_]{3,}" + Q + ", seg)" + N
+           + "                     if not w.isascii())",
+           "        pass  # BREAKAGE")
+
+
+@case("r7claimmem", ["tests/smoke_test.py"],
+      "believe only the receipt -> a killed compaction's memories vanish")
+def _break_r7claimmem(root):
+    _patch(root, f"{PKG}/core/db.py",
+           '                "AND (s.complete = 1 OR EXISTS (SELECT 1 FROM memories m "' + N
+           + '                "     WHERE m.session_id = s.id AND m.is_active = 1)) "' + N,
+           '                "AND s.complete = 1 "  # BREAKAGE' + N)
+
+
+@case("r7gcarch", ["tests/smoke_test.py"],
+      "count the archive as lineage -> gc collects none of its real input")
+def _break_r7gcarch(root):
+    _patch(root, f"{PKG}/core/db.py",
+           "                   WHERE project_id = ? AND complete = 0" + N
+           + "                     AND compacted_at < ?" + N,
+           "                   WHERE project_id = ? AND complete = 0" + N
+           + "                     AND compacted_at < ?" + N
+           + "                     AND (archive_path IS NULL OR archive_path = '')"
+           + "  -- BREAKAGE" + N)
+
+
+@case("r7j3dedup", ["tests/smoke_test.py"],
+      "list compactions -> one session eats every 'prior session' slot")
+def _break_r7j3dedup(root):
+    _patch(root, f"{PKG}/core/db.py",
+           # anchor repaired 2026-08-09 (round 8): the escape hatch is now
+           # COALESCE(...) = '' — `''` is the sentinel pre_compact writes, and
+           # `'' IS NULL` is false, so the old spelling collapsed them all.
+           "                     AND (COALESCE(s.claude_session_id, '') = ''" + N
+           + "                          OR s.id = (SELECT MAX(s2.id) FROM sessions s2" + N
+           + "                                     WHERE s2.project_id = s.project_id" + N
+           + "                                       AND s2.complete = 1" + N
+           + "                                       AND s2.claude_session_id" + N
+           + "                                           = s.claude_session_id))" + N,
+           "                     -- BREAKAGE: fan-out restored" + N)
+
+
+@case("r7obsbudget", ["tests/smoke_test.py"],
+      "serve below the arrival rate -> the observation queue never drains")
+def _break_r7obsbudget(root):
+    _patch(root, f"{PKG}/hooks/pre_compact.py",
+           "_OBS_PER_EXTRACTION = 300",
+           "_OBS_PER_EXTRACTION = 50  # BREAKAGE")
+
+
+@case("r7obsread", ["tests/smoke_test.py"],
+      "unbounded oldest-first reader -> the Stop feed and its watermark disagree")
+def _break_r7obsread(root):
+    _patch(root, f"{PKG}/core/db.py",
+           "                   ORDER BY id ASC LIMIT ?" + Q * 3 + ",",
+           "                   ORDER BY id DESC LIMIT ?" + Q * 3 + ",  # BREAKAGE")
+
+
+@case("r7harness", ["tests/smoke_test.py"],
+      "take the first user record -> the harness caveat becomes the request")
+def _break_r7harness(root):
+    _patch(root, f"{PKG}/hooks/pre_compact.py",
+           "        candidate = strip_harness_blocks(candidate)",
+           "        pass  # BREAKAGE")
+
+
+@case("r7stderr", ["tests/smoke_test.py"],
+      "warn on stderr -> a hook paints an error banner on a successful call")
+def _break_r7stderr(root):
+    # The v2.7.0 form, restored verbatim from `git diff HEAD -- core/plan.py`.
+    # An earlier draft of this case dropped only the `_log.warn` name and left
+    # a bare `print()`, i.e. it moved the line to STDOUT — a real breach of the
+    # same rule, which the then-current source grep did not match, so the case
+    # reported GREEN. That is now case r7stdout below; this one is the stream
+    # the rule is named for.
+    _patch(root, f"{PKG}/core/plan.py",
+           "        _log.warn(f" + Q + "plan history archive failed ({e}) — proceeding; " + Q + N
+           + "                  f" + Q + "the carryover gate already enforced accounting" + Q + ")",
+           "        import sys as _sys" + N
+           + "        print(f" + Q + "[WARN] plan history archive failed ({e}) — proceeding; " + Q + N
+           + "              f" + Q + "the carryover gate already enforced accounting" + Q + "," + N
+           + "              file=_sys.stderr)")
+
+
+@case("r7stdout", ["tests/smoke_test.py"],
+      "warn on stdout -> a PostToolUse hook whose stdout must be empty speaks")
+def _break_r7stdout(root):
+    _patch(root, f"{PKG}/core/plan.py",
+           "        _log.warn(f" + Q + "plan history archive failed ({e}) — proceeding; " + Q,
+           "        print(f" + Q + "plan history archive failed ({e}) — proceeding; " + Q)
+
+
+@case("r7planorder", ["tests/smoke_test.py"],
+      "commit the row first -> the refiner refines a plan already replaced")
+def _break_r7planorder(root):
+    path = root / PKG / "core" / "plan.py"
+    text = path.read_text(encoding="utf-8")
+    start = text.index("def capture_exit_plan_mode(")
+    write_stmt = ('        write_atomic(memory_dir / ".plan_raw.md", plan_text,' + N
+                  + "                     budget_s=_DERIVED_BUDGET_S)" + N)
+    if write_stmt not in text[start:]:
+        raise AssertionError("BREAKAGE ANCHOR ROTTED: plan.py no longer "
+                             "publishes .plan_raw.md as one statement "
+                             "inside capture_exit_plan_mode")
+    i = text.index(write_stmt, start)
+    commit = ("    db.upsert_plan_active(" + N
+              + "        project_id," + N
+              + "        raw=plan_text," + N
+              + "        needs_refine=1," + N
+              + "    )" + N)
+    j = text.index(commit, start)
+    assert i < j, "BREAKAGE ANCHOR ROTTED: plan.py already commits first"
+    text = text[:i] + text[i + len(write_stmt):]
+    j = text.index(commit, start)
+    text = text[:j + len(commit)] + write_stmt + text[j + len(commit):]
+    path.write_text(text, encoding="utf-8")
+
+
+@case("r7ftsprobe", ["tests/smoke_test.py"],
+      "probe the declaration -> a corrupt index reports HEALTHY")
+def _break_r7ftsprobe(root):
+    _patch(root, f"{PKG}/core/db.py",
+           "                conn.execute(" + N
+           + '                    "SELECT rowid FROM memories_fts "' + N
+           + '                    "WHERE memories_fts MATCH ? LIMIT 1",' + N
+           + '                    ("ccmemoryftshealthprobe",)).fetchall()' + N,
+           '                conn.execute("SELECT rowid FROM memories_fts LIMIT 0")'
+           + "  # BREAKAGE" + N)
+
+
+@case("r7ftsguard", ["tests/smoke_test.py"],
+      "catch only OperationalError -> a corrupt index raises past the LIKE fallback")
+def _break_r7ftsguard(root):
+    _patch(root, f"{PKG}/core/db.py",
+           "                return [dict(r) for r in rows]" + N
+           + "            except sqlite3.DatabaseError:",
+           "                return [dict(r) for r in rows]" + N
+           + "            except sqlite3.OperationalError:  # BREAKAGE")
+
+
+@case("r7ftstrig", ["tests/smoke_test.py"],
+      "keep the triggers -> 'LIKE fallback' is a total write outage")
+def _break_r7ftstrig(root):
+    _patch(root, f"{PKG}/core/db.py",
+           "        for name in self._FTS_TRIGGERS:",
+           "        for name in ():  # BREAKAGE")
+
+
+@case("r7onconflict", ["tests/smoke_test.py"],
+      "read then insert -> the first DB call every surface makes is a race")
+def _break_r7onconflict(root):
+    _patch(root, f"{PKG}/core/db.py",
+           '                "ON CONFLICT(path) DO UPDATE SET last_active = excluded.last_active",',
+           '                "",  # BREAKAGE')
+
+
+@case("r7topiclimit", ["tests/smoke_test.py"],
+      "unbounded topic scan -> 5000 rows fetched for a 500-row decision")
+def _break_r7topiclimit(root):
+    _patch(root, f"{PKG}/core/db.py",
+           "                           ORDER BY importance DESC, created_at DESC" + N
+           + "                           LIMIT ?" + Q * 3 + "," + N
+           + "                        (project_id, topic, max_candidates)).fetchall()]",
+           "                           ORDER BY importance DESC, created_at DESC" + Q * 3 + "," + N
+           + "                        (project_id, topic)).fetchall()]  # BREAKAGE")
+
+
+@case("r7j2sum", ["tests/smoke_test.py"],
+      "hard-code the summary fields -> PROGRESS.md section 2 is a path dump")
+def _break_r7j2sum(root):
+    _patch(root, f"{PKG}/hooks/pre_compact.py",
+           '                "learned": "; ".join(_learned[:5]),' + N
+           + '                "completed": ("; ".join(_done[:5]) if _done' + N
+           + '                              else ", ".join(obs_files_modified[:10])),',
+           '                "learned": "",  # BREAKAGE' + N
+           + '                "completed": ", ".join(obs_files_modified[:10]),')
+
+
+@case("r7mcpscope", ["tests/test_surfaces.py"],
+      "drop the scope gate -> an injected model plants an importance-5 memory "
+      "in another project")
+def _break_r7mcpscope(root):
+    _patch(root, f"{PKG}/mcp/server.py",
+           "    own = _server_root()",
+           "    own = None  # BREAKAGE")
+
+
+@case("r7mcpanchor", ["tests/test_surfaces.py"],
+      "compare the RAW argument -> a subdirectory of this project is refused")
+def _break_r7mcpanchor(root):
+    # The other half of the same gate. Comparing before anchoring is not a
+    # weaker gate but a WRONG one: it refuses the server's own project spelled
+    # as any subdirectory, on the one surface where the caller cannot see why.
+    _patch(root, f"{PKG}/mcp/server.py",
+           "    project = _anchor_mcp_project(project)",
+           "    pass  # BREAKAGE: gate now compares the unanchored argument")
+
+
+
+# ── round 8 (cc-tree round 2: attacking round 7's own fixes) ────────────────
+# Round 7 fixed real defects and introduced these. Each case reverts ONE of the
+# round-8 repairs; every one was run individually and confirmed RED.
+
+@case("r8nest", ["tests/smoke_test.py"],
+      "one peeling pass -> a depth-2 nested marker survives every render path")
+def _break_r8nest(root):
+    _patch(root, f"{PKG}/core/privacy.py",
+           "    for _ in range(_MAX_MARKER_PASSES):" + N
+           + "        peeled = _MARKER_TAG_RE.sub(_escape_tag, text)" + N
+           + "        if peeled == text:" + N
+           + "            break" + N
+           + "        text = peeled" + N
+           + "    else:" + N
+           + "        if _MARKER_TAG_RE.search(text):" + N
+           + "            text = text.replace(" + Q + "<" + Q + ", " + Q + "&lt;" + Q
+           + ").replace(" + Q + ">" + Q + ", " + Q + "&gt;" + Q + ")" + N,
+           "    text = _MARKER_TAG_RE.sub(_escape_tag, text)  # BREAKAGE" + N)
+
+
+@case("r8harness", ["tests/smoke_test.py"],
+      "harness strip fails CLOSED -> an ordinary question is truncated at the tag")
+def _break_r8harness(root):
+    _patch(root, f"{PKG}/core/privacy.py",
+           "    return _strip_spans(text, _HARNESS_FAMILIES, fail_closed=False)",
+           "    return _strip_spans(text, _HARNESS_FAMILIES)  # BREAKAGE")
+
+
+@case("r8literal", ["tests/smoke_test.py"],
+      "consume the unpaired tag -> the sentence loses the word being asked about")
+def _break_r8literal(root):
+    _patch(root, f"{PKG}/core/privacy.py",
+           "    if not fail_closed:" + N + "        stacks = [[] for _ in families]",
+           "    if False:  # BREAKAGE" + N + "        stacks = [[] for _ in families]")
+
+
+@case("r8banner", ["tests/smoke_test.py"],
+      "sweep the whole join -> the injection loses its own header and terminator")
+def _break_r8banner(root):
+    _patch(root, f"{PKG}/hooks/session_start.py",
+           "    body = neutralize_document(" + Q + BS + "n" + Q
+           + ".join(parts[1:])) if len(parts) > 1 else " + Q + Q + N
+           + "    result = parts[0] + (" + Q + BS + "n" + Q + " + body if body else " + Q + Q + ")" + N
+           + "    result = result + " + Q + BS + "n" + BS + "n" + Q + " + _BANNER_TAIL + " + Q + BS + "n" + Q + N,
+           "    result = neutralize_document(" + Q + BS + "n" + Q + ".join(parts))"
+           + "  # BREAKAGE" + N)
+
+
+@case("r8emptysid", ["tests/smoke_test.py"],
+      "IS NULL only -> every compaction the harness gave no session id collapses to one")
+def _break_r8emptysid(root):
+    _patch(root, f"{PKG}/core/db.py",
+           "                     AND (COALESCE(s.claude_session_id, '') = ''",
+           "                     AND (s.claude_session_id IS NULL  -- BREAKAGE")
+
+
+@case("r8obsseed", ["tests/smoke_test.py"],
+      "seed the observer at row 0 -> every session re-walks the whole backlog")
+def _break_r8obsseed(root):
+    _patch(root, f"{PKG}/core/db.py",
+           "            seed = max(0, int(newest) - max(0, int(window)))",
+           "            seed = 0  # BREAKAGE")
+
+
+@case("r8obsmono", ["tests/smoke_test.py"],
+      "plain assignment -> a slow session rewinds the shared observer cursor")
+def _break_r8obsmono(root):
+    _patch(root, f"{PKG}/core/db.py",
+           '                "UPDATE projects SET obs_watermark = MAX(COALESCE(obs_watermark, 0), ?) "',
+           '                "UPDATE projects SET obs_watermark = ? "  # BREAKAGE')
+
+
+@case("r8ftsdrop", ["tests/smoke_test.py"],
+      "drop the triggers on any error -> one handle unindexes every other handle's writes")
+def _break_r8ftsdrop(root):
+    _patch(root, f"{PKG}/core/db.py",
+           "        if not drop_triggers:" + N + "            return",
+           "        pass  # BREAKAGE")
+
+
+@case("r8ftsempty", ["tests/smoke_test.py"],
+      "trust an empty MATCH -> a frozen index reports the memory does not exist")
+def _break_r8ftsempty(root):
+    _patch(root, f"{PKG}/core/db.py",
+           "                if not rows and not self._fts_triggers_present(conn):",
+           "                if False:  # BREAKAGE")
+
+
+@case("r8idxmem", ["tests/smoke_test.py"],
+      "drop idx_memories_session -> the recency EXISTS scans memories per session")
+def _break_r8idxmem(root):
+    _patch(root, f"{PKG}/core/db.py",
+           '     "CREATE INDEX IF NOT EXISTS idx_memories_session "' + N
+           + '     "ON memories (session_id, is_active)"),',
+           '     "SELECT 1"),  # BREAKAGE')
+
+
+@case("r8idxsid", ["tests/smoke_test.py"],
+      "drop idx_sessions_sid -> the per-turn timeline query is quadratic again")
+def _break_r8idxsid(root):
+    _patch(root, f"{PKG}/core/db.py",
+           '     "CREATE INDEX IF NOT EXISTS idx_sessions_sid "' + N
+           + '     "ON sessions (project_id, claude_session_id, id)"),',
+           '     "SELECT 1"),  # BREAKAGE')
+
+
+@case("r8planhook", ["tests/test_surfaces.py"],
+      "plan control back under the mode gate -> the whole anchor is dead again")
+def _break_r8planhook(root):
+    # The v2.5.0 flagship defect, restored. `TodoWrite` is in every mode's
+    # skip_tools and `ExitPlanMode` is in no mode's observe_tools, so under the
+    # gate `_apply_plan_integration` never runs in ANY mode. It passed all nine
+    # release gates in that state until §8i existed.
+    path = root / PKG / "hooks" / "post_tool_use.py"
+    text = path.read_text(encoding="utf-8")
+    block = ("        try:" + N
+             + "            _apply_plan_integration(db, project_id, cwd, tool_name, tool_input)" + N)
+    gate = "        if should_observe(mode, tool_name):" + N
+    i = text.index(block)
+    j = text.index(gate)
+    assert i < j, "BREAKAGE ANCHOR ROTTED: the plan block is already below the gate"
+    text = text[:i] + text[i + len(block):]
+    j = text.index(gate)
+    moved = ("            _apply_plan_integration(db, project_id, cwd, tool_name, tool_input)" + N
+             + "            try:" + N)
+    text = text[:j + len(gate)] + moved + text[j + len(gate):]
+    path.write_text(text, encoding="utf-8")
+
+
+@case("r8antipatch", ["tests/smoke_test.py"],
+      "a direct db.insert_memory caller -> <private> is never stripped from it")
+def _break_r8antipatch(root):
+    # The anti-patch contract was prose-only until tools/contracts.py computed
+    # it. This adds the cheapest possible bypass: one caller outside the writer.
+    path = root / PKG / "cli" / "mem.py"
+    text = path.read_text(encoding="utf-8")
+    marker = "def main("
+    i = text.index(marker)
+    text = (text[:i]
+            + "def _breakage_direct_insert(db, pid):" + N
+            + "    return db.insert_memory(pid, None, 'note', 'x', 3, [], '')" + N
+            + N + N + text[i:])
+    path.write_text(text, encoding="utf-8")
+
+
+@case("r8mcpdot", ["tests/test_surfaces.py"],
+      "compare unresolved paths -> the server refuses its OWN project spelled '.'")
+def _break_r8mcpdot(root):
+    _patch(root, f"{PKG}/mcp/server.py",
+           "    if own is not None and not _same_root(project, own):",
+           "    if own is not None and Path(project) != own:  # BREAKAGE")
+
+
+# The two cases below break a CLAIM, not code: doc_claims scans package prose
+# (Python docstrings/comments) and config.json since round 2 closed finding
+# #5 — the markdown-only gate shipped "the seventh caller" (twelve surfaces),
+# "66 call sites" (80) and "three hooks import this" (two hooks + core/idle).
+# If a later change drops either scan, these go GREEN and flag it as vacuous.
+
+@case("r8claimpy", ["tools/doc_claims.py"],
+      "wrong hook count in a package docstring -> the md-only gate would ship it")
+def _break_r8claimpy(root):
+    _patch(root, f"{PKG}/core/modes.py",
+           "because ALL SIX hooks",
+           "because ALL SEVEN hooks")
+
+
+@case("r8claimjson", ["tools/doc_claims.py"],
+      "wrong hook count in config.json notes -> caught only because JSON is scanned")
+def _break_r8claimjson(root):
+    _patch(root, f"{PKG}/config.json",
+           "all six hooks <!--ce:hooks-->",
+           "all five hooks <!--ce:hooks-->")
+
+
+@case("r8dashsweep", ["tests/test_surfaces.py"],
+      "skip the assembled sweep -> a stranger's package.json is live authority")
+def _break_r8dashsweep(root):
+    _patch(root, f"{PKG}/ui/dashboard.py",
+           '        return neutralize_document("\\n".join(sections))',
+           '        return "\\n".join(sections)  # BREAKAGE: unswept')
+
+
+@case("r8topicrows", ["tests/test_surfaces.py"],
+      "memory_topics unbounded again -> every topic returned to the model")
+def _break_r8topicrows(root):
+    _patch(root, f"{PKG}/mcp/server.py",
+           "    limit = args.get(\"limit\", _TOPICS_DEFAULT)\n"
+           "    try:\n"
+           "        limit = max(1, min(int(limit), 200))\n"
+           "    except (TypeError, ValueError):\n"
+           "        limit = _TOPICS_DEFAULT\n"
+           "    rows = db.get_topics(pid, limit=limit)",
+           "    rows = db.get_topics(pid)  # BREAKAGE: unbounded")
+
+
+@case("r8topicbody", ["tests/test_surfaces.py"],
+      "drop the body clip -> a 272 KB tool result reads as an answer")
+def _break_r8topicbody(root):
+    _patch(root, f"{PKG}/mcp/server.py",
+           "_TOPIC_BODY_CHARS = 2000",
+           "_TOPIC_BODY_CHARS = 10 ** 9  # BREAKAGE")
+
+
+@case("r8memmdcap", ["tests/smoke_test.py"],
+      "MEMORY.md topic list unbounded again -> ~298 KB at 2000 topics")
+def _break_r8memmdcap(root):
+    _patch(root, f"{PKG}/llm/memory_writer.py",
+           "        for t in topics[:_MEMORY_MD_TOPICS]:",
+           "        for t in topics:  # BREAKAGE: unbounded")
+
+
+@case("r8arcorder", ["tests/smoke_test.py"],
+      "rank archives by mtime again -> a restored archive outranks a newer one")
+def _break_r8arcorder(root):
+    _patch(root, f"{PKG}/llm/memory_writer.py",
+           "        archive_files = []\n"
+           "        try:\n"
+           "            for year in sorted((d for d in sessions_dir.iterdir() "
+           "if d.is_dir()),\n"
+           "                               key=lambda d: d.name, reverse=True):\n"
+           "                for month in sorted((d for d in year.iterdir() "
+           "if d.is_dir()),\n"
+           "                                    key=lambda d: d.name, "
+           "reverse=True):\n"
+           "                    archive_files += sorted(month.glob(\"*.md\"),\n"
+           "                                            key=lambda p: p.name, "
+           "reverse=True)\n"
+           "                    if len(archive_files) >= 5:\n"
+           "                        break\n"
+           "                if len(archive_files) >= 5:\n"
+           "                    break\n"
+           "        except OSError:",
+           "        archive_files = sorted(sessions_dir.rglob(\"*.md\"),\n"
+           "                               key=lambda p: p.stat().st_mtime,\n"
+           "                               reverse=True)  # BREAKAGE: mtime\n"
+           "        try:\n"
+           "            pass\n"
+           "        except OSError:")
+
+
+def verify_anchors():
+    """Count every registered case's breakage anchors WITHOUT running a gate.
+
+    A rotted anchor otherwise aborts a full run at whichever case sorts
+    first (measured 2026-08-09: `cjk` and `donebar` both rotted after r5/r6
+    rewrote their fix sites, and the whole suite died on `cjk`). Each case
+    gets a fresh copy so one case's patch cannot shadow another's anchor.
+    `skillgate` uses str.replace with no count check, so it cannot rot here.
+    """
+    rotted = []
+    for name in sorted(CASES):
+        box, root = _copy_repo()
+        try:
+            CASES[name][0](root)
+        except SystemExit as e:
+            rotted.append((name, str(e).splitlines()[0]))
+        finally:
+            shutil.rmtree(box, ignore_errors=True)
+    for name, msg in rotted:
+        print(f"[ROT] {name}: {msg}")
+    print(f"{len(CASES) - len(rotted)}/{len(CASES)} anchors intact")
+    return 1 if rotted else 0
+
+
+def run_case(name, keep=False):
+    breaker, gate, description = CASES[name]
+    box, root = _copy_repo()
+    try:
+        breaker(root)
+        proc = _run(root, *gate)
+        red = proc.returncode != 0
+        tail = (proc.stdout or "")[-600:] + (proc.stderr or "")[-600:]
+        status = "RED (detected)" if red else "GREEN — NOT DETECTED"
+        print(f"[{'ok ' if red else 'FAIL'}] {name:<11} {status}")
+        print(f"          {description}")
+        if not red:
+            print("          the breakage survived every gate; the check that "
+                  "was supposed to catch it is vacuous")
+            print("          gate tail:", tail.strip()[-400:].replace("\n", " | "))
+        return red
+    finally:
+        if keep:
+            print(f"          copy kept at {root}")
+        else:
+            shutil.rmtree(box, ignore_errors=True)
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.strip().splitlines()[0])
+    ap.add_argument("--case", action="append", choices=sorted(CASES),
+                    help="run only these cases (repeatable)")
+    ap.add_argument("--keep", action="store_true",
+                    help="keep the broken copies for inspection")
+    ap.add_argument("--anchors", action="store_true",
+                    help="verify every case's anchors against the tree; "
+                         "runs no gates, reports ALL rot at once")
+    ap.add_argument("--list", action="store_true")
+    args = ap.parse_args()
+    if args.anchors:
+        return verify_anchors()
+    if args.list:
+        for name, (_, gate, desc) in sorted(CASES.items()):
+            print(f"{name:<11} {gate[0]:<24} {desc}")
+        return 0
+    names = args.case or sorted(CASES)
+    print(f"Falsifying {len(names)} fix(es) against a temporary copy of "
+          f"{REPO}\n")
+    results = {n: run_case(n, keep=args.keep) for n in names}
+    n_red = sum(1 for v in results.values() if v)
+    print(f"\nSummary: {n_red}/{len(names)} breakages detected")
+    undetected = sorted(n for n, v in results.items() if not v)
+    if undetected:
+        print(f"UNDETECTED: {undetected}")
+    return 0 if n_red == len(names) else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

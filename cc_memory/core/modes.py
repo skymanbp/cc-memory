@@ -5,8 +5,9 @@ project opt-out every hook consults.
 Each mode defines which tools to observe, which categories to prioritize,
 and what to suffix onto extraction prompts.
 
-`is_excluded` lives here rather than in a hook because ALL SIX hooks have to
-call it and hooks must not import each other (see its comment below).
+`is_excluded` lives here rather than in a hook because ALL SIX hooks
+<!--ce:hooks--> have to call it and hooks must not import each other (see its
+comment below).
 `read_config` lives here for the same reason: it is THE runtime reader of
 cc_memory/config.json, and three independent copies of that six-line read is
 exactly how the BOM hole below stayed open for a release.
@@ -14,6 +15,8 @@ exactly how the BOM hole below stayed open for a release.
 import json
 import os
 from pathlib import Path
+
+from core.db import CATEGORIES
 from typing import Dict, List
 
 # cc_memory/ — the directory holding config.json under BOTH install layouts
@@ -63,9 +66,10 @@ def read_config():
     — PowerShell's ``Out-File`` defaults to UTF-8 *with* a BOM and Notepad
     offers it, and a BOM makes ``json.load`` raise ``JSONDecodeError``.
     ``ui/installer.py:_read_json_config`` has read this way since v2.5.0 with
-    that same comment; the six hook paths did not, so a user who edited the
-    only privacy control the plugin has, with the tools the platform hands
-    them, silently lost it — every tool input AND output stored, and with a
+    that same comment; the six hook <!--ce:hooks:asof--> paths did not, so a
+    user who edited the only privacy control the plugin has, with the tools
+    the platform hands them, silently lost it — every tool input AND output
+    stored, and with a
     credential POSTed to the Anthropic API by the Stop observer. Write paths
     still emit no BOM.
     """
@@ -137,9 +141,10 @@ def _norm_path(value: str) -> str:
 # ── Project opt-out (config.json `excluded_projects`) ──────────────────────
 # SINGLE implementation, called by every hook. Through v2.5.0 this existed as
 # two byte-identical private copies (hooks/user_prompt.py, hooks/pre_compact.py)
-# justified by "those two hooks are the ONLY paths that create memory/". True,
-# and beside the point: the other four hooks gate on memory/memory.db merely
-# EXISTING, so a project that was already initialised and listed AFTERWARDS —
+# justified by "those two hooks <!--ce:hooks:asof--> are the ONLY paths that
+# create memory/". True, and beside the point: the other four hooks
+# <!--ce:hooks:asof--> gate on memory/memory.db merely EXISTING, so a project
+# that was already initialised and listed AFTERWARDS —
 # the natural sequence, since a user reaches for this control on realising a
 # repo is sensitive — kept storing observations (inputs AND outputs), kept
 # getting a progress row + PROGRESS.md naming its files, kept being injected at
@@ -190,9 +195,14 @@ def is_excluded(cwd) -> bool:
                         f"anywhere) until it parses")
             return True
         entries = cfg.get("excluded_projects")
-        if not entries:
-            # None / missing / [] / "" — no list, so nothing is excluded. The
-            # overwhelmingly common case, and not a misconfiguration.
+        if entries is None or entries == [] or entries == "":
+            # Missing / empty list / empty string — no list, so nothing is
+            # excluded. The overwhelmingly common case, not a misconfiguration.
+            # EXPLICIT emptiness tests, not `not entries`: `{}`, `0` and
+            # `false` are also falsy, and the truthiness test waved all three
+            # through as "nothing excluded" with `config_fault()` reporting
+            # None — a WRONG TYPE failing open while every other wrong type
+            # fails closed (register D1).
             return False
         if isinstance(entries, str):
             # One bare path instead of a list: unambiguous intent, and the
@@ -243,6 +253,72 @@ def is_excluded(cwd) -> bool:
     return False
 
 
+def refusal_notice(project) -> str:
+    """The one refusal wording every opted-out surface prints.
+
+    The MCP refusal has always promised that an excluded project's memories
+    are "neither readable nor writable through any cc-memory tool", but until
+    v2.8.0 only the six hooks <!--ce:hooks:asof--> and the MCP server actually
+    asked: `is_excluded` appeared zero times in cli/mem.py, cli/plan.py and
+    ui/dashboard.py, so every hand-run command read and wrote an opted-out
+    project freely. "Any
+    tool" now means any tool, and it says so in one place so the three CLI
+    surfaces cannot drift apart from the MCP text.
+
+    Callers PRINT this and exit 0 — a standing user setting is not an error.
+    """
+    fault = config_fault()
+    if fault:
+        # `is_excluded` fails CLOSED on an unusable config, so EVERY project
+        # refuses — including ones in no list at all. Saying "remove it from
+        # that list" there names a cause that is false and a remedy that is
+        # impossible: the merge-conflicted config.json this fail-closed branch
+        # exists for lists nothing. Report the real fault instead.
+        # Returned verbatim: config_fault()'s sentence is already complete and
+        # actionable (what broke, where, why it fails closed). Wrapping it in a
+        # second explanation of the same thing is the stacking this refusal is
+        # supposed to be an example against.
+        return fault
+    return (f"cc-memory is opted out for this project: {project} is listed in "
+            f"config.json 'excluded_projects' (or lies beneath a listed "
+            f"directory). Its memories are neither readable nor writable "
+            f"through any cc-memory tool. Remove it from that list to "
+            f"re-enable.")
+
+
+def cli_opt_out_notice(project):
+    """Refusal text for a hand-run surface, or None when the project is in.
+
+    The ONE gate cli/mem.py, cli/plan.py and ui/dashboard.py share, because
+    three inline copies is how they drift. It differs from calling
+    `is_excluded` directly in exactly one way, and that difference is the
+    point: a BLANK `--project` is normalised to the current directory first.
+
+    `is_excluded` returns False for an empty string by design — its docstring
+    explains that resolving `""` would silently widen a HOOK's match to the
+    interpreter's cwd, and it leaves the gate to callers. The CLIs then did
+    not gate. Meanwhile `anchor_project("")` resolves the same `""` to the
+    real project root, so `--project ""` was a fully working spelling that
+    skipped the privacy check: measured, `plan.py --project "" add` wrote a
+    row into an opted-out project's database while `--project .` was refused.
+
+    Normalising here cannot widen anything: `Path("").resolve()` is the same
+    directory as `Path(".").resolve()`, so the gate still asks about exactly
+    the directory the command is about to touch — never its parent. That is
+    why this runs BEFORE anchoring, which is the step that may move upward.
+    """
+    try:
+        raw = project if isinstance(project, str) else ""
+        target = raw if raw.strip() else str(Path(".").resolve())
+        if is_excluded(target):
+            return refusal_notice(target)
+    except Exception:
+        # why: a surface that cannot evaluate the opt-out must still run; the
+        # hooks and the MCP server enforce it independently on every write
+        return None
+    return None
+
+
 def config_fault():
     """Why `is_excluded` is failing CLOSED right now — or None if it is not.
 
@@ -272,7 +348,13 @@ def config_fault():
                     f"parses. This is fail-closed by design — the privacy "
                     f"opt-out lives in that file.")
         entries = cfg.get("excluded_projects")
-        if entries and not isinstance(entries, (list, str)):
+        # Same explicit-emptiness rule as is_excluded (register D1): `{}` / 0 /
+        # false are wrong TYPES, and `if entries and ...` skipped them because
+        # they are falsy — so is_excluded failed closed (after its own fix)
+        # while this reporter said nothing, destroying the accident's
+        # diagnosability that this function exists to provide.
+        if (entries is not None and entries != [] and entries != ""
+                and not isinstance(entries, (list, str))):
             return (f"cc-memory is SUSPENDED: cc_memory/config.json "
                     f"'excluded_projects' is a {type(entries).__name__}, not a "
                     f"list of paths. No memory is being recorded for any "
@@ -298,7 +380,7 @@ MODES = {
             "ListMcpResourcesTool", "TaskCreate", "TaskUpdate",
             "TaskList", "TaskGet", "TaskStop", "TaskOutput",
         ],
-        "categories": ["decision", "result", "config", "bug", "task", "arch", "note"],
+        "categories": list(CATEGORIES),
         "injection_priority": ["bug", "decision", "task", "config", "arch", "result", "note"],
         "extraction_prompt_suffix": "",
     },
@@ -368,10 +450,6 @@ def should_observe(mode_name: str, tool_name: str) -> bool:
 
 def get_injection_priority(mode_name: str) -> List[str]:
     return get_mode(mode_name).get("injection_priority", MODES["code"]["injection_priority"])
-
-
-def get_extraction_suffix(mode_name: str) -> str:
-    return get_mode(mode_name).get("extraction_prompt_suffix", "")
 
 
 def list_modes() -> List[Dict]:

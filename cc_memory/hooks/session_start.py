@@ -40,12 +40,13 @@ sys.path.insert(0, str(_PKG_ROOT))
 from core.encoding_setup import enable_utf8_io
 enable_utf8_io()
 
-from core.db import MemoryDB
+from core.db import CATEGORIES, MemoryDB
 from core.extractor import load_transcript_window, mangle_project_path
 from core.logger import get_logger
 from core.modes import is_excluded
 from core.roots import project_root  # v2.6.0 root anchoring — core/roots.py
-from core.privacy import neutralize_inline, neutralize_markers
+from core.privacy import (neutralize_document, neutralize_inline,
+                          neutralize_markers)
 from core.progress import write_progress_md
 from llm.memory_writer import upsert_batch
 
@@ -62,6 +63,27 @@ _LAYER_BUDGETS = {
     "progress": 0.25,  # PROGRESS.md preview gets a larger share now
     "footer":   0.10,
 }
+
+# Longest topic NAME rendered into a layer. Names are LLM-derived and also
+# model-supplied through the `memory_add` MCP tool, so nothing else bounds
+# them; one 10,000-character name used to empty the whole topics layer.
+_MAX_TOPIC_NAME = 80
+
+# The plugin's own injection frame. Named because `build_context` has to emit
+# both OUTSIDE the assembled-content sweep — `core.privacy._BANNER_RE` matches
+# them by construction, and escaping them destroys the block the injection is.
+_BANNER_HEAD = "=== CC-MEMORY: Context Restored ==="
+_BANNER_TAIL = "=== END CC-MEMORY ==="
+
+# _LAYER_SKIP_NOTE — why every budget check below says `continue`, not `break`.
+# A `break` makes ONE over-budget row suppress every row behind it, and the
+# rows are ordered `importance DESC, updated_at DESC`, which is exactly where
+# a freshly written row lands. Measured with one oversized row at the head:
+# the critical layer went from 8 of 8 facts to 0 of 8 and the timeline layer
+# from 12 of 12 to 0 of 12, while both layer HEADERS still rendered — so the
+# injection looked structurally normal and was empty. `memory_add` is
+# model-invokable, so the oversized row does not have to be an accident.
+# Skipping the entry costs that one row; stopping costs the layer.
 
 
 # ── Why every content field below is neutralised ───────────────────────────
@@ -89,15 +111,24 @@ def _build_topics_layer(db, project_id, budget):
     used = 0
     topic_names = set()
     for t in topics:
-        name = neutralize_inline(str(t["name"]))
+        # The NAME is capped too. It was interpolated whole, so one 10,000-char
+        # topic name blew the per-entry budget and the `break` below then
+        # emptied the entire knowledge-base layer — measured, 21 topics in the
+        # database and 0 rendered. Topic names come from the LLM extractor and
+        # from the model-invokable `memory_add`, so their length is not ours.
+        name = neutralize_inline(str(t["name"]))[:_MAX_TOPIC_NAME]
         summary = neutralize_inline(str(t["content"]))
-        max_len = min(250, (budget - used) // max(len(topics), 1))
+        # max(8, ...): with many topics the per-topic share falls below 3 and
+        # `summary[:max_len-3]` became a NEGATIVE slice — `summary[:-3]`, which
+        # returns almost the whole string instead of truncating it, inverting
+        # the cap exactly when pressure is highest.
+        max_len = max(8, min(250, (budget - used) // max(len(topics), 1)))
         if len(summary) > max_len:
             cut = summary[:max_len].rfind(".")
             summary = summary[:cut+1] if cut > 50 else summary[:max_len-3] + "..."
         entry = f"**[{name}]** {summary}\n"
         if used + len(entry) > budget:
-            break
+            continue   # skip THIS entry; see _LAYER_SKIP_NOTE
         lines.append(entry)
         used += len(entry)
         # RAW name, deliberately: _build_critical_layer matches this set against
@@ -118,11 +149,25 @@ def _build_critical_layer(db, project_id, budget, topic_names):
     lines = ["### Critical (unmerged)", ""]
     used = 0
     shown = set()
-    for m in unmerged[:8]:
+    scanned = 0
+    for m in unmerged:
+        if len(shown) >= 8 or scanned >= 64:
+            # scanned cap (register r6-B7): with only the emitted-count cap,
+            # a sea of oversized rows made this loop neutralise EVERY
+            # critical memory while emitting none — unbounded work on a hook
+            # whose stdout is not flushed until the whole injection is built.
+            # 64 candidates is eight full misses per slot before giving up.
+            break
+        scanned += 1
+        # The 8-cap counts entries EMITTED, not candidates scanned: the old
+        # `unmerged[:8]` slice ran BEFORE the oversized-skip below, so an
+        # over-budget row that skipped itself had already consumed one of the
+        # eight slots and the layer rendered 7 — a cap on the candidate side
+        # is the same shape as every silent-slice defect this release closed.
         entry = (f"- [{neutralize_inline(str(m['category']))}] "
                  f"{neutralize_inline(str(m['content']))}")
         if used + len(entry) > budget:
-            break
+            continue   # skip THIS entry; see _LAYER_SKIP_NOTE
         lines.append(entry)
         used += len(entry)
         shown.add(m["id"])
@@ -154,7 +199,7 @@ def _build_timeline_layer(db, project_id, budget, shown_ids, mode_name="code"):
             short = content[:60] + "..." if len(content) > 60 else content
             entry = f"#{m['id']} {cat}: {short}"
         if used + len(entry) > budget:
-            break
+            continue   # skip THIS entry; see _LAYER_SKIP_NOTE
         lines.append(entry)
         used += len(entry)
         injected.append(m["id"])
@@ -173,8 +218,18 @@ def _build_progress_preview(memory_dir, budget):
     if not progress.exists():
         return ""
     try:
-        text = progress.read_text(encoding="utf-8")
-    except OSError:
+        # errors="replace" and a ValueError arm, both for the SAME reason
+        # core/progress.py:ensure_memory_gitignore has them: strict UTF-8
+        # raises UnicodeDecodeError — a ValueError, NOT an OSError — on one
+        # byte from a GBK editor or a PowerShell redirect, and this handler
+        # never caught it. It escaped `build_context` into main()'s outer
+        # handler, so the hook exited 0, wrote nothing to stderr and emitted
+        # NO CONTEXT AT ALL: measured 2777 bytes with the mandatory
+        # <system-reminder> and every memory, down to 58 bytes with neither,
+        # from appending one GBK line to a generated file. PROGRESS.md is
+        # also a file the user is invited to read and may well edit.
+        text = progress.read_text(encoding="utf-8", errors="replace")
+    except (OSError, ValueError):
         # why: read failure shouldn't break SessionStart; fall through to empty
         return ""
     # A PROGRESS.md written by v2.5.1 or earlier can still hold armed markers
@@ -186,10 +241,46 @@ def _build_progress_preview(memory_dir, budget):
     # Trim to budget
     if len(text) > budget:
         text = text[:budget].rsplit("\n", 1)[0] + "\n…[truncated, read memory/PROGRESS.md]"
+    # Balance code fences (register E4): PROGRESS.md legitimately contains a
+    # fenced block (§7's transcript pointer), and a budget cut landing inside
+    # it left an ODD number of fence lines — everything concatenated after
+    # the preview, including the FORCED reminder, then rendered as code and
+    # was never read as an instruction (measured: fence count 1 before the
+    # reminder). §7 widens its fence past any backtick run in the content,
+    # so counting lines that OPEN with a fence is exact for this document.
+    # A fence STATE MACHINE, not a raw line count (register r6-B6): inside an
+    # open fence, only a run AT LEAST as long as the opener closes it — a
+    # literal three-backtick line inside a widened four-backtick block is
+    # content, and counting it flipped parity so the balancer APPENDED a
+    # fence after an already-balanced preview, re-opening a block around the
+    # forced reminder. Track the open run's length; append a closer of that
+    # exact length only when the document ends still open.
+    open_len = 0
+    for ln in text.split("\n"):
+        s = ln.lstrip()
+        if not s.startswith("```"):
+            continue
+        run = len(s) - len(s.lstrip("`"))
+        if open_len == 0:
+            open_len = run
+        elif run >= open_len:
+            open_len = 0
+    if open_len:
+        text += "\n" + "`" * open_len
     return "### Last Session PROGRESS (preview)\n\n" + text + "\n"
 
 
-def _build_footer(db, project_id, memory_dir):
+def _build_footer(db, project_id, memory_dir, budget=None):
+    """The footer layer. `budget` is its share of the injection, in chars.
+
+    It took no budget at all, while `_LAYER_BUDGETS` has declared a 0.10 share
+    for it since the table was written — so the one layer the table said was
+    bounded was the only unbounded one. Every field below is interpolated from
+    `memory/.last_save.json`, a plain file in the project that anything with
+    the Write tool can create: measured, a single 5 MB field produced a
+    5,010,676-character injection against a 16,000-char budget, 313x over.
+    The other four layers hold because their own checks do.
+    """
     lines = []
     last_save = memory_dir / ".last_save.json"
     if last_save.exists():
@@ -279,8 +370,24 @@ def _build_footer(db, project_id, memory_dir):
         f"[{stats['n_sessions']} sessions, {stats['n_memories']} memories, "
         f"{stats.get('n_topics', 0)} topics, {n_obs} observations]"
     )
-    lines += ["", "=== END CC-MEMORY ===", ""]
-    return "\n".join(lines)
+    # The terminator is NOT emitted here. It used to be, and that put it inside
+    # the assembled text `build_context` sweeps — where `_BANNER_RE` matches it
+    # by construction, because that pattern exists to stop a stored row forging
+    # exactly this banner. Every session shipped `&#61;&#61;&#61; END
+    # CC-MEMORY &#61;&#61;&#61;` and therefore no terminator at all, while the
+    # gate stayed green because it asserted on THIS function's return value,
+    # i.e. before the sweep. `build_context` now appends the closer after the
+    # sweep, which is the same treatment the forced reminder already gets: the
+    # plugin's own frame is not stored content and must not be escaped, while
+    # everything between the frames still is.
+    text = "\n".join(lines)
+    if budget is not None and len(text) > budget:
+        # Truncate the STATUS lines only. The closer is added by the caller and
+        # costs nothing from this budget, so the head of the diagnostics is all
+        # that has to fit.
+        tail = "\n[footer truncated]\n"
+        text = text[:max(0, budget - len(tail))] + tail
+    return text
 
 
 def _build_forced_reminder(memory_dir):
@@ -365,9 +472,13 @@ def build_context(memory_dir, db, project_id, project_name, current_session_id="
     total_budget = _DEFAULT_BUDGET
     mode_name = db.get_project_mode(project_id)
 
+    # parts[0] is the plugin's own frame and is deliberately kept OUT of the
+    # sweep below; `project_name` is the one caller-supplied value in it, so it
+    # is neutralised here instead (a directory can be named anything).
     header = (
-        f"=== CC-MEMORY: Context Restored ===\n"
-        f"Project: {project_name}  |  {datetime.now().strftime('%Y-%m-%d %H:%M')}\n"
+        f"{_BANNER_HEAD}\n"
+        f"Project: {neutralize_inline(str(project_name))}  |  "
+        f"{datetime.now().strftime('%Y-%m-%d %H:%M')}\n"
     )
     parts = [header]
 
@@ -392,13 +503,50 @@ def build_context(memory_dir, db, project_id, project_name, current_session_id="
     if progress_text:
         parts.append(progress_text)
 
-    footer = _build_footer(db, project_id, memory_dir)
+    # `total_budget`, not the `budget` local — that name has been reassigned
+    # four times by the layers above and holds the PROGRESS share here.
+    footer = _build_footer(db, project_id, memory_dir,
+                           budget=int(total_budget * _LAYER_BUDGETS["footer"]))
     parts.append(footer)
 
-    # The forced reminder block goes LAST so it's the freshest context.
-    parts.append(_build_forced_reminder(memory_dir))
-
-    result = "\n".join(parts)
+    # ONE MORE PASS OVER THE ASSEMBLED CONTENT — and over the CONTENT ONLY.
+    #
+    # Per-value neutralisation is not sufficient, because the renderer
+    # CONCATENATES values: a row ending `<system-reminder` and the next row
+    # starting `>` produce a token this module's OWN `_MARKER_TAG_RE` matches,
+    # from two rows that each pass the check alone. Measured on three memories
+    # written through the real writer: 4 tag matches inside the final
+    # injection where the plugin emits 2, forging a block that reads as
+    # authoritative policy. `memory_add` is a model-invokable MCP tool, so
+    # both halves are writable by the same actor.
+    #
+    # The forced reminder is appended AFTER this pass, never before: it is the
+    # one block that is SUPPOSED to contain a live `<system-reminder>`, and
+    # running it through the escaper turns the mandatory handoff into visible
+    # `&lt;system-reminder` noise. Verified by driving the real hook — the
+    # first version of this fix did exactly that, and the check below is what
+    # caught it.
+    # The plugin's OWN banners are exempt for the same reason, and they were
+    # not until this was measured: `parts[0]` is the header
+    # `=== CC-MEMORY: Context Restored ===` and the last part ends with
+    # `=== END CC-MEMORY ===`, both of which `_BANNER_RE` matches BY
+    # CONSTRUCTION — it was written to catch a memory row forging them. Sweeping
+    # the whole join therefore escaped the plugin's own emission on every
+    # session for every user: `&#61;&#61;&#61; CC-MEMORY: Context Restored
+    # &#61;&#61;&#61;`, and no terminator at all. The terminator is load-bearing
+    # by this file's own account (`_build_footer` truncates its STATUS lines
+    # specifically so `=== END CC-MEMORY ===` survives). Only the CONTENT is
+    # swept; the header and the footer are the plugin speaking, not stored text.
+    body = neutralize_document("\n".join(parts[1:])) if len(parts) > 1 else ""
+    result = parts[0] + ("\n" + body if body else "")
+    result = result + "\n\n" + _BANNER_TAIL + "\n"
+    reminder = _build_forced_reminder(memory_dir)
+    if reminder:
+        result = result + "\n" + reminder
+    assert "<system-reminder>" in result or not reminder, \
+        "the forced reminder was escaped by the assembled-content pass"
+    assert _BANNER_HEAD in result and _BANNER_TAIL in result, \
+        "the assembled-content pass escaped the plugin's own frame banners"
 
     # ── v2.3 observability: persist exactly WHAT was injected, and mark those
     # memories as referenced (keeps them "young" for the staleness net). The
@@ -463,7 +611,7 @@ You are a memory extraction system. Given a Claude Code conversation transcript,
 extract the most important information worth remembering across sessions.
 
 Output a JSON array of objects: {"category": str, "content": str, "importance": int, "topic": str}
-- category: decision|result|config|bug|task|arch|note
+- category: """ + "|".join(CATEGORIES) + """
 - content: one concise, self-contained sentence with specific values
 - importance: 1-5 (5=critical, 4=important, 3=useful)
 - topic: a short keyword for the topic
@@ -573,68 +721,26 @@ def _transcript_is_foreign(messages, project_path):
 
 
 def _get_saved_session_ids(db, project_id):
+    """claude_session_ids whose transcripts were FULLY saved (complete=1).
+
+    A bare sessions row is a CLAIM, not a receipt (register X6): pre_compact
+    publishes the row before minutes of LLM work, and reading it as "saved"
+    made a kill in that window skip the transcript forever — the row said
+    saved, the memories said 0. `complete` is flipped by
+    mark_session_complete only after every dependent write has landed;
+    legacy rows carry the migration default 1.
+    """
     with db._connect() as conn:
         rows = conn.execute(
-            "SELECT claude_session_id FROM sessions WHERE project_id = ?",
+            "SELECT claude_session_id FROM sessions "
+            "WHERE project_id = ? AND complete = 1",
             (project_id,)
         ).fetchall()
     return {r["claude_session_id"] for r in rows if r["claude_session_id"]}
 
 
-def _summarize_transcript(messages, max_chars=12000, total_records=None):
-    """Render the most RECENT slice of a transcript, up to max_chars.
-
-    Same contract as pre_compact._build_transcript_summary, and fixed for the
-    same reason: filling the budget from the OLDEST record pinned retroactive
-    extraction to a session's opening minutes and never showed it the work that
-    actually happened. Fills newest-first, then restores chronological order.
-    """
-    parts, total, scanned = [], 0, 0
-    for msg in reversed(messages):
-        scanned += 1
-        message = msg.get("message", {})
-        if not isinstance(message, dict):
-            continue
-        role = message.get("role", "")
-        content = message.get("content", "")
-        if isinstance(content, str):
-            text = content
-        elif isinstance(content, list):
-            text_parts = []
-            for block in content:
-                if isinstance(block, dict):
-                    if block.get("type") == "text":
-                        text_parts.append(block.get("text", ""))
-                    elif block.get("type") == "tool_use":
-                        name = block.get("name", "")
-                        inp = block.get("input", {})
-                        if name in ("Edit", "Write", "MultiEdit"):
-                            text_parts.append(f"[Tool: {name} {inp.get('file_path', '')}]")
-                        elif name == "Bash":
-                            text_parts.append(f"[Bash: {inp.get('command', '')[:100]}]")
-                        else:
-                            text_parts.append(f"[Tool: {name}]")
-            text = "\n".join(text_parts)
-        else:
-            continue
-        if not text.strip():
-            continue
-        if len(text) > 800:
-            text = text[:400] + "\n...\n" + text[-400:]
-        line = f"[{role}] {text}\n"
-        if total + len(line) > max_chars:
-            scanned -= 1  # this one didn't make it in
-            break
-        parts.append(line)
-        total += len(line)
-    parts.reverse()  # newest-first accumulation → chronological
-    # `messages` may be a bounded window, so its length understates the
-    # transcript; total_records is the real count when the caller has it.
-    universe = len(messages) if total_records is None else max(total_records, len(messages))
-    omitted = universe - scanned
-    if omitted > 0:
-        parts.insert(0, f"[...{omitted} earlier messages omitted, showing most recent...]\n")
-    return "\n".join(parts)
+# THE transcript summariser lives in core.extractor (register M2).
+from core.extractor import summarize_transcript as _summarize_transcript
 
 
 def _retroactive_extract(messages, total_records=None, deadline=None):
@@ -647,16 +753,14 @@ def _retroactive_extract(messages, total_records=None, deadline=None):
         return None
     try:
         from llm.ccl_backend import call_llm
+        from llm.parse import extract_json
         text = call_llm(_RETROACTIVE_PROMPT,
                         f"Extract memories:\n\n{transcript_text}",
                         api_key, max_tokens=2000, timeout=_API_TIMEOUT,
                         fallback_timeout=_FALLBACK_TIMEOUT,
                         deadline=deadline)
-        text = text.strip()
-        if text.startswith("```"):
-            text = "\n".join(l for l in text.split("\n") if not l.strip().startswith("```"))
-        memories = json.loads(text)
-        if not isinstance(memories, list):
+        memories = extract_json(text, kind="array")
+        if memories is None:
             return None
         valid = []
         for m in memories:
@@ -668,7 +772,7 @@ def _retroactive_extract(messages, total_records=None, deadline=None):
             topic = m.get("topic", "")
             if not content or len(content) < 10:
                 continue
-            if cat not in ("decision", "result", "config", "bug", "task", "arch", "note"):
+            if cat not in CATEGORIES:
                 cat = "note"
             valid.append({
                 "category": cat, "content": content,
@@ -750,14 +854,8 @@ def _refresh_progress_row(db, project_id, memory_dir, current_session_id=None):
     # ── Tier 2C: files_touched from recent observations ────────────────────
     if not cur.get("files_touched"):
         obs = db.get_recent_observations(project_id, limit=40)
-        files_read = list(dict.fromkeys(
-            o["tool_input"] for o in obs
-            if o["tool_name"] == "Read" and o["tool_input"]
-        ))[:15]
-        files_modified = list(dict.fromkeys(
-            o["tool_input"] for o in obs
-            if o["tool_name"] in ("Edit", "Write", "MultiEdit") and o["tool_input"]
-        ))[:15]
+        from core.extractor import files_from_observations
+        files_read, files_modified = files_from_observations(obs, cap=15)
         ft = (
             [{"path": p, "action": "edit"} for p in files_modified] +
             [{"path": p, "action": "read"} for p in files_read if p not in files_modified]
@@ -971,6 +1069,10 @@ def retroactive_save(cwd, db, project_id, current_session_id="", deadline=None):
                 brief_summary=f"Retroactive save at {datetime.now().strftime('%Y-%m-%d %H:%M')}",
             )
             counts = upsert_batch(db, project_id, sid, memories, memory_dir=memory_dir)
+            # Receipt after the memories landed (register X6) — a kill between
+            # insert_session and here leaves the row incomplete and the NEXT
+            # retroactive pass retries this transcript instead of skipping it.
+            db.mark_session_complete(sid)
             n_retroactive += 1
             _log.info(
                 f"retroactive {session_uuid[:8]}: +{counts.get('inserted',0)} "
@@ -1090,8 +1192,23 @@ def main():
             _log.error(f"progress refresh failed: {e}")
 
         print(f"\n[cc-memory] Session start — loading memory for '{Path(cwd).name}'...")
-        print(build_context(memory_dir, db, project_id, Path(cwd).name,
-                            current_session_id=session_id))
+        # The FORCED reminder must not share a failure domain with the layers.
+        # `build_context` assembles five layers from unbounded database and
+        # file content and appends the reminder LAST, so anything raising
+        # inside any layer discarded the whole injection — reminder included —
+        # into main()'s outer handler, silently and with rc=0. Measured: one
+        # GBK byte appended to PROGRESS.md took the injection from 2777 bytes
+        # (reminder + every memory) to 58 bytes (neither). docs/CONTRACTS.md
+        # calls that reminder mandatory; a mandatory thing that a stray byte
+        # anywhere upstream can delete is not mandatory. The layers are
+        # best-effort; the reminder is the contract, so it is emitted either
+        # way and the layer failure degrades to "no context this session".
+        try:
+            print(build_context(memory_dir, db, project_id, Path(cwd).name,
+                                current_session_id=session_id))
+        except Exception:
+            _log.error_tb("build_context failed; emitting the forced reminder alone")
+            print(_build_forced_reminder(memory_dir))
         # The injection is complete and irreplaceable — get it out of the
         # buffer before any further work can run us into the 15s timeout.
         _flush_stdout()

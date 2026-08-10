@@ -13,7 +13,6 @@ right away (don't wait for PreCompact).
 """
 import json
 import sys
-import tempfile
 from pathlib import Path
 
 _HERE = Path(__file__).resolve().parent
@@ -27,9 +26,10 @@ enable_utf8_io()
 
 # Project opt-out. This USED to be a private literal copy here and a second
 # byte-identical one in hooks/pre_compact.py, on the grounds that those two are
-# "the ONLY paths that create memory/". The other four hooks gate on
-# memory/memory.db merely existing, so a project initialised BEFORE being listed
-# stayed fully captured; the single implementation now lives in core.modes and
+# "the ONLY paths that create memory/". The other four hooks
+# <!--ce:hooks:asof--> gated on memory/memory.db merely existing, so a project
+# initialised BEFORE being listed stayed fully captured; the single
+# implementation now lives in core.modes and
 # every hook calls it. See core/modes.py:is_excluded.
 from core.modes import is_excluded
 
@@ -38,19 +38,20 @@ from core.modes import is_excluded
 # cwd follows the agent's own `cd`, which is how a session launched at a repo
 # root came to report a subdirectory. See core/roots.py for the ladder.
 from core.roots import project_root
+# safe_id replaces this hook's private `[:16]` truncating copy (three hooks
+# <!--ce:hooks:asof--> each had one; truncation cross-wired any two sessions
+# sharing a 16-char prefix). read_marker never raises and refuses to follow a
+# planted symlink.
+from core.markers import marker_path, read_marker, safe_id as _safe_id, write_marker
 
 # Privacy opt-out. `<private>…</private>` was honoured on the observation path
 # (hooks/post_tool_use.py) and on every memory-write path (llm/memory_writer.py,
 # core/extractor.py) but NOT on the progress path this hook feeds — the same tag,
 # in the same session, behaving in opposite ways. See the call site in main().
-from core.privacy import clean_for_storage
+from core.privacy import clean_for_storage, strip_harness_blocks
 
 _TURN_FILE_PREFIX = "cc_mem_turns_"
 _PROMPT_FILE_PREFIX = "cc_mem_prompt_"
-
-
-def _safe_id(session_id):
-    return session_id[:16].replace("/", "_").replace("\\", "_")
 
 
 def _init_project_if_needed(cwd):
@@ -59,15 +60,14 @@ def _init_project_if_needed(cwd):
     if db_path.exists():
         return False
     try:
-        memory_dir = Path(cwd) / "memory"
-        memory_dir.mkdir(parents=True, exist_ok=True)
-        (memory_dir / "sessions").mkdir(exist_ok=True)
-        (memory_dir / "topics").mkdir(exist_ok=True)
+        from core.progress import ensure_memory_dir
+        # Raises FileNotFoundError when `cwd` no longer exists, which the
+        # handler below turns into "skip this turn" — the project stays gone
+        # instead of being reborn as an empty shell on the next message.
+        memory_dir = ensure_memory_dir(Path(cwd) / "memory")
         from core.db import MemoryDB
         db = MemoryDB(db_path)
         db.upsert_project(cwd)
-        from core.progress import ensure_memory_gitignore
-        ensure_memory_gitignore(memory_dir)
         from core.logger import get_logger
         get_logger("user_prompt").info(f"auto-initialized memory for {Path(cwd).name}")
         return True
@@ -126,20 +126,20 @@ def main():
         sys.exit(0)
 
     safe = _safe_id(session_id)
-    tmp = Path(tempfile.gettempdir())
 
     try:
-        turn_file = tmp / f"{_TURN_FILE_PREFIX}{safe}"
+        turn_file = marker_path(_TURN_FILE_PREFIX, safe)
         turn_count = 1
-        if turn_file.exists():
+        raw_count = read_marker(turn_file, "").strip()
+        if raw_count:
             try:
-                turn_count = int(turn_file.read_text(encoding="utf-8").strip()) + 1
-            except (ValueError, OSError):
+                turn_count = int(raw_count) + 1
+            except ValueError:
                 # why: corrupted turn file — reset to 1; observer will still
                 # work, just doesn't know how many turns we've had
                 turn_count = 1
         try:
-            turn_file.write_text(str(turn_count), encoding="utf-8")
+            write_marker(turn_file, str(turn_count))
         except OSError:
             # why: can't persist turn count; observer falls back to recent-20
             pass
@@ -161,13 +161,18 @@ def main():
             # still seen as a matched pair; clean_for_storage fails CLOSED on a
             # dangling open tag, so a cut landing mid-span drops the remainder
             # instead of emitting it.
-            prompt = clean_for_storage(prompt)[:500]
-            prompt_file = tmp / f"{_PROMPT_FILE_PREFIX}{safe}"
+            # strip_harness_blocks first, same primitive and same reason as
+            # pre_compact._first_user_request: whatever ends up here is
+            # stored as `progress.current_request` and spliced into the
+            # Stop observer's Anthropic request, and neither should ever
+            # be Claude Code's own slash-command scaffolding.
+            prompt = clean_for_storage(strip_harness_blocks(prompt))[:500]
+            prompt_file = marker_path(_PROMPT_FILE_PREFIX, safe)
             try:
                 # Written even when cleaning emptied it: this marker is
                 # per-SESSION and reused every turn, so skipping the write would
                 # leave the PREVIOUS turn's prompt in place for stop.py to read.
-                prompt_file.write_text(prompt, encoding="utf-8")
+                write_marker(prompt_file, prompt)
             except OSError:
                 # why: prompt context for observer is enrichment, not required
                 pass

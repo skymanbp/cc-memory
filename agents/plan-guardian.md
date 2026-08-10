@@ -45,9 +45,10 @@ NEXT ACTION:
    goal, changed file structure with no plan rationale) is `drifting`. If
    the plan no longer matches reality at all (e.g. user changed their mind
    mid-session), recommend `replan-needed`.
-4. **Use git context if useful**: `bash git diff --stat HEAD~5..HEAD` to see
-   what changed recently. `bash git log --oneline -10` for recent commits.
-   Don't push, fetch, or modify state — read-only commands only.
+4. **Use git context if useful**: run `git diff --stat HEAD~5..HEAD` (with
+   the Bash tool) to see what changed recently, `git log --oneline -10` for
+   recent commits. Don't push, fetch, or modify state — read-only commands
+   only.
 5. **Do not invent steps**. If PLAN.md is missing or invalid, report
    `ALIGNMENT: replan-needed` and stop.
 

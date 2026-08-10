@@ -104,11 +104,17 @@ def load_transcript(transcript_path: str) -> List[Dict]:
                 if not line:
                     continue
                 try:
-                    messages.append(json.loads(line))
+                    record = json.loads(line)
                 except json.JSONDecodeError:
                     # why: a single malformed line shouldn't drop the whole transcript;
                     # JSONL is line-delimited so we recover on the next line
                     continue
+                # Records only. json.loads happily returns `null`, a number,
+                # a string or an array for a well-formed non-object line, and
+                # every consumer starts with `msg.get(...)` — same rationale
+                # as _decode_records below.
+                if isinstance(record, dict):
+                    messages.append(record)
     except (FileNotFoundError, PermissionError):
         # why: missing / unreadable transcript is a normal early-call state
         # (file may not exist yet for a freshly compacted session). Return empty.
@@ -128,6 +134,8 @@ _DEFAULT_HEAD_RECORDS = 40      # enough for _first_user_request to clear the
 _DEFAULT_TAIL_BYTES = 32 << 20  # 32 MiB ≈ 10k records of recent history
 _READ_CHUNK = 8 << 20
 _MAX_RECORD_BYTES = 8 << 20     # per-record read cap; see the head loop below
+_MAX_HEAD_BYTES = 8 << 20       # TOTAL head budget (register D6) — the head
+                                # carries the opening request, not bulk data
 
 TranscriptWindow = namedtuple(
     "TranscriptWindow",
@@ -144,11 +152,20 @@ def _decode_records(raw_lines) -> List[Dict]:
         try:
             # json.loads accepts bytes (UTF-8 autodetect), so we never decode a
             # slice that might straddle a multi-byte character.
-            out.append(json.loads(line))
+            record = json.loads(line)
         except (json.JSONDecodeError, UnicodeDecodeError):
             # why: a malformed or partially-written final line must not drop the
             # whole window; JSONL is line-delimited so the next line recovers
             continue
+        # Records only — a transcript line reading `null`, `42`, `"s"` or
+        # `[1,2]` is well-formed JSON but not a record, and every consumer
+        # starts with `msg.get(...)`. One such line used to abort the ENTIRE
+        # compaction: build_extraction raised AttributeError, the hook's
+        # outer handler wrote success:false, and the PROGRESS.md handoff was
+        # skipped (measured with a single `null` line). Dropping it here is
+        # the same degradation contract as a malformed line.
+        if isinstance(record, dict):
+            out.append(record)
     return out
 
 
@@ -167,16 +184,29 @@ def _count_records(fh, size: int) -> int:
     this is a count of RECORDS PRESENT, not of records successfully parsed.
     """
     fh.seek(0)
-    n, remaining, carry = 0, size, b""
+    n, remaining = 0, size
+    # A BOOLEAN carry, not the bytes themselves (register D6): the old code
+    # kept the whole unterminated fragment and re-concatenated it every
+    # chunk, so a long line with no newline grew the carry unboundedly and
+    # each `carry + chunk` copied it again — measured 793 MiB peak resident
+    # on a 140 MiB file. Only the fragment's NON-BLANKNESS matters to the
+    # count, and that is one bit.
+    frag_nonblank = False
     while remaining > 0:
         chunk = fh.read(min(_READ_CHUNK, remaining))
         if not chunk:
             break
         remaining -= len(chunk)
-        parts = (carry + chunk).split(b"\n")
-        carry = parts.pop()  # trailing fragment: no newline seen yet
-        n += sum(1 for p in parts if p.strip())
-    if carry.strip():
+        parts = chunk.split(b"\n")
+        if len(parts) == 1:
+            # no newline in this chunk: the fragment just grows
+            frag_nonblank = frag_nonblank or bool(parts[0].strip())
+            continue
+        if frag_nonblank or parts[0].strip():
+            n += 1  # the carried fragment's line ended in this chunk
+        n += sum(1 for p in parts[1:-1] if p.strip())
+        frag_nonblank = bool(parts[-1].strip())
+    if frag_nonblank:
         n += 1  # final record without a trailing newline
     return n
 
@@ -226,23 +256,46 @@ def load_transcript_window(
 
             if size <= tail_bytes:
                 # Small enough to read whole — same records as load_transcript().
-                msgs = _decode_records(fh.read(size).splitlines())
+                data = fh.read(size)
+                msgs = _decode_records(data.splitlines())
+                # total_records counts records PRESENT (non-blank lines), the
+                # same unit the truncated branch's _count_records reports.
+                # `len(msgs)` counted records PARSED, so the same file gave a
+                # different msg_count depending only on which branch read it
+                # (register D7: 3 parsed vs 5 present, measured).
+                # split(b"\n"), NOT splitlines (register r6-C8): splitlines
+                # also breaks on lone \r / \x0b / \x1c-\x1e, which
+                # _count_records does not — the two branches disagreed again
+                # on a CR-separated file (2 vs 1, measured). One delimiter,
+                # both branches.
+                total = sum(1 for l in data.split(b"\n") if l.strip())
                 # Partition (not overlap) so messages == head + tail holds here too.
                 return TranscriptWindow(
                     messages=msgs, head=msgs[:head_records],
                     tail=msgs[head_records:],
-                    total_records=len(msgs), total_bytes=size, truncated=False,
+                    total_records=total, total_bytes=size, truncated=False,
                 )
 
             head_raw: List[bytes] = []
+            head_bytes = 0
             for _ in range(head_records):
-                # Bounded readline: head_records caps the record COUNT, this caps
-                # the BYTES. An over-long record arrives truncated, fails
-                # json.loads, and _decode_records drops it — the right degradation.
-                line = fh.readline(_MAX_RECORD_BYTES)
+                # Bounded readline: head_records caps the record COUNT, and the
+                # TOTAL budget caps the bytes — passed INTO readline (register
+                # r6-C9), because checking after the read let a 7 MiB line
+                # plus an 8 MiB line both land before the check fired,
+                # retaining ~2× the advertised budget. An over-long record
+                # arrives truncated, fails json.loads, and _decode_records
+                # drops it — the right degradation. The head exists to carry
+                # the opening request; one budget's worth of bytes is already
+                # far past any real opening (register D6's other half).
+                remaining = _MAX_HEAD_BYTES - head_bytes
+                if remaining <= 0:
+                    break
+                line = fh.readline(min(_MAX_RECORD_BYTES, remaining))
                 if not line:
                     break
                 head_raw.append(line)
+                head_bytes += len(line)
             head = _decode_records(head_raw)
             head_end = fh.tell()
 
@@ -275,6 +328,86 @@ def load_transcript_window(
             messages=[], head=[], tail=[], total_records=0,
             total_bytes=0, truncated=False,
         )
+
+
+def files_from_observations(observations, cap=None):
+    """(files_read, files_modified) from observation rows — deduped,
+    order-preserving, optionally capped. THE one implementation: it existed
+    as three hand-rolled copies (pre_compact, session_start refresh, stop's
+    per-turn patch) with three different caps, which is the same copy-drift
+    shape as the transcript summariser above (register M2)."""
+    reads = list(dict.fromkeys(
+        o["tool_input"] for o in observations
+        if o["tool_name"] == "Read" and o["tool_input"]))
+    mods = list(dict.fromkeys(
+        o["tool_input"] for o in observations
+        if o["tool_name"] in ("Edit", "Write", "MultiEdit") and o["tool_input"]))
+    if cap is not None:
+        reads, mods = reads[:cap], mods[:cap]
+    return reads, mods
+
+
+def summarize_transcript(messages, max_chars=12000, total_records=None):
+    """Render the most RECENT slice of a conversation, up to max_chars.
+    THE one implementation (register M2) — it existed as three near-identical
+    copies (hooks/pre_compact.py, hooks/session_start.py, ui/dashboard.py)
+    whose fill-direction bug had to be fixed three times in v2.4.2.
+
+    Fills from the NEWEST message BACKWARDS, then restores chronological
+    order: filling from the oldest exhausted the budget after 329 of
+    ~585,000 records on a real 2.1 GiB transcript, pinning every extraction
+    to content 70 days stale. ``total_records`` is the transcript's REAL
+    record count so the "earlier messages omitted" figure describes the
+    file, not the window (~10,000 claimed vs ~575,000 real, measured).
+    """
+    parts, total, scanned = [], 0, 0
+    for msg in reversed(messages):
+        scanned += 1
+        message = msg.get("message", {})
+        if not isinstance(message, dict):
+            continue
+        role = message.get("role", "")
+        content = message.get("content", "")
+        if isinstance(content, str):
+            text = content
+        elif isinstance(content, list):
+            text_parts = []
+            for block in content:
+                if isinstance(block, dict):
+                    if block.get("type") == "text":
+                        text_parts.append(block.get("text", ""))
+                    elif block.get("type") == "tool_use":
+                        name = block.get("name", "")
+                        inp = block.get("input", {})
+                        if name in ("Edit", "Write", "MultiEdit"):
+                            text_parts.append(f"[Tool: {name} {inp.get('file_path', '')}]")
+                        elif name == "Bash":
+                            text_parts.append(f"[Bash: {inp.get('command', '')[:100]}]")
+                        elif name == "TodoWrite":
+                            text_parts.append(
+                                f"[TodoWrite: {json.dumps(inp.get('todos', [])[:5], ensure_ascii=False)[:200]}]"
+                            )
+                        else:
+                            text_parts.append(f"[Tool: {name}]")
+            text = "\n".join(text_parts)
+        else:
+            continue
+        if not text.strip():
+            continue
+        if len(text) > 800:
+            text = text[:400] + "\n...[truncated]...\n" + text[-400:]
+        line = f"[{role}] {text}\n"
+        if total + len(line) > max_chars:
+            scanned -= 1  # this one didn't make it in
+            break
+        parts.append(line)
+        total += len(line)
+    parts.reverse()  # newest-first accumulation -> chronological for the LLM
+    universe = len(messages) if total_records is None else max(total_records, len(messages))
+    omitted = universe - scanned
+    if omitted > 0:
+        parts.insert(0, f"[...{omitted} earlier messages omitted, showing most recent...]\n")
+    return "\n".join(parts)
 
 
 def _text_from_content(content: Any) -> str:

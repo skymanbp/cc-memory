@@ -40,14 +40,14 @@ if getattr(sys, 'frozen', False):
     sys.path.insert(0, str(_BUNDLE_DIR))
 else:
     sys.path.insert(0, str(_PKG_ROOT))
-from core.db import MemoryDB
+from core.db import CATEGORIES, MemoryDB
 from core.encoding_setup import enable_utf8_io
 from core.extractor import (
     build_extraction,
     group_sentences,
     load_transcript,
 )
-from core.progress import ensure_memory_gitignore
+from core.progress import ensure_memory_dir
 from llm.memory_writer import upsert_smart, upsert_batch, regenerate_memory_index
 
 try:
@@ -294,7 +294,7 @@ class DashboardApp:
         ttk.Label(filt, text="Category:").pack(side=tk.LEFT, padx=(10,0))
         self.mem_cat_var = tk.StringVar(value="all")
         cat_combo = ttk.Combobox(filt, textvariable=self.mem_cat_var, width=12,
-                     values=["all","decision","result","config","bug","task","arch","note"],
+                     values=["all"] + list(CATEGORIES),
                      state="readonly")
         cat_combo.pack(side=tk.LEFT, padx=5)
         cat_combo.bind("<<ComboboxSelected>>", lambda e: self._load_memories())
@@ -761,16 +761,12 @@ class DashboardApp:
         RECREATED the project as an empty shell — memory.db, .gitignore,
         sessions/ and topics/ included — instead of reporting it gone. Raises
         FileNotFoundError instead; _load_project turns that into a dialog.
+
+        The rule lives in `core.progress.ensure_memory_dir` now. Keeping the
+        correct version here as a private method is why six other creators
+        each shipped their own parents=True copy and kept resurrecting.
         """
-        project = Path(project)
-        if not project.is_dir():
-            raise FileNotFoundError(f"project directory not found: {project}")
-        memory_dir = project / "memory"
-        memory_dir.mkdir(exist_ok=True)
-        (memory_dir / "sessions").mkdir(exist_ok=True)
-        (memory_dir / "topics").mkdir(exist_ok=True)
-        ensure_memory_gitignore(memory_dir)
-        return memory_dir
+        return ensure_memory_dir(Path(project) / "memory")
 
     def _set_busy(self, busy: bool, msg: str = ""):
         """Toggle a wait cursor + status text around a long main-thread job."""
@@ -799,8 +795,20 @@ class DashboardApp:
         the previously loaded project intact instead of half-swapping to one
         that could not be opened (project_path used to be overwritten first).
         """
+        # Anchoring belongs HERE, not only in main(): this is the single choke
+        # point all five routes pass through (combobox, Manage.../Save & Close,
+        # the registry, Init New, and --project), and the one place that turns
+        # a path into a database. Anchoring only --project left the four GUI
+        # routes planting a full memory/memory.db in whatever subdirectory the
+        # user happened to browse to — and rung 0 then pinned every hook to it.
+        # The opt-out is checked on the RAW pick, before anchoring, so a
+        # per-subdirectory exclusion is not widened to its parent.
+        notice = self._opt_out_notice(project_path)
+        if notice:
+            self._report_opt_out(project_path, notice)
+            return
         try:
-            resolved = Path(project_path).resolve()
+            resolved = Path(self._anchor(project_path)).resolve()
             memory_dir = self._ensure_memory_dir(resolved)
             db = MemoryDB(memory_dir / "memory.db")
             project_id = db.upsert_project(str(resolved))
@@ -826,6 +834,49 @@ class DashboardApp:
             self.status_var.set(f"Loaded: {resolved.name} — but {errors[0]}")
         else:
             self.status_var.set(f"Loaded: {resolved.name}")
+
+    @staticmethod
+    def _anchor(project_path):
+        """Project root for a GUI-picked path; the raw path if unresolvable."""
+        try:
+            from core.roots import anchor_project
+            return anchor_project(project_path)
+        except Exception:
+            # why: the dashboard must still open a project if the resolver
+            # cannot load; the raw path is the pre-v2.8.0 behaviour
+            return project_path
+
+    @staticmethod
+    def _opt_out_notice(project_path):
+        """Refusal text when the user picked an opted-out project, else None."""
+        try:
+            from core.modes import cli_opt_out_notice
+            return cli_opt_out_notice(project_path)
+        except Exception:
+            # why: an unavailable opt-out check must not block the GUI; the
+            # hooks and the MCP server enforce it independently on every write
+            return None
+
+    def _report_opt_out(self, project_path, notice):
+        """Report a privacy opt-out as a SETTING, not as a failure.
+
+        Routing this through `_report_project_error` produced an error dialog
+        titled "Project unavailable" that blamed an unplugged drive and told
+        the user to drop the entry with Manage… — a false cause and the wrong
+        remedy. The project is fine and the entry should stay; the thing to
+        change is config.json. Informational, not an error icon.
+        """
+        try:
+            self.status_var.set(f"Opted out: {project_path}")
+        except tk.TclError:
+            # why: a torn-down root must not turn a reported setting into an
+            # unreported exception
+            pass
+        messagebox.showinfo(
+            "Project opted out of cc-memory",
+            f"{project_path}\n\n{notice}\n\nNothing was created or read. The "
+            f"entry stays in the project list — this is a standing setting, "
+            f"not a failure, so removing the entry would not change it.")
 
     def _report_project_error(self, verb, project_path, err):
         """Surface a project-level failure in the status bar AND a dialog."""
@@ -1035,6 +1086,21 @@ Category Breakdown:
         """
         if not hasattr(self, "progress_text"):
             return
+        # Marker neutralisation on EVERY stored slot below (register E3): this
+        # tab renders memory content, LLM summaries and plan text — the same
+        # model-reachable columns every other render path escapes — and it was
+        # the one surface printing them raw. A copied-out live tag re-enters
+        # a Claude session as an authority marker; escaped, it stays prose.
+        try:
+            from core.privacy import neutralize_inline as _ni, \
+                neutralize_markers as _nm
+        except Exception:
+            # why: a read-only view must render even on a broken install;
+            # over-escaping every '<' is the same fail-closed fallback the
+            # CLI's _neutralize uses (register Y3)
+            def _ni(t):
+                return str(t).replace("<", "&lt;")
+            _nm = _ni
         self.progress_text.config(state=tk.NORMAL)
         self.progress_text.delete("1.0", tk.END)
         if not self.db or self.project_id is None:
@@ -1050,25 +1116,25 @@ Category Breakdown:
             out.append("(no progress row yet — PreCompact writes it at the first "
                        "compaction of this project)")
         else:
-            out.append(f" 1. current_request  : {prog.get('current_request') or '(empty)'}")
-            out.append(f" 2. status_done      : {prog.get('status_done') or '(none yet)'}")
-            out.append(f" 3. status_in_flight : {prog.get('status_in_flight') or '(none)'}")
-            out.append(f" 4. status_blocked   : {prog.get('status_blocked') or '(none)'}")
+            out.append(f" 1. current_request  : {_ni(prog.get('current_request') or '(empty)')}")
+            out.append(f" 2. status_done      : {_ni(prog.get('status_done') or '(none yet)')}")
+            out.append(f" 3. status_in_flight : {_ni(prog.get('status_in_flight') or '(none)')}")
+            out.append(f" 4. status_blocked   : {_ni(prog.get('status_blocked') or '(none)')}")
 
             todos = prog.get("open_todos") or []
             out.append(f" 5. open_todos       : {len(todos)}")
             for t in todos[:20]:
                 if isinstance(t, dict):
                     mark = "[ ]" if t.get("status", "pending") == "pending" else "[~]"
-                    out.append(f"        {mark} {str(t.get('priority', 'medium')):<6} "
-                               f"{t.get('content', '')}")
+                    out.append(f"        {mark} {_ni(str(t.get('priority', 'medium'))):<6} "
+                               f"{_ni(str(t.get('content', '')))}")
                 else:
                     # why: no shipped writer emits bare strings today, but the
                     # MCP progress_regenerate tool is a public surface that can
                     # — a read-only view must render them, not raise
-                    out.append(f"        [ ] {t}")
+                    out.append(f"        [ ] {_ni(str(t))}")
 
-            plan_lines = (prog.get("plan") or "").splitlines() or ["(none)"]
+            plan_lines = _nm(prog.get("plan") or "").splitlines() or ["(none)"]
             out.append(f" 6. plan             : {plan_lines[0]}")
             for ln in plan_lines[1:20]:
                 out.append(f"                       {ln}")
@@ -1077,20 +1143,20 @@ Category Breakdown:
             out.append(f" 7. critical_context : {len(crit)}")
             for m in crit[:10]:
                 if isinstance(m, dict):
-                    out.append(f"        #{m.get('id', '?')} [{m.get('category', '')}] "
-                               f"{(m.get('content') or '')[:90]}")
+                    out.append(f"        #{m.get('id', '?')} [{_ni(str(m.get('category', '')))}] "
+                               f"{_ni(str(m.get('content') or ''))[:90]}")
                 else:
-                    out.append(f"        {str(m)[:90]}")
+                    out.append(f"        {_ni(str(m))[:90]}")
 
             files = prog.get("files_touched") or []
             out.append(f" 8. files_touched    : {len(files)}")
             for f in files[:20]:
                 if isinstance(f, dict):
-                    out.append(f"        {str(f.get('action', '?')):<8} {f.get('path', '')}")
+                    out.append(f"        {_ni(str(f.get('action', '?'))):<8} {_ni(str(f.get('path', '')))}")
                 else:
-                    out.append(f"        {f}")
+                    out.append(f"        {_ni(str(f))}")
 
-            out.append(f" 9. transcript_ptr   : {prog.get('transcript_ptr') or '(none)'}")
+            out.append(f" 9. transcript_ptr   : {_ni(prog.get('transcript_ptr') or '(none)')}")
             out.append(f"10. updated_at       : {prog.get('updated_at') or '-'}")
             out.append(f"11. trigger_type     : {prog.get('trigger_type') or '-'}")
             out.append(f"    session tag      : "
@@ -1118,17 +1184,17 @@ Category Breakdown:
                 out.append("** generated PLAN.md) may still describe the PREVIOUS plan.")
                 out.append("")
                 out.append("Raw capture:")
-                for ln in (pa.get("raw") or "(empty)").splitlines()[:40]:
+                for ln in _nm(pa.get("raw") or "(empty)").splitlines()[:40]:
                     out.append(f"    {ln}")
                 out.append("")
 
             if structured.get("goal"):
-                out.append(f"Goal: {structured['goal']}")
+                out.append(f"Goal: {_ni(str(structured['goal']))}")
                 sc = structured.get("success_criteria")
                 if isinstance(sc, list) and sc:
                     out.append("Success criteria:")
                     for c in sc[:10]:
-                        out.append(f"  - {c}")
+                        out.append(f"  - {_ni(str(c))}")
                 done = sum(1 for s in steps
                            if isinstance(s, dict) and s.get("status") == "done")
                 out.append("")
@@ -1142,13 +1208,13 @@ Category Breakdown:
                     mark = ("  <-- ACTIVE"
                             if s.get("id") == active and s.get("status") != "done"
                             else "")
-                    line = f"  {s.get('id', '?')}. {glyph} {s.get('title', '')}{mark}"
+                    line = f"  {s.get('id', '?')}. {glyph} {_ni(str(s.get('title', '')))}{mark}"
                     if s.get("notes"):
-                        line += f"  — {s['notes']}"
+                        line += f"  — {_ni(str(s['notes']))}"
                     out.append(line)
             elif not pa.get("needs_refine"):
                 out.append("(no structured plan yet; raw capture follows)")
-                for ln in (pa.get("raw") or "(empty)").splitlines()[:40]:
+                for ln in _nm(pa.get("raw") or "(empty)").splitlines()[:40]:
                     out.append(f"    {ln}")
 
             out += ["",
@@ -1199,6 +1265,10 @@ Category Breakdown:
         # prompt of any kind. Confirm every write, and report its rowcount.
         read_only = _sql_is_read_only(query)
         if not read_only:
+            if self._optout_blocks_write():
+                self.sql_output.insert("1.0", "(refused — project is opted "
+                                              "out via excluded_projects)")
+                return
             proj = self.project_path.name if self.project_path else "this project"
             preview = query if len(query) <= 400 else query[:400] + "..."
             if not messagebox.askyesno(
@@ -1212,10 +1282,27 @@ Category Breakdown:
                 return
 
         try:
-            with self.db._connect() as conn:
-                cur = conn.execute(query)
-                rows = cur.fetchall()
-                affected = cur.rowcount
+            if read_only:
+                # ENGINE-enforced (register E2): `_sql_is_read_only` decides
+                # whether to CONFIRM; it must never be what decides whether a
+                # write can happen. A single-statement CTE-DML shape passed
+                # it as read-only and SQLite committed the DELETE with no
+                # dialog (measured). On core.db.readonly_connect's mode=ro
+                # connection the same statement fails inside the engine, and
+                # the authorizer refuses ATTACH — the one road out of ro.
+                from core.db import readonly_connect
+                conn = readonly_connect(self.db.db_path)
+                try:
+                    cur = conn.execute(query)
+                    rows = cur.fetchall()
+                    affected = cur.rowcount
+                finally:
+                    conn.close()
+            else:
+                with self.db._connect() as conn:
+                    cur = conn.execute(query)
+                    rows = cur.fetchall()
+                    affected = cur.rowcount
         except sqlite3.Error as e:
             self.sql_output.insert("1.0", f"SQL Error: {e}{self._sql_table_hint()}")
             return
@@ -1323,15 +1410,14 @@ Memories:
 
         try:
             from llm.ccl_backend import call_llm
+            from llm.parse import extract_json
             text_content = call_llm(
                 "You are a memory database curator. Output ONLY valid JSON, no markdown.",
                 prompt, api_key, max_tokens=3000, timeout=25,
             )
-            text_content = text_content.strip()
-            if text_content.startswith("```"):
-                lines = text_content.split("\n")
-                text_content = "\n".join(l for l in lines if not l.strip().startswith("```"))
-            analysis = json.loads(text_content)
+            analysis = extract_json(text_content, kind="object")
+            if analysis is None:
+                raise ValueError("the model returned no parseable JSON object")
         except Exception as e:
             self.status_var.set("Ready")
             messagebox.showerror("API Error", f"LLM analysis failed:\n\n{e}")
@@ -1493,7 +1579,7 @@ Memories:
         canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
 
-        check_vars = []  # (BooleanVar, memory_id)
+        check_vars = []  # (BooleanVar, memory_id, content the verdict saw)
 
         for mid in shown_ids:
             row = id_to_row[mid]
@@ -1513,25 +1599,33 @@ Memories:
                 ttk.Label(rf, text=f"({reason})", foreground="gray",
                           font=("", 8)).pack(side=tk.LEFT, padx=3)
 
-            check_vars.append((var, mid))
+            # FULL content, not the 90-char display slice: the guard below
+            # compares against exactly what the tidy scan judged.
+            check_vars.append((var, mid, row["content"]))
 
         # Buttons
         bf = ttk.Frame(dlg, padding=8)
         bf.pack(fill=tk.X, padx=15)
 
         def do_delete():
-            ids_to_delete = [mid for var, mid in check_vars if var.get()]
-            if not ids_to_delete:
+            if self._optout_blocks_write():
+                dlg.destroy()
+                return
+            picked = [(mid, content) for var, mid, content in check_vars
+                      if var.get()]
+            if not picked:
                 dlg.destroy()
                 return
 
-            # Archive (is_active = 0) instead of DELETE. A hard delete broke
-            # every supersedes_id chain that pointed at the row: the column was
-            # added by a bare ALTER TABLE and declares no foreign key, so
-            # nothing caught the dangling reference and the provenance chain
-            # was destroyed irreversibly. bulk_archive is the writer's own
-            # retirement path — see docs/CONTRACTS.md#anti-patch-contract.
-            self.db.bulk_archive(ids_to_delete)
+            # Archive (is_active = 0) instead of DELETE — see the anti-patch
+            # contract. And CONDITIONAL on the content this dialog showed
+            # (register X7): the verdict was computed from a snapshot taken
+            # before the user finished reading the dialog, and a row repaired
+            # by a concurrent hook in that window was archived anyway —
+            # measured, "old garbage..." shown, "valuable repaired content"
+            # archived. archive_if_unchanged makes the stale tick a no-op,
+            # and the count reported below is what actually happened.
+            n = self.db.archive_if_unchanged(picked)
 
             dlg.destroy()
             # MEMORY.md is a GENERATED artifact. _refresh() only repaints the
@@ -1540,12 +1634,18 @@ Memories:
             regenerate_memory_index(self.db, self.project_id,
                                     self.project_path / "memory")
             self._refresh()
-            self.status_var.set(f"Archived {len(ids_to_delete)} memories")
+            skipped = len(picked) - n
+            self.status_var.set(f"Archived {n} memories"
+                                + (f" ({skipped} changed since review, kept)"
+                                   if skipped else ""))
             messagebox.showinfo(
                 "Done",
-                f"Archived {len(ids_to_delete)} memories (is_active = 0).\n\n"
-                "Rows are retired, not erased — supersedes_id provenance "
-                "chains stay intact and MEMORY.md has been regenerated.")
+                f"Archived {n} of {len(picked)} selected (is_active = 0).\n"
+                + (f"{skipped} were modified while this dialog was open and "
+                   f"were KEPT — re-run Tidy to review their new content.\n"
+                   if skipped else "")
+                + "\nRows are retired, not erased — supersedes_id provenance "
+                  "chains stay intact and MEMORY.md has been regenerated.")
 
         # len(check_vars), never len(delete_ids): the label must count the
         # checkboxes the user can actually see and untick.
@@ -1555,6 +1655,32 @@ Memories:
         self.status_var.set("Ready")
 
     # ── Dialogs ──────────────────────────────────────────────────────────────
+
+    def _optout_blocks_write(self):
+        """True (plus a dialog) when this project is opted out RIGHT NOW.
+
+        Re-checked at write time, not only at project load (register r6-C3):
+        the dashboard runs for hours over a cached MemoryDB, and a project
+        added to config.json excluded_projects after load kept accepting
+        Add-Memory / Save-Session / Tidy / SQL writes. Reads stay available —
+        the opt-out's contract is that nothing NEW is recorded.
+        """
+        try:
+            # cli_opt_out_notice, NOT a direct is_excluded call: the shared
+            # gate is what keeps every surface's opt-out spelling identical
+            # (three inline copies are how it drifted before), and
+            # test_surfaces enforces exactly this routing.
+            from core.modes import cli_opt_out_notice
+        except Exception:
+            # why: a broken opt-out import must not brick the GUI; the hooks
+            # enforce the same control on every hook path regardless
+            return False
+        notice = (cli_opt_out_notice(str(self.project_path))
+                  if self.project_path else None)
+        if notice:
+            messagebox.showwarning("cc-memory", notice)
+            return True
+        return False
 
     def _add_memory_dialog(self):
         if not self.db:
@@ -1572,7 +1698,7 @@ Memories:
         ttk.Label(dlg, text="Category:").grid(row=0, column=0, padx=10, pady=5, sticky=tk.W)
         cat_var = tk.StringVar(value="note")
         ttk.Combobox(dlg, textvariable=cat_var, width=15,
-                     values=["decision","result","config","bug","task","arch","note"],
+                     values=list(CATEGORIES),
                      state="readonly").grid(row=0, column=1, padx=10, pady=5, sticky=tk.W)
 
         ttk.Label(dlg, text="Importance:").grid(row=1, column=0, padx=10, pady=5, sticky=tk.W)
@@ -1588,6 +1714,8 @@ Memories:
         content_text.grid(row=2, column=1, padx=10, pady=5)
 
         def save():
+            if self._optout_blocks_write():
+                return
             content = content_text.get("1.0", tk.END).strip()
             if not content:
                 messagebox.showwarning("Empty", "Enter some content first.")
@@ -1955,7 +2083,7 @@ Memories:
 You are a memory extraction system. Given a Claude Code conversation transcript, extract the most important information worth remembering across sessions.
 
 Output a JSON array of objects: {"category": str, "content": str, "importance": int}
-- category: decision|result|config|bug|task|arch|note
+- category: """ + "|".join(CATEGORIES) + """
 - content: one concise, self-contained sentence with specific values
 - importance: 1-5 (5=critical, 4=important, 3=useful)
 
@@ -1963,46 +2091,13 @@ Rules: Only conclusions, not process. Self-contained. Specific values. 5-15 item
 Output ONLY valid JSON array."""
 
     def _build_transcript_summary(self, messages, max_chars=12000):
-        """Condensed transcript for LLM prompt."""
-        parts = []
-        total = 0
-        for msg in messages:
-            message = msg.get("message", {})
-            if not isinstance(message, dict):
-                continue
-            role = message.get("role", "")
-            content = message.get("content", "")
-            if isinstance(content, str):
-                text = content
-            elif isinstance(content, list):
-                text_parts = []
-                for block in content:
-                    if isinstance(block, dict):
-                        if block.get("type") == "text":
-                            text_parts.append(block.get("text", ""))
-                        elif block.get("type") == "tool_use":
-                            name = block.get("name", "")
-                            inp = block.get("input", {})
-                            if name in ("Edit", "Write", "MultiEdit"):
-                                text_parts.append(f"[Tool: {name} {inp.get('file_path', '')}]")
-                            elif name == "Bash":
-                                text_parts.append(f"[Bash: {inp.get('command', '')[:100]}]")
-                            else:
-                                text_parts.append(f"[Tool: {name}]")
-                text = "\n".join(text_parts)
-            else:
-                continue
-            if not text.strip():
-                continue
-            if len(text) > 800:
-                text = text[:400] + "\n...\n" + text[-400:]
-            line = f"[{role}] {text}\n"
-            if total + len(line) > max_chars:
-                parts.append(f"\n[...truncated, {len(messages) - len(parts)} more messages...]")
-                break
-            parts.append(line)
-            total += len(line)
-        return "\n".join(parts)
+        """Condensed transcript for the LLM prompt. Delegates to THE one
+        implementation in core.extractor (register M2) — this was the third
+        near-identical copy, and the only one still filling from the OLDEST
+        record, i.e. still carrying the staleness bug v2.4.2 fixed in the
+        other two."""
+        from core.extractor import summarize_transcript
+        return summarize_transcript(messages, max_chars=max_chars)
 
     def _extract_via_llm(self, messages, api_key):
         """Call Haiku API for structured extraction. Returns list of dicts or None."""
@@ -2012,18 +2107,14 @@ Output ONLY valid JSON array."""
 
         try:
             from llm.ccl_backend import call_llm
+            from llm.parse import extract_json
             text_content = call_llm(
                 self._EXTRACTION_PROMPT,
                 f"Extract memories:\n\n{transcript_text}",
                 api_key, max_tokens=2000, timeout=25,
             )
-            text_content = text_content.strip()
-            if text_content.startswith("```"):
-                lines = text_content.split("\n")
-                text_content = "\n".join(l for l in lines if not l.strip().startswith("```"))
-
-            memories = json.loads(text_content)
-            if not isinstance(memories, list):
+            memories = extract_json(text_content, kind="array")
+            if memories is None:
                 return None
 
             valid = []
@@ -2035,7 +2126,7 @@ Output ONLY valid JSON array."""
                 imp = m.get("importance", 3)
                 if not content or len(content) < 10:
                     continue
-                if cat not in ("decision", "result", "config", "bug", "task", "arch", "note"):
+                if cat not in CATEGORIES:
                     cat = "note"
                 valid.append({"category": cat, "content": content,
                               "importance": max(1, min(int(imp), 5))})
@@ -2113,6 +2204,9 @@ Output ONLY valid JSON array."""
                 messagebox.showinfo("Empty", "Transcript is empty or could not be parsed.")
                 return
 
+            if self._optout_blocks_write():
+                self._set_busy(False, "Ready")
+                return
             self._set_busy(True, "Extracting memories...")
 
             now = datetime.now()
@@ -2185,6 +2279,11 @@ Output ONLY valid JSON array."""
                 self.db, self.project_id, session_id, batch,
                 memory_dir=self.project_path / "memory",
             )
+            # Receipt after the memories landed (register X6): insert_session
+            # writes complete=0, and _get_saved_session_ids only believes a
+            # row this flag confirms — an abort between the insert above and
+            # here leaves the transcript eligible for retroactive save.
+            self.db.mark_session_complete(session_id)
             mem_count = counts.get("inserted", 0)
             merged = counts.get("merged", 0)
             superseded = counts.get("superseded", 0)
@@ -2211,7 +2310,17 @@ Output ONLY valid JSON array."""
         path = filedialog.askdirectory(title="Select project to initialize")
         if not path:
             return
-        project = Path(path)
+        # Init New reaches _ensure_memory_dir directly, so the gate inside
+        # _load_project does not cover it: this is the route that CREATES.
+        # Opt-out on the raw pick (before anchoring, so a per-subdirectory
+        # exclusion is not widened), then anchor — picking a subdirectory of an
+        # existing project must initialise that project, not plant a second
+        # database one level down.
+        notice = self._opt_out_notice(path)
+        if notice:
+            self._report_opt_out(path, notice)
+            return
+        project = Path(self._anchor(path)).resolve()
         memory_dir = project / "memory"
         if (memory_dir / "memory.db").exists():
             self._load_project(str(project))
@@ -2751,7 +2860,28 @@ def _generate_claude_md(project: Path, scan: dict) -> str:
     sections.append("- Never fabricate data, results, or citations")
     sections.append("")
 
-    return "\n".join(sections)
+    # CLAUDE.md is PROJECT INSTRUCTIONS — Claude Code loads it as authority at
+    # every session, which makes it the highest-value target in the tree, and
+    # this generator interpolates a stranger's text into it. `desc` comes from
+    # a cloned repository's `package.json` "description" (or pyproject's) via
+    # `scan["suggested_memories"]`, which is the list built BEFORE any
+    # `upsert_batch`, so `clean_for_storage` has not run on it: the storage
+    # cleaner protects the database, not this file. Same for the key-directory
+    # and entry-point slots, which come from names on disk.
+    #
+    # `neutralize_document`, on the ASSEMBLED text, for the same reason the
+    # artifact renderers (PROGRESS.md, PLAN.md, MEMORY.md, the SessionStart
+    # injection) use it: two independently clean values can complete a
+    # marker across a join the renderer itself wrote.
+    try:
+        from core.privacy import neutralize_document
+        return neutralize_document("\n".join(sections))
+    except ImportError:
+        # why: dashboard.py is launched standalone often enough that a partial
+        # install must still produce a file — but never an unswept one. Escape
+        # the two delimiters by hand rather than emitting raw authority markup.
+        return ("\n".join(sections)
+                .replace("<", "&lt;").replace(">", "&gt;"))
 
 
 # ---------------------------------------------------------------------------
@@ -2767,6 +2897,34 @@ def main():
     parser = argparse.ArgumentParser(description="cc-memory Dashboard")
     parser.add_argument("--project", help="Initial project path")
     args = parser.parse_args()
+
+    # Anchor like every other entry point. The dashboard opens the project with
+    # MemoryDB(memory_dir / "memory.db"), which CREATES, so `--project <subdir>`
+    # planted a stray there and rung 0 then pinned all six hooks
+    # <!--ce:hooks:asof--> to it. Printed, not silent, for the same reason the
+    # CLIs print it: an explicit --project is an instruction. `is not None` so
+    # `--project ""` anchors too.
+    if args.project is not None:
+        # Opt-out BEFORE anchoring, exactly like the hooks and the two CLIs.
+        try:
+            from core.modes import cli_opt_out_notice
+            notice = cli_opt_out_notice(args.project)
+            if notice:
+                print(f"[cc-memory] {notice}")
+                return
+        except ImportError:
+            # why: the dashboard must still open if the opt-out check cannot
+            # load; hooks and the MCP server enforce it independently
+            pass
+        try:
+            from core.roots import anchor_project
+            args.project = anchor_project(
+                args.project, announce=lambda m: print(f"[cc-memory] {m}"))
+        except Exception as exc:
+            # why: the dashboard must still open if the resolver cannot load;
+            # the raw path is exactly the pre-v2.8.0 behaviour
+            print(f"[cc-memory] project-root anchoring unavailable ({exc}); "
+                  f"using {args.project} as given")
 
     root = tk.Tk()
     app = DashboardApp(root, initial_project=args.project)

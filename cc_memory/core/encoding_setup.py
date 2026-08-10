@@ -73,9 +73,14 @@ def enable_utf8_io() -> None:
             kwargs["line_buffering"] = True
         try:
             reconf(**kwargs)
-        except (ValueError, OSError):
+        except (ValueError, OSError, TypeError):
             # why: reconfigure may fail when the stream is already wrapped
             # by an unflushable buffer, is detached, or (for stdin) has
             # already had data read from it; we silently keep the current
-            # encoding rather than crash the hook process at start
+            # encoding rather than crash the hook process at start.
+            # TypeError (register Y8): a stream whose reconfigure() takes
+            # no keyword arguments — test doubles and exotic wrappers — used
+            # to raise straight through the docstring's "safe to call from
+            # any entry point" promise. Each stream is tried independently,
+            # so one narrow stream cannot cost the other two their UTF-8.
             pass

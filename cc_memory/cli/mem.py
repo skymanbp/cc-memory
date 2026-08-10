@@ -18,6 +18,7 @@ import re
 import sqlite3
 import sys
 import textwrap
+from builtins import print as _builtin_print
 from pathlib import Path
 
 _HERE = Path(__file__).resolve().parent
@@ -29,7 +30,7 @@ sys.path.insert(0, str(_PKG_ROOT))
 from core.encoding_setup import enable_utf8_io
 enable_utf8_io()
 
-from core.db import MemoryDB
+from core.db import CATEGORIES, MemoryDB
 
 
 def _resolve_version() -> str:
@@ -104,7 +105,108 @@ def _require_db(db_path):
     return conn
 
 
+def _bounded_limit(value):
+    """argparse type for --limit: [1, MemoryDB._MAX_SEARCH_LIMIT].
+
+    SQLite reads a NEGATIVE limit as "no limit", so `--limit -1` printed the
+    whole table (register Y5) — the same floor-and-ceiling rule db.search_fts
+    already enforces, applied at the argument boundary where the user sees
+    the refusal instead of a silent full dump.
+    """
+    n = int(value)
+    if n < 1:
+        raise argparse.ArgumentTypeError(
+            f"--limit must be >= 1 (SQLite reads a negative LIMIT as "
+            f"unbounded); got {n}")
+    return min(n, MemoryDB._MAX_SEARCH_LIMIT)
+
+
+def _require_project_id(conn, project):
+    """The `projects.id` this --project resolves to — or a visible refusal.
+
+    One memory.db can hold SEVERAL project rows (a directory rename creates a
+    second one — register C4 — and nested layouts are real), and `list` /
+    `stats` used to query with no project predicate at all: after a rename,
+    `list` printed the other project's memories and `stats` counted both
+    (register E1). A database whose rows all belong to OTHER paths is a
+    finding to report, not a scope to silently widen.
+    """
+    path = str(Path(project).resolve())
+    row = conn.execute("SELECT id FROM projects WHERE path = ?",
+                       (path,)).fetchone()
+    if row:
+        return row["id"]
+    others = [r["path"] for r in conn.execute(
+        "SELECT path FROM projects ORDER BY last_active DESC").fetchall()]
+    print(f"Error: this database has no project row for {path}.")
+    if others:
+        print("  It holds row(s) for: " + ", ".join(others[:5]))
+        # NOT "point --project at the old path" (register r6-C13): after a
+        # rename the old path no longer exists, and `_resolve_db` derives the
+        # database FROM the --project path — so that advice cannot work. The
+        # row is created by the first hook that runs here.
+        print("  A renamed project keeps its rows under the old path. Run one "
+              "Claude session in this directory (any hook creates the new "
+              "row), or inspect the old rows with:")
+        print(f"    /cc-mem sql \"SELECT * FROM memories WHERE project_id="
+              f"(SELECT id FROM projects WHERE path='{others[0]}') LIMIT 20\"")
+    sys.exit(1)
+
+
+def _neutralize(text):
+    """Escape authority markers in anything this CLI prints. Never deletes.
+
+    `/cc-mem` runs as a Bash command inside a Claude session, so its stdout
+    lands in the model's context — which makes this a RENDER PATH in exactly
+    the sense `CLAUDE.md` means when it says the marker defence "runs on the
+    write path and again on every render path". When this function was added
+    that sentence named four renderers <!--ce:render_paths:asof--> and this
+    file was not among them; the set is computed now (`python
+    tools/contracts.py` render_paths) and this file is in it. Measured on
+    this repository's own database: 307 active rows, 2 armed; the same row
+    prints as `&lt;system-reminder&gt;` through SessionStart and as a live
+    tag here.
+    Degrades to the raw text if `core.privacy` cannot be imported — a CLI that
+    cannot render is worse than one that renders unescaped.
+    """
+    try:
+        from core.privacy import neutralize_markers
+        return neutralize_markers(text)
+    except Exception:
+        # why: printing is this command's whole job; an unavailable defence
+        # must not turn a listing into a traceback. But it must not print the
+        # LIVE tag either — this fallback used to return the text verbatim,
+        # so the one failure mode the defence exists for (armed rows) sailed
+        # through exactly when the defence was down (register Y3). Escaping
+        # every `<` over-escapes ordinary text; on a display-only path where
+        # the sanitizer is UNIMPORTABLE (a broken install), readable-but-ugly
+        # beats armed, and duplicating the marker list here is the drift this
+        # module refuses everywhere else.
+        return str(text).replace("<", "&lt;")
+
+
+def print(*parts, **kw):        # noqa: A001 — shadowing is the whole point
+    """Every line this CLI emits, escaped. Shadows the builtin ON PURPOSE.
+
+    This module has 194 print sites and stdout that lands in a Claude session's
+    context. Escaping at the call sites was tried and failed twice: `_trunc`
+    got it right, then `cmd_summary` (:1188) and `cmd_inject_show` (:1513)
+    shipped printing stored rows raw, and a planted row measured live=1
+    escaped=0 through both. A rule that 194 sites must each remember is a rule
+    that the 195th breaks, so the unsafe primitive is removed from the module
+    instead of being documented.
+
+    `neutralize_markers` is idempotent (verified on tags, banners, controls,
+    and already-escaped text), so the call sites that still escape explicitly
+    stay correct. Non-str arguments are stringified first — exactly what the
+    builtin does — so behaviour is identical apart from the escaping.
+    """
+    _builtin_print(*[_neutralize(p if isinstance(p, str) else str(p))
+                     for p in parts], **kw)
+
+
 def _trunc(text, w=80):
+    text = _neutralize(text)
     return text[:w-1] + "…" if len(text) > w else text
 
 
@@ -112,7 +214,13 @@ def _table(headers, rows):
     widths = [len(h) for h in headers]
     srows = []
     for row in rows:
-        sr = [str(v) if v is not None else "" for v in row]
+        # Escape BEFORE measuring. `_trunc` escapes on the way out, so widths
+        # taken from the raw text were a different length than the text they
+        # had to hold: a 38-character `<system-reminder>…` becomes 50 escaped
+        # and was cut back to 38 — twelve characters of a row the user asked
+        # to see, lost to a column that was never full. Idempotent, so the
+        # `_trunc` pass below is a no-op on what it receives here.
+        sr = [_neutralize(str(v)) if v is not None else "" for v in row]
         srows.append(sr)
         for i, c in enumerate(sr):
             widths[i] = max(widths[i], min(len(c), 60))
@@ -156,6 +264,17 @@ _REQUIRED_PLUGIN_FILES = [
     # It was absent from this list, which is what let `status` report an
     # install "healthy" while nothing worked.
     "cc_memory/core/roots.py",
+    # v2.8.0, and the SAME shape a second time: two hooks <!--ce:hooks:subset-->
+    # (stop, user_prompt) and core/idle.py import this at module level for the
+    # per-session marker paths. A new core module has to
+    # be registered in three separate places — this list, `ui/installer.py`'s
+    # copy manifest and `build_exe.py`'s — and smoke_test asserts parity only
+    # between the latter two, so this one is the copy that goes quiet.
+    "cc_memory/core/markers.py",
+    # v2.8.0: the ONE similarity substrate. llm/memory_writer.py imports it at
+    # module level, and every hook imports memory_writer — an install missing
+    # it loses all six hooks <!--ce:hooks--> at once.
+    "cc_memory/core/textsim.py",
     "cc_memory/hooks/pre_compact.py",
     "cc_memory/hooks/consolidate_async.py",
     "cc_memory/hooks/session_start.py",
@@ -164,6 +283,7 @@ _REQUIRED_PLUGIN_FILES = [
     "cc_memory/hooks/user_prompt.py",
     "cc_memory/llm/memory_writer.py",
     "cc_memory/llm/ccl_backend.py",
+    "cc_memory/llm/parse.py",
     "hooks/hooks.json",
 ]
 
@@ -402,8 +522,8 @@ def _inspect_layout(layout_name, root: Path,
                 hooks_registered = list(hj.get("hooks", {}).keys())
             except (json.JSONDecodeError, OSError):
                 # why: malformed hooks.json IS a bug we want to surface, but
-                # at the LAYOUT-detection level we just report 0 hooks — the
-                # downstream _print_layout_report will flag the mismatch
+                # at the LAYOUT-detection level we just report an empty hook
+                # list — the downstream _print_layout_report flags the mismatch
                 hooks_registered = []
     elif hooks_via == "user-settings" and settings_dict is not None:
         # ONE implementation of "which events does settings.json[hooks]
@@ -670,45 +790,56 @@ def cmd_status(args):
 
 
 def cmd_stats(args):
+    # Every query below carries `project_id = ?` (register E1): one DB file
+    # can hold several project rows, and unscoped counts summed them all.
     _, db_path, name = _resolve_db(args.project)
     conn = _require_db(db_path)
+    pid = _require_project_id(conn, args.project)
     print(f"\n{'='*50}\n  Memory stats: {name}\n{'='*50}")
     s = conn.execute(
-        "SELECT COUNT(*) n, MIN(compacted_at) first, MAX(compacted_at) last FROM sessions"
+        "SELECT COUNT(*) n, MIN(compacted_at) first, MAX(compacted_at) last "
+        "FROM sessions WHERE project_id = ?", (pid,)
     ).fetchone()
     print(f"\nSessions: {s['n']}")
     if s['first']:
         print(f"  First : {s['first'][:16]}\n  Last  : {s['last'][:16]}")
-    m = conn.execute("SELECT COUNT(*) n FROM memories WHERE is_active=1").fetchone()
-    a = conn.execute("SELECT COUNT(*) n FROM memories WHERE is_active=0").fetchone()
+    m = conn.execute("SELECT COUNT(*) n FROM memories WHERE is_active=1 "
+                     "AND project_id = ?", (pid,)).fetchone()
+    a = conn.execute("SELECT COUNT(*) n FROM memories WHERE is_active=0 "
+                     "AND project_id = ?", (pid,)).fetchone()
     print(f"\nMemories: {m['n']} active, {a['n']} archived")
     print("\nBy category:")
     by_cat = conn.execute(
         """SELECT category, COUNT(*) cnt, AVG(importance) avg_imp, MAX(importance) max_imp
-           FROM memories WHERE is_active=1 GROUP BY category ORDER BY cnt DESC"""
+           FROM memories WHERE is_active=1 AND project_id = ?
+           GROUP BY category ORDER BY cnt DESC""", (pid,)
     ).fetchall()
     _table(["Category", "Count", "Avg Imp", "Max Imp"],
            [(r["category"], r["cnt"], f"{r['avg_imp']:.1f}", r["max_imp"]) for r in by_cat])
 
-    topics = conn.execute("SELECT COUNT(*) n FROM topics").fetchone()
+    topics = conn.execute("SELECT COUNT(*) n FROM topics WHERE project_id = ?",
+                          (pid,)).fetchone()
     if topics["n"]:
         print(f"\nTopics: {topics['n']}")
         by_topic = conn.execute(
             """SELECT COALESCE(topic, '(none)') AS t, COUNT(*) cnt
-               FROM memories WHERE is_active=1 GROUP BY t ORDER BY cnt DESC LIMIT 15"""
+               FROM memories WHERE is_active=1 AND project_id = ?
+               GROUP BY t ORDER BY cnt DESC LIMIT 15""", (pid,)
         ).fetchall()
         _table(["Topic", "Count"], [(r["t"], r["cnt"]) for r in by_topic])
 
     # Supersede chain summary
     superseded = conn.execute(
-        "SELECT COUNT(*) n FROM memories WHERE supersedes_id IS NOT NULL"
+        "SELECT COUNT(*) n FROM memories WHERE supersedes_id IS NOT NULL "
+        "AND project_id = ?", (pid,)
     ).fetchone()
     if superseded["n"]:
         print(f"\nSupersede chains: {superseded['n']} update events recorded "
               f"(anti-patch in action — see docs/CONTRACTS.md#anti-patch-contract)")
 
     kw = conn.execute(
-        "SELECT keyword, frequency FROM keywords ORDER BY frequency DESC LIMIT 10"
+        "SELECT keyword, frequency FROM keywords WHERE project_id = ? "
+        "ORDER BY frequency DESC LIMIT 10", (pid,)
     ).fetchall()
     if kw:
         print("\nTop keywords: " + ", ".join(f"{r['keyword']}({r['frequency']})" for r in kw))
@@ -718,16 +849,22 @@ def cmd_stats(args):
 def cmd_list(args):
     _, db_path, name = _resolve_db(args.project)
     conn = _require_db(db_path)
+    # Scoped to THIS project's row (register E1): after a directory rename
+    # the same DB holds a second project row, and the unscoped query listed
+    # the other project's memories under this one's name. Session recency by
+    # id, not the compacted_at string (see core/db.py's ordering note).
+    pid = _require_project_id(conn, args.project)
     cat = args.category
     recent = [r[0] for r in conn.execute(
-        "SELECT id FROM sessions ORDER BY compacted_at DESC LIMIT ?", (args.sessions,)
+        "SELECT id FROM sessions WHERE project_id = ? "
+        "ORDER BY id DESC LIMIT ?", (pid, args.sessions)
     ).fetchall()]
 
     # Session-less memories (session_id IS NULL) are what EVERY manual save path
     # writes — `mem add`, MCP memory_add, the Tk dashboard, the web viewer,
     # skills/save-memories. An INNER JOIN on sessions plus `session_id IN (...)`
     # made all of them permanently invisible to `list`, at every importance.
-    params = []
+    params = [pid]
     if recent:
         ph = ",".join("?" * len(recent))
         sess_sql = f"(m.session_id IN ({ph}) OR m.session_id IS NULL)"
@@ -743,7 +880,7 @@ def cmd_list(args):
     rows = conn.execute(
         f"""SELECT m.id, m.category, m.importance, m.content, m.topic, s.compacted_at
             FROM memories m LEFT JOIN sessions s ON m.session_id=s.id
-            WHERE m.is_active=1 AND {sess_sql} {cat_sql}
+            WHERE m.is_active=1 AND m.project_id = ? AND {sess_sql} {cat_sql}
             ORDER BY m.importance DESC, m.created_at DESC LIMIT ?""", params
     ).fetchall()
 
@@ -776,10 +913,14 @@ def cmd_search(args):
         idx = c.lower().find(args.query.lower())
         if idx >= 0:
             s, e = max(0, idx-20), min(len(c), idx+len(args.query)+40)
-            snip = ("..." if s > 0 else "") + c[s:e] + ("..." if e < len(c) else "")
+            # _neutralize here too: this branch builds the snippet by slicing
+            # and never reaches _trunc, so it is the one search result that
+            # would still print a live marker.
+            snip = (("..." if s > 0 else "") + _neutralize(c[s:e])
+                    + ("..." if e < len(c) else ""))
         else:
             snip = _trunc(c, 90)
-        topic = f"[{r.get('topic', '')}]" if r.get("topic") else ""
+        topic = f"[{_neutralize(str(r.get('topic', '')))}]" if r.get("topic") else ""
         print(f"  [{r['id']:4d}] {'*'*r['importance']:<5}  {r['category']:<10}  "
               f"{topic:<12}  {d}  {snip}")
 
@@ -898,13 +1039,19 @@ def cmd_sql(args):
         print("  To change memory use `/cc-mem add`, `/cc-mem cleanup`, "
               "`/cc-mem consolidate` or `/cc-mem encoding-check --apply`.")
         sys.exit(1)
-    conn = _require_db(db_path)
+    _require_db_path(db_path)
+    # ENGINE-enforced read-only (register E2): the lexical gate above is the
+    # explainer, `mode=ro` is the guard. A statement shape the regex misses
+    # fails inside SQLite with "attempt to write a readonly database" instead
+    # of committing. One implementation, shared with the dashboard console —
+    # see core.db.readonly_connect.
+    from core.db import readonly_connect
+    conn = readonly_connect(db_path)
     print(f"\nSQL: {args.query}\n")
     try:
         rows = conn.execute(args.query).fetchall()
     except sqlite3.Error as e:
         print(f"SQL Error: {e}")
-        conn.rollback()
         conn.close()
         sys.exit(1)
     if not rows:
@@ -912,9 +1059,6 @@ def cmd_sql(args):
     else:
         _table(list(rows[0].keys()), [list(r) for r in rows])
         print(f"\n({len(rows)} rows)")
-    # Belt and braces: nothing above may write, but never let an implicit
-    # transaction survive to close() where its fate depends on the statement.
-    conn.rollback()
     conn.close()
 
 
@@ -923,7 +1067,8 @@ def cmd_add(args):
     from llm.memory_writer import (upsert_smart, regenerate_memory_index,
                                    MIN_CONTENT_LEN)
     memory_dir, db_path, _ = _resolve_db(args.project)
-    memory_dir.mkdir(parents=True, exist_ok=True)
+    from core.progress import ensure_memory_dir
+    ensure_memory_dir(memory_dir)
     db = MemoryDB(db_path)
     pid = db.upsert_project(args.project)
     tags = args.tags.split(",") if args.tags else ["manual"]
@@ -987,9 +1132,9 @@ def cmd_topics(args):
         return
     for t in topics:
         n = counts.get(t["name"], 0)
-        print(f"  [{t['name']}] (v{t['version']}, {n} memories, "
+        print(f"  [{_neutralize(str(t['name']))}] (v{t['version']}, {n} memories, "
               f"updated {t['updated_at'][:10]})")
-        for line in textwrap.wrap(t["content"], width=78):
+        for line in textwrap.wrap(_neutralize(t["content"]), width=78):
             print(f"    {line}")
         print()
 
@@ -1022,10 +1167,24 @@ def cmd_cleanup(args):
     from core.consolidate import cleanup_garbage, merge_near_duplicates, assign_topics_auto
     from llm.memory_writer import regenerate_memory_index
     memory_dir = Path(args.project).resolve() / "memory"
+    # Refuse rather than create, exactly like its sibling `cmd_consolidate`
+    # (its `if not db_path.exists()` guard). A bare line range was cited here
+    # and had already rotted onto an unrelated SELECT: tools/citation_check.py
+    # only scans the files in its TRACKED list, all of which are docs, so a
+    # citation inside source is checked by nobody. Name the symbol instead.
+    # `MemoryDB(...)` creates, so cleanup used to *initialise* a
+    # project that had never used cc-memory and then report "Final: 0 active
+    # memories, MEMORY.md regenerated" — a success line for work that could not
+    # have happened. Two commands that both operate on existing memories must
+    # not disagree about whether there have to be any.
+    if not (memory_dir / "memory.db").exists():
+        print(f"Error: no memory database at {memory_dir / 'memory.db'} — "
+              f"nothing to clean up.")
+        sys.exit(1)
     db = MemoryDB(memory_dir / "memory.db")
     pid = db.upsert_project(args.project)
     print(f"\n{'='*50}\n  Cleanup for {Path(args.project).name}\n{'='*50}\n")
-    print(f"  Garbage deleted: {cleanup_garbage(db, pid)}")
+    print(f"  Garbage archived: {cleanup_garbage(db, pid)}")
     print(f"  Duplicates archived: {merge_near_duplicates(db, pid)}")
     print(f"  Topics assigned: {assign_topics_auto(db, pid)}")
     regenerate_memory_index(db, pid, memory_dir)
@@ -1127,6 +1286,100 @@ def cmd_supersedes(args):
         when = (m.get("updated_at") or "")[:16]
         print(f"  v{len(chain)-i}  #{m['id']:4d}  [{active}]  {when}  "
               f"{m['category']:<10}  {_trunc(m['content'], 70)}")
+
+
+def cmd_archive(args):
+    """Retire memories by id — archive (recoverable), never DELETE.
+
+    This closes a genuine dead end, not a convenience gap. When a stored
+    memory turns out to be WRONG the user had no supported way to retire it:
+    `sql` is read-only by design, `add` reconciles only when the new text
+    scores similar enough to the old, and — before v2.8.0's CJK-aware
+    substrate — a Chinese correction of a Chinese fact scored 0.23 and was
+    INSERTED beside the thing it corrected. The only remaining route was to
+    bypass the CLI entirely and call `db.bulk_archive` by hand, which is how
+    this maintainer actually did it (ids 291/293/294 on a live database).
+
+    Archive, matching `cleanup_garbage` and `core/db.py`'s standing rule that
+    every retirement path keeps the row: a hard DELETE strands any
+    `supersedes_id` pointing at it, and the chain becomes unwalkable.
+    `--supersedes` records WHICH memory replaced these, so the lineage stays
+    traceable exactly as an ordinary supersede would.
+    """
+    _, db_path, _ = _resolve_db(args.project)
+    _require_db_path(db_path)
+    db = MemoryDB(db_path)
+    pid = db.upsert_project(str(Path(args.project).resolve()))
+
+    rows, foreign, missing, already = [], [], [], []
+    for mid in args.memory_ids:
+        row = db.get_memory(mid)
+        if row is None:
+            missing.append(mid)
+        elif row["project_id"] != pid:
+            # `memories.id` is global to the DB file, exactly like `plans.id`
+            # — the defect v2.5.3 closed on the three plan mutators. A bare
+            # id from another project must not be archivable through this
+            # project's --project.
+            foreign.append(mid)
+        elif not row["is_active"]:
+            already.append(mid)
+        else:
+            rows.append(row)
+
+    for label, ids in (("no such memory", missing),
+                       ("belongs to a different project", foreign),
+                       ("already archived", already)):
+        if ids:
+            print(f"  [skip] {label}: {ids}")
+    if not rows:
+        print("Nothing to archive.")
+        sys.exit(1 if (missing or foreign) else 0)
+
+    canonical = None
+    if args.supersedes is not None:
+        if args.supersedes in {r["id"] for r in rows} \
+                or args.supersedes in set(args.memory_ids):
+            # `archive N --supersedes N` used to print "[archived] 0 row(s)"
+            # and exit 0 — archive_obsolete filters the canonical out of its
+            # id list, so the command reported success while doing nothing
+            # (register Y4). A row cannot supersede itself; refuse loudly.
+            print(f"Error: --supersedes {args.supersedes} is in the list "
+                  f"being archived — a memory cannot supersede itself")
+            sys.exit(1)
+        canonical = db.get_memory(args.supersedes)
+        if canonical is None or canonical["project_id"] != pid:
+            print(f"Error: --supersedes {args.supersedes} is not a memory of "
+                  f"this project")
+            sys.exit(1)
+        if not canonical["is_active"]:
+            print(f"Error: --supersedes {args.supersedes} is itself archived; "
+                  f"pointing lineage at a retired row hides both")
+            sys.exit(1)
+
+    print(f"\nArchiving {len(rows)} memor{'y' if len(rows) == 1 else 'ies'}"
+          + (f", superseded by #{args.supersedes}" if canonical else "") + ":\n")
+    for row in rows:
+        print(f"  #{row['id']:4d}  {row['category']:<10} "
+              f"{_trunc(row['content'], 66)}")
+    n = db.archive_obsolete([r["id"] for r in rows],
+                            canonical_id=args.supersedes)
+    memory_dir = db_path.parent
+    try:
+        from llm.memory_writer import regenerate_memory_index
+        regenerate_memory_index(db, pid, memory_dir)
+    except Exception as exc:
+        # why: MEMORY.md is a projection of rows that are already committed;
+        # a stale index is a cosmetic problem, and the next write refreshes
+        # it. Reporting it beats failing the archive that did happen.
+        print(f"  [warn] MEMORY.md not regenerated ({exc})")
+    print(f"\n[archived] {n} row(s), is_active=0 — recoverable. "
+          f"`/cc-mem supersedes <id>` still walks the chain.")
+    if n == 0:
+        # archive_obsolete now reports rows ACTUALLY archived; zero after the
+        # validations above means a concurrent writer got there first — an
+        # outcome, but not the requested one (register Y4's other half).
+        sys.exit(1)
 
 
 def cmd_summary(args):
@@ -1358,7 +1611,11 @@ def cmd_plan_replan(args):
         print("[FAIL] no raw plan stored. Use `/cc-mem plan-set --raw` first.")
         sys.exit(1)
     db.upsert_plan_active(pid, needs_refine=1)
-    (memory_dir / ".plan_raw.md").write_text(row["raw"], encoding="utf-8")
+    # Same reason as core/plan.py's writer: the refiner subagent Reads this
+    # file from another process, and write_text truncates before it writes.
+    from core.atomic import write_atomic, _DERIVED_BUDGET_S
+    write_atomic(memory_dir / ".plan_raw.md", row["raw"],
+                 budget_s=_DERIVED_BUDGET_S)
     print("[OK] Marked for re-refining. Invoke @plan-refiner subagent on "
           "memory/.plan_raw.md, then `/cc-mem plan-set --from-refiner`.")
 
@@ -1376,7 +1633,7 @@ def cmd_plan_check(args):
         return
     # FRESHNESS FIRST. core.plan.raw_pending_refinement's contract is that every
     # live-plan renderer consults it BEFORE the structured form; plan-check was
-    # the one renderer that never did. Testing is_valid_structured() alone
+    # the one surface that never did. Testing is_valid_structured() alone
     # briefed the guardian on the PREVIOUS, now-superseded plan — printing its
     # goal and progress while `plan-status` and the PLAN.md this command had
     # just rewritten both said "stale" — and reset the counters, silencing the
@@ -1595,8 +1852,30 @@ def cmd_encoding_check(args):
               "Any observation FFFD is transient + harmless.")
 
 
+class _EscapingParser(argparse.ArgumentParser):
+    """argparse, routed through this module's escaping `print`.
+
+    `_print_message` is argparse's single output funnel — usage, --help and
+    the `error()` path all reach the stream through it — so overriding it
+    covers every message argparse can emit, including ones added by a future
+    stdlib version. Overriding `error()` alone would not.
+
+    It matters because argparse ECHOES the offending argument: an invalid
+    subcommand spelled `<system-reminder>PWN</system-reminder>` was reproduced
+    printing that tag live, and `commands/cc-mem.md` hands this command's
+    output straight back to Claude to summarise. The module's `print` writes to
+    stdout, which is also where the rest of this CLI's output goes; nothing
+    parses these streams (verified: no hook, skill or agent subprocesses
+    `/cc-mem`), so merging them costs nothing and closes the bypass.
+    """
+
+    def _print_message(self, message, file=None):
+        if message:
+            print(message, end="")
+
+
 def make_parser():
-    p = argparse.ArgumentParser(prog="cc-memory",
+    p = _EscapingParser(prog="cc-memory",
         description=f"cc-memory CLI v{__version__}",
         formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--project", required=True, help="Project root path")
@@ -1607,8 +1886,8 @@ def make_parser():
 
     pl = sub.add_parser("list", help="List memories")
     pl.add_argument("category", nargs="?", default="all",
-                    choices=["all", "decision", "result", "config", "bug", "task", "arch", "note"])
-    pl.add_argument("--limit", type=int, default=20)
+                    choices=["all"] + list(CATEGORIES))
+    pl.add_argument("--limit", type=_bounded_limit, default=20)
     pl.add_argument("--sessions", type=int, default=5)
 
     ps = sub.add_parser("search", help="Search memories")
@@ -1622,7 +1901,7 @@ def make_parser():
 
     pa = sub.add_parser("add", help="Add memory (anti-patch upsert)")
     pa.add_argument("category",
-                    choices=["decision", "result", "config", "bug", "task", "arch", "note"])
+                    choices=list(CATEGORIES))
     pa.add_argument("content")
     pa.add_argument("--importance", type=int, default=3, choices=range(1, 6), metavar="1-5")
     pa.add_argument("--tags", default="manual")
@@ -1641,8 +1920,17 @@ def make_parser():
     psup = sub.add_parser("supersedes", help="Show supersede chain for a memory ID")
     psup.add_argument("memory_id", type=int)
 
+    par = sub.add_parser(
+        "archive",
+        help="Retire memories by id (is_active=0, recoverable — never DELETE)")
+    par.add_argument("memory_ids", type=int, nargs="+",
+                     help="Memory ids to archive")
+    par.add_argument("--supersedes", type=int, default=None, metavar="ID",
+                     help="Record that this memory replaces the archived ones "
+                          "(sets supersedes_id, keeping the chain walkable)")
+
     po = sub.add_parser("observations", help="List recent tool observations")
-    po.add_argument("--limit", type=int, default=30)
+    po.add_argument("--limit", type=_bounded_limit, default=30)
 
     pm = sub.add_parser("mode", help="Show/set project mode")
     pm.add_argument("mode_name", nargs="?", default=None)
@@ -1698,8 +1986,8 @@ def _anchor_project(raw):
     hooks anchored and the CLI did not, so `/cc-mem add` run from a
     subdirectory created exactly the stray database the hooks had just been
     taught to refuse — and rung 0 (an existing database is terminal) then
-    pinned all six hooks to it permanently. The same gap made `status`
-    report "No database" for a subdirectory the hooks were happily using.
+    pinned all six hooks <!--ce:hooks:asof--> to it permanently. The same gap
+    made `status` report "No database" for a subdirectory it was using.
 
     The redirection is PRINTED, never silent: an explicit `--project` is an
     instruction, and quietly doing something else to it would be worse than
@@ -1707,26 +1995,47 @@ def _anchor_project(raw):
     leaves the raw value in place.
     """
     try:
-        from core.roots import project_root
-        root = project_root(raw)
+        from core.roots import anchor_project
     except Exception as exc:
         # why: the CLI must keep working even if the resolver cannot load;
         # the raw path is exactly the pre-v2.7.0 behaviour
         print(f"[cc-memory] project-root anchoring unavailable ({exc}); "
               f"using {raw} as given")
         return raw
-    # Path comparison, not os.path.normcase: PurePath.__eq__ already applies
-    # the platform's case rule, and mem.py deliberately imports no `os`.
-    if Path(root).resolve() != Path(raw).resolve():
-        print(f"[cc-memory] {raw}\n"
-              f"            is inside a project rooted at {root} — using that "
-              f"root, so this command and the hooks share one database.")
-    return str(root)
+    return anchor_project(raw, announce=lambda m: print(f"[cc-memory] {m}"))
+
+
+def _refuse_if_excluded(project):
+    """Print the standing refusal and return True when `project` is opted out.
+
+    Exit 0, not an error code: an opt-out is a setting the user chose, not a
+    failure. Fails OPEN only if `core.modes` itself cannot be imported, which
+    would otherwise make an unrelated install problem look like an opt-out.
+    """
+    try:
+        from core.modes import cli_opt_out_notice
+    except Exception:
+        # why: a CLI that cannot load the opt-out check must still work; the
+        # hooks and the MCP server enforce it independently
+        return False
+    notice = cli_opt_out_notice(project)
+    if notice:
+        print(f"[cc-memory] {notice}")
+        return True
+    return False
 
 
 def main():
     args = make_parser().parse_args()
-    if getattr(args, "project", None):
+    # `is not None`, NOT truthiness: `--project ""` is falsy, so the old guard
+    # skipped anchoring entirely and every subcommand then resolved "" to the
+    # CLI's own cwd — unanchored, which is the one thing this call prevents.
+    if getattr(args, "project", None) is not None:
+        # Opt-out BEFORE anchoring, exactly like the hooks: anchoring first
+        # would resolve an excluded SUBDIRECTORY up to its unexcluded parent
+        # and thereby serve a path the user opted out of.
+        if _refuse_if_excluded(args.project):
+            return
         args.project = _anchor_project(args.project)
     dispatch = {
         "status": cmd_status, "stats": cmd_stats, "list": cmd_list, "search": cmd_search,
@@ -1734,6 +2043,7 @@ def main():
         "keywords": cmd_keywords, "topics": cmd_topics,
         "consolidate": cmd_consolidate, "cleanup": cmd_cleanup,
         "schema": cmd_schema, "progress": cmd_progress, "supersedes": cmd_supersedes,
+        "archive": cmd_archive,
         "observations": cmd_observations, "mode": cmd_mode,
         "summary": cmd_summary, "serve": cmd_serve, "dashboard": cmd_dashboard,
         "plan-show": cmd_plan_show, "plan-status": cmd_plan_status,
@@ -1742,7 +2052,19 @@ def main():
         "inject-show": cmd_inject_show, "inject-usage": cmd_inject_usage,
         "encoding-check": cmd_encoding_check,
     }
-    dispatch[args.command](args)
+    try:
+        dispatch[args.command](args)
+    except FileNotFoundError as exc:
+        # why: the project directory is GONE. `core.progress.ensure_memory_dir`
+        # and `MemoryDB.__init__` refuse to recreate it (v2.8.0) and raise
+        # instead — correct behaviour that reached the user as a 9-line
+        # traceback from `/cc-mem add`, while `cli/plan.py` printed one clean
+        # line for the identical case. The boundary belongs on the ONE line
+        # every subcommand passes through, not on the subcommands that happen
+        # to have been noticed: thirteen `MemoryDB(...)` sites in this file
+        # alone can raise it, and a fourteenth would have been missed.
+        print(f"Error: {exc}")
+        sys.exit(1)
 
 
 if __name__ == "__main__":

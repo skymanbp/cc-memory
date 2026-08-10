@@ -1,9 +1,9 @@
-<!-- i18n-source: README.md | sha256: 161f96f66eeacdcc | version: 2.7.0 | translated: 2026-08-07 -->
+<!-- i18n-source: README.md | sha256: 348d504985024673 | version: 2.8.0 | translated: 2026-08-09 -->
 > [English](README.md) · **简体中文**
 
 # cc-memory
 
-**Claude Code 持久化记忆插件（v2.7.0）**——反补丁式的写入即归并（reconcile-on-write）、
+**Claude Code 持久化记忆插件（v2.8.0）**——反补丁式的写入即归并（reconcile-on-write）、
 LLM 判定的语义去重、强制 PROGRESS.md 交接、带 plan-refiner / plan-guardian 子代理与
 强制结转闸门的实时 PLAN.md 锚点、有界 transcript 读取、注入可观测性、FTS5 搜索，
 以及以 Haiku 为主（本地 Ollama 兜底可选）的 AI 判定式抽取。
@@ -16,7 +16,80 @@ LLM 判定的语义去重、强制 PROGRESS.md 交接、带 plan-refiner / plan-
 cc-memory 在每一个对话边界捕获结构化记忆，并且**强制下一次会话在开始工作之前先阅读
 一份交接文档**。
 
-## v2.7.0 有什么新变化
+## v2.8.0 有什么新变化
+
+**反补丁契约在中文下是失效的。**字符三元组在 CJK 上会塌缩：十个汉字的事实改一个字，
+相似度 **0.4545**，而等价的英文改动是 0.7317——低于决定 MERGE 与 SUPERSEDE 的 0.50
+阈值，于是每一条中文更正都被当作**新事实**入库，两条互相矛盾的行同时活着。这不是构造
+出来的，是在真实库上撞到的（对 #294 的一条更正打分 0.23，变成了 #301）。第二层也救不
+了：LLM 判定的语义去重用 `[a-z0-9_]{3,}` 分词，纯中文记忆的词集为**空**，压根进不了
+提名。`core/textsim.py` 现在是唯一的相似度基座——CJK 连续段用字符二元组，其余仍是三
+元组，且 ASCII 输出与被它替换的实现**逐字节相同**，所以树里每一个调好的阈值都不动。
+对一个记忆以中文为主的项目来说，矛盾堆叠是常态而不是边角。
+
+同批还有：MERGE 会销毁幸存行的来源 tags；排在第 51 位的 0.95 相似行对写入器不可见；
+`supersede_memory` 是两个事务（中途被杀就同时发布两条事实）；五个 `id IN (...)` 写入
+在 SQLite 变量上限之后直接崩；以及**发现一条记忆是错的时候根本没有受支持的退役路径**
+——现在有 `/cc-mem archive` 了。完整清单见 [CHANGELOG.md](CHANGELOG.md)。
+
+**v2.7.0 教会了六个 hook 项目根在哪，却把其余每一个入口都落下了。**又跑了三轮对抗
+debug——每条发现都由我独立复现后才采纳，两条因复现不出来而被否决——确认 22 项缺陷。
+这与 v2.7.0 当初要修的是同一种形状，只是高了一层：守卫挂在**部分调用方**上，而不是挂在
+它们共同经过的那个东西上。
+
+不是假想，是实测：你机器的 `D:` 盘符根上曾经有一个 `memory/memory.db`，由本项目
+**自己的测试套件**在每一次运行时种下（`test_surfaces` 喂了病态 cwd `D:*b`，解析器答
+`D:\`，hook 就在那儿初始化了数据库）。它存在期间，该盘上每一个尚未初始化的项目都会
+解析到它。
+
+- **现在是九个入口锚定，不是两个。**`cli/plan.py` 连只读的 `list` 都会种野生库；MCP
+  服务器——唯一面向模型的**写入**面——用的是裸 `os.getcwd()`；dashboard 只锚定了
+  `--project`，另外四条 GUI 路径没锚；installer 的 *Initialize Project*、web viewer 和
+  `/save-memories` 则完全没锚。web viewer 的症状是反过来的：从子目录启动时它会**拒绝**
+  一个已经初始化好的项目。
+- **隐私退出名单终于兑现了它自己写下的承诺。**`is_excluded` 在两个 CLI 和 dashboard 里
+  出现次数为**零**，而 MCP 的拒绝文案却说记忆"经**任何** cc-memory 工具都不可读不可写"。
+  现在所有手动入口共用同一道门，且在**锚定之前**检查，这样子目录级的排除不会被上浮到
+  未被排除的父目录。空白 `--project` 曾连这道新门都能绕过——实测它在 `--project .` 被
+  拒绝之后的下一条命令里，把一行写进了被排除项目的数据库。而 installer 的那道门加上之后
+  被发现是**不可达的**：它在全文件唯一一处 `sys.path` 准备**之上 34 行**就 import
+  `core.modes`，于是一个进程里第一次点 Initialize Project 时抛 `ModuleNotFoundError`
+  直接落进 `except ImportError: pass`，项目照样被建脚手架。**第二次**点就正常了——所以
+  谁点两下测试就永远看不见它。一个 grep 式的测试给这道门开了绿灯；抓住它的是行为级测试：
+  把每个建库者放进全新子进程里真跑一遍。
+- **文件系统根不再是候选**——这本来就是 `_chain` 的 docstring 一直宣称、而代码从未做到的
+  事——但对携带 `.ccm-root` 的根有豁免，否则这条规则会悄悄压过固定标记。而 `.ccm-root`
+  现在也压过容器启发式：一个仅仅"长得像容器"的被固定目录此前会被丢出候选集，等于那个
+  写在文档里的逃生门什么也没做。
+- **两处 hook 契约违反。**`core/logger.py` 在模块级绑定 `Path.home()`，而 `Path.home()`
+  在解析不出 home 时会抛异常——于是"导入 logger"这一句本身就把四个 hook 送到 rc=1 并
+  在 stderr 上留下 traceback。另外 `pre_compact` 是唯一没有 `isinstance(cwd, str)` 守卫、
+  同时又是唯一无条件 mkdir 的 hook，所以 `{"cwd": 123}` 会在 hook 进程自己的目录里建库。
+- **建库时不写 `memory/.gitignore`**——正是这一处遗漏，让一个 184 KB 的 `memory.db`
+  混进了姊妹仓库的三个提交。写这个文件本来是每个调用方各自的责任，于是每个调用方都忘了
+  （光 `cli/mem.py` 就有十三处开库），所以它现在挪进了 `MemoryDB.__init__`——也就是
+  创建那个目录的那一行。
+
+### 之上还做了一整轮对抗式代码审计
+
+十二个 framing——安全、并发、资源耗尽、LLM 信任边界——每条发现都在被采纳前先复现，
+两条因复现不出来而被否决。最要紧的三条：
+
+- **自动清理器一直在销毁写入侧刚刚接受的记忆。**`core/consolidate.py` 里有第二个长度
+  下限：20 字符，对着写入侧的 10，而且走的是**删除**不是归档。实测：
+  `/cc-mem add note "lr=3e-4 wins"` 打印 `[inserted] #1`，五个回合后 `memories` 表
+  **一行不剩**——发生在插件自己的热路径上，不需要任何攻击者。
+- **两条渲染路径不转义权限标记。**`CLAUDE.md` 承诺这道防御跑在"**每一条**渲染路径"上，
+  然后只点了四个渲染器；MCP 服务器和 CLI 不在其中。本仓库自己的数据库有 307 条活跃行，
+  其中**已有 2 条是武装的**——同一行经 SessionStart 被转义、经 MCP 原样直出。
+- **一个 NUL 字节就能把只读搜索变成全文索引全量重建**，可从 viewer 的 `?q=%00` 触达，
+  也可从 `memory_search` 工具触达——它的 `minLength: 1` 恰好被一个孤立 NUL 满足。
+
+另外还修了：会话标记的跨事务丢更新、Linux 上世界可读且可被符号链接劫持的每会话标记、
+viewer 无上限的线程集合、consolidation 里无上限的 pairwise 阶段，以及一个"被拒绝"与
+"成功"无法区分的 `PRAGMA journal_mode`。
+
+## 此前 — v2.7.0 有什么新变化
 
 **v2.6.0 把安全守卫挂在了某一档的内层循环上，而不是挂在候选集合上——于是每一个没继承到
 守卫的档位都变成了一个独立的数据完整性缺陷。**一轮收敛式对抗 debug（五个维度，每条发现
@@ -331,6 +404,9 @@ guardian 的漂移计数还会随模式静默变化。计划控制不是观测�
   `ThreadingHTTPServer` 仍然是每连接一线程。它只监听回环地址。HTTP/1.0 的流水线
   行为未变（浏览器不做流水线）。DNS 重绑定的修复是用伪造 `Host` 头验证的，不是用
   真实 DNS 控制；SPA 的转义加固属于纵深防御：并没有真的执行出 XSS。
+  *（上限那一半已在 v2.8.0 关闭：`_MAX_CONCURRENT = 16` 准入信号量，超额连接
+  以 503 拒绝——`tests/test_surfaces.py` 驱动两个半边。回环监听与伪造 `Host`
+  两条保留意见仍然成立。）*
 - MCP 仍会原样回显数组/对象类型的 `id`（不合规但属合法 JSON；能应答总好过让它成为
   孤儿），无法解析或超长的帧会以 `"id": null` 应答，因为它的 id 确实无从得知。
   巨大单行导致的 `MemoryError` 从未被复现——1 MiB 的帧上限是按逃逸类别推定的，
@@ -339,6 +415,8 @@ guardian 的漂移计数还会随模式静默变化。计划控制不是观测�
   `update_plan_content`）都接受 `project_id`，且所有随包发布的调用方都已传入，但
   它们都不**强制要求**这个参数——新代码里一次未加限定的裸调用仍会跨项目，因为
   `plans.id` 在整个数据库文件范围内是全局的。
+  *（已在 v2.5.3 关闭：三个函数的 `project_id` 均为必填且仅限关键字，
+  `tests/smoke_test.py` 断言其签名。）*
 - 搜索一个裸的 `%` 或 `_` 现在返回 0 行而不是整张表。这正是修复本身，但它是一个
   用户可见的结果变化。
 - **文档里的 `file:line` 引用自 v2.5.2 起已有门禁**，由
@@ -757,13 +835,13 @@ $P clear              # 丢弃 done/failed/skipped
   **需显式开启；`enabled` 默认为 `false`**，此时 Anthropic 那几条腿是唯一后端。
 - `excluded_projects` — 完全退出 cc-memory 的绝对路径。被列出的目录*及其下的一切*
   都不会得到 `memory/` 目录、数据库、observation、抽取和 PROGRESS.md：**全部六个
-  钩子，外加 MCP 服务**，在解析出 `cwd` 之后的第一件事就是调用
+  钩子 <!--ce:hooks-->，外加 MCP 服务**，在解析出 `cwd` 之后的第一件事就是调用
   `core.modes.is_excluded(cwd)` 并以 0 退出（MCP 则回 `isError`）。那是**一份**
   共享实现，而不是每个调用方各抄一份——v2.5.0 曾把它作为两份私有副本放进仅有的
   两个会*创建* `memory/` 的钩子里，结果是：一个在被列入名单**之前**就已初始化过的
   项目仍被完整地埋点——observation 继续累积，PROGRESS.md 继续点名它的文件，而在有
   可用凭据时，Stop 观察者会继续把这些内容 POST 给 Anthropic API。v2.5.1 修好了六个
-  钩子，却漏掉了第七个调用方：**MCP 服务在 v2.5.1 及之前完全没有这项检查**——它由
+  钩子 <!--ce:hooks:asof-->，却漏掉了第七个调用方：**MCP 服务在 v2.5.1 及之前完全没有这项检查**——它由
   发布清单默认加载，且每一次调用都由模型自行发起，所以被列出的项目对模型而言仍然
   可读可写。v2.5.2 在 `_get_db` 处设卡，那是全部八个工具都必经的唯一收口。匹配基于
   解析后的绝对路径，Windows 上不区分大小写。这是唯一的退出机制。
@@ -789,7 +867,7 @@ cc-memory 会从 `~/.claude/.credentials.json` 自动检测你的 Claude OAuth �
 
 ## 测试
 
-五个纯 stdlib 脚本，无需 pytest，也没有任何 pip 依赖。**八道发布门禁——全部都要跑。**
+六个纯 stdlib 脚本，无需 pytest，也没有任何 pip 依赖。**九道发布门禁——全部都要跑。**
 
 ```bash
 python -m compileall -q cc_memory tests tools
@@ -799,16 +877,17 @@ python tests/smoke_test.py
 # 期望：一连串 [OK] 行，以 "===== ALL SMOKE TESTS PASSED =====" 结尾
 
 python tests/test_plan_carryover.py
-# 期望："RESULT: 14 passed, 0 failed"
+# 期望："RESULT: 20 passed, 0 failed"
 
 python tests/test_surfaces.py
-# 期望："===== ALL SURFACE TESTS PASSED ====="（§1-§6）
+# 期望："===== ALL SURFACE TESTS PASSED ====="（§1-§8）
 
 python tools/i18n_check.py       # 翻译漂移；有漂移则非零退出
 python tools/citation_check.py   # 文档 file:line 引用；"0 unchecked, 0 stale"
+python tools/doc_claims.py       # 散文里的计数 vs tools/contracts.py；"0 problem(s)"
 ```
 
-第八道门禁是版本声明一致性：`pyproject.toml`、两个 `.claude-plugin/*.json`、
+第九道门禁是版本声明一致性：`pyproject.toml`、两个 `.claude-plugin/*.json`、
 `cc_memory/config.json` 和 `cc_memory/core/version.py` 必须携带同一个字符串，
 由 `smoke_test.py` 断言。
 
@@ -817,18 +896,28 @@ python tools/citation_check.py   # 文档 file:line 引用；"0 unchecked, 0 sta
   旧版 `SESSION_HANDOFF.md` 迁移、布局检查器、两支路的 PreCompact 形态、有界
   transcript 窗口、i18n 漂移门，以及自 v2.5.2 起新增的 `.gitignore` 三副本一致性、
   sqlite 句柄数回归、PLAN.md / MEMORY.md 抗伪造、唯一原子写入器规则、计划修改函数
-  仅限关键字的 `project_id`，以及两道文档门禁。
+  仅限关键字的 `project_id`，以及三道文档门禁。
 - `tests/test_plan_carryover.py` —— v2.4.0 的结转门禁（20 项检查）；该特性唯一的覆盖。
-- `tests/test_surfaces.py` —— v2.5 新增，共六节，覆盖另外两者都没碰的表面：
+- `tests/test_surfaces.py` —— v2.5 新增，自 v2.8.0 起共八节，覆盖另外两者都
+  没碰的表面：
   §1 MCP stdio 服务、§2 Web 面板的请求守卫、§3 独立安装器（界面的按名安装/卸载、
-  畸形 `settings.json` 处理、与 `hooks/hooks.json` 的超时同步）、§4 六个钩子上的
+  畸形 `settings.json` 处理、与 `hooks/hooks.json` 的超时同步）、§4 六个钩子 <!--ce:hooks--> 上的
   `excluded_projects`、§5 config.json 的各种形态与 MCP 侧的同一退出机制、
-  §6 `settings.json` 的比较并交换。外加「每个调用 LLM 的钩子都必须传入绝对期限」。
+  §6 `settings.json` 的比较并交换、§7 项目根锚定（真实文件系统上的整条阶梯、从子目录
+  驱动同一批钩子，以及「每个钩子都在退出开关**之后**解析」这条源码级规则）、
+  §8 v2.8.0 的新表面（MCP 启动项目作用域门、加界的 `memory_topics`、经由自己
+  钩子在每种模式下驱动的计划锚点，以及对敌意 `package.json` 无头执行的
+  `ui/dashboard.py`）。外加「每个调用 LLM 的钩子都必须传入绝对期限」。
 - `tools/i18n_check.py` —— 按归一化内容哈希检查翻译漂移。
 - `tools/citation_check.py` —— 全部 13 个 markdown 文件里的每一条 `file.py:LINE`
   引用。`--fix` 修复，`--list` 显示每条判定。
+- `tools/doc_claims.py` —— 散文里**数数**的句子，对照 `tools/contracts.py` 从代码树
+  推导出的集合来检查。引用门证明行号仍然指向它的符号；这一道证明围绕它的那句话仍然成立。
+  自 v2.8.0 起它用同一套语法扫三个表面：受跟踪的 markdown、
+  `cc_memory/config.json`，以及随包发布代码的 docstring 与连续注释段——对后
+  两者的第一次扫描就抓到了三处已经错了的计数。
 
-两个开发期检查器同样在 `smoke_test.py` 内部运行，所以套件绿了就意味着文档状态也绿：
+三个开发期检查器同样在 `smoke_test.py` 内部运行，所以套件绿了就意味着文档状态也绿：
 
 ```bash
 python tools/i18n_check.py --list       # 每个 英文/翻译 配对 + 记录哈希 vs 当前哈希

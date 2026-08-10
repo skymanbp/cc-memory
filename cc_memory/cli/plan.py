@@ -44,15 +44,62 @@ STATUS_ICONS = {
 }
 
 
+def _anchor(project):
+    """Anchor `--project` before anything derives a path from it.
+
+    Until this existed, `plan.py --project <subdir>` built the scaffold in the
+    subdirectory — `_get_db` below mkdirs and MemoryDB creates the file, so
+    even the read-only `list` planted `<subdir>/memory/memory.db`. That is the
+    exact stray the hooks have refused to create since v2.6.0, and because an
+    existing database is a terminal rung, planting one there pinned all six
+    hooks <!--ce:hooks:asof--> to it permanently. Announces through print:
+    this CLI's stdout is already a human report, unlike the MCP server's.
+    """
+    try:
+        from core.roots import anchor_project
+    except Exception as exc:
+        # why: the plan CLI must keep working even if the resolver cannot
+        # load; the raw path is exactly the pre-v2.7.1 behaviour
+        print(f"[cc-memory] project-root anchoring unavailable ({exc}); "
+              f"using {project} as given")
+        return project
+    return anchor_project(project, announce=lambda m: print(f"[cc-memory] {m}"))
+
+
 def _resolve(project):
     p = Path(project).resolve()
     return p / "memory" / "memory.db", p.name
 
 
-def _get_db(project):
+def _get_db(project, create=True):
+    """Open the project's database; `create=False` refuses to conjure one.
+
+    `MemoryDB.__init__` mkdirs and creates, so before v2.8.0 the READ-ONLY
+    `list` and `status` fabricated a 140 KB empty database (without even the
+    memory/.gitignore that every other creator writes — the omission that let
+    a stray ride into version control) merely for asking what was in the
+    queue. cli/mem.py has always printed "no memory database at X" instead,
+    and two halves of one CLI pair must not disagree about that.
+    """
     db_path, name = _resolve(project)
     if not db_path.exists():
-        db_path.parent.mkdir(parents=True, exist_ok=True)
+        if not create:
+            _die(f"no memory database at {db_path}\n"
+                 f"       Run /ccm-load in that project, or a plan command "
+                 f"that writes (e.g. add), to create one.")
+        # ensure_memory_dir also writes memory/.gitignore. This creator did not,
+        # and a database created without it is exactly how a 184 KB memory.db
+        # rode into three commits of a sibling repository. A vanished project
+        # directory raises FileNotFoundError, which _die reports rather than
+        # recreating the project as an empty shell.
+        try:
+            from core.progress import ensure_memory_dir
+            ensure_memory_dir(db_path.parent)
+        except FileNotFoundError:
+            _die(f"project directory no longer exists: {db_path.parent.parent}")
+        except Exception as exc:
+            print(f"[cc-memory] could not prepare {db_path.parent}"
+                  f" ({exc}); add memory/ to .gitignore yourself")
     db = MemoryDB(db_path)
     pid = db.upsert_project(project)
     return db, pid, name
@@ -184,7 +231,7 @@ def cmd_add(args):
 
 def cmd_list(args):
     """List plans."""
-    db, pid, name = _get_db(args.project)
+    db, pid, name = _get_db(args.project, create=False)
     if args.all:
         plans = db.get_plans(pid)
         _print_plans(plans, f"All Plans ({name})")
@@ -195,7 +242,7 @@ def cmd_list(args):
 
 def cmd_status(args):
     """Show plan queue status summary."""
-    db, pid, name = _get_db(args.project)
+    db, pid, name = _get_db(args.project, create=False)
     plans = db.get_plans(pid)
     counts = {}
     for p in plans:
@@ -244,11 +291,21 @@ def cmd_evaluate(args):
     print(f"  {_prog()} --project {args.project} set-eval <ID> <status> \"<notes>\"")
 
 
+# The states a plan may be moved OUT OF by an approval-side command. `done`
+# and `failed` are terminal: a plan that finished must not re-enter the ready
+# queue, where `exec --next` would hand it back to Claude to run again.
+# `cmd_evaluate` has filtered on its own predicate since the twin defect was
+# fixed there; these two took explicit ids with NO predicate at all, so
+# `approve 1` and `set-eval 1 ready` both walked a `done` plan backwards
+# (measured: status `done` -> `ready` for each).
+_APPROVABLE_STATUSES = ["draft", "evaluating"]
+
+
 def cmd_set_eval(args):
     """Set evaluation result for a plan."""
     db, pid, name = _get_db(args.project)
     status = args.status  # 'ready' or 'skipped'
-    _require_plans(db, pid, [args.id])
+    _require_plans(db, pid, [args.id], statuses=_APPROVABLE_STATUSES)
     _update_checked(db, pid, args.id, status, args.notes, field="feasibility")
     print(f"Plan #{args.id} -> {status}" + (f": {args.notes}" if args.notes else ""))
 
@@ -258,12 +315,15 @@ def cmd_approve(args):
     db, pid, name = _get_db(args.project)
 
     if args.all:
-        plans = db.get_plans(pid, statuses=["draft", "evaluating"])
+        plans = db.get_plans(pid, statuses=_APPROVABLE_STATUSES)
         if not plans:
             print("No draft/evaluating plans to approve.")
             return
     elif args.ids:
-        plans = _require_plans(db, pid, args.ids)
+        # The SAME predicate as the --all branch above. It had none, so the
+        # two spellings of one command disagreed about the state machine.
+        plans = _require_plans(db, pid, args.ids,
+                               statuses=_APPROVABLE_STATUSES)
     else:
         prog = _prog()
         _die(f"Specify --all or plan IDs to approve.\n"
@@ -279,6 +339,17 @@ def cmd_approve(args):
 def cmd_exec(args):
     """Mark a plan as executing (Claude should then execute it)."""
     db, pid, name = _get_db(args.project)
+
+    # REFUSE a contradictory invocation instead of silently picking one. The
+    # branch order was `--next`, then `--all`, then the positional id, and a
+    # supplied id was never validated or even mentioned when a flag was also
+    # present: `exec --next 3` exited 0 and executed plan #1 (measured). The
+    # installer already sets the precedent of refusing arguments it cannot
+    # honour rather than guessing.
+    if args.id is not None and (args.next or args.all):
+        flag = "--next" if args.next else "--all"
+        _die(f"`exec {flag} {args.id}` is contradictory: {flag} picks the "
+             f"plan(s) itself. Drop the id, or drop {flag} to execute #{args.id}.")
 
     if args.next:
         plan = db.get_next_plan(pid)
@@ -440,6 +511,26 @@ def main():
     """Console entry point (`cc-memory-plan`, pyproject [project.scripts])."""
     enable_utf8_io()
     args = make_parser().parse_args()
+    # Anchor ONCE, here, before any of the 13 `_get_db(args.project)` call
+    # sites or the two help lines that echo the path back. Anchoring inside
+    # `_resolve` instead would have placed the database at the root while
+    # `_get_db` still passed the RAW path to `upsert_project` — one file, two
+    # project rows, which is worse than the stray it replaced.
+    # `is not None`, not truthiness: `--project ""` must anchor too.
+    if getattr(args, "project", None) is not None:
+        # Opt-out BEFORE anchoring, exactly like the hooks: anchoring first
+        # would resolve an excluded SUBDIRECTORY up to its unexcluded parent.
+        try:
+            from core.modes import cli_opt_out_notice
+            notice = cli_opt_out_notice(args.project)
+            if notice:
+                print(f"[cc-memory] {notice}")
+                return
+        except ImportError:
+            # why: a plan CLI that cannot load the opt-out check must still
+            # work; hooks and the MCP server enforce it independently
+            pass
+        args.project = _anchor(args.project)
     dispatch = {
         "add": cmd_add, "list": cmd_list, "status": cmd_status,
         "evaluate": cmd_evaluate, "set-eval": cmd_set_eval,

@@ -79,6 +79,22 @@ def _find_pkg_dir():
             # why: a malformed settings.json must not abort resolution -- the
             # standalone candidate appended below can still succeed
             cand.append(None)
+    ip = Path.home() / '.claude' / 'plugins' / 'installed_plugins.json'
+    if ip.exists():
+        try:
+            # DELIBERATE MIRROR of cli/mem.py's marketplace-cache probe:
+            # installed_plugins.json[plugins][cc-memory@cc-memory][*]
+            # .installPath. Without this rung the skill was dead on a
+            # cache-only install (plugin installed from a remote marketplace,
+            # no dev-checkout path in extraKnownMarketplaces) -- the same
+            # class of gap as the v2.4.3 hardcoded legacy path.
+            _plugs = (json.loads(ip.read_text(encoding='utf-8-sig')) or {}).get('plugins') or {}
+            for _e in (_plugs.get('cc-memory@cc-memory') or []):
+                if isinstance(_e, dict) and _e.get('installPath'):
+                    cand.append(_e['installPath'])
+        except (json.JSONDecodeError, OSError, AttributeError):
+            # why: a corrupt plugin cache costs one candidate, not the run
+            pass
     cand.append(str(Path.home() / '.claude' / 'hooks' / 'cc-memory'))
     for c in cand:
         d = _pkg_dir(c)
@@ -95,13 +111,58 @@ sys.path.insert(0, str(PKG.resolve()))
 from core.db import MemoryDB
 from llm.memory_writer import upsert_batch
 
-project = str(Path('.').resolve())
+# Anchor before MemoryDB touches the path: MemoryDB CREATES the file and its
+# parent, so run from a subdirectory this planted <subdir>/memory/memory.db --
+# the exact stray the hooks have refused to create since v2.6.0, and because
+# an existing database is a terminal rung, planting one there pinned all six
+# hooks to it permanently. Falls back to cwd if the resolver is missing, which
+# is only possible on installs predating it.
+try:
+    from core.roots import project_root
+    project = str(Path(project_root(str(Path('.').resolve()))).resolve())
+except Exception as _anchor_err:
+    print(f'[warn] root anchoring unavailable ({_anchor_err}); using cwd')
+    project = str(Path('.').resolve())
+
+# Opt-out. This skill WRITES conversation memories, so a project the user
+# opted out of must get nothing at all — the setting promises memories are
+# 'neither readable nor writable through any cc-memory tool', and a skill is
+# a tool. Checked on the pre-anchor cwd for the same reason every other
+# surface does: anchoring is the step that can move up to an unexcluded parent.
+try:
+    from core.modes import cli_opt_out_notice
+    _refusal = cli_opt_out_notice(str(Path('.').resolve()))
+    if _refusal:
+        print(f'[cc-memory] {_refusal}')
+        sys.exit(0)
+except ImportError:
+    print('[warn] opt-out check unavailable; hooks still enforce it on writes')
 db = MemoryDB(Path(project) / 'memory' / 'memory.db')
 pid = db.upsert_project(project)
 
 memories = [
     # {'category': 'decision', 'content': '...', 'importance': 4, 'topic': 'auth'},
-    # ADD MEMORIES HERE — see Step 2 for fields
+    #
+    # ADD MEMORIES HERE — see Step 2 for fields.
+    #
+    # NO BACKTICKS, NO DOLLAR SIGNS AND NO DOUBLE QUOTES IN THE TEXT YOU WRITE
+    # HERE. This whole body is a shell DOUBLE-quoted string, so bash expands it
+    # before python sees it: a backtick is command substitution, a dollar sign
+    # is variable expansion, and a double quote ENDS THE STRING — after which
+    # bash parses the rest as shell. Step 2 asks for concrete values such as
+    # numbers, file paths and parameter names, which is exactly the prose an
+    # LLM writes with markdown backticks. A memory recording a shell command
+    # would RUN that command in the user's project; one recording an
+    # environment variable assignment would expand the live value into a
+    # string that then lands in memory/MEMORY.md; and one quoting a phrase
+    # breaks the skill outright. Write command names and paths in plain text,
+    # or single quotes. (This comment spells the characters out in words for
+    # the same reason it is telling you not to type them — an earlier revision
+    # quoted that Step 2 phrase literally and made this file a bash syntax
+    # error, so the whole skill silently stopped running.)
+    # skills/ccm-load/SKILL.md carries the same rule; unlike this one its body
+    # is static, so this is the slot where the hazard is recurring rather
+    # than historical. Enforced by test_surfaces §7 over BOTH skills.
 ]
 
 counts = upsert_batch(db, pid, None, memories, memory_dir=Path(project) / 'memory')

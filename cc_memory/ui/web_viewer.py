@@ -48,6 +48,7 @@ import argparse
 import json
 import socket
 import sys
+import threading
 import time
 import webbrowser
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
@@ -58,7 +59,7 @@ _HERE = Path(__file__).resolve().parent     # cc_memory/ui/
 _PKG_ROOT = _HERE.parent                     # cc_memory/
 sys.path.insert(0, str(_PKG_ROOT))
 
-from core.db import MemoryDB
+from core.db import CATEGORIES, MemoryDB
 from core.encoding_setup import enable_utf8_io
 from core.logger import get_logger
 from llm.memory_writer import upsert_smart, regenerate_memory_index
@@ -66,7 +67,7 @@ from llm.memory_writer import upsert_smart, regenerate_memory_index
 _log = get_logger("web")
 
 # Mirrors the allow-list inside llm.memory_writer.upsert_smart.
-_CATEGORIES = ("decision", "result", "config", "bug", "task", "arch", "note")
+_CATEGORIES = CATEGORIES  # single source: core.db (register M3)
 _MAX_BODY = 1 << 20          # 1 MiB — a memory is text, not an upload
 _LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1")
 
@@ -74,6 +75,98 @@ _LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1")
 _BODY_STALL_S = 5.0          # max silence inside one body read
 _BODY_DEADLINE_S = 15.0      # max TOTAL time to receive a declared body
 _DRAIN_DEADLINE_S = 3.0      # max TOTAL time spent draining a rejected body
+
+# Concurrency admission. The budgets above bound ONE request; they say nothing
+# about how many. A connection that sends no bytes at all never reaches them
+# and still leases a worker thread for `timeout` seconds, so an attacker's
+# connect RATE set our thread count — the gap this module's own docstring
+# names ("ThreadingHTTPServer caps neither threads nor connections") and then
+# does not close. 16 admits a browser's six-per-origin plus slack; anything
+# beyond is shed immediately rather than queued into a thread.
+_MAX_CONCURRENT = 16
+# BoundedSemaphore, not Semaphore: a plain one accepts a release it never
+# handed out and silently RAISES the ceiling. The first version of this class
+# released in two places on the failure path and the cap grew 16 -> 17 -> 18
+# -> 19 across three failures, unnoticed, precisely while under the load it
+# exists to bound. A bounded one turns that class of bug into a ValueError.
+_ADMIT = threading.BoundedSemaphore(_MAX_CONCURRENT)
+
+# The shed reply, pre-rendered: it is written from the ACCEPT LOOP, so it must
+# cost no formatting and no allocation beyond the send itself.
+_SHED_BODY = b'{"error":"server busy, retry"}'
+_SHED_REPLY = (
+    b"HTTP/1.1 503 Service Unavailable\r\n"
+    b"Content-Type: application/json\r\n"
+    b"Content-Length: " + str(len(_SHED_BODY)).encode() + b"\r\n"
+    b"Retry-After: 1\r\n"
+    b"Connection: close\r\n\r\n" + _SHED_BODY)
+# Bound on the shed write. It runs on the accept loop, so an unbounded send to
+# a peer that has stopped reading would stall every other connection — the
+# exact failure the non-blocking acquire below exists to avoid. ~120 bytes to
+# a loopback peer either fits the socket buffer immediately or is not worth
+# waiting on.
+_SHED_WRITE_S = 0.25
+
+
+def _shed_response(request):
+    """Answer a refused connection with 503 instead of just closing it.
+
+    Closing the socket with no HTTP response at all is not a rejection, it is
+    a transport error: the client raises ConnectionResetError (measured,
+    `[WinError 10054]`, on the 17th concurrent request) with no status line,
+    no Retry-After and nothing to distinguish "busy" from "the server died".
+    The SPA's fetch() rejects and the panel sits on Loading forever — so the
+    cap that exists to keep the viewer responsive under load presented as the
+    viewer being broken under load. Best-effort and never raises: the
+    connection is dropped by the caller either way.
+    """
+    try:
+        request.settimeout(_SHED_WRITE_S)
+        request.sendall(_SHED_REPLY)
+    except OSError:
+        # why: the peer may already be gone, or refusing to read. The socket
+        # is closed by the caller regardless, and a raise here would escape
+        # into the accept loop — strictly worse than the client seeing the
+        # original transport error.
+        pass
+
+
+class _BoundedServer(ThreadingHTTPServer):
+    """ThreadingHTTPServer that refuses to spawn an unbounded thread set."""
+
+    request_queue_size = 32
+
+    def process_request(self, request, client_address):
+        # NON-BLOCKING, deliberately. `process_request` runs on the accept
+        # loop, so a bounded WAIT here is worse than no cap at all: measured
+        # with a 2 s wait, 40 silent connections made the 41st request time
+        # out after 8 s, because every shed decision stalled the one thread
+        # that accepts. Shed instantly instead — the cap exists to bound the
+        # thread set, not to queue callers.
+        if not _ADMIT.acquire(blocking=False):
+            # Shed WITHOUT acquiring: close the socket directly rather than
+            # through shutdown_request, whose override below releases.
+            _log.warn("admission refused: %d concurrent requests in flight"
+                      % _MAX_CONCURRENT)
+            _shed_response(request)
+            self.close_request(request)
+            return
+        # NO try/except release here. `BaseServer._handle_request_noblock`
+        # already calls `shutdown_request` on BOTH of its failure arms
+        # (`except Exception` and the bare `except`), so releasing here as
+        # well returned the permit twice for one acquire — measured, the cap
+        # climbed 16 -> 17 -> 18 -> 19 over three `RuntimeError: can't start
+        # new thread` failures and never came back down. `shutdown_request`
+        # below is the single release point for every admitted request:
+        # the worker thread's `finally` on success, the server's failure arm
+        # when the thread never started.
+        super().process_request(request, client_address)
+
+    def shutdown_request(self, request):
+        try:
+            super().shutdown_request(request)
+        finally:
+            _ADMIT.release()
 
 
 class _BadRequest(ValueError):
@@ -172,29 +265,18 @@ _HTML = """\
 <div class="top-bar">
   <input type="text" id="search" placeholder="Search memories..." onkeyup="if(event.key==='Enter')doSearch()">
   <button onclick="doSearch()">Search</button>
+  <!-- options are filled from CATS at load (register r6-C11): two hardcoded
+       lists meant a category the backend accepted could not be picked or
+       filtered here at all -->
   <select id="cat-filter" onchange="doSearch()">
     <option value="">All categories</option>
-    <option value="decision">decision</option>
-    <option value="result">result</option>
-    <option value="config">config</option>
-    <option value="bug">bug</option>
-    <option value="task">task</option>
-    <option value="arch">arch</option>
-    <option value="note">note</option>
   </select>
   <button class="primary" id="add-toggle" onclick="toggleAdd()">+ Add memory</button>
 </div>
 
 <div id="add-form" class="card hidden">
   <div class="row">
-    <select id="add-cat" title="category">
-      <option value="note">note</option>
-      <option value="decision">decision</option>
-      <option value="result">result</option>
-      <option value="config">config</option>
-      <option value="bug">bug</option>
-      <option value="task">task</option>
-      <option value="arch">arch</option>
+    <select id="add-cat" title="category"><!-- filled from CATS at load -->
     </select>
     <select id="add-imp" title="importance">
       <option value="1">1 - trivia</option>
@@ -233,7 +315,7 @@ async function api(path, options) {
   return r.json();
 }
 
-const CATS = ['decision','result','config','bug','task','arch','note'];
+const CATS = ['decision','result','config','bug','task','arch','note']; // the ONE deliberate literal: browser JS cannot import core.db.CATEGORIES -- hand-sync
 function impClass(n) { return 'imp imp-' + n; }
 function impStars(n) { return '<span class="' + impClass(n) + '">' + '★'.repeat(n) + '☆'.repeat(5-n) + '</span>'; }
 // catBadge was the one sink that fed a DB column straight into an ATTRIBUTE.
@@ -368,6 +450,21 @@ async function loadStats() {
   panel.innerHTML = html;
 }
 
+// Category selects are POPULATED from CATS (register r6-C11), so the one
+// browser-side literal is the only place the vocabulary appears here — two
+// hardcoded <option> lists meant a category the API accepts could be neither
+// chosen nor filtered. add-cat keeps 'note' preselected, as its static
+// markup did.
+function fillCats() {
+  const filter = document.getElementById('cat-filter');
+  const add = document.getElementById('add-cat');
+  CATS.forEach(c => {
+    if (filter) { const o = document.createElement('option'); o.value = c; o.textContent = c; filter.appendChild(o); }
+    if (add) { const o = document.createElement('option'); o.value = c; o.textContent = c; o.selected = (c === 'note'); add.appendChild(o); }
+  });
+}
+fillCats();
+
 // Initial load
 showTab('memories');
 </script>
@@ -388,7 +485,13 @@ class MemoryHandler(BaseHTTPRequestHandler):
     # blocks forever on a connection that never sends a byte. Browsers
     # speculatively pre-connect, and one such socket used to wedge the whole
     # server. socket.timeout is caught by handle_one_request -> connection closed.
-    timeout = 10
+    #
+    # 3, not 10: with _MAX_CONCURRENT admission above, this is now also how
+    # long a silent connection can HOLD one of the 16 permits. A loopback
+    # client that has sent nothing in 3 s is not a browser pre-connect worth
+    # waiting on, and the shorter hold is what keeps a burst of silent
+    # connections from shedding a legitimate request behind them.
+    timeout = 3
 
     def log_message(self, format, *args):
         _log.debug(format % args)
@@ -589,11 +692,31 @@ class MemoryHandler(BaseHTTPRequestHandler):
         except (TypeError, ValueError):
             return False
 
-    def _require_db(self):
+    def _require_db(self, write=False):
         db, pid = self.__class__.db, self.__class__.pid
         if not db:
             self._reject("No database loaded", 500)
             return None, None
+        if write:
+            # Re-checked at WRITE time, not only at main() (register r6-C3):
+            # this server runs for hours, and a project listed in
+            # excluded_projects after startup kept accepting POST writes
+            # through the cached handle. Reads keep working — the opt-out's
+            # own contract text promises no NEW recording; main() already
+            # refuses to serve a project excluded at launch.
+            try:
+                # the shared gate, not a direct is_excluded call — same
+                # routing rule test_surfaces enforces on every surface
+                from core.modes import cli_opt_out_notice
+                notice = cli_opt_out_notice(str(db.db_path.parent.parent))
+                if notice:
+                    self._reject("project is opted out via config.json "
+                                 "excluded_projects; write refused", 403)
+                    return None, None
+            except Exception as e:
+                # why: the opt-out check failing must not take the viewer
+                # down; the hooks enforce the same control on their paths
+                _log.error(f"opt-out re-check failed: {e}")
         return db, pid
 
     # ── GET ─────────────────────────────────────────────────────────────────
@@ -669,7 +792,10 @@ class MemoryHandler(BaseHTTPRequestHandler):
             self._json_response({"results": results})
 
         elif path == "/api/topics":
-            self._json_response({"topics": db.get_topics(pid)})
+            # Bounded like every other list route here. It was the exception,
+            # and a topic body has no size limit of its own.
+            limit = _int(p("limit", "100"), 100, 1, 500, "limit")
+            self._json_response({"topics": db.get_topics(pid, limit=limit)})
 
         elif path == "/api/observations":
             limit = _int(p("limit", "50"), 50, 1, 1000, "limit")
@@ -724,7 +850,7 @@ class MemoryHandler(BaseHTTPRequestHandler):
             self._reject("Content-Type must be application/json", 415)
             return
 
-        db, pid = self._require_db()
+        db, pid = self._require_db(write=True)
         if not db:
             return
 
@@ -819,7 +945,30 @@ def main():
     parser.add_argument("--no-open", action="store_true", help="Don't open browser")
     args = parser.parse_args()
 
-    project = str(Path(args.project).resolve())
+    # The last unanchored --project. It defaults to "." and only READS, so the
+    # symptom was the inverse of everywhere else: instead of planting a stray
+    # it REFUSED a fully initialised project whenever it was started from a
+    # subdirectory, printing "no memory database" for a database mem.py,
+    # plan.py and the dashboard all serve from the same directory. Opt-out
+    # checked on the raw pick, before anchoring, so a per-subdirectory
+    # exclusion is not widened to its parent.
+    try:
+        from core.modes import cli_opt_out_notice
+        notice = cli_opt_out_notice(args.project)
+        if notice:
+            print(f"[cc-memory] {notice}")
+            sys.exit(0)
+    except ImportError:
+        # why: a viewer that cannot load the opt-out check must still run; the
+        # hooks and the MCP server enforce it independently on every write
+        pass
+    try:
+        from core.roots import anchor_project
+        project = str(Path(anchor_project(args.project)).resolve())
+    except Exception as exc:
+        print(f"[cc-memory] project-root anchoring unavailable ({exc}); "
+              f"using {args.project} as given")
+        project = str(Path(args.project).resolve())
     memory_dir = Path(project) / "memory"
     db_path = memory_dir / "memory.db"
     if not db_path.exists():
@@ -835,7 +984,7 @@ def main():
 
     # 127.0.0.1, never 0.0.0.0 — this API can write memories that are injected
     # into the next Claude session.
-    server = ThreadingHTTPServer(("127.0.0.1", args.port), MemoryHandler)
+    server = _BoundedServer(("127.0.0.1", args.port), MemoryHandler)
     server.daemon_threads = True
     url = f"http://127.0.0.1:{args.port}"
     print(f"cc-memory dashboard: {url}")
