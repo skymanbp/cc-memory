@@ -325,9 +325,9 @@ Eleven tables, matching `CLAUDE.md` § "Database schema (11 tables)".
 
 Plus `memories_fts` — an FTS5 virtual table over `memories` (`core/db.py:455-458`),
 kept in sync by three triggers (`core/db.py:459-478`, migration `v2_fts5` at
-`db.py:2625-2659`). It is created only when the local SQLite build has FTS5; otherwise
-`db.search_fts` (`core/db.py:2625-2659`) falls back to `LIKE ? ESCAPE '\'`
-(`core/db.py:2625-2659`). FTS5 is advertised in `.claude-plugin/plugin.json:4`
+`db.py:2742-2776`). It is created only when the local SQLite build has FTS5; otherwise
+`db.search_fts` (`core/db.py:2742-2776`) falls back to `LIKE ? ESCAPE '\'`
+(`core/db.py:2742-2776`). FTS5 is advertised in `.claude-plugin/plugin.json:4`
 and `:12`, and `/cc-mem status` reports which path is live (`cli/mem.py`,
 `cmd_status`).
 
@@ -335,11 +335,11 @@ The `supersedes_id` column on `memories` (migration `v3_supersedes`,
 `db.py:168`) makes the anti-patch chain explicit: when `upsert_smart` decides a
 new memory supersedes an old one, the new row links back to the old row's ID
 (and the old row is archived). Walking the chain via
-`db.get_supersede_chain(memory_id)` (`db.py:1340-1355`) shows the full update
-history. `content_hash` (migration `v2_content_hash`, `db.py:1340-1355`) is
+`db.get_supersede_chain(memory_id)` (`db.py:1387-1402`) shows the full update
+history. `content_hash` (migration `v2_content_hash`, `db.py:1387-1402`) is
 `sha256[:16]` of the normalized content, used for the cheap exact-duplicate
-check (`db.compute_content_hash` at `db.py:1897-1899`, `db.find_by_hash` at
-`db.py:1897-1899`).
+check (`db.compute_content_hash` at `db.py:1942-1944`, `db.find_by_hash` at
+`db.py:1942-1944`).
 
 Migrations are applied in order from the `_MIGRATIONS` list (`db.py:121-284`) and
 recorded in `_migrations`. Levels shipped so far: **v1** (topic column +
@@ -593,10 +593,10 @@ normalises it to JSON, written back via `/cc-mem plan-set --from-refiner`;
 LLM); `Edit`/`Write`/`MultiEdit`/`NotebookEdit` bump
 `edits_since_last_guardian`, and sensitive Bash calls (`git push`, `rm -rf`,
 `DROP TABLE`, `npm publish`, `kubectl apply`, `terraform apply`, … —
-`core.plan.is_sensitive_tool_call`, `plan.py:1126-1149`) bump it by 20. The Stop hook
+`core.plan.is_sensitive_tool_call`, `plan.py:1231-1254`) bump it by 20. The Stop hook
 emits the guardian advisory once `turns_since_last_guardian >= 8` OR
 `edits_since_last_guardian >= 12` (`core.plan.should_nudge_guardian`,
-`plan.py:1090-1106`), and rate-limits the refiner nudge to once every 5 turns per
+`plan.py:1195-1211`), and rate-limits the refiner nudge to once every 5 turns per
 session. Hooks never spawn subagents themselves — they only nudge. Full spec:
 [docs/CONTRACTS.md](CONTRACTS.md#plan-contract). Every branch above runs in
 every mode since v2.5 — see
@@ -638,7 +638,7 @@ does not retry, `core/auth.py:60-93`); it also carries the `oauth_expired`
 signal behind SessionStart's "[WARNING: OAuth expired — LLM extraction
 disabled]" footer (`session_start.py:594`). Hook callers use it to *supply*
 the credential passed into `call_llm`: `pre_compact.py:80 → :166`,
-`stop.py:84`, `session_start.py:594`, `core/consolidate.py:424, 549, 724`.
+`stop.py:85`, `session_start.py:594`, `core/consolidate.py:424, 549, 724`.
 
 Fall-through was added in v2.3.4 for a concrete failure: a dead env key (e.g.
 zero credit → HTTP 400) used to blackhole the healthy subscription token behind
@@ -739,7 +739,7 @@ Per-project state lives at `<project>/memory/`:
 Writers, for traceability: `MEMORY.md` ← `memory_writer.regenerate_memory_index`
 (`memory_writer.py:261-370`); `PROGRESS.md` ← `core.progress.write_progress_md`
 (`progress.py:331-490, 366`); `PLAN.md` ← `core.plan.write_plan_md`
-(`plan.py:520-568`); `.plan_history/` ← `plan.py:520-568`; `.last_save.json` ←
+(`plan.py:630-678`); `.plan_history/` ← `plan.py:630-678`; `.last_save.json` ←
 `pre_compact.py:737, 771`; `.last_inject.json` ← `session_start.py:291-309`
 (tempfile + `os.replace`, genuinely atomic, unlike the plain write used for
 `.last_save.json`); `.last_consolidation.json` / `.consolidation.lock` ←
@@ -775,7 +775,7 @@ inside another one — `Claude-Code-Local/companion` alone holds 3725 memories
 and carries its own `.git`. A stray sub-database and a deliberate nested
 sub-project are **byte-for-byte indistinguishable on disk**: both have
 `memory/memory.db` whose `projects` row names their own directory, because
-`upsert_project` (`core/db.py:946-978`) records whatever cwd it was handed.
+`upsert_project` (`core/db.py:993-1025`) records whatever cwd it was handed.
 Outermost-wins resolves that ambiguity unconditionally in the direction that
 destroys data, so the first post-upgrade session in `companion` would have
 moved 3725 memories out of reach, silently.
@@ -972,7 +972,7 @@ reports on each:
 - **legacy / standalone install** — `~/.claude/hooks/cc-memory/`
   (`mem.py:43`), written by the PyInstaller installer
   (`ui/installer.py:72` `TARGET_DIR`). Hooks here are registered directly in
-  `~/.claude/settings.json` by `_merge_into_settings` (`installer.py:1010-1044+`),
+  `~/.claude/settings.json` by `_merge_into_settings` (`installer.py:1047-1081+`),
   not via a plugin manifest.
 
 Under the marketplace layouts `~/.claude/hooks/cc-memory/` holds only `logs/`
@@ -1055,7 +1055,7 @@ seeded leaves exactly those two files behind.
 
 ### settings.json is validated before anything is copied (v2.5)
 
-`_read_settings` (`installer.py:689-721`) returns `(dict, None)` or `(None, error)`
+`_read_settings` (`installer.py:729-761`) returns `(dict, None)` or `(None, error)`
 and never raises; `cli_install` calls it at step **[0/3]** and returns 1 with
 `Nothing has been installed.` on a parse failure. Through v2.4.3 the parse
 happened *after* the copy, so a `settings.json` the installer could not read

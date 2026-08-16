@@ -139,7 +139,15 @@ _SETTINGS_FIX_HINT = ("Fix that file (or move it aside) and re-run the "
 #                        whole observation backlog. Kept here for the same
 #                        reason as cc_memory_reminded_ below: an uninstall must
 #                        still sweep what an older install left behind.
-#   cc_mem_refine_       hooks/stop.py         plan-refiner nudge cooldown
+#   cc_mem_refine_       NO live writer since v2.11.0 - the plan-refiner nudge
+#                        was a rate-limited ADVISORY, which is precisely why a
+#                        plan could sit unrefined forever; it is now an enforced
+#                        Stop block (cc_mem_block_ below). Kept here for the
+#                        same reason as cc_mem_eval_: an uninstall must still
+#                        sweep what an older install left behind.
+#   cc_mem_block_        hooks/stop.py         consecutive-refusal counter for
+#                        plan enforcement, keyed by condition-set digest so the
+#                        escape budget restarts when the condition changes.
 #   cc_mem_idle_         core/idle.py          idle-reorg cooldown
 #   cc_memory_reminded_  NO live writer - retired together with the
 #                        "remember to call /save-memories" reminder spam (see
@@ -147,7 +155,7 @@ _SETTINGS_FIX_HINT = ("Fix that file (or move it aside) and re-run the "
 #                        so an uninstall still sweeps markers an older install
 #                        left in the temp dir.
 _TEMP_MARKER_PREFIXES = ("cc_mem_turns_", "cc_mem_prompt_", "cc_mem_eval_",
-                         "cc_mem_refine_", "cc_mem_idle_",
+                         "cc_mem_refine_", "cc_mem_block_", "cc_mem_idle_",
                          "cc_memory_reminded_")
 # Marker suffix = hooks/stop.py:_safe_id(session_id) -> a 16-char session id with
 # path separators replaced. Anything else in %TEMP% is not ours; leave it alone.

@@ -2,17 +2,64 @@
 
 ## Project: cc-memory
 
-**Claude Code persistent memory plugin (v2.10.1)** — anti-patch reconcile-on-write
+**Claude Code persistent memory plugin (v2.11.0)** — anti-patch reconcile-on-write
 + LLM-judged semantic de-duplication, forced PROGRESS.md handoff with
 per-session annotation, live PLAN.md anchor with plan-refiner / plan-guardian
-subagents + mandatory carryover gate, bounded transcript reads, injection
-observability, FTS5 search, AI-judged extraction with Haiku (optional local
-Ollama fallback).
+subagents + mandatory carryover gate, **an enforced directive ledger**, bounded
+transcript reads, injection observability, FTS5 search, AI-judged extraction
+with Haiku (optional local Ollama fallback).
 
 - **Language**: Python 3.8+ (pure stdlib, zero pip dependencies at runtime)
-- **Version**: 2.10.1
+- **Version**: 2.11.0
 - **License**: MIT
 - **Platform**: Windows-primary, cross-platform compatible (Tkinter required for GUI)
+
+## What changed in v2.11.0 (over v2.10.1)
+
+**Advisory became enforced, because advisory did not work.** Every piece of
+plan machinery in this package was a suggestion, and `hooks/stop.py` said so
+in its own comment: *"The plan-refiner nudge is advisory."* On top of that the
+nudge was rate-limited to once per five turns.
+
+The measurement that forced this, from a real consuming project
+(`lore_disaster`, 2026-08-15): a **51,237-char raw plan sat unrefined** while
+`PLAN.md`, `plan-status` **and the drift guardian** all answered from the
+PREVIOUS plan — the guardian was dutifully drift-checking against a superseded
+baseline. A full-transcript audit of **416 deduped user messages** then found a
+feature the user had demanded **six separate times** with zero implementation,
+and a pause rule stated **three times** that was violated the first time it
+mattered. Nothing detected any of it, because nothing was ever forced.
+
+Three additions a future change must not break:
+
+1. **Stop enforcement, with a guaranteed escape.** `core/plan.blocking_reasons`
+   returns the conditions that must stop a turn (unrefined plan, undrift-checked
+   plan, idle directive); `hooks/stop.py:_emit_block` emits
+   `{"decision": "block", "reason": ...}`. **The escape budget is load-bearing**:
+   after `_BLOCK_MAX_CONSECUTIVE` refusals of the *same condition set* it
+   degrades to a loud advisory, and `_block_attempt` keys the counter by a
+   digest of the condition keys so fixing one problem never spends the budget
+   of the next. An unbreakable block is worse than no block. Kill switch:
+   `CC_MEMORY_PLAN_ENFORCE=0`. Projects with no plan row are never enforced,
+   so opting in is what turns it on.
+
+2. **The directive ledger is NOT plan steps.** A plan step is a unit of
+   EXECUTION and dies when the plan is replaced or the step is marked done. A
+   directive is a unit of INTENT and outlives every plan. Folding one into the
+   other is exactly how the six-times-repeated demand vanished — it was never a
+   step in whichever plan happened to be active. `times_stated` accumulates on
+   ONE row because repetition is the importance signal a plan cannot express,
+   and `directive-close` **refuses without `--evidence`**: a directive closed
+   on an assertion is the failure the ledger exists to prevent.
+
+3. **`source` mirrors Scanned/Manual.** Rows authored from what the user
+   actually said are never rewritten by machinery; only `derived` rows may be
+   refreshed. Same principle that keeps a rescan from destroying hand
+   annotation.
+
+Gate: `tests/test_directive_enforcement.py` (27 checks) plus a live hook drive
+proving the wire format reaches the harness and that the escape budget really
+releases (`[True, True, True, False, False]` over five consecutive Stops).
 
 ## What changed in v2.10.1 (over v2.10.0)
 
@@ -498,7 +545,7 @@ not be imported at all — `cli/plan.py` now has a `main()`.
 
 **Residual limits, recorded rather than papered over:**
 
-- `core/db.py`'s three plan mutators — `update_plan_status` (`db.py:2788-2832`),
+- `core/db.py`'s three plan mutators — `update_plan_status` (`db.py:2905-2949`),
   `delete_plan` (`:1410`) and `update_plan_content` (`:1427`) — all accept
   `project_id`, and `cli/plan.py` + `ui/dashboard.py` pass it at every call
   site, but none of them *requires* it (it defaults to `None`). An unscoped raw

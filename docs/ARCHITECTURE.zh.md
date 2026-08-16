@@ -1,4 +1,4 @@
-<!-- i18n-source: ARCHITECTURE.md | sha256: d4dcc4607b70a8f2 | version: 2.10.1 | translated: 2026-08-10 -->
+<!-- i18n-source: ARCHITECTURE.md | sha256: 931420fe3a9384e3 | version: 2.11.0 | translated: 2026-08-15 -->
 > [English](ARCHITECTURE.md) · **简体中文**
 
 # cc-memory — 架构（v2.9.0）
@@ -295,17 +295,17 @@ SQLite 表（定义在 [`cc_memory/core/db.py`](../cc_memory/core/db.py)），�
 
 此外还有 `memories_fts`——一个建立在 `memories` 之上的 FTS5 虚拟表
 （`core/db.py:455-458`），由三个触发器保持同步（`core/db.py:459-478`，迁移 `v2_fts5` 在
-`db.py:2625-2659`）。它只在本地 SQLite 构建带 FTS5 时才会创建；否则
-`db.search_fts`（`core/db.py:2625-2659`）回退到 `LIKE ? ESCAPE '\'`
-（`core/db.py:2625-2659`）。FTS5 在 `.claude-plugin/plugin.json:4` 与 `:12` 中被
+`db.py:2742-2776`）。它只在本地 SQLite 构建带 FTS5 时才会创建；否则
+`db.search_fts`（`core/db.py:2742-2776`）回退到 `LIKE ? ESCAPE '\'`
+（`core/db.py:2742-2776`）。FTS5 在 `.claude-plugin/plugin.json:4` 与 `:12` 中被
 宣传，`/cc-mem status` 会报告当前实际走哪条路径（`cli/mem.py` 的 `cmd_status`）。
 
 `memories` 上的 `supersedes_id` 列（迁移 `v3_supersedes`，`db.py:168`）把反补丁的
 取代链显式化：当 `upsert_smart` 判定一条新记忆取代了一条旧记忆时，新行会回链到旧行
-的 ID（旧行被归档）。通过 `db.get_supersede_chain(memory_id)`（`db.py:1340-1355`）走一遍
-链条，就能看到完整的更新历史。`content_hash`（迁移 `v2_content_hash`，`db.py:1897-1899`）
+的 ID（旧行被归档）。通过 `db.get_supersede_chain(memory_id)`（`db.py:1387-1402`）走一遍
+链条，就能看到完整的更新历史。`content_hash`（迁移 `v2_content_hash`，`db.py:1942-1944`）
 是归一化内容的 `sha256[:16]`，用于廉价的精确重复检查（`db.compute_content_hash` 在
-`db.py:1910-1918`，`db.find_by_hash` 在 `db.py:1910-1918`）。
+`db.py:1955-1963`，`db.find_by_hash` 在 `db.py:1955-1963`）。
 
 迁移按 `_MIGRATIONS` 列表（`db.py:121-284`）的顺序应用，并记录在 `_migrations` 中。目前
 已交付的层级：**v1**（topic 列 + 索引）、**v2**（content_hash、observations、
@@ -475,7 +475,7 @@ SessionStart：
 ```
 
 上面的调用签名都是真实的：`write_progress_md(db, project_id, memory_dir)`
-（`core/progress.py:331-490`；调用点 `pre_compact.py:751`、`stop.py:325`、
+（`core/progress.py:331-490`；调用点 `pre_compact.py:751`、`stop.py:373`、
 `user_prompt.py:133`、`session_start.py:912`、`mcp/server.py:243`、
 `cli/mem.py:1179`）。PROGRESS.md 的结构规格见
 [docs/CONTRACTS.md](CONTRACTS.md#handoff-contract)。
@@ -536,16 +536,16 @@ transcript 得到 0 条腿、0 条记忆。第 3 级从
 机械地同步步骤状态（不调用 LLM）；`Edit`/`Write`/`MultiEdit`/`NotebookEdit` 会累加
 `edits_since_last_guardian`，而敏感的 Bash 调用（`git push`、`rm -rf`、
 `DROP TABLE`、`npm publish`、`kubectl apply`、`terraform apply`……见
-`core.plan.is_sensitive_tool_call`，`plan.py:1126-1149`）一次加 20。一旦
+`core.plan.is_sensitive_tool_call`，`plan.py:1231-1254`）一次加 20。一旦
 `turns_since_last_guardian >= 8` 或 `edits_since_last_guardian >= 12`，Stop 钩子
-就发出 guardian 建议（`core.plan.should_nudge_guardian`，`plan.py:1090-1106`），并把
+就发出 guardian 建议（`core.plan.should_nudge_guardian`，`plan.py:1195-1211`），并把
 refiner 提示限速为每会话每 5 个回合至多一次。钩子自己绝不派生子代理——它们只提示。
 完整规格见 [docs/CONTRACTS.md](CONTRACTS.md#plan-contract)。**自 v2.5 起，上面的
 每一条分支在每种模式下都会运行**——此前遮蔽它们的是什么，见
 [observation 闸门](#observation-闸门不再遮蔽计划分支v25-已修)。
 
 尚未精炼的原始计划也不再是隐形的：`core.plan.raw_pending_refinement`
-（`plan.py:520-568`）是共享判据，`write_plan_md` 与 `/cc-mem plan-status` 都会以一条
+（`plan.py:630-678`）是共享判据，`write_plan_md` 与 `/cc-mem plan-status` 都会以一条
 PENDING REFINEMENT 横幅加逐字原文开头，并把更旧的结构化计划明确标注为已被取代。
 那段逐字块的围栏宽度会超过原始文本里最长的一串反引号，因为计划模式的输出里经常
 带有代码围栏。
@@ -575,7 +575,7 @@ BudgetGate 来说仍是已知量。候选顺序与传输格式（`core/auth.py:2
 `core/auth.py:60-93`）；它同时承载 `oauth_expired` 信号，支撑 SessionStart 的
 “[WARNING: OAuth expired — LLM extraction disabled]” 页脚
 （`session_start.py:594`）。钩子调用方用它来*提供*传给 `call_llm` 的凭据：
-`pre_compact.py:80 → :166`、`stop.py:84`、`session_start.py:594`、
+`pre_compact.py:80 → :166`、`stop.py:85`、`session_start.py:594`、
 `core/consolidate.py:355, 549, 724`。
 
 逐级回退是 v2.3.4 为一个具体故障加入的：一个失效的环境变量密钥（例如额度为零 →
@@ -668,7 +668,7 @@ v2.4.2 才成立：`_extract_via_llm` 的 `except` 元组此前不包含 `Runtim
 写入方，便于溯源：`MEMORY.md` ← `memory_writer.regenerate_memory_index`
 （`memory_writer.py:261-370`）；`PROGRESS.md` ← `core.progress.write_progress_md`
 （`progress.py:331-490, 366`）；`PLAN.md` ← `core.plan.write_plan_md`
-（`plan.py:520-568`）；`.plan_history/` ← `plan.py:520-568`；`.last_save.json` ←
+（`plan.py:630-678`）；`.plan_history/` ← `plan.py:630-678`；`.last_save.json` ←
 `pre_compact.py:737, 771`；`.last_inject.json` ← `session_start.py:291-309`
 （临时文件 + `os.replace`，是真正原子的，不同于 `.last_save.json` 用的普通写）；
 `.last_consolidation.json` / `.consolidation.lock` ←
@@ -696,7 +696,7 @@ agent 自己的 `cd` 走：一个在仓库根启动、却在 `cli/` 里跑过一
 共 **20** 个，其中 **4** 个是**合法地嵌套**在另一个项目里的——单是
 `Claude-Code-Local/companion` 就有 3725 条记忆，并且自带 `.git`。野生子库与刻意嵌套的
 子项目在磁盘上**逐字节不可区分**：两者都有 `memory/memory.db`，其 `projects` 行都写着
-自己那个目录，因为 `upsert_project`（`core/db.py:946-978`）记录的就是别人递给它的 cwd。
+自己那个目录，因为 `upsert_project`（`core/db.py:993-1025`）记录的就是别人递给它的 cwd。
 "最外端胜"会把这种歧义无条件地朝毁数据的方向解决——升级后第一次在 `companion` 里开会话，
 3725 条记忆就会悄无声息地失联。
 
@@ -844,7 +844,7 @@ home 边界是双份的：环境所声称的（`HOME`/`USERPROFILE`/`Path.home()
   报告为损坏布局，而不是被跳过（`mem.py:158-170`）。
 - **legacy / 独立安装**——`~/.claude/hooks/cc-memory/`（`mem.py:43`），由
   PyInstaller 安装器写入（`ui/installer.py:72` 的 `TARGET_DIR`）。这里的钩子由
-  `_merge_into_settings`（`installer.py:1010-1044+`）直接注册进
+  `_merge_into_settings`（`installer.py:1047-1081+`）直接注册进
   `~/.claude/settings.json`，而不是通过插件清单。
 
 在市场类布局下，`~/.claude/hooks/cc-memory/` 只保留 `logs/`（`core.logger` 的输出
@@ -920,7 +920,7 @@ home 边界是双份的：环境所声称的（`HOME`/`USERPROFILE`/`Path.home()
 
 ### settings.json 在任何复制之前就被校验（v2.5）
 
-`_read_settings`（`installer.py:689-721`）返回 `(dict, None)` 或 `(None, error)`，绝不
+`_read_settings`（`installer.py:729-761`）返回 `(dict, None)` 或 `(None, error)`，绝不
 抛异常；`cli_install` 在第 **[0/3]** 步调用它，解析失败时以 1 退出并打印
 `Nothing has been installed.`。一直到 v2.4.3 为止，解析发生在复制**之后**，所以一份
 安装器读不懂的 `settings.json` 会留下 32 个文件在盘上、**零个钩子被注册** —— 卸载器

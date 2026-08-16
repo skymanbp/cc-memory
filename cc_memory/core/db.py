@@ -324,6 +324,51 @@ _MIGRATIONS = [
     # durable, so it lives where the observations do.
     ("v7_projects_obs_watermark",
      "ALTER TABLE projects ADD COLUMN obs_watermark INTEGER NOT NULL DEFAULT 0"),
+
+    # ── v8 migrations (directive ledger) ─────────────────────────────────────
+
+    # The standing-instruction ledger. Motivating incident (lore_disaster,
+    # 2026-08-15): a full-transcript audit of 416 deduped user messages found
+    # a mod mechanic the user had demanded SIX separate times with zero
+    # implementation, and a pause rule stated THREE times that was violated
+    # the first time it mattered. Neither was detectable, because nothing in
+    # this project — or in ccm — ever recorded what the user asked for.
+    #
+    # Why a table and not plan steps: a plan step is a unit of EXECUTION and
+    # dies when the plan is replaced or the step is marked done. A directive
+    # is a unit of INTENT and outlives every plan; folding one into the other
+    # is exactly how the six-times-repeated mechanic vanished — it was never
+    # a step in the plan that happened to be active.
+    #
+    # `source` mirrors the Scanned/Manual split that keeps a rescan from
+    # destroying hand annotation: 'user' rows are authored from what the user
+    # actually said and are never rewritten by machinery; 'derived' rows may
+    # be refreshed by tooling. `times_stated` is the repetition count — the
+    # single strongest signal of importance that a plan cannot express.
+    ("v8_directives", """
+        CREATE TABLE IF NOT EXISTS directives (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            project_id    INTEGER NOT NULL REFERENCES projects(id),
+            slug          TEXT    NOT NULL,
+            quote         TEXT    NOT NULL DEFAULT '',
+            demand        TEXT    NOT NULL DEFAULT '',
+            kind          TEXT    NOT NULL DEFAULT 'standing',
+            status        TEXT    NOT NULL DEFAULT 'active',
+            times_stated  INTEGER NOT NULL DEFAULT 1,
+            source        TEXT    NOT NULL DEFAULT 'user',
+            evidence      TEXT    NOT NULL DEFAULT '',
+            first_seen_at TEXT    NOT NULL,
+            last_seen_at  TEXT    NOT NULL,
+            closed_at     TEXT    NOT NULL DEFAULT '',
+            created_at    TEXT    NOT NULL,
+            updated_at    TEXT    NOT NULL
+        )"""),
+    ("v8_directives_slug_idx",
+     "CREATE UNIQUE INDEX IF NOT EXISTS idx_directives_slug "
+     "ON directives (project_id, slug)"),
+    ("v8_directives_status_idx",
+     "CREATE INDEX IF NOT EXISTS idx_directives_status "
+     "ON directives (project_id, status)"),
 ]
 
 
@@ -2547,6 +2592,78 @@ class MemoryDB:
                    WHERE project_id = ?""",
                 (now, now, project_id),
             )
+
+    # ── directives (v8) ──────────────────────────────────────────────────────
+    # A directive is a unit of INTENT and outlives every plan. See the
+    # v8_directives migration comment for why this is not plan steps.
+
+    def upsert_directive(self, project_id, slug, **fields):
+        """Insert-or-update one directive, keyed by (project_id, slug).
+
+        Re-stating an existing directive bumps `times_stated` and refreshes
+        `last_seen_at` rather than creating a second row: the repetition count
+        IS the signal, so it must accumulate on one row. A caller that wants
+        to correct a field passes it explicitly; anything omitted is kept.
+        """
+        now = self._now()
+        allowed = ("quote", "demand", "kind", "status", "times_stated",
+                   "source", "evidence", "closed_at")
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM directives WHERE project_id = ? AND slug = ?",
+                (project_id, slug)).fetchone()
+            if row is None:
+                data = {k: fields.get(k) for k in allowed}
+                conn.execute(
+                    """INSERT INTO directives
+                       (project_id, slug, quote, demand, kind, status,
+                        times_stated, source, evidence, first_seen_at,
+                        last_seen_at, closed_at, created_at, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (project_id, slug,
+                     data["quote"] or "", data["demand"] or "",
+                     data["kind"] or "standing", data["status"] or "active",
+                     int(data["times_stated"] or 1),
+                     data["source"] or "user", data["evidence"] or "",
+                     now, now, data["closed_at"] or "", now, now))
+                return "created"
+            sets, params = [], []
+            for key in allowed:
+                if key in fields and fields[key] is not None:
+                    sets.append(f"{key} = ?")
+                    params.append(fields[key])
+            if "times_stated" not in fields:
+                sets.append("times_stated = times_stated + 1")
+            sets += ["last_seen_at = ?", "updated_at = ?"]
+            params += [now, now, project_id, slug]
+            conn.execute(
+                f"UPDATE directives SET {', '.join(sets)} "
+                "WHERE project_id = ? AND slug = ?", params)
+            return "updated"
+
+    def list_directives(self, project_id, status=None):
+        """Directives for a project, most-repeated first. status=None → all."""
+        sql = "SELECT * FROM directives WHERE project_id = ?"
+        params = [project_id]
+        if status:
+            sql += " AND status = ?"
+            params.append(status)
+        sql += " ORDER BY times_stated DESC, id ASC"
+        with self._connect() as conn:
+            return [dict(r) for r in conn.execute(sql, params).fetchall()]
+
+    def set_directive_status(self, project_id, slug, status, evidence=""):
+        """Close/reopen a directive. Closing without evidence is refused by the
+        CLI layer, not here — the DB records what it is told."""
+        now = self._now()
+        closed = now if status in ("done", "superseded", "dropped") else ""
+        with self._connect() as conn:
+            cur = conn.execute(
+                """UPDATE directives
+                   SET status = ?, closed_at = ?, evidence = ?, updated_at = ?
+                   WHERE project_id = ? AND slug = ?""",
+                (status, closed, evidence, now, project_id, slug))
+            return cur.rowcount
 
     # ── FTS5 search ─────────────────────────────────────────────────────────
 

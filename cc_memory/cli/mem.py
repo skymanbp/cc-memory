@@ -1708,6 +1708,61 @@ def cmd_plan_check(args):
     print("       (c) recommended next action. ≤150 words.')")
 
 
+def cmd_directive_list(args):
+    """Standing user directives, loudest (most-repeated) first."""
+    db, pid, _memory_dir = _plan_db(args.project)
+    status = None if args.status == "all" else args.status
+    rows = db.list_directives(pid, status=status)
+    if not rows:
+        print(f"No {args.status} directives recorded.")
+        print("  Record one: /cc-mem directive-add <slug> --demand '...' "
+              "--quote '<the user's words>'")
+        return
+    print(f"{len(rows)} {args.status} directive(s), most-repeated first:\n")
+    for row in rows:
+        mark = {"active": "[ ]", "done": "[x]"}.get(row["status"], "[~]")
+        print(f"  {mark} {row['slug']}  ×{row['times_stated']}  "
+              f"({row['kind']})")
+        if row.get("demand"):
+            print(f"        {row['demand'][:96]}")
+        if row.get("quote"):
+            print(f"        原话: {row['quote'][:88]}")
+        if row.get("evidence"):
+            print(f"        证据: {row['evidence'][:88]}")
+
+
+def cmd_directive_add(args):
+    """Record a directive. Re-adding the same slug bumps its repetition count
+    rather than creating a second row — the count IS the importance signal."""
+    db, pid, _memory_dir = _plan_db(args.project)
+    fields = {"quote": args.quote, "demand": args.demand, "kind": args.kind}
+    if args.times is not None:
+        fields["times_stated"] = args.times
+    action = db.upsert_directive(pid, args.slug, **fields)
+    row = [r for r in db.list_directives(pid) if r["slug"] == args.slug][0]
+    print(f"[OK] directive {action}: {args.slug} "
+          f"(stated ×{row['times_stated']}, {row['kind']}, {row['status']})")
+
+
+def cmd_directive_close(args):
+    """Close a directive. Evidence is MANDATORY: a directive closed on an
+    assertion is exactly the failure this ledger exists to prevent — the point
+    is not to record that someone believed it was done."""
+    if not args.evidence.strip():
+        print("[FAIL] --evidence is required to close a directive.")
+        print("       Give something checkable: a commit sha, file:line, or "
+              "a gate name. 'done' on its own is what let a demand stated six "
+              "times reach zero implementation.")
+        sys.exit(1)
+    db, pid, _memory_dir = _plan_db(args.project)
+    n = db.set_directive_status(pid, args.slug, args.status,
+                                evidence=args.evidence)
+    if not n:
+        print(f"[FAIL] no directive named {args.slug!r} in this project.")
+        sys.exit(1)
+    print(f"[OK] {args.slug} -> {args.status} (evidence recorded)")
+
+
 def cmd_dashboard(args):
     """Launch the Tkinter dashboard for this project.
 
@@ -2017,6 +2072,33 @@ def make_parser():
     sub.add_parser("plan-check",
                    help="Reset guardian counters + emit subagent invocation hint")
 
+    # ── directive ledger (v2.11.0) ─────────────────────────────────────────
+    # A directive is what the USER asked for; a plan step is what WE decided
+    # to do about it. Keeping them in one table is how a demand stated six
+    # separate times still reached zero implementation unnoticed — it was
+    # never a step in whichever plan happened to be active.
+    pdl = sub.add_parser("directive-list",
+                         help="Standing user directives, most-repeated first")
+    pdl.add_argument("--status", default="active",
+                     choices=["active", "done", "superseded", "dropped", "all"],
+                     help="Filter by status (default: active)")
+    pda = sub.add_parser("directive-add",
+                         help="Record a directive (re-adding bumps its count)")
+    pda.add_argument("slug", help="Stable short id, e.g. pause-on-quota")
+    pda.add_argument("--quote", default="", help="The user's verbatim words")
+    pda.add_argument("--demand", default="", help="What it requires, one line")
+    pda.add_argument("--kind", default="standing",
+                     choices=["standing", "feature", "process", "oneoff"])
+    pda.add_argument("--times", type=int, default=None,
+                     help="Set the repetition count outright (transcript audit)")
+    pdc = sub.add_parser("directive-close",
+                         help="Close a directive — evidence is mandatory")
+    pdc.add_argument("slug")
+    pdc.add_argument("--evidence", default="",
+                     help="Where it landed: commit / file:line / gate name")
+    pdc.add_argument("--status", default="done",
+                     choices=["done", "superseded", "dropped"])
+
     # ── observability + encoding (v2.3) ────────────────────────────────────
     sub.add_parser("inject-show", help="Show what the last SessionStart injected")
     sub.add_parser("inject-usage", help="Deterministic signals: did Claude read the memory?")
@@ -2098,6 +2180,9 @@ def main():
         "plan-show": cmd_plan_show, "plan-status": cmd_plan_status,
         "plan-set": cmd_plan_set, "plan-clear": cmd_plan_clear,
         "plan-replan": cmd_plan_replan, "plan-check": cmd_plan_check,
+        "directive-list": cmd_directive_list,
+        "directive-add": cmd_directive_add,
+        "directive-close": cmd_directive_close,
         "inject-show": cmd_inject_show, "inject-usage": cmd_inject_usage,
         "encoding-check": cmd_encoding_check,
     }

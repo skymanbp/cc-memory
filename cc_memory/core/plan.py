@@ -382,6 +382,101 @@ def raw_pending_refinement(row: Optional[Dict]) -> bool:
     return not str(row.get("last_refined_at") or "").strip()
 
 
+# ── enforcement (v2.11.0) ───────────────────────────────────────────────────
+# Why this exists, stated plainly because the absence of it caused real damage:
+# every piece of plan machinery below was ADVISORY. `raw_pending_refinement`
+# could return True forever while work continued against a stale structured
+# plan, and the Stop hook's own comment said so ("The plan-refiner nudge is
+# advisory"). Measured in the lore_disaster project on 2026-08-15: a 51,237-char
+# raw plan sat unrefined while `plan-status` reported goals from a superseded
+# era, the guardian dutifully drift-checked against that stale baseline, and a
+# full-transcript audit later found a mechanic the user had demanded SIX times
+# with zero implementation. A mechanism nobody is forced to use is a mechanism
+# that does not exist.
+#
+# Two safety properties this MUST keep, or it becomes worse than advisory:
+#   1. It can never brick a session. After _BLOCK_MAX_CONSECUTIVE refusals the
+#      same condition degrades to a loud advisory, so a genuinely stuck state
+#      (a refiner that keeps failing) cannot trap the user in a Stop loop.
+#   2. It only governs projects that OPTED IN by having a live plan at all.
+#      No plan row -> no enforcement, so the 35 other projects on this machine
+#      are untouched until they use the feature.
+# Kill switch: CC_MEMORY_PLAN_ENFORCE=0.
+
+_BLOCK_MAX_CONSECUTIVE = 3
+
+
+def enforcement_enabled() -> bool:
+    """False when the operator has switched enforcement off for this run."""
+    import os
+    return str(os.environ.get("CC_MEMORY_PLAN_ENFORCE", "1")).strip().lower() \
+        not in ("0", "false", "no", "off")
+
+
+def blocking_reasons(plan_row: Optional[Dict],
+                     directives: Optional[list] = None,
+                     stale_turns: int = 25) -> list:
+    """Conditions that should stop the turn, worst first. Empty = let it end.
+
+    `directives` is the v8 ledger (list of rows). A directive is only ever
+    raised here when it is BOTH active and has gone `stale_turns` turns
+    without its status changing — a directive that is merely open is normal
+    work, not a defect; one that nobody has touched for 25 turns while the
+    user stated it repeatedly is the exact shape that went missing.
+    """
+    out = []
+    if not enforcement_enabled():
+        return out
+    if isinstance(plan_row, dict):
+        if raw_pending_refinement(plan_row):
+            out.append((
+                "plan-unrefined",
+                "A raw plan is captured but never refined, so every plan "
+                "reader (PLAN.md, plan-status, the guardian) is answering "
+                "from the PREVIOUS plan.",
+                "Invoke the @plan-refiner subagent on memory/.plan_raw.md, "
+                "then `/cc-mem plan-set --from-refiner` with its JSON.",
+            ))
+        else:
+            should, reason = should_nudge_guardian(plan_row)
+            if should:
+                out.append((
+                    "plan-drift",
+                    f"The live plan has not been drift-checked ({reason}).",
+                    "Run `/cc-mem plan-check`, or invoke @plan-guardian.",
+                ))
+    for row in (directives or []):
+        if row.get("status") != "active":
+            continue
+        if int(row.get("turns_idle") or 0) < stale_turns:
+            continue
+        out.append((
+            f"directive-idle:{row.get('slug')}",
+            f"Directive '{row.get('slug')}' (stated "
+            f"{row.get('times_stated')}x) has shown no progress for "
+            f"{row.get('turns_idle')} turns: {row.get('demand', '')[:120]}",
+            "Either work it, schedule it into the plan, or close it with "
+            f"`/cc-mem directive-close {row.get('slug')} --evidence '...'`.",
+        ))
+    return out
+
+
+def render_block_reason(reasons: list, attempt: int) -> str:
+    """The text shown when the Stop hook refuses. Same four-part shape every
+    time so a reader can locate the failed condition without re-reading the
+    whole message."""
+    lines = ["cc-memory · plan enforcement — this turn cannot close yet.", ""]
+    for key, what, how in reasons:
+        lines += [f"  [{key}]", f"    what : {what}", f"    fix  : {how}", ""]
+    left = _BLOCK_MAX_CONSECUTIVE - attempt
+    if left > 0:
+        lines.append(
+            f"  ({left} more refusal(s) before this degrades to an advisory "
+            "so you can never be trapped; switch off entirely with "
+            "CC_MEMORY_PLAN_ENFORCE=0)")
+    return "\n".join(lines)
+
+
 def render_pending_plan_md(raw: str, superseded: Optional[Dict] = None,
                            meta: Optional[Dict] = None) -> str:
     """PLAN.md body for a raw plan that has not been refined yet.

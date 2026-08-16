@@ -7,6 +7,67 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [2.11.0] — 2026-08-15
+
+### Advisory became enforced, because advisory did not work
+
+The whole plan subsystem was a suggestion. `hooks/stop.py` said so in its own
+comment — *"The plan-refiner nudge is advisory"* — and rate-limited that
+suggestion to once per five turns on top.
+
+What that cost, measured in a real consuming project on 2026-08-15: a
+**51,237-character raw plan sat unrefined** while `PLAN.md`, `plan-status`
+**and the drift guardian** all answered from the PREVIOUS plan. The guardian
+was faithfully drift-checking against a superseded baseline — the one job it
+exists to do, performed against the wrong document. A full-transcript audit of
+**416 deduped user messages** then found a feature demanded **six separate
+times** with zero implementation, and a pause rule stated **three times** that
+was violated the first time it mattered. Nothing detected any of it, because
+nothing was ever forced.
+
+### Added
+
+- **`directives` table (schema v8) + `directive-list` / `directive-add` /
+  `directive-close`.** A ledger of what the USER asked for, deliberately
+  separate from plan steps: a step is a unit of EXECUTION and dies when the
+  plan is replaced or the step is marked done, while a directive is a unit of
+  INTENT that outlives every plan. Folding them together is precisely how the
+  six-times-repeated demand vanished — it was never a step in whichever plan
+  happened to be active. `times_stated` accumulates on ONE row, because
+  repetition is the importance signal a plan cannot express.
+- **`directive-close` refuses without `--evidence`.** A directive closed on an
+  assertion is the exact failure the ledger exists to prevent.
+- **Stop enforcement**: `core.plan.blocking_reasons` +
+  `hooks/stop.py:_emit_block` emit `{"decision": "block", "reason": ...}` when
+  a plan is unrefined, has gone undrift-checked, or an active directive has sat
+  idle past the threshold.
+- **A guaranteed escape from that enforcement.** After
+  `_BLOCK_MAX_CONSECUTIVE` refusals of the *same condition set* it degrades to
+  a loud advisory; `_block_attempt` keys the counter by a digest of the
+  condition keys, so fixing one problem never spends the budget of the next.
+  An unbreakable block is worse than no block. Kill switch:
+  `CC_MEMORY_PLAN_ENFORCE=0`.
+- **`tests/test_directive_enforcement.py`** — 27 checks across the ledger, the
+  blocking predicate, the kill switch and the escape budget, plus a live hook
+  drive proving the wire format reaches the harness and that the budget really
+  releases (`[True, True, True, False, False]` over five consecutive Stops).
+
+### Changed
+
+- Projects with **no plan row are never enforced**, so opting into planning is
+  what turns enforcement on; every other project on the machine is untouched.
+- `cc_mem_block_` registered in `ui/installer.py`'s temp-marker sweep list —
+  every prefix a hook writes must be listed there or those files leak forever.
+
+### Removed
+
+- `_claim_refine_nudge` and its two constants. A rate-limited advisory is what
+  let a plan sit unrefined indefinitely; leaving the helper would keep a
+  second, unreachable policy in the tree. Its `cc_mem_refine_` prefix stays in
+  the uninstall sweep list so older installs still get cleaned.
+
+---
+
 ## [2.10.1] — 2026-08-10
 
 ### The three items v2.10.0 recorded as open, closed

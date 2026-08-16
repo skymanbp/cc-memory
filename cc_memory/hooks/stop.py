@@ -67,14 +67,15 @@ _PROMPT_FILE_PREFIX = "cc_mem_prompt_"
 # `projects.obs_watermark` since v2.8.0 — see _observer_evaluate. The prefix
 # stays in ui/installer.py's sweep list so an uninstall still removes the
 # files an older install wrote.)
-_REFINE_NUDGE_PREFIX = "cc_mem_refine_"
-
-# The plan-refiner nudge is advisory. `needs_refine` is cleared ONLY by
-# plan.apply_refined_plan, so a user who ignores the suggestion (or refines
-# via a path that fails) used to get the same line printed on EVERY Stop
-# forever — measured 5 consecutive Stops -> 5 identical nudges. Rate-limit it
-# instead: never clear needs_refine here, only the refiner may do that.
-_REFINE_NUDGE_COOLDOWN_TURNS = 5
+# (`cc_mem_refine_` was the plan-refiner nudge cooldown until v2.11.0. The
+# nudge was ADVISORY and rate-limited to once per 5 turns, so an unrefined
+# plan produced one quiet line every five turns and nothing else — measured in
+# lore_disaster: a 51,237-char raw plan sat unrefined while PLAN.md,
+# plan-status and the drift guardian all answered from the PREVIOUS plan.
+# Plan state is now ENFORCED at Stop; see _block_attempt / _emit_block and
+# core.plan.blocking_reasons. The prefix stays in ui/installer.py's sweep
+# list so an uninstall still removes files an older install wrote.)
+_BLOCK_STALE_DIRECTIVE_TURNS = 25
 
 # ── LLM wall-clock envelope (v2.5.0) ───────────────────────────────────────
 # hooks/hooks.json gives Stop 22s. TWO bounds, because per-leg timeouts alone
@@ -137,38 +138,85 @@ def _read_turn_count(session_id):
         return 0
 
 
-def _claim_refine_nudge(session_id, turn_count):
-    """Return True at most once per _REFINE_NUDGE_COOLDOWN_TURNS turns.
+# (_claim_refine_nudge lived here until v2.11.0. It rate-limited the
+# plan-refiner ADVISORY to once per 5 turns — and a rate-limited advisory is
+# exactly how a plan sat unrefined indefinitely while every reader answered
+# from the stale structured copy. Enforcement replaced it; the dead helper is
+# deleted rather than left as a second, unreachable policy. Its temp-marker
+# prefix stays registered in ui/installer.py so an uninstall still sweeps what
+# older installs wrote.)
 
-    Uses the same per-session temp-marker idiom as the turn / prompt / eval
-    markers rather than a file under memory/, because anything written there
-    also has to be added to core.progress.MEMORY_GITIGNORE_LINES or it leaks
-    into the user's repo forever (the v2.4.2 lesson).
 
-    `turn_count` is 0 when no UserPromptSubmit has run this session; the
-    marker still records it, so a burst of Stops with no intervening user
-    prompt yields exactly one nudge.
+_BLOCK_MARKER_PREFIX = "cc_mem_block_"
+
+
+def _block_attempt(session_id, keys):
+    """How many times in a row we have refused for THIS exact condition set.
+
+    Keyed by the sorted condition keys, not by a bare counter: when the
+    conditions change the count restarts, so fixing one problem and hitting a
+    different one does not consume the escape budget of the new one. Returns
+    the 1-based attempt number, or None when the marker cannot be read/written
+    (in which case the caller degrades to advisory rather than risk a Stop
+    loop it cannot count).
     """
-    f = marker_path(_REFINE_NUDGE_PREFIX, _safe_id(session_id))
+    import hashlib
+    digest = hashlib.sha256("|".join(sorted(keys)).encode()).hexdigest()[:12]
+    f = marker_path(_BLOCK_MARKER_PREFIX, _safe_id(session_id))
+    prev_digest, prev_n = "", 0
     raw = read_marker(f, "").strip()
-    if raw:
+    if ":" in raw:
         try:
-            last = int(raw)
-            if turn_count - last < _REFINE_NUDGE_COOLDOWN_TURNS:
-                return False
+            prev_digest, n_text = raw.split(":", 1)
+            prev_n = int(n_text)
         except ValueError:
-            # why: corrupt marker — fall through and nudge once, rewriting
-            # the marker below (degrades to "nudge now", never to "nudge
-            # every turn")
-            pass
+            # why: corrupt marker — restart the count rather than inherit a
+            # bogus one; a restarted budget is safe, an inflated one is not.
+            prev_digest, prev_n = "", 0
+    n = prev_n + 1 if prev_digest == digest else 1
     try:
-        write_marker(f, str(turn_count))
+        write_marker(f, f"{digest}:{n}")
     except OSError:
-        # why: cannot persist the cooldown marker (read-only temp). Degrading
-        # to the old every-turn nudge is noisy but harmless; suppressing the
-        # nudge entirely would hide a captured-but-unrefined plan.
-        pass
-    return True
+        # why: cannot persist the attempt count. Blocking without a countable
+        # escape budget could trap the session, so the caller treats None as
+        # "advise, do not block" — the safe direction.
+        return None
+    return n
+
+
+def _idle_directives(db, project_id, idle_turns=25):
+    """Active directives that have gone `idle_turns` turns untouched.
+
+    Idleness is measured from the plan's own turn counter rather than from
+    wall-clock time: a directive is not stale because a week passed, it is
+    stale because many turns of work went by without it moving. Returns rows
+    with `turns_idle` filled in, the shape plan.blocking_reasons expects.
+    """
+    try:
+        rows = db.list_directives(project_id, status="active")
+    except Exception:
+        # why: the v8 table may be absent on a DB an older ccm created and a
+        # newer one has not opened yet. No ledger simply means no directive
+        # conditions — never a crash in the Stop path.
+        return []
+    plan_row = db.get_plan_active(project_id) or {}
+    turns = int(plan_row.get("turns_since_last_guardian") or 0)
+    out = []
+    for row in rows:
+        row = dict(row)
+        row["turns_idle"] = turns
+        out.append(row)
+    return out if turns >= idle_turns else []
+
+
+def _emit_block(reason_text):
+    """Stop-hook refusal. Top-level decision/reason, exit 0 — the shape the
+    harness accepts (verified against the working stop_guard implementation
+    on this machine, not inferred from documentation)."""
+    payload = {"decision": "block", "reason": reason_text}
+    sys.stdout.write(json.dumps(payload, ensure_ascii=False) + "\n")
+    sys.stdout.flush()
+    sys.exit(0)
 
 
 def _observer_evaluate(cwd, session_id, memory_dir):
@@ -408,27 +456,28 @@ def main():
             db.bump_plan_turn_counter(project_id, n=1)
             plan_row = db.get_plan_active(project_id)  # re-read post-bump
 
-            if plan_row.get("needs_refine") and (plan_row.get("raw") or "").strip():
-                # Rate-limited: see _claim_refine_nudge. needs_refine stays 1 —
-                # only plan.apply_refined_plan may clear it.
-                if _claim_refine_nudge(session_id, turn_count):
-                    print(
-                        "[cc-memory.plan] NEW PLAN captured (memory/.plan_raw.md). "
-                        "Invoke @plan-refiner subagent to normalise it, then "
-                        "`/cc-mem plan-set --from-refiner` with the JSON."
-                    )
-            else:
-                should_nudge, reason = plan_mod.should_nudge_guardian(plan_row)
-                if should_nudge:
-                    steps = plan_row.get("structured", {}).get("steps", [])
-                    active_id = plan_row.get("active_step", 0)
-                    n_total = len(steps)
-                    n_done = sum(1 for s in steps if s.get("status") == "done")
-                    print(
-                        f"[cc-memory.plan] guardian check recommended "
-                        f"({reason}) · {n_done}/{n_total} done · "
-                        f"active step #{active_id} · run `/cc-mem plan-check`."
-                    )
+            # v2.11.0: ENFORCED, not advised. The old code printed a
+            # rate-limited nudge and exited 0, which is why a plan could sit
+            # unrefined indefinitely while every reader answered from the
+            # stale structured copy. Only projects with a live plan row reach
+            # here, so projects that never used planning are unaffected.
+            reasons = plan_mod.blocking_reasons(
+                plan_row,
+                _idle_directives(db, project_id, _BLOCK_STALE_DIRECTIVE_TURNS),
+                stale_turns=_BLOCK_STALE_DIRECTIVE_TURNS)
+            if reasons:
+                attempt = _block_attempt(session_id, [r[0] for r in reasons])
+                if attempt is not None and attempt <= plan_mod._BLOCK_MAX_CONSECUTIVE:
+                    _emit_block(plan_mod.render_block_reason(reasons, attempt))
+                # Escape budget spent (or unmarkable temp dir): say so loudly
+                # and let the turn close. A block we cannot count is a block
+                # that could trap the session.
+                print("[cc-memory.plan] " + "; ".join(r[0] for r in reasons)
+                      + " — still unresolved after "
+                      f"{plan_mod._BLOCK_MAX_CONSECUTIVE} refusals; "
+                      "degrading to advisory so you are not trapped.")
+    except SystemExit:
+        raise
     except Exception:
         _log.error_tb("stop hook tail")
         print("\n[cc-memory] stop hook ran (degraded)")
