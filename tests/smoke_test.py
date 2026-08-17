@@ -1091,16 +1091,22 @@ def main():
     # in neither is a gate that exists only in a commit message.
     _dc_gates = ("tests/smoke_test.py", "tests/test_plan_carryover.py",
                  "tests/test_surfaces.py", "tests/test_directive_enforcement.py",
-                 "tools/i18n_check.py",
-                 "tools/citation_check.py", "tools/doc_claims.py")
+                 "tools/i18n_check.py", "tools/citation_check.py",
+                 "tools/doc_claims.py", "tools/doc_coverage.py")
     # every suite/checker on disk must BE on that list — the tuple above is
     # hand-written, and a hand-written list is what went stale. This closes it
     # in the other direction, so a fifth suite cannot be added silently.
+    # DERIVED on both sides. `tools/doc_claims.py` used to be spelled out here
+    # and `tools/doc_coverage.py` would have had to be added by hand next to
+    # it — a hand-kept list of the scripts that check hand-kept lists. Every
+    # tools/*.py is a gate EXCEPT the two the docs explicitly call "not a
+    # gate", so a new checker is picked up by existing to be run at all.
+    _dc_not_gates = {"contracts.py", "falsify_fixes.py"}
     _dc_on_disk = sorted(
         [f"tests/{p.name}" for p in (_REPO / "tests").glob("test_*.py")]
         + ["tests/smoke_test.py"]
-        + [f"tools/{p.name}" for p in (_REPO / "tools").glob("*_check.py")]
-        + ["tools/doc_claims.py"])
+        + [f"tools/{p.name}" for p in (_REPO / "tools").glob("*.py")
+           if p.name not in _dc_not_gates])
     assert set(_dc_on_disk) <= set(_dc_gates), (
         "gate scripts exist on disk but are in no gate list: "
         f"{sorted(set(_dc_on_disk) - set(_dc_gates))}")

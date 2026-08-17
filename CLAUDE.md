@@ -2,7 +2,7 @@
 
 ## Project: cc-memory
 
-**Claude Code persistent memory plugin (v2.11.3)** — anti-patch reconcile-on-write
+**Claude Code persistent memory plugin (v2.11.4)** — anti-patch reconcile-on-write
 + LLM-judged semantic de-duplication, forced PROGRESS.md handoff with
 per-session annotation, live PLAN.md anchor with plan-refiner / plan-guardian
 subagents + mandatory carryover gate, **an enforced directive ledger**, bounded
@@ -10,7 +10,7 @@ transcript reads, injection observability, FTS5 search, AI-judged extraction
 with Haiku (optional local Ollama fallback).
 
 - **Language**: Python 3.8+ (pure stdlib, zero pip dependencies at runtime)
-- **Version**: 2.11.3
+- **Version**: 2.11.4
 - **License**: MIT
 - **Platform**: Windows-primary, cross-platform compatible (Tkinter required for GUI)
 
@@ -30,7 +30,7 @@ why each looked right. **Put a new invariant in CONTRACTS, not only in
 CHANGELOG**: the person about to break it will be reading the specification.
 
 Also: `README.md` stopped claiming cross-platform support "by construction" —
-an intention, not a measurement — and now states what CI runs (all ten gates on
+an intention, not a measurement — and now states what CI runs (all gates on
 Windows and Linux 3.11/3.13) and that macOS is unmeasured.
 
 **Known limit, recorded rather than papered over:** no gate detects an
@@ -917,7 +917,7 @@ cc-memory/
 │   ├── mcp/                     server
 │   └── ui/                      installer, dashboard, web_viewer
 ├── tests/
-│   ├── run_gates.py             ← THE gate runner: one command, all 10 (v2.11.1)
+│   ├── run_gates.py             ← THE gate runner: one command, all 11
 │   ├── smoke_test.py            end-to-end anti-patch + PROGRESS.md +
 │   │                            tier-3 transcript + layout-inspector +
 │   │                            live-plan + i18n gate + bounded-window tests
@@ -1130,15 +1130,15 @@ standalone installs.
 
 ## Tests
 
-**TEN release gates, and there is now ONE command that runs them:**
+**ELEVEN release gates, and there is ONE command that runs them:**
 
 ```bash
-python tests/run_gates.py          # all 10; prints a table, exits nonzero on any red
+python tests/run_gates.py          # all 11; prints a table, exits nonzero on any red
 python tests/run_gates.py --list   # what each gate checks
 python tests/run_gates.py --fast   # skips the 2 slow suites — NOT a release run
 ```
 
-Ten = four suites, three dev checkers, `compileall`, a `tomllib` parse of
+Eleven = four suites, four dev checkers, `compileall`, a `tomllib` parse of
 `pyproject.toml`, and version-site agreement. `tests/smoke_test.py` asserts
 that this section names every gate script, that every suite/checker ON DISK is
 on that list, and that `run_gates.py` actually runs each one — so the list
@@ -1245,7 +1245,18 @@ beneath it, and the boundary is deliberately doubled — environment *and*
 platform-conventional structure — because the sandbox this suite runs in
 redirects the environment.
 
-**Three DOC gates, all inside `smoke_test.py`.** `tools/citation_check.py`
+**FOUR DOC gates.** Three run inside `smoke_test.py`; `tools/doc_coverage.py`
+(v2.11.4) is the fourth and runs standalone, because it asks a different
+question from the other three: they verify the docs that EXIST — a citation
+still points at its symbol, a counted sentence matches the tree, a
+translation is bound to its source — while it asks whether a public surface
+produced any documentation AT ALL. v2.11.2's two schema columns appeared 0
+times in the specification and all ten gates passed. It enumerates schema
+tables, `ALTER`-added columns, MCP tools and config keys from the CODE and
+requires the owning document, in BOTH languages, to name each one.
+Deliberately NOT checked, measured rather than assumed: migration KEYS
+against `CHANGELOG.md` (27 of 29 are absent, and the only remedy would be
+rewriting history entries). `tools/citation_check.py`
 resolves every `file.py:LINE` citation in **all 13** tracked markdown files —
 symbol-anchored where a symbol can be resolved, bounds-checked (inside the
 file, non-blank) where it cannot — and no citation may be unchecked. A second
@@ -1288,7 +1299,7 @@ output.
 
 ```bash
 python tests/run_gates.py
-# THE command. expect: "[OK] all 10 gates green"
+# THE command. expect: "[OK] all 11 gates green"
 # Individually, when you need one gate's own output:
 python tests/smoke_test.py
 # expect: [OK] lines ending with "===== ALL SMOKE TESTS PASSED ====="

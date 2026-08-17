@@ -118,6 +118,8 @@ GATES = [
      [PY, "tools/citation_check.py"], None),
     ("claims",    "prose counts vs the sets computed from the tree",
      [PY, "tools/doc_claims.py"], None),
+    ("coverage",  "every public surface is named by the doc that owns it",
+     [PY, "tools/doc_coverage.py"], None),
 ]
 
 # The two that dominate wall-clock. --fast skips them; a release run must not.

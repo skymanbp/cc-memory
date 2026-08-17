@@ -30,7 +30,7 @@ $ python tests/run_gates.py
 
 ## Checklist
 
-- [ ] `python tests/run_gates.py` is green (all 10 gates — not a `--fast` run)
+- [ ] `python tests/run_gates.py` is green (all 11 gates — not a `--fast` run)
 - [ ] No new pip dependency at runtime; standard library only
 - [ ] Any new hook code cannot raise, cannot write to stderr, and exits 0
 - [ ] Any new SQL is parameterised and scoped by `project_id`

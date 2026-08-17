@@ -1,4 +1,4 @@
-<!-- i18n-source: ARCHITECTURE.md | sha256: 1b80b1dee2a34843 | version: 2.11.3 | translated: 2026-08-17 -->
+<!-- i18n-source: ARCHITECTURE.md | sha256: 1b80b1dee2a34843 | version: 2.11.4 | translated: 2026-08-17 -->
 > [English](ARCHITECTURE.md) · **简体中文**
 
 # cc-memory — 架构

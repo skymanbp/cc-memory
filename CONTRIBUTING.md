@@ -8,7 +8,7 @@ that are actually enforced, because in this repository most of them are.
 ```bash
 git clone https://github.com/skymanbp/cc-memory.git
 cd cc-memory
-python tests/run_gates.py          # all 10 gates; nothing to install first
+python tests/run_gates.py          # all 11 gates; nothing to install first
 ```
 
 There is no `pip install -r requirements.txt` step, and adding one would be a
@@ -65,16 +65,25 @@ defect; several are checked mechanically and will turn a gate red.
 
 ## The documentation gates
 
-Three of the ten gates are documentation gates, and they are the reason this
+Four of the eleven gates are documentation gates, and they are the reason this
 project's prose is trustworthy:
 
 | Gate | What it proves |
 |---|---|
 | `tools/citation_check.py` | Every `file.py:LINE` citation in every tracked markdown file still points at its symbol (or, where no symbol is resolvable, at a real non-blank line) |
 | `tools/doc_claims.py` | A sentence that **counts** something matches the set computed from the tree |
+| `tools/doc_coverage.py` | Every public surface the code exposes — schema tables, `ALTER`-added columns, MCP tools, config keys — is **mentioned at all** by the document that owns it, in both language siblings |
 | `tools/i18n_check.py` | Every `*.zh.md` is bound to a hash of its English source and has not drifted |
 
-Two practical consequences when you write prose:
+The fourth is newer than the others and exists because the first three all
+check the docs that **already exist**. A schema migration landed with its two
+new columns mentioned zero times in the specification, and every gate passed —
+so if you add a table, an `ALTER` column, an MCP tool or a config key, the
+build now fails until the owning document names it. It answers "is this written
+down at all", not "is the prose correct": that second question is not
+mechanical, and a green run should not be read as claiming it.
+
+Three practical consequences when you write prose:
 
 - **Do not enumerate a set in prose.** Name the count, bind it with an HTML
   comment, and point at `python tools/contracts.py` for the members:
@@ -90,6 +99,11 @@ Two practical consequences when you write prose:
 
 - **Fix a stale line number with the tool, not by hand:**
   `python tools/citation_check.py --fix`.
+
+- **A new invariant goes in `docs/CONTRACTS.md`, not only in `CHANGELOG.md`.**
+  The person about to break it will be reading the specification, not the
+  release history. `doc_coverage` can prove the *surface* is mentioned; only
+  you can put the *rule* where it will be found.
 
 If you change an English document, refresh its translation and re-stamp the
 marker:

@@ -1861,6 +1861,25 @@ def _break_r11entryreq(root):
            '')
 
 
+@case("r11doccoverage", ["tools/doc_coverage.py"],
+      "undocument a schema column -> the code exposes a surface no spec mentions")
+def _break_r11doccoverage(root):
+    # THE case this gate was built for, replayed against the real history: the
+    # v9 columns landed with zero mentions in the specification and every one
+    # of the ten gates passed. Removing the sentence v2.11.3 added must now
+    # turn the eleventh red.
+    #
+    # Targets `turns_at_touch`, which appears ONCE in that document.
+    # `turns_total` appears twice (the plan_active row defines it, the
+    # directives row references it), so patching only its definition left the
+    # word present and this case ran GREEN — the gate was right and the
+    # breakage was too small. A substring check is only falsified by removing
+    # every occurrence.
+    _patch(root, "docs/ARCHITECTURE.md",
+           "Carries `turns_at_touch` since `v9_directives_turns_at_touch`",
+           "BREAKAGE: the column is undocumented")
+
+
 def verify_anchors():
     """Count every registered case's breakage anchors WITHOUT running a gate.
 

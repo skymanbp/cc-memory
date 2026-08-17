@@ -7,6 +7,75 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [2.11.4] — 2026-08-17
+
+### The eleventh gate: is it written down at all?
+
+v2.11.3 fixed an undocumented design **by hand** and recorded the class as open:
+*"no gate detects an undocumented design."* This release closes it.
+
+### Added
+
+- **`tools/doc_coverage.py`** — release gate #11. The other three doc gates all
+  verify the documentation that **already exists**: a `file.py:LINE` citation
+  still points at its symbol, a sentence that COUNTS something matches the tree,
+  a translation is bound to a hash of its source. None of them asks whether a
+  new public surface produced any documentation at all — which is why v2.11.2's
+  two schema columns appeared **0 times** in the specification while all ten
+  gates passed.
+
+  It enumerates four surfaces **from the code** and requires the document that
+  owns each one to name every member — in **both** language siblings, because a
+  Chinese reader following the same specification must not be reading a shorter
+  one:
+
+  | surface | enumerated from | must appear in |
+  |---|---|---|
+  | schema tables | `CREATE TABLE` in `core/db.py` | `docs/ARCHITECTURE.md` (+`.zh`) |
+  | schema columns | `ALTER TABLE … ADD COLUMN` | `docs/ARCHITECTURE.md` (+`.zh`) |
+  | MCP tools | `mcp/server.py` advertised schemas | `README.md` (+`.zh`) |
+  | config keys | `cc_memory/config.json` leaves | `README.md` (+`.zh`) |
+
+  38 members, 76 document checks. Columns declared inside the original
+  `CREATE TABLE` are covered by the table itself; an `ALTER` is the shape that
+  arrives **later**, which is exactly when documentation is forgotten.
+
+  Falsified against the real history rather than a constructed case:
+  `falsify --case r11doccoverage` reverts the sentence v2.11.3 added by hand and
+  the gate goes red. Registering it also caught that the first breakage was too
+  small — `turns_total` appears twice in that document, so removing only its
+  definition left the word present and the case ran GREEN. A substring check is
+  falsified only by removing every occurrence.
+
+- The gate-script list `tests/smoke_test.py` asserts is now **derived on both
+  sides**: every `tools/*.py` is a gate except the two the docs explicitly call
+  "not a gate" (`contracts.py`, `falsify_fixes.py`). It previously spelled out
+  `tools/doc_claims.py` by hand — a hand-kept list of the scripts that check
+  hand-kept lists — and `doc_coverage.py` would have had to be added beside it.
+
+### Deliberately not checked, measured rather than assumed
+
+- **Migration KEYS against `CHANGELOG.md`.** Measured before scoping the gate:
+  **27 of 29** keys are absent from it. Requiring them would be a 27-item red
+  gate whose only remedy is rewriting history entries, and this project holds
+  that a history edited to stay current is not a history.
+- **Whether the prose is CORRECT.** This gate answers "is this surface
+  mentioned at all". `doc_claims` covers counted assertions and
+  `citation_check` covers pointers; whether the described *behaviour* is right
+  is not mechanical, and a green run should not be read as claiming it.
+
+### Changed
+
+- Every live "ten gates" claim became eleven — README badge and gate list,
+  `CLAUDE.md`, `CONTRIBUTING.md`, the PR template, and both CI job names.
+  Sentences describing what was true at an earlier release keep their original
+  number; a history edited to stay current is not a history.
+- `CONTRIBUTING.md` gains the rule the gate cannot enforce: **a new invariant
+  goes in `docs/CONTRACTS.md`, not only in `CHANGELOG.md`** — the person about
+  to break it is reading the specification, not the release history.
+
+---
+
 ## [2.11.3] — 2026-08-17
 
 ### The gates were green and the specification was silent

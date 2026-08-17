@@ -21,9 +21,9 @@ concurrency:
 jobs:
   # Windows is this project's primary platform (CLAUDE.md), it is where the
   # gates are developed and verified, and it is the only OS where the whole
-  # set is known to pass. So it runs ALL ten.
+  # set is known to pass. So it runs the WHOLE set.
   full:
-    name: all 10 gates (windows)
+    name: all 11 gates (windows)
     runs-on: windows-latest
     timeout-minutes: 30
     steps:
@@ -46,7 +46,7 @@ jobs:
   # the project: whether cc-memory works on Linux at all. `python3-tk` is the
   # one real dependency those suites need; everything else is standard library.
   linux:
-    name: all 10 gates (linux)
+    name: all 11 gates (linux)
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:

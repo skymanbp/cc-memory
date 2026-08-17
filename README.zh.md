@@ -1,4 +1,4 @@
-<!-- i18n-source: README.md | sha256: c23d8e367f7e7433 | version: 2.11.3 | translated: 2026-08-17 -->
+<!-- i18n-source: README.md | sha256: e44d79672225eabb | version: 2.11.4 | translated: 2026-08-17 -->
 > [English](README.md) · **简体中文**
 
 <div align="center">
@@ -9,11 +9,11 @@
 项目里的决策、结果、缺陷与计划，能挺过上下文压缩、会话边界和关掉的终端——
 并且下一个会话在动手之前会被**强制**先读它们。
 
-[![version](https://img.shields.io/badge/version-2.11.3-blue.svg)](CHANGELOG.md)
+[![version](https://img.shields.io/badge/version-2.11.4-blue.svg)](CHANGELOG.md)
 [![license](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![python](https://img.shields.io/badge/python-3.8%2B-blue.svg)](pyproject.toml)
 [![dependencies](https://img.shields.io/badge/runtime%20deps-0-brightgreen.svg)](#运行要求)
-[![release gates](https://img.shields.io/badge/release%20gates-10-orange.svg)](#发布闸门)
+[![release gates](https://img.shields.io/badge/release%20gates-11-orange.svg)](#发布闸门)
 [![platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg)](#运行要求)
 
 </div>
@@ -258,7 +258,7 @@ Windows 上也可以从 [Releases](https://github.com/skymanbp/cc-memory/release
 | **有界的 LLM 墙钟** | 每个调用 LLM 的钩子都传绝对截止时刻，而不只是单腿超时，因此不可能超出宿主的硬性钩子超时 |
 | **移出阻塞路径** | 整理作为 `PreCompact` 的 `async` 腿在预算闸门下运行，因此永远不会表现为 `Hook cancelled` |
 | **按项目限定作用域** | 每个会碰表的命令都用 `project_id` 限定——一个数据库文件里合法地存着多个项目 |
-| **10 道发布闸门** | 三道文档闸门、四个测试套件、`compileall`、一次 `pyproject` 解析，以及版本站点一致性。见[发布闸门](#发布闸门) |
+| **11 道发布闸门** | 四道文档闸门、四个测试套件、`compileall`、一次 `pyproject` 解析，以及版本站点一致性。见[发布闸门](#发布闸门) |
 | **一份可证伪登记册** | 每条已登记的修复都会在临时副本上被撤销，以证明它的闸门确实会**变红**。一个不可能失败的闸门，就是一个在说谎的闸门 |
 
 ---
@@ -401,7 +401,7 @@ LF 换行——**不需要任何 `PYTHONUTF8` / `PYTHONIOENCODING` 环境变量*
 
 | 键 | 默认值 | 含义 |
 |---|---|---|
-| `version` | `2.11.3` | 给早于 `core/version.py` 的扁平安装的最后兜底；`core/version.py` 才是权威 |
+| `version` | `2.11.4` | 给早于 `core/version.py` 的扁平安装的最后兜底；`core/version.py` 才是权威 |
 | `consolidation.auto_interval_sessions` | `5` | 两次异步整理之间相隔的会话数 |
 | `ccl.enabled` | `false` | 本地 Ollama 兜底——**需显式开启** |
 | `ccl.ollama_url` | `http://localhost:11434` | Ollama 端点 |
@@ -529,7 +529,7 @@ cc-memory/
 
 ### 发布闸门
 
-十道闸门，全部纯标准库——没有 pytest，没有 pip 依赖。一条命令跑完：
+十一道闸门，全部纯标准库——没有 pytest，没有 pip 依赖。一条命令跑完：
 
 ```bash
 python tests/run_gates.py           # 跑全部 10 道，打印表格，任一变红即非零退出
@@ -541,13 +541,14 @@ python tests/run_gates.py --list    # 看每道闸门查什么
 ```bash
 python -m compileall -q cc_memory tests tools
 python -c "import tomllib,pathlib;tomllib.loads(pathlib.Path('pyproject.toml').read_text(encoding='utf-8'))"
-python tests/smoke_test.py                    # 端到端 + 三道文档闸门 + 版本一致性
+python tests/smoke_test.py                    # 端到端 + 它承载的文档闸门 + 版本一致性
 python tests/test_plan_carryover.py           # 结转闸门
 python tests/test_surfaces.py                 # 安装器 · MCP · 查看器 · 退出开关 · 锚定
 python tests/test_directive_enforcement.py    # 指令账本 + Stop 强制执行
 python tools/i18n_check.py                    # 翻译漂移
 python tools/citation_check.py                # 被跟踪文档里的每条 file.py:LINE 引用
 python tools/doc_claims.py                    # 文字里的计数 vs 从代码树算出的集合
+python tools/doc_coverage.py                  # 每个公开面都被拥有它的文档提到
 ```
 
 还有两个脚本**不是**闸门，而是当你怀疑某道闸门时该跑的东西：
@@ -642,7 +643,7 @@ v2.11.1 自身闭合了六个位于"可以拒绝你这一轮"那条代码路径�
 - **PyInstaller** 只在构建可执行文件时需要
 - **Windows**：`python3` 必须能解析到一个 Python 3 解释器（见[故障排查](#故障排查)）
 
-以 Windows 为首要平台开发。**全部十道发布闸门在 CI 上同时跑 Windows 与 Linux
+以 Windows 为首要平台开发。**全部发布闸门在 CI 上同时跑 Windows 与 Linux
 （Python 3.11 与 3.13）**——此前这句话建立在"写的时候就考虑了可移植"之上，而那
 不是证据；直到 v2.11.3 之前 Linux 只跑子集，而"另外两个套件是 Windows 专属"这个
 假设后来被证明是错的。macOS 未被 CI 覆盖：预期可用（与 Linux 演练的是同一套 POSIX

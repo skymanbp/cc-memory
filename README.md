@@ -9,11 +9,11 @@ Your project's decisions, results, bugs and plans survive compaction, session
 boundaries, and closed terminals — and the next session is *forced* to read
 them before it does anything.
 
-[![version](https://img.shields.io/badge/version-2.11.3-blue.svg)](CHANGELOG.md)
+[![version](https://img.shields.io/badge/version-2.11.4-blue.svg)](CHANGELOG.md)
 [![license](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![python](https://img.shields.io/badge/python-3.8%2B-blue.svg)](pyproject.toml)
 [![dependencies](https://img.shields.io/badge/runtime%20deps-0-brightgreen.svg)](#requirements)
-[![release gates](https://img.shields.io/badge/release%20gates-10-orange.svg)](#release-gates)
+[![release gates](https://img.shields.io/badge/release%20gates-11-orange.svg)](#release-gates)
 [![platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg)](#requirements)
 
 </div>
@@ -265,7 +265,7 @@ intent and outlives every plan.
 | **Bounded LLM wall-clock** | Every LLM-calling hook passes an absolute deadline, not just a per-leg timeout, so it cannot overrun the host's hard hook timeout |
 | **Off the blocking path** | Consolidation runs as an `async` PreCompact leg under a budget gate, so it can never surface as `Hook cancelled` |
 | **Scoped to the project** | Every command that touches a table scopes it by `project_id` — one database file legitimately holds several projects |
-| **10 release gates** | Three doc gates, four test suites, `compileall`, a `pyproject` parse, and version-site agreement. See [Release gates](#release-gates) |
+| **11 release gates** | Four doc gates, four test suites, `compileall`, a `pyproject` parse, and version-site agreement. See [Release gates](#release-gates) |
 | **A falsification register** | Every registered fix is reverted on a temporary copy to prove its gate goes **red**. A gate that cannot fail is a gate that is lying |
 
 ---
@@ -410,7 +410,7 @@ something.
 
 | Key | Default | Meaning |
 |---|---|---|
-| `version` | `2.11.3` | Last-resort fallback for a flat install predating `core/version.py`, which is canonical |
+| `version` | `2.11.4` | Last-resort fallback for a flat install predating `core/version.py`, which is canonical |
 | `consolidation.auto_interval_sessions` | `5` | Sessions between async consolidation runs |
 | `ccl.enabled` | `false` | Local Ollama fallback — **opt-in** |
 | `ccl.ollama_url` | `http://localhost:11434` | Ollama endpoint |
@@ -539,11 +539,11 @@ cc-memory/
 
 ### Release gates
 
-Ten gates, all pure stdlib — no pytest, no pip dependencies. Run them all with
+Eleven gates, all pure stdlib — no pytest, no pip dependencies. Run them all with
 one command:
 
 ```bash
-python tests/run_gates.py           # runs all 10, prints a table, exits nonzero on any red
+python tests/run_gates.py           # runs all 11, prints a table, exits nonzero on any red
 python tests/run_gates.py --list    # show what each gate is
 ```
 
@@ -552,13 +552,14 @@ Or individually:
 ```bash
 python -m compileall -q cc_memory tests tools
 python -c "import tomllib,pathlib;tomllib.loads(pathlib.Path('pyproject.toml').read_text(encoding='utf-8'))"
-python tests/smoke_test.py                    # end-to-end + the three doc gates + version agreement
+python tests/smoke_test.py                    # end-to-end + the doc gates it hosts + version agreement
 python tests/test_plan_carryover.py           # the carryover gate
 python tests/test_surfaces.py                 # installer · MCP · web viewer · opt-out · anchoring
 python tests/test_directive_enforcement.py    # the directive ledger + Stop enforcement
 python tools/i18n_check.py                    # translation drift
 python tools/citation_check.py                # every file.py:LINE citation in the tracked docs
 python tools/doc_claims.py                    # prose counts vs the sets computed from the tree
+python tools/doc_coverage.py                  # every public surface is named by the doc that owns it
 ```
 
 Two more scripts are **not** gates, and are the ones to reach for when you
@@ -624,7 +625,7 @@ was written down.** The specification documents had zero mentions of it.
 - Both Chinese siblings updated to match.
 
 Also corrected: this README claimed cross-platform support "by construction",
-which is not evidence. All ten gates now run on Windows **and** Linux (3.11,
+which is not evidence. All release gates now run on Windows **and** Linux (3.11,
 3.13) in CI; macOS remains unmeasured and is now described that way.
 
 ## What's new in v2.11.2
