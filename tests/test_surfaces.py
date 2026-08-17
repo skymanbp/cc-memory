@@ -1878,7 +1878,16 @@ def _mkdirs(base, rel, files=()):
 
 def _roots_ladder(project_root, pin_marker):
     """(a) the ladder over a real filesystem. Returns the case count."""
-    box = Path(tempfile.mkdtemp(prefix="ccm-roots-"))
+    # `.resolve()`, because `core.roots.project_root` resolves its cwd before
+    # walking and therefore always ANSWERS in long form. On a Windows box whose
+    # profile carries an 8.3 short name — GitHub's runner is
+    # `C:\Users\RUNNER~1\...` for `runneradmin` — `tempfile.mkdtemp` hands back
+    # the SHORT spelling, so every expectation below became a different
+    # spelling of the same directory and the ladder compared unequal. The
+    # product is right to normalise; the fixture has to speak the same dialect.
+    # Found by CI on its first run, on a path shape this project's own
+    # development machine cannot produce.
+    box = Path(tempfile.mkdtemp(prefix="ccm-roots-")).resolve()
     cases = []
 
     # THE contract: a directory that already owns a database is NEVER

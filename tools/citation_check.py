@@ -52,7 +52,15 @@ from pathlib import Path
 # nothing at all. "Which docs are gated" is exactly the kind of question that
 # rots silently, so the answer is now "all of them", and `smoke_test.py`
 # asserts this list equals `git ls-files "*.md"`.
+# EVERY tracked markdown file. `smoke_test.py` asserts this list equals
+# `git ls-files "*.md"`, so adding a document without adding it here turns the
+# suite red — which is how the three v2.11.1 additions below were caught, by
+# CI rather than locally: the gates were run BEFORE `git add`, so those files
+# were still untracked and `git ls-files` did not yet see them. Run the gates
+# again after staging, or let CI be the one that notices.
 TRACKED = ["README.md", "README.zh.md", "CLAUDE.md", "CHANGELOG.md",
+           "CONTRIBUTING.md", "SECURITY.md",
+           ".github/PULL_REQUEST_TEMPLATE.md",
            "docs/ARCHITECTURE.md", "docs/ARCHITECTURE.zh.md",
            "docs/CONTRACTS.md", "docs/CONTRACTS.zh.md",
            "commands/cc-mem.md",
