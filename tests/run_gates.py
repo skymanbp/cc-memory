@@ -106,9 +106,23 @@ GATES = [
 _SLOW = {"surfaces", "smoke"}
 
 
-def _run_one(gate) -> tuple[str, int, float, str]:
+# How many trailing lines of a FAILED gate's output to reproduce. One line was
+# not enough: a red `test_surfaces` in CI reported only its LAST print, which
+# happened to be a parenthetical detail from an unrelated passing check, so the
+# actual AssertionError never reached the CI log and the failure could not be
+# diagnosed without re-running by hand. A runner that hides the failure it
+# detected is only half a runner.
+_FAIL_TAIL_LINES = 30
+
+# Substrings that mark the line actually naming a failure, preferred over the
+# last line printed.
+_FAIL_MARKERS = ("Error", "error:", "FAIL", "Traceback", "assert")
+
+
+def _run_one(gate) -> tuple[str, int, float, str, str]:
     key, title, argv, fn = gate
     t0 = time.time()
+    tail = ""
     if fn is not None:
         try:
             rc, detail = fn()
@@ -121,7 +135,13 @@ def _run_one(gate) -> tuple[str, int, float, str]:
         stream = (proc.stdout or "") + (proc.stderr or "")
         lines = [ln for ln in stream.splitlines() if ln.strip()]
         detail = lines[-1][:160] if lines else "(no output)"
-    return key, rc, time.time() - t0, detail
+        if rc != 0:
+            for ln in reversed(lines):
+                if any(m in ln for m in _FAIL_MARKERS):
+                    detail = ln.strip()[:160]
+                    break
+            tail = "\n".join(lines[-_FAIL_TAIL_LINES:])
+    return key, rc, time.time() - t0, detail, tail
 
 
 def main() -> int:
@@ -158,13 +178,14 @@ def main() -> int:
 
     if args.json:
         print(json.dumps([{"gate": k, "rc": rc, "seconds": round(s, 2),
-                           "detail": d} for k, rc, s, d in results], indent=2))
+                           "detail": d} for k, rc, s, d, _t in results],
+                         indent=2))
 
     failed = [r for r in results if r[1] != 0]
     print("\n" + "=" * 78)
     print(f"{'GATE':<11}{'RESULT':<9}{'TIME':>8}   DETAIL")
     print("-" * 78)
-    for key, rc, secs, detail in results:
+    for key, rc, secs, detail, _tail in results:
         print(f"{key:<11}{'PASS' if rc == 0 else 'FAIL':<9}{secs:>7.1f}s   "
               f"{detail[:44]}")
     print("=" * 78)
@@ -174,8 +195,12 @@ def main() -> int:
     if failed:
         print(f"[FAIL] {len(failed)} of {len(selected)} gates RED: "
               f"{', '.join(r[0] for r in failed)}{note}")
-        for key, _rc, _s, detail in failed:
-            print(f"       {key}: {detail}")
+        for key, _rc, _s, detail, tail in failed:
+            print(f"\n──── {key} ──── {detail}")
+            # the red gate's OWN trailing output, so a CI log carries the
+            # failure rather than only the name of the gate that found it
+            for ln in tail.splitlines():
+                print(f"  | {ln}")
         return 1
     print(f"[OK] all {len(selected)} gates green{note}")
     return 0
