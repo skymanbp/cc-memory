@@ -1,4 +1,4 @@
-<!-- i18n-source: README.md | sha256: 938064d36d3a269b | version: 2.11.2 | translated: 2026-08-16 -->
+<!-- i18n-source: README.md | sha256: c23d8e367f7e7433 | version: 2.11.3 | translated: 2026-08-17 -->
 > [English](README.md) · **简体中文**
 
 <div align="center">
@@ -9,7 +9,7 @@
 项目里的决策、结果、缺陷与计划，能挺过上下文压缩、会话边界和关掉的终端——
 并且下一个会话在动手之前会被**强制**先读它们。
 
-[![version](https://img.shields.io/badge/version-2.11.2-blue.svg)](CHANGELOG.md)
+[![version](https://img.shields.io/badge/version-2.11.3-blue.svg)](CHANGELOG.md)
 [![license](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![python](https://img.shields.io/badge/python-3.8%2B-blue.svg)](pyproject.toml)
 [![dependencies](https://img.shields.io/badge/runtime%20deps-0-brightgreen.svg)](#运行要求)
@@ -45,7 +45,7 @@
 - [架构](#架构)
 - [开发](#开发)
 - [故障排查](#故障排查)
-- [v2.11.2 有什么新东西](#v2112-有什么新东西)
+- [v2.11.3 有什么新东西](#v2113-有什么新东西)
 - [文档地图](#文档地图)
 - [许可](#许可)
 
@@ -401,7 +401,7 @@ LF 换行——**不需要任何 `PYTHONUTF8` / `PYTHONIOENCODING` 环境变量*
 
 | 键 | 默认值 | 含义 |
 |---|---|---|
-| `version` | `2.11.2` | 给早于 `core/version.py` 的扁平安装的最后兜底；`core/version.py` 才是权威 |
+| `version` | `2.11.3` | 给早于 `core/version.py` 的扁平安装的最后兜底；`core/version.py` 才是权威 |
 | `consolidation.auto_interval_sessions` | `5` | 两次异步整理之间相隔的会话数 |
 | `ccl.enabled` | `false` | 本地 Ollama 兜底——**需显式开启** |
 | `ccl.ollama_url` | `http://localhost:11434` | Ollama 端点 |
@@ -591,6 +591,24 @@ python scripts/build_exe.py
 
 ---
 
+## v2.11.3 有什么新东西
+
+**文档追上了代码。** v2.11.2 改掉了指令闲置度的量法——那是一次带着承重规则的
+schema 变更——而十道闸门照样全绿，因为它们查的是引用行号、绑定计数和翻译哈希。
+**没有任何一道会问"这个新设计有没有被写下来"。** 规范文档里当时是零处提及。
+
+- `docs/CONTRACTS.md` 的计划契约新增第四条承重性质：闲置度是
+  `turns_total - turns_at_touch`，且**绝不可**改回用会被每次 guardian 检查
+  重置的 `turns_since_last_guardian` 来量。
+- `docs/ARCHITECTURE.md` 的数据库表用其他行已有的"自迁移 X 起带有 Y"格式
+  记录了两个 v9 新列。
+- `commands/cc-mem.md` 说清了对用户而言"闲置"到底怎么算：从**那一条指令**上次
+  被写入起的轮次——重述或关闭它会重置这个时钟，跑 `/cc-mem plan-check` 不会。
+- 两个中文兄弟文件同步更新。
+
+另外更正：本 README 曾声称"按构造跨平台"，那不是证据。现在全部十道闸门在 CI 上
+同时跑 Windows **与** Linux（3.11、3.13）；macOS 仍未被测量，文中已如实说明。
+
 ## v2.11.2 有什么新东西
 
 **v2.11.1 记录为"仍未闭合"的三项，全部闭合——包括它自己糊过去的那一项。**
@@ -624,7 +642,11 @@ v2.11.1 自身闭合了六个位于"可以拒绝你这一轮"那条代码路径�
 - **PyInstaller** 只在构建可执行文件时需要
 - **Windows**：`python3` 必须能解析到一个 Python 3 解释器（见[故障排查](#故障排查)）
 
-以 Windows 为首要平台开发；按构造跨平台，并在 POSIX 路径上全程演练过。
+以 Windows 为首要平台开发。**全部十道发布闸门在 CI 上同时跑 Windows 与 Linux
+（Python 3.11 与 3.13）**——此前这句话建立在"写的时候就考虑了可移植"之上，而那
+不是证据；直到 v2.11.3 之前 Linux 只跑子集，而"另外两个套件是 Windows 专属"这个
+假设后来被证明是错的。macOS 未被 CI 覆盖：预期可用（与 Linux 演练的是同一套 POSIX
+路径），但**没有被测量过**，本文档不会说它被验证过。
 
 ---
 

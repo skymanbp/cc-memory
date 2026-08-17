@@ -9,7 +9,7 @@ Your project's decisions, results, bugs and plans survive compaction, session
 boundaries, and closed terminals — and the next session is *forced* to read
 them before it does anything.
 
-[![version](https://img.shields.io/badge/version-2.11.2-blue.svg)](CHANGELOG.md)
+[![version](https://img.shields.io/badge/version-2.11.3-blue.svg)](CHANGELOG.md)
 [![license](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![python](https://img.shields.io/badge/python-3.8%2B-blue.svg)](pyproject.toml)
 [![dependencies](https://img.shields.io/badge/runtime%20deps-0-brightgreen.svg)](#requirements)
@@ -45,7 +45,7 @@ them before it does anything.
 - [Architecture](#architecture)
 - [Development](#development)
 - [Troubleshooting](#troubleshooting)
-- [What's new in v2.11.2](#whats-new-in-v2112)
+- [What's new in v2.11.3](#whats-new-in-v2113)
 - [Documentation map](#documentation-map)
 - [License](#license)
 
@@ -410,7 +410,7 @@ something.
 
 | Key | Default | Meaning |
 |---|---|---|
-| `version` | `2.11.2` | Last-resort fallback for a flat install predating `core/version.py`, which is canonical |
+| `version` | `2.11.3` | Last-resort fallback for a flat install predating `core/version.py`, which is canonical |
 | `consolidation.auto_interval_sessions` | `5` | Sessions between async consolidation runs |
 | `ccl.enabled` | `false` | Local Ollama fallback — **opt-in** |
 | `ccl.ollama_url` | `http://localhost:11434` | Ollama endpoint |
@@ -604,6 +604,29 @@ See [CONTRIBUTING.md](CONTRIBUTING.md). Security reports: [SECURITY.md](SECURITY
 
 ---
 
+## What's new in v2.11.3
+
+**The documentation caught up with the code.** v2.11.2 changed how directive
+idleness is measured — a schema change with a load-bearing rule attached — and
+the ten gates went green anyway, because they check citation line numbers,
+bound counts and translation hashes. **None of them asks whether a new design
+was written down.** The specification documents had zero mentions of it.
+
+- `docs/CONTRACTS.md` § Plan contract gains the rule as a fourth load-bearing
+  property: idleness is `turns_total - turns_at_touch`, and must never be
+  measured against `turns_since_last_guardian`, which every guardian check
+  resets.
+- `docs/ARCHITECTURE.md` § Database schema documents both v9 columns in the
+  same "carries X since migration Y" form the other rows already use.
+- `commands/cc-mem.md` says what "idle" counts for a user: turns since *that
+  directive* was last written — re-stating or closing it restarts the clock,
+  running `/cc-mem plan-check` does not.
+- Both Chinese siblings updated to match.
+
+Also corrected: this README claimed cross-platform support "by construction",
+which is not evidence. All ten gates now run on Windows **and** Linux (3.11,
+3.13) in CI; macOS remains unmeasured and is now described that way.
+
 ## What's new in v2.11.2
 
 **The three things v2.11.1 recorded as still open, closed — including the one
@@ -626,9 +649,8 @@ it had papered over.**
 
 v2.11.1 itself closed six defects in the code path that can refuse your turn —
 an escape budget that could never release, a stored directive reaching Claude as
-a live authority marker, a refusal whose stdout was not JSON, a cleared plan
-that enforced forever, and more. All of it is in
-**[CHANGELOG.md](CHANGELOG.md)**.
+a live authority marker, a refusal whose stdout was not JSON, and a cleared plan
+that enforced forever.
 
 Every earlier release is in **[CHANGELOG.md](CHANGELOG.md)**, which is the
 single history of this project — this README documents what the software *is*,
@@ -646,8 +668,13 @@ not what it used to be.
 - **Windows**: `python3` must resolve to a Python 3 interpreter (see
   [Troubleshooting](#troubleshooting))
 
-Developed Windows-first; cross-platform by construction and exercised on POSIX
-paths throughout.
+Developed Windows-first. **All ten release gates run on both Windows and Linux
+(Python 3.11 and 3.13) in CI** — that used to be a claim resting on "written to
+be portable", which is not evidence; Linux ran only a subset until v2.11.3, and
+the assumption that the other two suites were Windows-specific turned out to be
+wrong. macOS is not covered by CI: it is expected to work (the same POSIX paths
+Linux exercises) but has not been measured, and this document will not say it
+has.
 
 ---
 

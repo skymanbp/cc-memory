@@ -2,7 +2,7 @@
 
 ## Project: cc-memory
 
-**Claude Code persistent memory plugin (v2.11.2)** — anti-patch reconcile-on-write
+**Claude Code persistent memory plugin (v2.11.3)** — anti-patch reconcile-on-write
 + LLM-judged semantic de-duplication, forced PROGRESS.md handoff with
 per-session annotation, live PLAN.md anchor with plan-refiner / plan-guardian
 subagents + mandatory carryover gate, **an enforced directive ledger**, bounded
@@ -10,9 +10,32 @@ transcript reads, injection observability, FTS5 search, AI-judged extraction
 with Haiku (optional local Ollama fallback).
 
 - **Language**: Python 3.8+ (pure stdlib, zero pip dependencies at runtime)
-- **Version**: 2.11.2
+- **Version**: 2.11.3
 - **License**: MIT
 - **Platform**: Windows-primary, cross-platform compatible (Tkinter required for GUI)
+
+## What changed in v2.11.3 (over v2.11.2)
+
+**A green gate run is not evidence that a design was written down.** v2.11.2
+migrated the schema and attached a load-bearing rule to it; all ten gates
+passed, and `turns_total` / `turns_at_touch` appeared **0 times** in
+`docs/CONTRACTS.md`, `docs/ARCHITECTURE.md`, `commands/cc-mem.md` and both
+Chinese siblings. The doc gates check citation line numbers, bound counts and
+translation hashes — none of them asks whether a new invariant reached the
+specification.
+
+The rule now lives in `docs/CONTRACTS.md` § Plan contract as the fourth
+load-bearing property of a refusal, with the two earlier shapes recorded and
+why each looked right. **Put a new invariant in CONTRACTS, not only in
+CHANGELOG**: the person about to break it will be reading the specification.
+
+Also: `README.md` stopped claiming cross-platform support "by construction" —
+an intention, not a measurement — and now states what CI runs (all ten gates on
+Windows and Linux 3.11/3.13) and that macOS is unmeasured.
+
+**Known limit, recorded rather than papered over:** no gate detects an
+undocumented design. This release fixed the instance by hand; the class is
+open.
 
 ## What changed in v2.11.2 (over v2.11.1)
 

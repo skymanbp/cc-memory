@@ -63,6 +63,14 @@ someone who knows the command exists.
 > so fixing one problem never spends the next one's budget. Kill switch:
 > `CC_MEMORY_PLAN_ENFORCE=0`. A project with no `plan_active` row is never
 > enforced, so opting in is what turns it on.
+>
+> **What "idle" counts (v2.11.2).** Turns since *that directive* was last
+> written, not since the project was last drift-checked: `turns_total`
+> (monotonic, reset by nothing) minus the directive's own `turns_at_touch`.
+> Re-stating a directive or changing its status restarts its clock — those are
+> progress. Running `/cc-mem plan-check` does **not**: it resets the drift
+> counter, and if idleness were measured against that, a guardian check would
+> forgive a directive nobody had touched in thirty turns.
 
 > **Memory quality (v2.3).** `consolidate` now also runs LLM-judged **semantic
 > de-duplication** (same fact reworded across sessions → merged, recoverable via

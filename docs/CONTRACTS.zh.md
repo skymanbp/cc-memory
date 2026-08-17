@@ -1,4 +1,4 @@
-<!-- i18n-source: CONTRACTS.md | sha256: c8a9125c7a9cc4cf | version: 2.11.2 | translated: 2026-08-16 -->
+<!-- i18n-source: CONTRACTS.md | sha256: 8334630342dd7cd5 | version: 2.11.3 | translated: 2026-08-17 -->
 > [English](CONTRACTS.md) · **简体中文**
 
 # cc-memory — 契约（Contracts）
@@ -875,6 +875,23 @@ Stop 钩子调用 `should_nudge_guardian(plan_row)` 时不传任何覆盖值
    （这正是让 `revision` 跨越清除仍单调递增的机制），所以钩子检查的是 `raw` /
    `structured` 非空，而不是这一行是否存在。没有计划的项目永远不会被强制执行，
    这也正是"选择加入"才会开启强制执行的原因。
+4. **指令闲置度用的是一个单调时钟。** `turns_idle` 等于
+   `plan_active.turns_total - directives.turns_at_touch`（都是 v9 新增，都只增
+   不减）。**绝不可**改回用 `turns_since_last_guardian` 来量：`/cc-mem plan-check`
+   和每次计划替换都会把那个计数器清零，于是一条真正三十轮没人碰的指令，只要有人
+   跑一次 guardian 检查就显得刚被照料过——这个账本恰好赦免了它存在意义所在的那种
+   疏忽，而且是静默的，因为"没有指令闲置"和"账本在正常工作"长得一模一样。此前有
+   两种写法都失败过，而且都看着像对的：v2.11.0 拿项目计数器给每条活跃指令打戳
+   （于是几秒前记下的指令就会拦住这一轮），v2.11.1 的"自 guardian 窗口开启以来
+   是否被触碰"守卫修好了那个，却从它仍在读的计数器那里继承了重置问题。可重置的
+   计数器量不了"已流逝的疏忽"；正解是一个永不重置的时钟，而不是对着会重置的那个
+   做更聪明的比较。
+
+   这个戳由 `db.upsert_directive` 与 `db.set_directive_status` **在它们各自的
+   `BEGIN IMMEDIATE` 内部**写入，从数据库读取而不是由调用方提供。不要把它外推给
+   调用方：每个调用方都得知道"闲置以计划轮次计"，而忘掉的那一个会写出一条永远
+   不可能被判为闲置的行。状态变更同样打戳——否则一条被重新打开的指令会立刻"闲置"
+   了它关闭期间流逝的全部轮次。
 
 关闭开关：`CC_MEMORY_PLAN_ENFORCE=0`（`core.plan.enforcement_enabled`）。
 要显式请求一次 guardian 巡检，仍然用 `/cc-mem plan-check`；它会先刷新 PLAN.md

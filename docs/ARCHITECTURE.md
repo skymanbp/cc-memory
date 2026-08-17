@@ -325,8 +325,8 @@ project-local at `<project>/memory/memory.db`, WAL mode:
 | `observations` | Raw PostToolUse events, cleaned up after extraction (`db.py:131`) |
 | `session_summaries` | 6-field structured summary per session (request / investigated / learned / completed / next_steps / notes) + files_read/files_modified (`db.py:144`) |
 | **`progress`** | NEW in v2.1 — single row per project. SOT for `memory/PROGRESS.md` (`db.py:188`). |
-| **`plan_active`** | NEW in v2.2 — single row per project. SOT for `memory/PLAN.md` (`db.py:210`). |
-| **`directives`** | NEW in v2.11.0 — the user-INTENT ledger. `times_stated` accumulates on ONE row per `slug`; a directive outlives every plan, which is why it is not plan steps |
+| **`plan_active`** | NEW in v2.2 — single row per project. SOT for `memory/PLAN.md` (`db.py:210`). Carries `turns_total` since `v9_plan_turns_total`: a MONOTONIC turn count that nothing resets, distinct from `turns_since_last_guardian`, which every guardian check and plan replacement zeroes |
+| **`directives`** | NEW in v2.11.0 — the user-INTENT ledger. `times_stated` accumulates on ONE row per `slug`; a directive outlives every plan, which is why it is not plan steps. Carries `turns_at_touch` since `v9_directives_turns_at_touch` — the value of `turns_total` when it was last written, so idleness is subtraction between two monotonic numbers |
 | `_migrations` | Tracks applied migrations (`db.py:289`) |
 
 Twelve tables, matching `CLAUDE.md` § "Database schema (12 tables)".

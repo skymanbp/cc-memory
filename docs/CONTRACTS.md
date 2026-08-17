@@ -971,6 +971,29 @@ are load-bearing and a change must not break any of them:
    for non-empty `raw`/`structured` rather than for the row's existence. A
    project with no plan is never enforced, which is what makes opting in the
    thing that turns enforcement on.
+4. **Directive idleness is measured on a MONOTONIC clock.** `turns_idle` is
+   `plan_active.turns_total - directives.turns_at_touch` (both v9, both only
+   ever incremented). It must NEVER be measured against
+   `turns_since_last_guardian`: `/cc-mem plan-check` and every plan replacement
+   zero that counter, so a directive genuinely untouched for thirty turns looked
+   freshly attended to the moment anybody ran a guardian check — the ledger
+   forgiving exactly the neglect it exists to surface, and doing it silently,
+   because "no directive is idle" is indistinguishable from "the ledger is
+   working". Two earlier shapes failed here and both looked right: v2.11.0
+   stamped every active directive with the project counter (so a directive
+   recorded seconds ago blocked the turn), and v2.11.1's "touched since the
+   guardian window opened?" guard fixed that while inheriting the reset problem
+   from the counter it still read. A resettable counter cannot measure elapsed
+   neglect; the fix is a clock that never resets, not a cleverer comparison
+   against one that does.
+
+   The stamp is written by `db.upsert_directive` and `db.set_directive_status`
+   **inside their own `BEGIN IMMEDIATE`**, read from the database rather than
+   supplied by the caller. Do not push it out to callers: each would have to
+   know that idleness is counted in plan turns, and the one that forgot would
+   write a row that can never be seen as idle. A status change stamps too — a
+   reopened directive would otherwise be instantly "idle" by however many turns
+   passed while it was closed.
 
 Kill switch: `CC_MEMORY_PLAN_ENFORCE=0` (`core.plan.enforcement_enabled`).
 `/cc-mem plan-check` remains the way to request a guardian sweep explicitly; it

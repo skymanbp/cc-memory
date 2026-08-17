@@ -1,4 +1,4 @@
-<!-- i18n-source: ARCHITECTURE.md | sha256: 6592e6a348ff8695 | version: 2.11.2 | translated: 2026-08-16 -->
+<!-- i18n-source: ARCHITECTURE.md | sha256: 1b80b1dee2a34843 | version: 2.11.3 | translated: 2026-08-17 -->
 > [English](ARCHITECTURE.md) · **简体中文**
 
 # cc-memory — 架构
@@ -294,8 +294,8 @@ SQLite 表（定义在 [`cc_memory/core/db.py`](../cc_memory/core/db.py)），�
 | `observations` | 原始 PostToolUse 事件，抽取后清理（`db.py:131`） |
 | `session_summaries` | 每会话 6 字段结构化摘要（request / investigated / learned / completed / next_steps / notes）+ files_read/files_modified（`db.py:144`） |
 | **`progress`** | v2.1 新增——每项目一行。`memory/PROGRESS.md` 的唯一真相来源（`db.py:188`）。 |
-| **`plan_active`** | v2.2 新增——每项目一行。`memory/PLAN.md` 的唯一真相来源（`db.py:210`）。 |
-| **`directives`** | v2.11.0 新增——用户**意图**账本。`times_stated` 累加在同一 `slug` 的**一行**上；指令的寿命长于任何一份计划，这正是它不能被折叠成计划步骤的原因 |
+| **`plan_active`** | v2.2 新增——每项目一行。`memory/PLAN.md` 的唯一真相来源（`db.py:210`）。自 `v9_plan_turns_total` 起带有 `turns_total`：一个**单调**轮次计数，任何东西都不会重置它；与之相对的 `turns_since_last_guardian` 会被每次 guardian 检查和计划替换清零 |
+| **`directives`** | v2.11.0 新增——用户**意图**账本。`times_stated` 累加在同一 `slug` 的**一行**上；指令的寿命长于任何一份计划，这正是它不能被折叠成计划步骤的原因。自 `v9_directives_turns_at_touch` 起带有 `turns_at_touch`——最后一次写入时的 `turns_total` 值，因此闲置度是两个单调数字相减 |
 | `_migrations` | 记录已应用的迁移（`db.py:289`） |
 
 共十二张表，与 `CLAUDE.md` 的 §“Database schema (12 tables)” 一致。

@@ -7,6 +7,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [2.11.3] — 2026-08-17
+
+### The gates were green and the specification was silent
+
+v2.11.2 changed how directive idleness is measured — a schema migration with a
+load-bearing rule attached — and all ten gates passed. They check that a
+`file.py:LINE` citation still points at its symbol, that a sentence which
+COUNTS something matches the tree, and that each translation is bound to a hash
+of its source. **None of them asks whether a new design was written down at
+all.** Measured after the fact: `turns_total` / `turns_at_touch` appeared 3× in
+`CLAUDE.md` and 2× in this changelog, and **0×** in `docs/CONTRACTS.md`,
+`docs/ARCHITECTURE.md`, `commands/cc-mem.md` or either Chinese sibling.
+
+A contract that lives only in a changelog entry is a contract the next change
+will break, because the person about to break it will be reading the
+specification.
+
+### Changed
+
+- **`docs/CONTRACTS.md` § Plan contract** gains directive idleness as a fourth
+  load-bearing property of a Stop refusal: it is
+  `plan_active.turns_total - directives.turns_at_touch`, and must NEVER be
+  measured against `turns_since_last_guardian`, which `/cc-mem plan-check` and
+  every plan replacement zero. Both earlier shapes are recorded there with why
+  each looked right, and the rule that the stamp is written inside
+  `upsert_directive` / `set_directive_status` rather than supplied by callers.
+- **`docs/ARCHITECTURE.md` § Database schema** documents both v9 columns in the
+  same "carries X since migration Y" form the `projects` and `sessions` rows
+  already use, naming `turns_total` as monotonic and distinguishing it from the
+  resettable drift counter.
+- **`commands/cc-mem.md`** states what "idle" counts for a *user*: turns since
+  that directive was last written; re-stating or closing it restarts the clock,
+  `/cc-mem plan-check` does not.
+- Both `.zh.md` siblings updated to match, markers regenerated.
+- **`README.md` no longer claims cross-platform support "by construction".**
+  That phrasing described an intention, not a measurement. It now states what
+  CI actually runs — all ten gates on Windows and on Linux (3.11, 3.13) — and
+  says plainly that macOS is unmeasured rather than implying otherwise.
+
+### Known limits
+
+- macOS has no CI coverage. It is expected to work (the same POSIX paths the
+  Linux job exercises) and that expectation is not evidence; the documentation
+  now says so instead of rounding it up to "cross-platform".
+- No gate detects an undocumented design. This release fixed the instance by
+  hand; the class remains open, and the honest description of it is that
+  documentation completeness is still a human responsibility here.
+
+---
+
 ## [2.11.2] — 2026-08-17
 
 ### The debts v2.11.1 recorded, paid — including the one it had approximated
