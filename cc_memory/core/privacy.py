@@ -281,6 +281,16 @@ def strip_protected_spans(text: str) -> str:
     return _strip_spans(text)
 
 
+# The two single-family accessors below have NO production caller by design,
+# and an audit that greps for callers will keep re-flagging them, so the reason
+# is recorded here rather than rediscovered: the write path deliberately uses
+# `strip_protected_spans` (both families in ONE pass — see `_strip_spans` for
+# why one pass is load-bearing), and these exist so the suite can prove each
+# family's behaviour SEPARATELY. Without them a regression in one family is
+# only observable through the combined function, where the other family's
+# result can mask it. They are the tested primitives of a combined path, not
+# leftovers — do not delete them for having no caller.
+
 def strip_private(text: str) -> str:
     """Remove all <private>…</private> spans. No tag count cap; fails closed."""
     return _strip_spans(text, (_SPAN_FAMILIES[0],))

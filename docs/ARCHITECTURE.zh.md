@@ -1,7 +1,13 @@
-<!-- i18n-source: ARCHITECTURE.md | sha256: 931420fe3a9384e3 | version: 2.11.0 | translated: 2026-08-15 -->
+<!-- i18n-source: ARCHITECTURE.md | sha256: ecd1974b14b7e643 | version: 2.11.1 | translated: 2026-08-16 -->
 > [English](ARCHITECTURE.md) · **简体中文**
 
-# cc-memory — 架构（v2.9.0）
+# cc-memory — 架构
+
+<!-- 标题里刻意不带版本号。它曾经连着两个发布都写着 "(v2.9.0)"：钉进标题的
+     版本号每次发布都会腐烂，而标题不是可计数断言，没有任何闸门看得住它。
+     权威版本在 `cc_memory/core/version.py`，`tests/run_gates.py` 断言每一个
+     版本站点都与它一致；历史在 CHANGELOG.md。 -->
+
 
 cc-memory 是一个 Claude Code 插件，为 Claude 提供**跨压缩、跨会话的持久化结构化
 记忆**。本文档是总览：这个插件用来做什么、仓库如何布局、哪些钩子在何时触发、数据库
@@ -289,9 +295,10 @@ SQLite 表（定义在 [`cc_memory/core/db.py`](../cc_memory/core/db.py)），�
 | `session_summaries` | 每会话 6 字段结构化摘要（request / investigated / learned / completed / next_steps / notes）+ files_read/files_modified（`db.py:144`） |
 | **`progress`** | v2.1 新增——每项目一行。`memory/PROGRESS.md` 的唯一真相来源（`db.py:188`）。 |
 | **`plan_active`** | v2.2 新增——每项目一行。`memory/PLAN.md` 的唯一真相来源（`db.py:210`）。 |
+| **`directives`** | v2.11.0 新增——用户**意图**账本。`times_stated` 累加在同一 `slug` 的**一行**上；指令的寿命长于任何一份计划，这正是它不能被折叠成计划步骤的原因 |
 | `_migrations` | 记录已应用的迁移（`db.py:289`） |
 
-共十一张表，与 `CLAUDE.md` 的 §“Database schema (11 tables)” 一致。
+共十二张表，与 `CLAUDE.md` 的 §“Database schema (12 tables)” 一致。
 
 此外还有 `memories_fts`——一个建立在 `memories` 之上的 FTS5 虚拟表
 （`core/db.py:455-458`），由三个触发器保持同步（`core/db.py:459-478`，迁移 `v2_fts5` 在
@@ -382,7 +389,7 @@ regenerate_memory_index(db, project_id, memory_dir)   ← MEMORY.md 刷新
   所有钩子调用方都会传（`pre_compact.py:435`、`stop.py:166`、
   `session_start.py:1056`）；同步 PreCompact 支路还会在其余状态变更之后再刷一次
   （`pre_compact.py:782`）。
-- 单发调用方显式调用 `regenerate_memory_index`：`cli/mem.py:1089` 与 `:584`、
+- 单发调用方显式调用 `regenerate_memory_index`：`cli/mem.py:1099` 与 `:584`、
   `mcp/server.py:644`、`ui/dashboard.py:1664`、`ui/web_viewer.py:65`，外加
   `skills/ccm-load` 的内联脚本（`skills/ccm-load/SKILL.md:308, 318`）。
   `core/idle.py:96` 与 `hooks/consolidate_async.py:188` 也会在维护之后刷新它。
@@ -475,9 +482,9 @@ SessionStart：
 ```
 
 上面的调用签名都是真实的：`write_progress_md(db, project_id, memory_dir)`
-（`core/progress.py:331-490`；调用点 `pre_compact.py:751`、`stop.py:373`、
+（`core/progress.py:331-490`；调用点 `pre_compact.py:751`、`stop.py:406`、
 `user_prompt.py:133`、`session_start.py:912`、`mcp/server.py:243`、
-`cli/mem.py:1179`）。PROGRESS.md 的结构规格见
+`cli/mem.py:1189`）。PROGRESS.md 的结构规格见
 [docs/CONTRACTS.md](CONTRACTS.md#handoff-contract)。
 
 ### 被杀运行检测（v2.4.2）
@@ -538,7 +545,7 @@ transcript 得到 0 条腿、0 条记忆。第 3 级从
 `DROP TABLE`、`npm publish`、`kubectl apply`、`terraform apply`……见
 `core.plan.is_sensitive_tool_call`，`plan.py:1231-1254`）一次加 20。一旦
 `turns_since_last_guardian >= 8` 或 `edits_since_last_guardian >= 12`，Stop 钩子
-就发出 guardian 建议（`core.plan.should_nudge_guardian`，`plan.py:1195-1211`），并把
+就发出 guardian 建议（`core.plan.should_nudge_guardian`，`plan.py:1231-1247`），并把
 refiner 提示限速为每会话每 5 个回合至多一次。钩子自己绝不派生子代理——它们只提示。
 完整规格见 [docs/CONTRACTS.md](CONTRACTS.md#plan-contract)。**自 v2.5 起，上面的
 每一条分支在每种模式下都会运行**——此前遮蔽它们的是什么，见
@@ -867,7 +874,7 @@ home 边界是双份的：环境所声称的（`HOME`/`USERPROFILE`/`Path.home()
     ├── core/  hooks/  llm/  cli/  mcp/  ui/
 ```
 
-**独立安装器（扁平）**——`_copy_subpackages(TARGET_DIR)` 把每一个 `SUBPACKAGE_FILES`
+**独立安装器（FLAT）**——`_copy_subpackages(TARGET_DIR)` 把每一个 `SUBPACKAGE_FILES`
 键（`installer.py:72`）直接写到 `TARGET_DIR`（`installer.py:72`）之下，
 **没有 `cc_memory/` 这一段**，并且 `_make_hooks_config` 把命令构造成
 `python "<TARGET_DIR>/hooks/<name>.py"`：
@@ -877,12 +884,12 @@ home 边界是双份的：环境所声称的（`HOME`/`USERPROFILE`/`Path.home()
 ├── __init__.py
 ├── config.json
 ├── installed_surfaces.json  ← 写进了 ~/.claude 的东西（v2.5）
-├── core/    auth.py consolidate.py db.py encoding_setup.py extractor.py
-│            idle.py logger.py modes.py plan.py privacy.py progress.py
-│            version.py
-├── hooks/   consolidate_async.py post_tool_use.py pre_compact.py
+├── core/    atomic.py auth.py consolidate.py db.py encoding_setup.py
+│            extractor.py idle.py logger.py markers.py modes.py plan.py
+│            privacy.py progress.py roots.py textsim.py version.py
+├── hooks/   _entry.py consolidate_async.py post_tool_use.py pre_compact.py
 │            session_start.py stop.py user_prompt.py
-├── llm/     ccl_backend.py memory_writer.py
+├── llm/     ccl_backend.py memory_writer.py parse.py
 ├── cli/     mem.py plan.py
 ├── mcp/     server.py
 ├── ui/      dashboard.py installer.py web_viewer.py

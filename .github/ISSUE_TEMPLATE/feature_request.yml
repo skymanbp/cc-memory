@@ -1,0 +1,38 @@
+name: Feature request
+description: Propose a capability cc-memory does not have
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: >
+        What goes wrong today, concretely. A proposal that starts from a
+        solution rather than a measured problem is very hard to evaluate.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you would like it to do
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: What you tried instead
+      description: Existing subcommands, config keys, or workarounds, and why they fall short.
+
+  - type: checkboxes
+    id: constraints
+    attributes:
+      label: Constraints this project holds
+      description: >
+        These are hard rules (see CONTRIBUTING.md). Confirm the proposal can
+        live inside them, or say in the box above why it cannot.
+      options:
+        - label: It needs no pip dependency at runtime (standard library only)
+        - label: It does not make a hook able to hang, raise, or write to stderr
+        - label: It does not add a config key without a reader

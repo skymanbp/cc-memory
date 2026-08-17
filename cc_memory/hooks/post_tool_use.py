@@ -103,15 +103,22 @@ def _apply_plan_integration(db, project_id, cwd, tool_name, tool_input):
                 db, project_id, raw_plan, memory_dir=memory_dir
             )
 
+    # `is_live_plan`, NOT the row's truthiness. `clear_plan_active` keeps a
+    # TOMBSTONE row by design (it is what keeps `revision` monotonic across
+    # clears), so every `if db.get_plan_active(...)` in this file went on
+    # firing after the user explicitly dropped their plan: TodoWrite kept
+    # syncing steps into an empty structure and both counters kept accruing
+    # against a plan that no longer existed — which is what later made the
+    # Stop hook refuse turns citing drift from nothing.
     elif tool_name == "TodoWrite":
         todos = tool_input.get("todos", []) if isinstance(tool_input, dict) else []
-        if todos and db.get_plan_active(project_id):
+        if todos and plan_mod.is_live_plan(db.get_plan_active(project_id)):
             plan_mod.apply_todowrite_sync(
                 db, project_id, todos, memory_dir=memory_dir
             )
 
     elif tool_name in ("Edit", "Write", "MultiEdit", "NotebookEdit"):
-        if db.get_plan_active(project_id):
+        if plan_mod.is_live_plan(db.get_plan_active(project_id)):
             db.bump_plan_edit_counter(project_id, n=1)
 
     # Sensitive tool calls (git push, rm -rf, drop table, deploys, ...)
@@ -119,7 +126,7 @@ def _apply_plan_integration(db, project_id, cwd, tool_name, tool_input):
     # the same drift risk as ~20 ordinary edits", so the next Stop hook
     # will surface a guardian-recommendation line immediately.
     if plan_mod.is_sensitive_tool_call(tool_name, tool_input):
-        if db.get_plan_active(project_id):
+        if plan_mod.is_live_plan(db.get_plan_active(project_id)):
             db.bump_plan_edit_counter(project_id, n=20)
 
 

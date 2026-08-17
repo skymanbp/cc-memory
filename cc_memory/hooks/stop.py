@@ -174,9 +174,18 @@ def _block_attempt(session_id, keys):
             # bogus one; a restarted budget is safe, an inflated one is not.
             prev_digest, prev_n = "", 0
     n = prev_n + 1 if prev_digest == digest else 1
-    try:
-        write_marker(f, f"{digest}:{n}")
-    except OSError:
+    # write_marker NEVER RAISES — its docstring says so in its first line, and
+    # all three of its failure paths `return False`. The `except OSError` that
+    # used to sit here was therefore dead code and the return value was
+    # discarded, which inverted this function's entire contract: on a marker
+    # directory `core.markers` refuses (a mode-1777 temp root, a planted
+    # reparse point, a read-only temp) nothing persisted, every later read came
+    # back empty, `n` was 1 forever, and the escape budget NEVER released —
+    # measured [1,1,1,1,1,1,1,1] over eight consecutive Stops, i.e. a session
+    # that can no longer end. "An unbreakable block is worse than no block" is
+    # the invariant this line exists to hold, so the failure must be OBSERVED,
+    # not merely handled in a shape that cannot fire.
+    if not write_marker(f, f"{digest}:{n}"):
         # why: cannot persist the attempt count. Blocking without a countable
         # escape budget could trap the session, so the caller treats None as
         # "advise, do not block" — the safe direction.
@@ -191,6 +200,14 @@ def _idle_directives(db, project_id, idle_turns=25):
     wall-clock time: a directive is not stale because a week passed, it is
     stale because many turns of work went by without it moving. Returns rows
     with `turns_idle` filled in, the shape plan.blocking_reasons expects.
+
+    TOUCHED-SINCE guard: the counter is a PROJECT clock, so stamping every
+    active directive with it reported a directive recorded ten seconds ago as
+    "no progress for 40 turns" — and blocked the turn over it. A directive is
+    only idle if it has not been touched since the current guardian window
+    OPENED (`plan_active.last_guardian_at`, or the plan's own `created_at`
+    when no guardian check has ever run). Both columns and `last_seen_at` are
+    written by the same `_now()`, so the comparison is between like clocks.
     """
     try:
         rows = db.list_directives(project_id, status="active")
@@ -201,12 +218,28 @@ def _idle_directives(db, project_id, idle_turns=25):
         return []
     plan_row = db.get_plan_active(project_id) or {}
     turns = int(plan_row.get("turns_since_last_guardian") or 0)
+    if turns < idle_turns:
+        return []
+    window_start = str(plan_row.get("last_guardian_at") or "") \
+        or str(plan_row.get("created_at") or "")
     out = []
     for row in rows:
         row = dict(row)
+        touched = str(row.get("last_seen_at") or "")
+        # `>=`, not `>`: `MemoryDB._now()` stamps WHOLE SECONDS, so a directive
+        # recorded in the same second the window opened compares EQUAL, and a
+        # strict `>` reported it as idle — which is the exact false block this
+        # guard exists to remove (caught by §5(c) of the enforcement gate, not
+        # by review). Equality resolves toward "not idle": failing to block is
+        # recoverable, blocking a turn over a directive the user just stated is
+        # the failure that makes people switch enforcement off.
+        if window_start and touched >= window_start:
+            # stated or amended inside this very window — that is progress,
+            # not silence, and it is the case that produced false blocks.
+            continue
         row["turns_idle"] = turns
         out.append(row)
-    return out if turns >= idle_turns else []
+    return out
 
 
 def _emit_block(reason_text):
@@ -434,33 +467,44 @@ def main():
         db.tag_progress_session(project_id, session_id)
         _patch_progress_from_recent_obs(db, project_id, memory_dir)
 
-        # Compact status line for Claude (one line, every turn)
+        # Compact status line for Claude (one line, every turn).
+        #
+        # BUILT, NOT PRINTED YET. When this hook refuses a turn it must write
+        # a JSON DOCUMENT to stdout and nothing else — `{"decision": "block"}`
+        # preceded by a human status line is not JSON, and a harness that
+        # parses stdout as JSON sees no decision at all, which silently
+        # restores the advisory-that-never-fires this release exists to end.
+        # So enforcement is evaluated FIRST and the status line is emitted
+        # only on the path where the turn is allowed to close.
         stats = db.get_stats(project_id)
         n_obs = db.get_observation_count(project_id)
-        print(
+        status_line = (
             f"\n[cc-memory] {stats['n_memories']} memories"
             f" | {n_obs} obs"
             f" | {stats.get('n_topics', 0)} topics"
             f" | PROGRESS.md fresh"
         )
+        advisory = ""
 
-        # Job 4 (v2.2): live plan nudges. Two kinds, mutually exclusive:
-        #   (a) a raw plan was captured but not yet refined → suggest refiner
-        #   (b) drift counters crossed thresholds → suggest guardian check
-        # Both emit a SINGLE extra status line. We do NOT force-reminder
-        # via <system-reminder> here — that's the SessionStart's job; the
-        # Stop hook stays in "advisory" tone.
+        # Job 4: live plan enforcement.
+        # v2.11.0: ENFORCED, not advised. The old code printed a rate-limited
+        # nudge and exited 0, which is why a plan could sit unrefined
+        # indefinitely while every reader answered from the stale structured
+        # copy.
         plan_row = db.get_plan_active(project_id)
-        if plan_row:
+        # A TOMBSTONE IS NOT A PLAN. `clear_plan_active` deliberately keeps the
+        # row (it is what keeps `revision` monotonic across clears and closes
+        # the CAS ABA window) with raw='' and structured=''. A bare truthiness
+        # test therefore kept enforcing on a project whose plan the user had
+        # explicitly dropped: the counter kept accruing and the turn was
+        # refused every 8 turns, demanding a drift check against a plan that no
+        # longer exists. Only projects with a LIVE plan are enforced, which is
+        # also what makes opting in the thing that turns enforcement on.
+        if plan_mod.is_live_plan(plan_row):
             # Always bump turn counter so guardian thresholds accrue
             db.bump_plan_turn_counter(project_id, n=1)
             plan_row = db.get_plan_active(project_id)  # re-read post-bump
 
-            # v2.11.0: ENFORCED, not advised. The old code printed a
-            # rate-limited nudge and exited 0, which is why a plan could sit
-            # unrefined indefinitely while every reader answered from the
-            # stale structured copy. Only projects with a live plan row reach
-            # here, so projects that never used planning are unaffected.
             reasons = plan_mod.blocking_reasons(
                 plan_row,
                 _idle_directives(db, project_id, _BLOCK_STALE_DIRECTIVE_TURNS),
@@ -468,14 +512,17 @@ def main():
             if reasons:
                 attempt = _block_attempt(session_id, [r[0] for r in reasons])
                 if attempt is not None and attempt <= plan_mod._BLOCK_MAX_CONSECUTIVE:
+                    # ONLY the JSON document reaches stdout on this path.
                     _emit_block(plan_mod.render_block_reason(reasons, attempt))
                 # Escape budget spent (or unmarkable temp dir): say so loudly
                 # and let the turn close. A block we cannot count is a block
                 # that could trap the session.
-                print("[cc-memory.plan] " + "; ".join(r[0] for r in reasons)
-                      + " — still unresolved after "
-                      f"{plan_mod._BLOCK_MAX_CONSECUTIVE} refusals; "
-                      "degrading to advisory so you are not trapped.")
+                advisory = ("\n[cc-memory.plan] "
+                            + "; ".join(r[0] for r in reasons)
+                            + " — still unresolved after "
+                            f"{plan_mod._BLOCK_MAX_CONSECUTIVE} refusals; "
+                            "degrading to advisory so you are not trapped.")
+        print(status_line + advisory)
     except SystemExit:
         raise
     except Exception:

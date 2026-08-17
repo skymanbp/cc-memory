@@ -38,6 +38,24 @@ projects.json
 
 .ce/
 
+# Dotted directories are per-user tool state by default, so ignore them
+# wholesale — BUT re-include the two that ARE the product. `.*/` on its own
+# swallowed both, and did it silently: `.github/` went to 0 tracked files and
+# vanished from `git status` entirely (the release-gate CI would simply never
+# have been committed), and every FUTURE file under `.claude-plugin/` — the
+# manifest that makes this a Claude Code plugin at all — would have been
+# dropped the same way. The two existing manifest files survived only because
+# they were already tracked, which is the worst kind of survival: it looks
+# fine until someone adds the third file.
+#
+# Same lesson as the /memory/ block above, one pattern later: an unanchored
+# blanket hides its own damage. A negation only works because git can still
+# DESCEND into a re-included directory — `!.github/` re-includes the directory
+# itself, not just its contents, and that ordering is load-bearing.
+.*/
+!.github/
+!.claude-plugin/
+
 # cc-tree audit output — working evidence for the v2.8.0 audit rounds
 # (adjudications, raw candidate JSON, the convergence report). Excluded by
 # user ruling (2026-08-09): the release notes carry the narrative inline,

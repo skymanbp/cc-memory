@@ -1,965 +1,391 @@
 > **English** · [简体中文](README.zh.md)
 
+<div align="center">
+
 # cc-memory
 
-**Claude Code persistent memory plugin (v2.10.1)** — anti-patch reconcile-on-write
-with LLM-judged semantic de-duplication, forced PROGRESS.md handoff, live PLAN.md
-anchor with plan-refiner / plan-guardian subagents and a mandatory carryover
-gate, bounded transcript reads, injection observability, FTS5 search, AI-judged
-extraction with Haiku (optional local Ollama fallback).
+**Persistent memory for Claude Code.**
+Your project's decisions, results, bugs and plans survive compaction, session
+boundaries, and closed terminals — and the next session is *forced* to read
+them before it does anything.
+
+[![version](https://img.shields.io/badge/version-2.11.1-blue.svg)](CHANGELOG.md)
+[![license](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+[![python](https://img.shields.io/badge/python-3.8%2B-blue.svg)](pyproject.toml)
+[![dependencies](https://img.shields.io/badge/runtime%20deps-0-brightgreen.svg)](#requirements)
+[![release gates](https://img.shields.io/badge/release%20gates-10-orange.svg)](#release-gates)
+[![platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg)](#requirements)
+
+</div>
+
+---
+
+## Table of contents
+
+- [The problem](#the-problem)
+- [How it works in 60 seconds](#how-it-works-in-60-seconds)
+- [Quick start](#quick-start)
+- [Feature index](#feature-index)
+  - [1 · Memory capture](#1--memory-capture)
+  - [2 · Memory quality — the anti-patch contract](#2--memory-quality--the-anti-patch-contract)
+  - [3 · Session handoff — PROGRESS.md](#3--session-handoff--progressmd)
+  - [4 · Plan and intent — PLAN.md and the directive ledger](#4--plan-and-intent--planmd-and-the-directive-ledger)
+  - [5 · Search and retrieval](#5--search-and-retrieval)
+  - [6 · Interfaces](#6--interfaces)
+  - [7 · Privacy and safety](#7--privacy-and-safety)
+  - [8 · Reliability engineering](#8--reliability-engineering)
+- [Reference](#reference)
+  - [`/cc-mem` — 32 subcommands](#cc-mem--32-subcommands)
+  - [`cc-memory-plan` — the plan queue](#cc-memory-plan--the-plan-queue)
+  - [MCP tools](#mcp-tools)
+  - [Configuration](#configuration)
+  - [Per-project files](#per-project-files)
+  - [Database schema](#database-schema)
+  - [Hook table](#hook-table)
+- [Architecture](#architecture)
+- [Development](#development)
+- [Troubleshooting](#troubleshooting)
+- [What's new in v2.11.1](#whats-new-in-v2111)
+- [Documentation map](#documentation-map)
+- [License](#license)
+
+---
+
+## The problem
+
+Claude Code **compacts** a conversation when the context window fills. Whatever
+was in the discarded turns is gone: the decision you made three hours ago, the
+benchmark number you measured, the bug you already fixed once, the constraint
+you stated and had to state again. Sessions that simply end — terminal closed,
+laptop shut — lose the same thing, silently.
+
+The usual workarounds do not survive contact with a long project:
+
+| Workaround | Why it fails |
+|---|---|
+| A hand-written `NOTES.md` | Nobody updates it under deadline; it goes stale and starts lying |
+| Pasting context back in each session | Manual, lossy, and costs the tokens you were trying to save |
+| Bigger context windows | Delays the compaction; does not remove it |
+| Append-only memory files | The same fact gets restated every session and stacks up; the file becomes noise |
+
+cc-memory attacks all four. It captures structured memories at every
+conversation boundary, **reconciles** each new fact against what is already
+stored instead of appending, and emits a `<system-reminder>` at session start
+that requires the next Claude to read the handoff document **before** it
+responds.
+
+---
+
+## How it works in 60 seconds
+
+```
+┌──────────────────────── your Claude Code session ────────────────────────┐
+│                                                                          │
+│  UserPromptSubmit ──▶ create memory/ on first contact, count the turn,    │
+│                       seed "what the user asked for" on turn 1           │
+│                                                                          │
+│  PostToolUse     ──▶ live plan anchor (ExitPlanMode → captured plan,      │
+│                       TodoWrite → step sync, edits → drift counters)      │
+│                       + one observation row per observed tool call        │
+│                                                                          │
+│  Stop            ──▶ Haiku reads this turn's observations and writes      │
+│                       memories · patches PROGRESS.md · enforces the plan  │
+│                                                                          │
+│  PreCompact      ──▶ sync leg  : extract from a bounded transcript window │
+│                       → reconcile → FULL-REWRITE PROGRESS.md → archive    │
+│                       async leg: LLM consolidation, off the blocking path │
+│                                                                          │
+│  SessionStart    ──▶ inject topics + critical memories + timeline, then   │
+│                       FORCE: "Read memory/PROGRESS.md before responding"  │
+└──────────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+                     <project>/memory/memory.db   (SQLite + FTS5)
+                     <project>/memory/PROGRESS.md (handoff, full-rewrite)
+                     <project>/memory/PLAN.md     (live plan anchor)
+                     <project>/memory/MEMORY.md   (browsable index)
+```
 
-## What it solves
+Everything is **project-local**. `memory/` lives inside your repository, is
+git-ignored by a `.gitignore` cc-memory writes itself, and never leaves your
+machine except for the extraction call to Anthropic (which you can scope with
+`<private>` tags, or switch off per-project entirely).
 
-Claude Code compresses (compacts) conversations when the context window fills up,
-causing information loss: decisions, results, todos, and project knowledge
-disappear. Conversations that end normally (terminal closed) also lose context.
+---
 
-cc-memory captures structured memories at every conversation boundary AND
-**forces the next session to read a handoff document** before it starts work.
+## Quick start
 
-## What's new in v2.10.1
-
-The three items v2.10.0 recorded as open are closed: the dashboard's two
-remaining highest-complexity cores are now **pure staticmethods driven
-headlessly by the test suite** (the Progress/Plan renderer with its marker
-escaping, and the LLM tidy-verdict normaliser — their Tk callbacks keep only
-widget plumbing), the contracts registries **fail loud** if the shared hook
-gate ever stops delegating to the opt-out (instead of listing six hooks as
-protected by a gate that is not one), and the codex confirmation verdict on
-the v2.10.0 guard fix came back **CONFIRMED-CLOSED**. Falsify registry
-149 → 151, both new cases verified red.
-
-## What's new in v2.10.0
-
-**An anti-bloat architecture round.** Every function in the tree was measured
-(LOC + cyclomatic complexity, against the v2.5.0 baseline) to answer one
-question: had five convergence rounds of fixes accreted into patch-on-patch
-bloat? The verdict: the growth is overwhelmingly *mechanism* with a measured
-defect behind every guard — except ONE real structural duplication, now fixed:
-
-- **The six hooks each hand-rolled the same entry ladder** (stdin read → JSON
-  parse → object check → opt-out on the RAW cwd → root anchor), ~350 lines of
-  six-way copies whose every historical drift shipped as a defect. The ladder
-  now lives once in `hooks/_entry.py`; per-hook policies (coerce vs abort,
-  the NUL check, excluded-branch reactions) stay per-hook. `test_surfaces` §4
-  gained a narrow-exclusion drive (a listed subdirectory inside a live
-  project — the case an ordering inversion silently breaks), §7 asserts the
-  order once inside the gate, and `falsify_fixes --case r10entryorder` proves
-  the inversion turns the suite red.
-
-What was deliberately NOT refactored is on record too (CLAUDE.md § v2.10.0):
-the dashboard's three highest-complexity functions stay untouched because
-they have zero executable coverage, and refactoring an untested 2.9k-line GUI
-is the exact "each fix breeds two bugs" failure mode this round exists to
-avoid.
-
-## What's new in v2.9.0
-
-**Two independent readers went over the shipped v2.8.0 tree at once**, with
-disjoint file sets and different angles: a six-scope fan-out of my own (with
-adversarial refutation of the severe findings) and a read-only pass by codex
-over the whole runtime package. 18 defects survived being **reproduced here**
-before they counted; two were refuted and dropped.
-
-The ones worth knowing about as a user:
-
-- **A memory's history could be truncated.** Archiving a row that already
-  carried a supersede link OVERWROTE that link, so the version it replaced
-  became unreachable from every chain walk — while `/cc-mem supersedes` still
-  printed the result under "newest first". The link is now written with
-  `COALESCE`: first fact wins, the second goes to the log.
-- **`/cc-mem` leaked across projects in a shared database file.** One
-  `memory.db` legitimately holds several project rows (a directory rename
-  makes one; copying a `memory/` between repos makes one). `encoding-check
-  --apply` **archived** the other project's rows, `supersedes` printed the
-  other project's memory into the Claude session, and `sessions` / `keywords`
-  listed it. All four are scoped now; `archive` always was.
-- **A reinstall deleted your own hooks.** If one of your `settings.json` hook
-  entries shared a matcher group with a cc-memory entry, the install path
-  dropped the whole group — rc=0, no warning. The uninstall path had been
-  fixed for this and the install path had not.
-- **On a machine with no `settings.json` yet, the installer's compare-and-swap
-  was entirely disarmed**, so a `settings.json` Claude Code wrote during the
-  install was destroyed silently.
-- **Large tool results were dropped whole.** PostToolUse read a 512 KiB
-  *prefix* of its input; anything bigger truncated mid-JSON and the hook
-  discarded the event — the observation row and the live-plan tracking with
-  it. A `Read` of a typical `package-lock.json` is enough.
-- **A Windows junction defeated both "never write through a link" guards**
-  (`stat.S_ISLNK` is False for one), so a junctioned `memory/` was written
-  into and adopted as a project root.
-- **The web viewer could be locked out indefinitely** by connections dripping
-  an unfinished header block: the wall-clock deadlines covered only the
-  request body. There is a 10-second absolute header budget now.
-- **An empty prompt left your PREVIOUS request** in the marker the Stop
-  observer ships to Anthropic, mis-attributing the memories it wrote.
-
-**And five holes in the gates themselves**, because this round was pointed at
-them too: the citation checker was `.py`-only (25 citations exempt, 2 already
-rotten), one modifier word between a number and its noun defeated every
-`doc_claims` trigger, the contracts registry under-counted the marker defence
-by one, `verify_anchors` caught only `SystemExit` so a rotted anchor killed the
-whole scan, and the third release gate ran outside a sandbox — leaking two
-project directories into the real `%TEMP%` per run (270 found, removed).
-
-The falsification register went 127 → **147 cases**, every new one driven RED
-individually. Full narrative in [CHANGELOG.md](CHANGELOG.md).
-
-**Release assets, for the first time:** both PyInstaller executables
-(`cc-memory-installer.exe`, `cc-memory-dashboard.exe`) plus a
-`SHA256SUMS.txt`, attached to the GitHub release.
-
-## What's new in v2.8.0
-
-**The anti-patch contract did not work in Chinese.** Character trigrams
-collapse on CJK: a one-character correction to a ten-character Chinese fact
-scores **0.4545** where the equivalent English edit scores 0.7317 — under the
-0.50 threshold that decides MERGE and SUPERSEDE, so every Chinese correction
-was filed as a NEW fact and the two contradictory rows both stayed active.
-Found on a live database, not constructed (a correction of memory #294 scored
-0.23 and became #301). The second layer could not help either: the LLM-judged
-de-duplicator tokenised with `[a-z0-9_]{3,}`, so a pure-CJK memory produced an
-empty word set and was never even nominated. `core/textsim.py` is now the one
-similarity substrate — character bigrams inside CJK runs, trigrams everywhere
-else, and ASCII output byte-identical to what it replaced so no tuned
-threshold moves. For a project whose memory is mostly Chinese, stacked
-contradictions were the normal case rather than an edge one.
-
-Alongside it: MERGE was destroying the surviving row's provenance tags, a
-0.95-similar row ranked 51st was invisible to the writer, `supersede_memory`
-was two transactions (a kill between them published both facts at once), five
-`id IN (...)` writers died past the SQLite variable cap, and there was **no
-supported way to retire a memory discovered to be wrong** — `/cc-mem archive`
-is that path now. Full list in [CHANGELOG.md](CHANGELOG.md).
-
-**v2.7.0 taught the six hooks where a project's root is, and left every other
-surface behind.** Three further adversarial rounds — each finding reproduced
-independently before it was accepted, two rejected as irreproducible —
-confirmed 22 defects. It is the same shape v2.7.0 was released to fix, one
-level up: a guard attached to *some* callers rather than to the thing they all
-pass through.
-
-Not hypothesised — measured on the reporting machine: a `memory/memory.db`
-sat at the root of drive `D:`, planted by this project's **own test suite**
-on every run (`test_surfaces` fed the pathological cwd `D:*b`, the resolver
-answered `D:\`, and the hook initialised a database there). While it existed,
-every uninitialised project on that drive resolved to it.
-
-- **Nine surfaces anchor now, not two.** `cli/plan.py` planted a stray even
-  for the read-only `list`; the MCP server — the one model-facing *write*
-  path — used raw `os.getcwd()`; the dashboard anchored only `--project`
-  while four GUI routes did not; the installer's *Initialize Project*, the
-  web viewer and `/save-memories` never anchored at all. The web viewer's
-  symptom was the inverse: it *refused* an initialised project when started
-  from a subdirectory.
-- **The privacy opt-out is finally what its own message promised.**
-  `is_excluded` appeared zero times in the two CLIs and the dashboard, while
-  the MCP refusal said memories were "neither readable nor writable through
-  **any** cc-memory tool". All hand-run surfaces now share one gate, checked
-  *before* anchoring so a per-subdirectory exclusion is never widened to its
-  parent. A blank `--project` had slipped past even that — measured, it wrote
-  a row into an opted-out project one command after `--project .` was refused.
-  And the installer's gate, once added, turned out to be **unreachable**: it
-  imported `core.modes` 34 lines above the only `sys.path` setup in the file,
-  so the first Initialize Project click of a process raised
-  `ModuleNotFoundError` into `except ImportError: pass` and scaffolded the
-  project anyway. A *second* click worked, which is why clicking twice hides
-  it. A grep-based test green-lit that gate; a behavioural one, driving each
-  creator in a fresh subprocess, is what caught it.
-- **The filesystem root is no longer a candidate**, which is what `_chain`'s
-  docstring had always claimed and the code never did — with an exemption for
-  a root carrying `.ccm-root`, without which this rule silently overruled the
-  pin. And `.ccm-root` now outranks the container heuristic: a pinned
-  directory that merely looked container-shaped was dropped, so the documented
-  escape hatch did nothing.
-- **Two hook-contract violations.** `core/logger.py` bound `Path.home()` at
-  module scope, and `Path.home()` raises when no home resolves — so importing
-  the logger took four hooks to rc=1 with a stderr traceback. And
-  `pre_compact` was the only hook without an `isinstance(cwd, str)` guard and
-  the only one that mkdirs unconditionally, so `{"cwd": 123}` created a
-  database in the hook process's own directory.
-- **Databases were created without `memory/.gitignore`** — the single
-  omission that let a 184 KB `memory.db` ride into three commits of a sibling
-  repository. Writing it was every caller's job and every caller forgot
-  (`cli/mem.py` alone opens the database in thirteen places), so it now
-  happens in `MemoryDB.__init__`, the line that creates the directory.
-
-### And a full adversarial code audit on top
-
-Twelve framings — security, concurrency, resource exhaustion, the LLM trust
-boundary — every finding reproduced before it was accepted, two rejected as
-irreproducible. The three that mattered most:
-
-- **The automatic janitor was destroying memories the writer had just
-  accepted.** `core/consolidate.py` carried a second length floor, 20
-  characters against the writer's 10, and *deleted* rather than archived.
-  Measured: `/cc-mem add note "lr=3e-4 wins"` printed `[inserted] #1` and five
-  turns later the `memories` table held zero rows — on the plugin's own hot
-  path, with no adversary involved.
-- **Two render paths did not escape authority markers.** `CLAUDE.md` promises
-  the defence runs on "every render path" and then names four; the MCP server
-  and the CLI were not among them. This repository's own database has 307
-  active rows and **2 of them are already armed** — the same row rendering
-  escaped through SessionStart and live through the MCP server.
-- **A single NUL byte turned a read into a full-text index rebuild**, reachable
-  from the viewer's `?q=%00` and from the `memory_search` tool, whose
-  `minLength: 1` a lone NUL satisfies.
-
-Also fixed: a cross-transaction lost update on the session tag, per-session
-markers that were world-readable and symlink-followable on Linux, an
-unbounded thread set in the viewer, unbounded pairwise stages in
-consolidation, and a `PRAGMA journal_mode` whose refusal was indistinguishable
-from success.
-
-## Previously — What's new in v2.7.0
-
-**v2.6.0 hung its safety guards off one rung's inner loop instead of off the
-candidate set — so every rung that did not inherit them became its own
-data-integrity defect.** A convergent adversarial debug round (five
-dimensions, every finding double-verified against the real source) confirmed
-45 defects; the three worst were reproduced before being fixed.
-
-- **`_candidates()` filters the chain once, for every rung.** Containers of
-  projects and dependency trees are no longer candidates anywhere. Before:
-  a `memory/` created by one session in a projects folder captured every
-  uninitialised project under it; one stray `package.json` there did the same
-  to every marker-less directory; and a cwd inside `node_modules/left-pad`
-  anchored on the *package*, planting a database where the reporter never looks.
-- **Monorepos resolve to the workspace, as the docs always claimed.** The
-  marker extension no longer requires a contiguous run of markers —
-  `packages/`, `apps/`, `crates/` and `libs/` carry no manifest, so v2.6.0
-  stopped at the package and re-created the stray it exists to prevent.
-- **`_is_profile_dir` now requires `Users`/`home` to sit at the filesystem
-  root.** Without that, any in-repo `users/` folder looked like a home
-  directory and truncated the chain — the guard producing the defect it guards.
-- **`project_root` really never raises now**, including for a non-path `cwd`;
-  v2.6.0's own handler re-raised and took the hook to rc=1 with a stderr
-  traceback. `user_prompt.py` gained the field-type guard the other five hooks
-  already had.
-- **Every surface anchors, not just the hooks.** `cc-mem --project` and
-  `/ccm-load` resolve too, so `/cc-mem add` from a subdirectory can no longer
-  create the stray the hooks refuse to. Redirections are always printed.
-- **The stray reporter was blind where strays live**: it reached one level
-  less than asked and skipped `vendor`, `node_modules` and seven more names.
-  Both fixed; the count is now active-only and provably cannot write to the
-  database it inspects.
-
-## Previously — What's new in v2.6.0
-
-**Every hook read the project out of `cwd`, and `cwd` follows the agent's own
-`cd`.** A session launched at a repo root that ran one command inside `cli/`
-started reporting `<root>/cli`, and `UserPromptSubmit` created a second, fully
-independent database there. Four of the six hooks gate on `memory/memory.db`
-merely *existing*, so once born the stray sustained itself — 27 memories and
-its own `projects` row in one, against 161 in the real database two levels up.
-
-- **`core/roots.py` resolves a project root first.** Over an ancestor chain
-  bounded below every home directory, below the filesystem root, at a
-  `.ccm-root` pin and at 25 levels: a database at cwd itself (terminal) → the
-  **nearest** ancestor with one → `CLAUDE_PROJECT_DIR` when it names a
-  directory in the chain → project markers (`.git`, `.hg`, `.svn`, manifests),
-  nearest-then-outward → the cwd verbatim. Never raises: any failure returns
-  the pre-2.6.0 answer.
-- **Prevention, not migration — an existing database is never overridden.** A
-  first draft took the *outermost* database-bearing ancestor, to heal strays.
-  An adversarial review killed it against ground truth: of the 20 databases on
-  the reporting machine, **four are legitimately nested** inside another
-  project — one holds 3,725 memories and its own `.git`. A stray and a
-  deliberate sub-project are byte-for-byte identical on disk, so healing the
-  first orphans the second. The reported bug is fixed by stopping the stray
-  from being born; adopting one that already exists means merging two SQLite
-  files, which is a confirmed command's job, not a hook's.
-- **No git required.** The database rungs need no VCS and no manifest, which is
-  the case that matters for projects that are not repositories at all. The
-  marker rung is what stops a stray being created before any database exists,
-  and its outward walk has three ceilings: 6 levels, a VCS root, and a refusal
-  to ever return a *container* of projects (the reporting machine's projects
-  folder has 27 project children — one stray marker there would otherwise
-  collapse all of them into one database).
-- **The home boundary is doubled — environment *and* structure.** Containers,
-  CI, `sudo` and this project's own test sandbox all redirect
-  `HOME`/`USERPROFILE`, so a direct child of a directory named `Users` or
-  `home` is treated as a profile root regardless. Measured with HOME
-  redirected: the walk climbed seven levels out of a temp fixture into the real
-  profile and matched the `memory.db` one session run in `~` had left there.
-- **`.claude/` is no longer a marker** (the user's HOME has one, which would
-  make `~` itself look like a project) and `CLAUDE.md` never was — Claude Code
-  supports per-subdirectory ones.
-- **Anchoring happens *after* the `excluded_projects` gate, never before.**
-  Resolving first would widen a per-subdirectory exclusion away by climbing to
-  its unexcluded parent.
-- **A stray is reported, never merged or deleted.** `cc-mem status` now lists
-  every separate database below the project root with its memory count, so a
-  stray born before v2.6.0 stops being invisible. `.ccm-root` pins a nested
-  project as a root in its own right. Pinned by `tests/test_surfaces.py` §7,
-  whose 18 ladder cases include the nested-project and container shapes above.
-
-## What's new in v2.5.6
-
-**The plan-replacement gate guards `steps`. It always has — and on 2026-08-05
-that cost a live plan two of its ten success criteria.** The replacement passed
-cleanly, nothing was printed, and one of the vanished criteria was an
-achieved-but-never-recorded release gate. A gate that covers part of an
-artifact says nothing about the rest; the silence looked identical to approval.
-
-- **`success_criteria` carryover advisory.** `plan-set --from-refiner` now
-  snapshots the outgoing plan *before* the replacement and prints every
-  criterion whose best trigram-Jaccard against the new plan's criteria — plus
-  its `goal` and `context` — falls below the same `0.5` threshold the steps
-  gate uses. A criterion folded into the new context counts as carried: lossy
-  survival is still survival, and crying wolf trains the reader to skip it.
-- **Deliberately an advisory, not a second refusal.** Criteria get reworded,
-  merged, translated and retired-because-achieved. An English plan replaced by
-  a Chinese one auto-carries nothing at all, so a hard gate here would make
-  ordinary plan evolution impossible. What it buys is that "it vanished" and "I
-  retired it on purpose" stop looking the same.
-- **The advisory names its own blind spot.** Its last line says `context` is
-  free text and is never compared — read it yourself. A gate that hides its
-  scope is how this failure happened in the first place.
-- `unmatched_criteria()` is appended at the **end** of `core/plan.py` on
-  purpose: this repo documents contracts with ~600 `file:line` citations, and
-  inserting beside `check_carryover` would have rotted ~60 of them across four
-  docs. Topic cohesion lost to not breaking the citation graph.
-- Pinned by `tests/test_plan_carryover.py` §7 — the core result, the
-  context-fold suppression, and that the CLI actually *prints* it. A core
-  function nobody surfaces is the same silence with extra steps.
-
-## What's new in v2.5.5
-
-**The doc gates covered 7 of this repository's 13 markdown files.** Asked
-whether every document was aligned, the answer turned out to be that the *gate
-scope* was the stale thing.
-
-- `tools/citation_check.py` now tracks **all 13** markdown files — `CHANGELOG.md`,
-  both agent prompts, `commands/cc-mem.md` and both skills were covered by
-  nothing. `smoke_test.py` asserts the tracked list equals `git ls-files "*.md"`.
-- **The docs' countable claims are gated too**, and three had drifted:
-  `CLAUDE.md` told the next Claude to run 7 of the 8 gates; `commands/cc-mem.md`
-  named 23 of 28 CLI subcommands (the missing five included `sql`, whose
-  read-only guard is a security fix nobody can use without knowing it exists);
-  and this README still said doc citations were unenforced, three releases after
-  they stopped being.
-
-## What's new in v2.5.4
-
-**Zero known limits.** v2.5.3 closed five of six residuals and recorded four new
-ones; this release closes all four, and adds a gate for each.
-
-- **Every citation is checked — 0 unchecked, down from 253.** A citation naming
-  no symbol is now bounds-checked (inside the file, not blank), and an ambiguous
-  bare filename is disambiguated by symbol. The bounds check alone found **34
-  stale citations** pointing past EOF or at blank lines, which every previous
-  release shipped.
-- **The `settings.json` lost update is closed in both directions.** v2.5.3
-  checked the digest *before* the rename; there is now a post-write
-  verification, so a peer write landing *after* it is detected too.
-- **PLAN.md and MEMORY.md no longer go stale.** A retry *count* was the wrong
-  shape — the file is unavailable for a *duration*. With a 3 s wall-clock
-  budget: 0 stale renders in 150 rounds against three 100 %-duty readers, where
-  12 fixed tries lost 2.
-- **The dashboard exe is executed too**, not just PE-header inspected.
-
-## What's new in v2.5.3
-
-**v2.5.2's "Known limits" section, cleared.** No new audit — this release takes
-the six residuals that release recorded rather than fixed. Two of them turned
-out to be worse than they were written up as:
-
-- **The three "deliberate literal twins" were not twins.** `core/progress.py`
-  retried and re-raised; `core/plan.py` and `llm/memory_writer.py` had no retry
-  and fell back to a plain **truncating** write — reintroducing the torn-read
-  defect they existed to remove. That fallback *was* the residual. One
-  implementation now (`core/atomic.py`), with an explicit contract: replace
-  completely, or raise. Never truncate.
-- **The plan mutators still accepted an unscoped call.** `plans.id` is global to
-  the DB file, so an unscoped `UPDATE`/`DELETE` reaches another project's row.
-  All 11 call sites already passed `project_id` by keyword, so requiring it cost
-  nothing — it is now mandatory and keyword-only.
-
-The rest: a fail-closed `config.json` now says so on SessionStart instead of
-only in a log file; the installer **detects** a concurrent `settings.json` write
-and re-merges instead of clobbering it; the installer exe is now actually **run**
-(12/12) rather than PE-header-inspected — which immediately found that unknown
-arguments were silently ignored, so a typo'd `--unistall` performed an *install*
-and exited 0; and doc citation coverage went from 224 to 341 of 594 checked.
-
-## What's new in v2.5.2
-
-A third audit, on angles the first two never used — time, concurrency,
-cross-surface agreement, hostile input. Full detail in
-[CHANGELOG.md](CHANGELOG.md); the four that matter most:
-
-- **Stored memory content could forge a complete `<system-reminder>` block** into
-  the SessionStart injection (**8 blocks in a stdout where the plugin emits 1**)
-  and into PROGRESS.md. `memory_add` is a model-invokable MCP tool, so one
-  indirect injection — a malicious README, a fetched page, a dependency's source
-  — became a *permanent* memory re-injected as authoritative context at the
-  start of every later session. Markers are now **escaped, not deleted**, on the
-  write path *and* on every render path (PROGRESS.md, the injection, PLAN.md,
-  MEMORY.md), so text stays readable and stops carrying authority.
-- **Two ways the privacy opt-out silently switched itself off**: a UTF-8 BOM on
-  `config.json` (PowerShell's `Out-File` default) made `json.load` raise into a
-  swallow-and-continue, and one unexpandable `~user` entry voided every entry
-  after it. The parser now reads `utf-8-sig`, cannot be aborted by one bad
-  entry, and **fails closed** on a config it cannot use.
-- **The MCP server ignored `excluded_projects` entirely** — the seventh caller
-  of a control v2.5.1 had just wired into the six hooks, and the one loaded by
-  default with every call chosen by the model.
-- **Concurrent and same-second writes destroyed data**: 12 compactions left 3
-  session archives; four *sequential* plan replacements left 1 history file;
-  PROGRESS.md / MEMORY.md / PLAN.md could be read as 0 bytes. All are now
-  claimed atomically and written through `os.replace`.
-
-Also: `MemoryDB._connect` no longer leaks a sqlite handle per operation (25 live
-after 20 inserts → 0), and `tools/citation_check.py` now gates doc `file:line`
-citations — its first run found **163 of 594 stale**.
-
-## What's new in v2.5.0
-
-The largest correctness release so far, and not a feature release: roughly 134
-defects closed across 26 files, then re-attacked by four read-only adversarial
-verifiers whose findings were closed as well. The headline items below were all
-**silently wrong in shipped code**.
-
-### Cross-project data contamination is closed
-
-Claude Code's `~/.claude/projects/` directory names replace **every** character
-outside `[A-Za-z0-9]` with `-`; cc-memory replaced only three of them
-(`:` `\` `/`). Any project path containing `_` or `.` therefore mangled to a
-slug that does not exist — and the miss fell through to a **fuzzy substring
-search** across every slug directory on the machine. On the reference machine
-(179 slug directories) the substring `core` matched 131 of them, and `app` and
-`data` matched 141 each. A project could ingest another project's transcript,
-send it to the extraction LLM, and store the result as its own memories.
-
-- `core.extractor.mangle_project_path` is now the single source of truth for the
-  slug convention, and the fuzzy fallback is **deleted** — a miss means "no
-  transcript", never "guess". Four probes that previously resolved to a real but
-  wrong directory now return `None`.
-- Retroactive save demands **positive proof** that a transcript belongs to this
-  project (the `cwd` its records carry) and fails closed when there is none.
-  With two planted transcripts, one foreign: 2 LLM legs ingesting
-  `['aaaa-foreign', 'bbbb-mine']` → 1 leg, `['bbbb-mine']`; a transcript with no
-  `cwd` at all → 0 legs, 0 memories.
-- The tier-3 PROGRESS.md mine is gated too, with a deliberately weaker
-  disagreement rule (absent `cwd` allowed, a *different* `cwd` refused) so
-  cwd-less transcripts keep working. A foreign transcript that used to yield
-  `open_todos=['FOREIGN TODO leak']` and `files=['FOREIGN_SECRET_FILE.py']` now
-  yields nothing and logs the refusal.
-- The dashboard carried a verbatim copy of the same fuzzy resolver. It is gone
-  there too.
-
-### The v2.2 live plan anchor works through its hook — for the first time
-
-`PostToolUse` returned early when `core.modes.should_observe()` was false, and
-the whole live-plan block sat *below* that gate. `TodoWrite` is in every mode's
-`skip_tools` and `ExitPlanMode` is in no mode's allow-list, so `should_observe`
-was `False` for both plan-control tools in all three modes: `plan_active` was
-never written by the hook, `memory/.plan_raw.md` and `memory/PLAN.md` never
-appeared, and the guardian drift counters silently varied by mode. Plan control
-is not observation — the block now runs above the gate, in every mode.
-
-| via `PostToolUse`, per mode (code / research / writing) | before | after |
-|---|---|---|
-| `ExitPlanMode` → `plan_active` rows | 0 / 0 / 0 | 1 / 1 / 1 |
-| `TodoWrite` → PLAN.md step statuses | untouched | `[x] [x] [~] ← ACTIVE` |
-| `Edit` → `edits_since_last_guardian` | 1 / 0 / 1 | 1 / 1 / 1 |
-| Bash `git push` → counter (1 edit + 20) | 21 / 20 / 1 | 21 / 21 / 21 |
-
-A raw plan awaiting refinement is also visible now: `PLAN.md` and
-`/cc-mem plan-status` lead with a **PENDING REFINEMENT** banner and the raw
-text, with any older structured plan clearly labelled stale, instead of showing
-only the superseded plan.
-
-### The privacy filter failed OPEN, and is now linear-time and fails CLOSED
-
-`strip_private` was `re.sub(r"<private>.*?</private>", "", text)` behind a
-`text.count("<private>") > 100` ReDoS guard — and that guard **returned the text
-unchanged**. Above the cap, `<private>` content reached both the Anthropic API
-call and the `memories` table: 100 tags stripped correctly, 101 leaked.
-
-The cap was also calibrated on the wrong signal. Well-formed tags are cheap;
-an **unterminated** `<private>` is the quadratic case — 16,000 unterminated tags
-(140.6 KiB) took `re.sub` **9,517.4 ms** and leaked the tail. A single
-left-to-right `str.find` scan replaces it: 0.0 ms on that input, 5.1 ms vs
-6.0 ms on 20,000 well-formed tags, no cap at all, and a dangling open tag now
-drops the rest of the text rather than emitting it. Equivalence was proved on
-20,000 random tag-soup inputs — zero behavioural differences on all 13,328
-well-formed ones; the 6,672 unterminated ones differ intentionally.
-
-### MCP: correct on the wire, and the schema is actually enforced
-
-- **UTF-8 both directions, before the handles are captured.** Under the box's
-  default gbk codec only 1 of 7 non-ASCII payloads round-tripped byte-identical;
-  under strict gbk five got no response at all and the server exited 1. Now 7/7
-  in all four locale regimes tested, stderr 0 B, exit 0. No `PYTHONUTF8` env
-  block is needed any more.
-- **Every parsed message with an id gets exactly one frame.** `params: null` —
-  which many clients send for "no params" — produced **no response**, hanging any
-  client without a timeout. So did a non-object `params` and a non-string tool
-  `name`. All now answer `-32602`; 13/13 ids answered where 8 were orphaned.
-- **Nothing escapes `main()`.** A 4301-digit integer (`ValueError`) and ~3000
-  levels of nesting (`RecursionError`) were both reachable through an advertised
-  tool argument *before* validation ran, and killed the server with a traceback
-  on stderr. Frames are also length-capped and strict RFC 8259 in both
-  directions (`NaN` / `Infinity` rejected instead of echoed).
-- **`tools/call` arguments are validated against the advertised `inputSchema`**
-  (required / type / enum / bounds / lengths) and rejected with `-32602` instead
-  of being coerced. `memory_search` with no `query` used to dump the whole table
-  and rebuild the FTS index; six malformed queries triggered six index rebuilds
-  (27.3 ms) and now trigger none (6.1 ms). `memory_get_details` no longer serves
-  retracted rows, and a failed write is no longer reported as success.
-
-### The web viewer was unusable, and was a prompt-injection channel
-
-- **One idle TCP connection wedged the whole server.** A single-threaded
-  `HTTPServer` with no handler timeout meant a browser's speculative pre-connect
-  — which `webbrowser.open` triggers by design — blocked every subsequent
-  request. It now runs threaded with daemon threads and a per-connection
-  timeout: 8 idle pre-connects → 200 in 0.02 s, 30 concurrent GETs → 30/30.
-- **`Access-Control-Allow-Origin: *` on every response.** Anything written
-  through `POST /api/memory` is injected into your next session, so any web page
-  you had open could write into your own context — and read `/api/sessions`,
-  which returns `archive_path` filesystem paths. The header is gone; `Origin`,
-  `Host` (against DNS rebinding, where the attacking page is same-origin and
-  sends no `Origin` at all) and `Content-Type: application/json` are all
-  enforced.
-- **`POST` rewrote the wrong project's `MEMORY.md`** — it derived the project
-  root from `os.getcwd()` instead of the served project.
-- Four routes answered malformed queries with **no HTTP response at all**; body
-  reads had no wall-clock deadline, so one client dripping a byte every few
-  seconds leased a worker thread for hours (measured: 403 after 52.09 s → 3.02 s;
-  10 concurrent drips, thread delta 10 → 0-2).
-- The `Add memory` form the docs already described now actually exists in the
-  page.
-
-### The standalone install shipped none of the user-facing surfaces
-
-`~/.claude` after a standalone install contained `hooks/` and `settings.json`
-and nothing else — no `/cc-mem` command, no `plan-refiner` / `plan-guardian`
-agents, no skills. The installer now copies all five, records them in
-`installed_surfaces.json`, and removes exactly those files **by name** on
-uninstall (your own `commands/`, `agents/`, `skills/` entries survive).
-
-It also **crashed after copying files** on any `settings.json` it could not
-parse — a JSONC comment, a trailing comma, a UTF-8 BOM (which is what
-PowerShell's `>` writes), or a hook group of an unexpected shape — leaving a
-half-installed tree with no hooks registered. Settings are now validated at step
-[0/3] before anything is copied, malformed shapes are preserved verbatim rather
-than shredded, and a hook that merely *mentions* cc-memory is kept and warned
-about instead of deleted. Across 19 settings shapes × 6 operations: **18 crashes
-→ 0**.
-
-### Hooks with hard host timeouts now bound their LLM wall-clock
-
-`call_llm`'s own docstring required a time-budgeted caller to bound its
-worst case; only `core/consolidate.py` did. `hooks/session_start.py` overran its
-**15 s** budget with the shipped default config (2 credential candidates × 20 s
-= 40 s), and `hooks/stop.py` measured **25.45 s** against a 22 s budget with
-stalled legs. Every LLM-calling hook now passes an **absolute deadline** — not
-just a per-leg timeout — which clamps each leg to the time actually remaining
-and skips a leg that cannot finish. Stop: 25.45 s → 15.99 s. PreCompact: ~144 s
-→ 74.39 s of its 120 s. Normal-path latency is unchanged (0.29 s → 0.30 s).
-
-### Also in this release
-
-- **One version string.** `cc_memory/core/version.py` is the canonical runtime
-  source, importable under both the nested and the flat install layout;
-  `cc_memory/__init__.py` re-exports it and the CLI, MCP and installer banners
-  resolve it instead of carrying literals (two of which were stale).
-- **`/cc-mem status` sees standalone installs.** Every layout probe assumed the
-  nested `cc_memory/` segment, so a healthy flat install reported 22 of 22 files
-  missing and the API-key check was skipped entirely.
-- **`config.json` no longer lies.** Two audits found 34 of 51 leaf keys with no
-  reader; every inert key is deleted, and the surviving ones cite their reader
-  in-file. `excluded_projects` is **not** a new key — it shipped in v2.4.3 with
-  an empty default and no reader anywhere — but it is now a real opt-out: a
-  listed directory and everything beneath it gets no `memory/`, no DB, no
-  observations, no extraction and no PROGRESS.md, because **all six hooks**
-  check it before doing anything else.
-- **`/cc-mem sql` is read-only for real.** `DROP TABLE topics` used to exit 0
-  and drop the table. The guard also refuses the `PRAGMA name(value)` setter
-  form, which SQLite accepts as an equivalent of `PRAGMA name = value` and an
-  `=`-only test let through. The dashboard's SQL console requires a confirmation
-  naming the statement before any write, and reports the rowcount.
-- **The dashboard stopped destroying data**: bulk delete became bulk *archive*
-  (no more dangling `supersedes_id` rows), `MEMORY.md` is regenerated after a
-  tidy, a corrupt project registry is backed up before it is overwritten, and no
-  callback can raise into a windowed build. It also gained a read-only
-  **Progress / Plan** tab.
-- **A third test suite.** `tests/test_surfaces.py` joins `smoke_test.py` and
-  `test_plan_carryover.py` as a release gate, covering the surfaces neither of
-  them touched: the standalone installer (surface install/uninstall by name,
-  malformed-`settings.json` handling, hook-timeout lockstep with
-  `hooks/hooks.json`), the MCP stdio server, the web viewer's request guards,
-  and the rule that every LLM-calling hook passes an absolute deadline.
-
-### What is *not* fixed
-
-Recorded honestly, because each was measured rather than assumed:
-
-- The web viewer is threaded with **no worker cap** — body reads are now
-  deadline-bounded, but `ThreadingHTTPServer` still spawns a thread per
-  connection. It is loopback-only. HTTP/1.0 pipelining is unchanged (browsers
-  do not pipeline). The DNS-rebinding fix was verified with forged `Host`
-  headers, not with real DNS control, and the SPA escaping hardening is
-  defence-in-depth: no XSS was executed. *(The cap half closed in v2.8.0:
-  `_MAX_CONCURRENT = 16` admission, excess connections shed with a 503 —
-  `tests/test_surfaces.py` drives both halves. The loopback-only and
-  forged-`Host` caveats still stand.)*
-- MCP still echoes array/object `id`s (non-conforming but valid JSON; answering
-  beats orphaning), and an unparsable or over-length frame is answered with
-  `"id": null` because its id is genuinely unknowable. `MemoryError` from a huge
-  line was never reproduced — the 1 MiB frame cap is justified by the escape
-  class, not by a measured crash.
-- `core/db.py`'s three plan mutators (`update_plan_status`, `delete_plan`,
-  `update_plan_content`) all accept `project_id` and every shipped caller now
-  passes it, but none of them *requires* it — an unscoped raw call from new code
-  would still cross projects, because `plans.id` is global to the DB file.
-  *(Closed in v2.5.3: `project_id` is REQUIRED and keyword-only on all three,
-  and `tests/smoke_test.py` asserts the signatures.)*
-- Searching for a bare `%` or `_` now returns 0 rows instead of the whole table.
-  That is the fix, but it is a visible result change.
-- **Doc `file:line` citations are enforced since v2.5.2** by
-  `tools/citation_check.py`, which runs inside `tests/smoke_test.py`. Since
-  v2.5.5 it covers **all 13** markdown files in the repository and leaves
-  nothing unchecked: a citation is anchored to its symbol's `ast` definition or
-  to a line that references it, and one whose sentence names no symbol is
-  bounds-checked instead (inside the file, not blank). Repair a stale number
-  with `python tools/citation_check.py --fix` rather than by hand.
-- `tools/i18n_check.py` compares content hashes only. It cannot see a
-  translation whose *body* has drifted from its English source — including a
-  dead in-document anchor, which is how 22 of them survived in the Chinese docs
-  until v2.5.1.
-
-## What's new in v2.4.2
-
-Hook survivability. On a long-lived project the `PreCompact` hook was being
-**killed mid-write** — losing that compaction's memories — and its extraction
-had quietly been reading the wrong end of the transcript. One root cause: the
-hook loaded the *entire* transcript before using ~12 KB of it.
-
-- **Bounded transcript reads.** `extractor.load_transcript_window` reads a
-  head + tail window (40 records + 32 MiB) instead of the whole file. Measured
-  on a real **2.11 GiB** transcript: loading went **88s → 1.66s**, and a full
-  hook run finishes in **14.33s** against its 120s budget. `msg_count` stays
-  exact via a raw record scan (~40× cheaper than parsing).
-- **Extraction now reads the *recent* end.** The LLM summary filled its 12,000
-  character budget starting from the oldest record — on that transcript it was
-  exhausted after **329 of ~585,000 records**, so every extraction saw only the
-  session's opening hours. It now fills from the newest backwards.
-- **Killed runs are no longer invisible.** A timeout kill runs no `except`
-  block, so a failed compaction used to leave `.last_save.json` describing the
-  *previous* success. `PreCompact` now writes a start marker it clears only on
-  completion, and SessionStart reports a survivor.
-- **Automatic compactions are now visible.** `.last_save.json` records whether
-  the trigger was `auto` or `manual` — Claude Code only surfaces hook execution
-  in its UI for manual `/compact`, which made auto runs look like they never
-  happened. (They always did.)
-- **`memory/.gitignore` migrates existing installs** instead of only being
-  created once, so generated state — including verbatim plan prose in
-  `.plan_history/` — stops leaking into user repos.
-- **Fixed: the package could not be built or installed.** A UTF-8 BOM in
-  `pyproject.toml` (since v2.4.0) made `tomllib` fail, breaking every PEP 517
-  frontend.
-
-## What's new in v2.4.0 / v2.4.1
-
-- **Mandatory plan carryover gate.** `plan_active` is a single-row slot, so
-  replacing a plan used to silently sink unfinished steps. Replacement now
-  requires every unfinished step to be auto-carried (by title similarity) or
-  explicitly dispositioned with a reason; `/cc-mem plan-clear` refuses without
-  `--reason`; every outgoing plan is archived to `memory/.plan_history/`.
-  **There is no force flag, by design.** See
-  [docs/CONTRACTS.md#plan-contract](docs/CONTRACTS.md#plan-contract).
-- v2.4.1 fixed a false refusal where a long `notes` field diluted the
-  title match and blocked a legitimate in-place plan update.
-
-## What's new in v2.3.4
-
-- **Anthropic auth fall-through.** A dead `ANTHROPIC_API_KEY` no longer
-  blackholes a healthy Claude subscription — candidates are tried in order with
-  the correct wire format each (`x-api-key` vs OAuth `Bearer`).
-- **Local Ollama fallback is now opt-in** (`ccl.enabled`, default `false`).
-
-## What's new in v2.3.3
-
-- **Documentation multilingual version-control.** English is the canonical
-  skeleton; Chinese docs are drift-tracked `*.zh.md` siblings (starting with
-  [README.zh.md](README.zh.md)), each tied to a normalized-sha256 of its English
-  source recorded in a line-1 marker. A pure-stdlib checker
-  ([tools/i18n_check.py](tools/i18n_check.py)) plus a [tests/smoke_test.py](tests/smoke_test.py)
-  gate turn red the moment an English doc changes without its translation being
-  refreshed. Memory *content* stays language-agnostic — only docs are tracked.
-  See [docs/ARCHITECTURE.md#9-documentation-language-convention-i18n](docs/ARCHITECTURE.md#9-documentation-language-convention-i18n).
-
-This is a docs + version-metadata release — no runtime behavior changed.
-
-## What's new in v2.3
-
-- **LLM-judged semantic de-duplication.** The anti-patch writer's char-trigram
-  similarity only catches near-verbatim restatement, so the same fact reworded
-  each session used to stack up (unbounded DB growth). `consolidate.semantic_dedup`
-  nominates small same-category candidate groups by word-Jaccard, Haiku confirms
-  same-fact, and the survivor is refreshed to a merged canonical while losers are
-  archived (`is_active=0`) with a forward `supersedes_id` link.
-- **Obsolescence detection + reference-aware staleness net.** `detect_obsolete_llm`
-  names `{stale, current}` pairs with a temporal guard (the superseder must be
-  newer) + an anti-event prompt; `decay_and_archive` archives only rows that are
-  simultaneously very old, low-importance, AND never injected. All archival is
-  recoverable (`is_active=0`, never `DELETE`).
-- **Injection observability.** SessionStart writes `memory/.last_inject.json`
-  recording exactly which memories/topics were injected and prints a one-line
-  recap; `/cc-mem inject-show` dumps ground truth, `/cc-mem inject-usage` reports
-  whether Claude actually Read PROGRESS.md / MEMORY.md.
-- **`/cc-mem encoding-check [--apply]`** — read-only U+FFFD corruption scan across
-  the text tables (valid CJK preserved).
-
-### v2.3.1 / v2.3.2 — "Hook cancelled" permanently fixed
-
-The intermittent `Compacted PreCompact [...] failed: Hook cancelled` is gone.
-v2.3.1 raised the PreCompact timeout 45s → 120s, but that only moved the goalpost
-on large DBs. **v2.3.2 removes the failure mode**: `PreCompact` now declares two
-command hooks — a fast **sync** leg (`hooks/pre_compact.py`, extraction +
-PROGRESS.md, ~1-5s) and a background **`async`** leg (`hooks/consolidate_async.py`,
-timeout 300s) that runs the every-Nth-session consolidation off the blocking
-compaction path. A budget gate with an honest worst-case cost model guarantees the
-async worker finishes before its timeout, so it can never be killed mid-write.
-See [CHANGELOG.md](CHANGELOG.md).
-
-## What's new in v2.2
-
-- **Live plan anchor (`memory/PLAN.md`).** Captures `ExitPlanMode` output
-  (or user-supplied raw plans) into a structured, step-tracked document
-  that survives session boundaries. `TodoWrite` syncs step statuses
-  mechanically; sensitive Bash calls (`git push`, deploys, ...) flag
-  drift. See [docs/CONTRACTS.md#plan-contract](docs/CONTRACTS.md#plan-contract).
-- **Plugin-shipped subagents.** `plan-refiner` normalises raw plans into
-  JSON; `plan-guardian` checks alignment when drift counters trip.
-  Definitions live in `agents/` and are auto-discovered after install.
-- **`/cc-mem dashboard`** subcommand: launches the Tkinter GUI without
-  needing to know the plugin install path.
-
-## What's new in v2.1
-
-- **Anti-patch writes.** Every save goes through `llm.memory_writer.upsert_smart`,
-  which MERGES (overwrites a similar memory in place), SUPERSEDES (archives the
-  old, links the new via `supersedes_id`), or INSERTS — chosen by trigram-Jaccard
-  similarity. No more stacked duplicates. See [docs/CONTRACTS.md#anti-patch-contract](docs/CONTRACTS.md#anti-patch-contract).
-- **Forced handoff via PROGRESS.md.** `memory/PROGRESS.md` is the single source
-  of truth for session handoff, always full-rewritten from a SQL row, never
-  appended. SessionStart emits a `<system-reminder>` block that requires the
-  next Claude to Read it before responding. See [docs/CONTRACTS.md#handoff-contract](docs/CONTRACTS.md#handoff-contract).
-- **Auto-fresh MEMORY.md.** Regenerated after every write — no more 50-day-stale
-  index files.
-- **Idle reorg.** Stop hook runs lightweight cleanup every 5 turns (no LLM).
-- **Clean subpackage layout.** `cc_memory/{core,hooks,llm,cli,mcp,ui}/`.
-- **One installer, one skills location, one version number.** Removed `.claude/skills/`
-  duplicate, removed the third copy of `save-memories`, removed dual installers.
-
-## Installation
-
-### Via marketplace (recommended once published)
+### Install — marketplace (recommended)
 
 ```bash
 claude /plugin marketplace add skymanbp/cc-memory
 claude /plugin install cc-memory
 ```
 
-### Local marketplace from this repo
-
-```bash
-claude /plugin marketplace add /path/to/cc-memory
-claude /plugin install cc-memory
-```
-
-### Standalone exe (Windows)
-
-1. Download `cc-memory-installer.exe` from [Releases](https://github.com/skymanbp/cc-memory/releases)
-2. Double-click → Install Plugin → Configure Hooks → done.
-
-### From source
+### Install — from a local checkout
 
 ```bash
 git clone https://github.com/skymanbp/cc-memory.git
-python cc-memory/cc_memory/ui/installer.py        # GUI
-# or
-python cc-memory/cc_memory/ui/installer.py --cli  # CLI
+claude /plugin marketplace add ./cc-memory
+claude /plugin install cc-memory
 ```
 
-The installer:
-0. **Validates `~/.claude/settings.json` before copying anything.** If it cannot
-   be parsed (JSONC comments, a trailing comma, a top-level array), it refuses
-   with `Nothing has been installed.` rather than leaving a half-installed tree.
-   A UTF-8 BOM — what PowerShell's `>` writes — is tolerated.
-1. Copies the subpackage tree to `~/.claude/hooks/cc-memory/`. This tree is
-   **FLAT**: `core/`, `hooks/`, `llm/`, `cli/`, `mcp/`, `ui/` sit directly under
-   that directory, with **no `cc_memory/` path segment**. (The marketplace / dev
-   checkout keeps the nested `<plugin root>/cc_memory/…` shape.)
-2. Installs the five user-facing surfaces into `~/.claude/`:
-   `commands/cc-mem.md`, `agents/plan-refiner.md`, `agents/plan-guardian.md`,
-   `skills/ccm-load/SKILL.md`, `skills/save-memories/SKILL.md`. They are
-   recorded in `~/.claude/hooks/cc-memory/installed_surfaces.json` and removed
-   **by name** on uninstall, so your own files in those directories survive.
-3. Adds the hook entries to `~/.claude/settings.json` (6 commands across 5
-   events — `PreCompact` declares a sync + an `async` leg), with the same
-   timeouts `hooks/hooks.json` declares. A hook of yours that merely mentions
-   cc-memory is kept and reported, never deleted.
-4. Prunes stale modules from a previous version and auto-detects + upgrades any
-   v2.0 flat-layout install. `logs/` is preserved on uninstall.
+### Install — standalone, no marketplace
 
-Per-project initialization is **automatic** — the first user message creates
-`<project>/memory/` and the SQLite DB. To opt a directory out entirely, list it
-in `config.json`'s `excluded_projects` (see [Configuration](#configuration)).
-
-## Architecture at a glance
-
-```
-Hooks (declared in hooks/hooks.json; discovered via the plugin manifest):
-
-  UserPromptSubmit ─► turn count + first-prompt seeding of PROGRESS.md
-                      auto-init memory/ on first contact
-
-  PostToolUse     ─► live plan anchor, in EVERY mode: ExitPlanMode → plan_active.raw,
-                     TodoWrite → mechanical step sync, edits/sensitive Bash → drift counters
-                     insert one observation row per OBSERVED tool call (no LLM)
-
-  Stop            ─► Haiku observer extracts memories from this turn
-                     patch_progress(files_touched=...)
-                     idle reorg every 5 turns
-
-  PreCompact      ─► fires TWO hooks:
-                     • sync  (pre_compact.py, 120s): Haiku extracts memories from
-                       a bounded head+tail transcript window (40 records + 32 MiB) → memory_writer.upsert_smart →
-                       FULL-REWRITE memory/PROGRESS.md → archive → regen MEMORY.md
-                     • async (consolidate_async.py, 300s, off the blocking path):
-                       every-Nth-session LLM consolidation under a time budget
-
-  SessionStart    ─► inject context (topics + critical + timeline + PROGRESS preview)
-                     record memory/.last_inject.json
-                     emit FORCED <system-reminder>: "Read PROGRESS.md FIRST"
-                     retroactive save of unsaved prior JSONLs
+```bash
+python cc-memory/cc_memory/ui/installer.py          # GUI
+python cc-memory/cc_memory/ui/installer.py --cli    # headless
 ```
 
-Per-project state lives at `<project>/memory/`:
+Or download `cc-memory-installer.exe` from
+[Releases](https://github.com/skymanbp/cc-memory/releases) on Windows.
+
+### Then
+
+Nothing. Per-project initialization is automatic: the first message you send in
+a project creates `<project>/memory/` and its database. Verify with:
 
 ```
-memory/
-├── memory.db                SQLite WAL, see core/db.py for schema
-├── MEMORY.md                auto-generated index, refreshed every write
-├── PROGRESS.md              full-rewrite from `progress` row at every Stop+PreCompact
-├── PLAN.md                  full-rewrite from `plan_active` row (live plan anchor)
-├── .last_save.json          status from last PreCompact
-├── .last_inject.json        what SessionStart injected (observability)
-├── .last_consolidation.json interval marker for the async consolidation leg
-├── .consolidation.lock      prevents overlapping async workers
-├── .pre_compact_attempt.json start marker; survives => last run was killed
-├── .plan_raw.md             last raw ExitPlanMode capture
-├── .plan_history/           append-only archive of replaced/cleared plans
-├── .gitignore               excludes the DB, sessions, and all generated
-│                            state above (migrates on every compaction)
-├── sessions/YYYY/MM/        per-session archives
-└── topics/                  reserved for future per-topic exports
+/cc-mem status
 ```
 
-## Memory model
+To opt a directory out completely, list it in `excluded_projects` — see
+[Configuration](#configuration).
 
-| Category | What gets extracted | Default importance |
-|----------|--------------------|--------------------|
-| `decision` | Explicit choices, design changes | 3 |
-| `result`   | Measured outcomes (numbers + units) | 3 |
-| `config`   | Hyperparameters, env vars, constants | 2 |
-| `bug`      | Identified+fixed problems, "NEVER do X" | 4 |
-| `task`     | Pending/blocked work items | 2 |
-| `arch`     | Module/pipeline structure, data flow | 3 |
-| `note`     | Everything else above noise | 1 |
+---
 
-Importance scale: `1`=noise, `2`=low, `3`=normal, `4`=important, `5`=critical (never forget).
+## Feature index
 
-Memory **content** is language-agnostic — the extractor and resume-signal
-detectors recognise both English and Chinese by design, and stored memories may be
-in any language. Only the project's own docs follow the English-skeleton +
-translation convention. See [docs/ARCHITECTURE.md#9-documentation-language-convention-i18n](docs/ARCHITECTURE.md#9-documentation-language-convention-i18n).
+### 1 · Memory capture
 
-## CLI
+| Feature | What it does |
+|---|---|
+| **AI-judged extraction** | Haiku reads the conversation and returns structured `{category, content, importance}` records — not keyword scraping |
+| **Regex fallback** | A project-neutral pattern layer runs when no credential is available, so capture never depends on the network |
+| **Optional local fallback** | Ollama backend, **opt-in** via `ccl.enabled` (default `false`) |
+| **Two capture points** | `Stop` captures per turn from that turn's tool observations; `PreCompact` captures from the transcript before context is destroyed |
+| **Bounded transcript reads** | A head+tail window (40 records + 32 MiB) instead of the whole file — a 2.11 GiB transcript loads in 1.66 s instead of 88 s, so the hook is never killed mid-write |
+| **Newest-first summarisation** | The extraction budget fills from the most recent record backwards; filling from the oldest pinned every extraction to a session's opening hours |
+| **Seven categories** | `decision` · `result` · `config` · `bug` · `task` · `arch` · `note` |
+| **Five importance levels** | `1` noise → `5` critical / never forget |
+| **Three project modes** | `code` · `research` · `writing` — each with its own observed-tool set and injection priority (`/cc-mem mode`) |
+| **Language-agnostic content** | Extraction and resume-signal detection recognise English *and* Chinese by design; stored memories may be in any language |
 
-**Inside Claude Code** (recommended, path-agnostic):
+### 2 · Memory quality — the anti-patch contract
+
+The differentiator. Most memory tools append; appending is what turns a memory
+store into noise.
+
+| Feature | What it does |
+|---|---|
+| **Reconcile-on-write** | Every save path routes through one writer, which decides **MERGE** (overwrite a near-identical row in place), **SUPERSEDE** (archive the old, link the new via `supersedes_id`), or **INSERT** |
+| **Similarity substrate** | Trigram-Jaccard, with **character bigrams inside CJK runs** — plain trigrams collapse on Chinese, scoring a one-character correction at 0.4545 and filing every correction as a new contradictory fact |
+| **LLM-judged semantic de-dup** | The same fact *reworded* each session scores low on trigrams; a second pass nominates candidate groups by word-Jaccard and has Haiku confirm same-fact before merging |
+| **Obsolescence detection** | Names `{stale, current}` pairs with a temporal guard, so a historical action cannot obsolete a live fact |
+| **Walkable history** | `supersedes_id` forms a DAG (cycles refused, first lineage fact preserved with `COALESCE`); `/cc-mem supersedes <id>` walks it |
+| **Nothing is ever deleted** | Archival is `is_active=0`, always recoverable. `/cc-mem archive` is the supported way to retire a fact discovered to be **wrong** |
+| **Provenance preserved** | Tags are unioned with the surviving row's, never replaced, and capped |
+
+### 3 · Session handoff — PROGRESS.md
+
+| Feature | What it does |
+|---|---|
+| **Single source of truth** | `memory/PROGRESS.md` is always **full-rewritten** from one SQL row, never appended — it cannot go stale or self-contradict |
+| **Forced read** | `SessionStart` emits a `<system-reminder>` requiring the next Claude to read it *before* responding |
+| **Eleven user-facing fields** | current request · done · in-flight · blocked · open todos · plan · critical context · files touched · transcript pointer · updated-at · trigger type |
+| **Four writers, one contract** | `PreCompact` full-overwrites; `Stop` patches files-touched per turn; `UserPromptSubmit` seeds the request on turn 1; `SessionStart` fills **only still-empty** fields |
+| **Per-session annotation** | The row records which session is speaking and when it started |
+| **Killed-run visibility** | A start marker survives a timeout kill, so a compaction that died mid-write is provable rather than invisible |
+| **Injection observability** | `.last_inject.json` records exactly what was injected; `/cc-mem inject-show` dumps ground truth and `/cc-mem inject-usage` reports whether Claude actually read it |
+
+### 4 · Plan and intent — PLAN.md and the directive ledger
+
+Two different things, deliberately kept apart: a **plan step** is a unit of
+execution and dies when the plan is replaced; a **directive** is a unit of user
+intent and outlives every plan.
+
+| Feature | What it does |
+|---|---|
+| **Live plan anchor** | `memory/PLAN.md` is full-rewritten from the `plan_active` row; `ExitPlanMode` output is captured automatically |
+| **Two shipped subagents** | `plan-refiner` normalises a raw plan into structured JSON; `plan-guardian` does a read-only ≤150-word drift check |
+| **Mechanical step sync** | `TodoWrite` events sync step statuses by title similarity — no LLM, no drift |
+| **Drift counters** | Edits bump a counter; a sensitive Bash call (`git push`, `rm -rf`, deploys) bumps it by 20 |
+| **Mandatory carryover gate** | Replacing a plan requires every unfinished step to be auto-carried or explicitly dispositioned with a reason. **There is no force flag, by design** |
+| **Success-criteria advisory** | Criteria that vanish in a replacement are named — a gate that covers only `steps` says nothing about the rest |
+| **Append-only plan history** | Every outgoing plan is archived to `memory/.plan_history/` |
+| **Directive ledger** | `/cc-mem directive-add` records what the *user* demanded. Re-stating the same slug bumps `times_stated` on **one** row — repetition is an importance signal a plan cannot express |
+| **Evidence-gated closure** | `/cc-mem directive-close` **refuses without `--evidence`**: a commit, a `file:line`, or a gate name. A directive closed on an assertion is the failure the ledger exists to prevent |
+| **Stop enforcement** | The `Stop` hook can refuse to end a turn while a plan sits unrefined, a live plan is undrift-checked, or an active directive has gone idle — with a guaranteed escape budget and the kill switch `CC_MEMORY_PLAN_ENFORCE=0` |
+
+### 5 · Search and retrieval
+
+| Feature | What it does |
+|---|---|
+| **FTS5 full-text search** | `/cc-mem search "auth flow"`, with `LIKE ? ESCAPE` fallback and clamped limits |
+| **Topic summaries** | Memories roll up into topics, refreshed by consolidation |
+| **Keyword vocabulary** | Project vocabulary by frequency, grown across sessions |
+| **Layered injection** | `SessionStart` injects topics + critical memories + a recent timeline + a PROGRESS preview, under per-layer budgets |
+| **Auto-fresh index** | `memory/MEMORY.md` is regenerated after every batch write |
+| **Corruption scan** | `/cc-mem encoding-check` finds U+FFFD damage across the text tables; `--apply` quarantines, recoverably |
+
+### 6 · Interfaces
+
+| Interface | Entry point | What you get |
+|---|---|---|
+| **Slash command** | `/cc-mem <sub>` | 32 subcommands, path-agnostic, resolves `--project .` for you |
+| **Shell CLI** | `cc-memory` / `cli/mem.py` | The same 32 subcommands outside Claude Code |
+| **Plan queue CLI** | `cc-memory-plan` / `cli/plan.py` | 12 subcommands for a `draft → ready → executing → done` task queue |
+| **MCP server** | `cc_memory/mcp/server.py` | 8 tools over JSON-RPC 2.0 stdio, registered inline in the plugin manifest |
+| **Desktop dashboard** | `/cc-mem dashboard` | Tkinter GUI, 7 tabs: Memories · Plans · Sessions · Keywords · SQL Console · Stats · Progress/Plan |
+| **Web viewer** | `/cc-mem serve` | Loopback-only browser UI: browse, search, and add memories |
+| **Skills** | `/ccm-load`, `/save-memories` | One-shot activation + bootstrap; manual save through the anti-patch writer |
+| **Subagents** | `plan-refiner`, `plan-guardian` | Shipped in the plugin, discoverable under both install layouts |
+
+### 7 · Privacy and safety
+
+| Feature | What it does |
+|---|---|
+| **Project opt-out** | `excluded_projects` — a listed directory *and everything beneath it* gets no `memory/`, no database, no observations, no extraction, no injection. Enforced by every hook and by the MCP server, on the **raw** cwd, *before* the project-root anchor |
+| **Fails closed** | A `config.json` that exists but cannot be used excludes **every** project and logs why, rather than guessing "not excluded" and storing data irreversibly |
+| **`<private>` spans** | Text between `<private>` tags is stripped before both the Anthropic call and the database — linear-time, no cap, and a dangling open tag drops the remainder rather than leaking it |
+| **Authority-marker neutralisation** | Stored content is **escaped, never interpolated raw**, on the write path and on every render path — a memory cannot forge a `<system-reminder>` into your next session |
+| **Read-only SQL** | `/cc-mem sql` refuses every write statement, including the `PRAGMA name(value)` setter form |
+| **Loopback-only web viewer** | No CORS header, `Origin` and `Host` both enforced (DNS-rebinding), JSON content-type required on POST, bounded header *and* body phases, capped concurrency |
+| **MCP schema enforcement** | `tools/call` arguments are validated against the advertised `inputSchema` and refused with `-32602` rather than coerced |
+| **No telemetry** | Nothing is sent anywhere except the extraction/consolidation calls to Anthropic (or your local Ollama), using your existing Claude Code credential |
+
+### 8 · Reliability engineering
+
+| Feature | What it does |
+|---|---|
+| **Zero runtime dependencies** | Pure Python standard library. PyInstaller is build-time only |
+| **Atomic artifact writes** | One writer — tmp + `os.replace`, with a wall-clock retry budget. Contract: *replace completely, or raise; never truncate* |
+| **Project-root anchoring** | `cwd` follows the agent's `cd`; a resolver walks an ancestor chain (database → `CLAUDE_PROJECT_DIR` → project markers) so a stray database is never born in a subdirectory. Containers of projects and dependency trees are never candidates |
+| **One shared hook entry ladder** | stdin parse → opt-out → root anchor, implemented once; per-hook policies stay per-hook |
+| **Bounded LLM wall-clock** | Every LLM-calling hook passes an absolute deadline, not just a per-leg timeout, so it cannot overrun the host's hard hook timeout |
+| **Off the blocking path** | Consolidation runs as an `async` PreCompact leg under a budget gate, so it can never surface as `Hook cancelled` |
+| **Scoped to the project** | Every command that touches a table scopes it by `project_id` — one database file legitimately holds several projects |
+| **10 release gates** | Three doc gates, four test suites, `compileall`, a `pyproject` parse, and version-site agreement. See [Release gates](#release-gates) |
+| **A falsification register** | Every registered fix is reverted on a temporary copy to prove its gate goes **red**. A gate that cannot fail is a gate that is lying |
+
+---
+
+## Reference
+
+### `/cc-mem` — 32 subcommands
+
+Inside Claude Code (path-agnostic — the wrapper resolves the plugin root):
 
 ```
-/cc-mem status                                    # Full health check
-/cc-mem stats                                     # Memory + supersede-chain counts
-/cc-mem list decision                             # Recent memories by category
-                                                  # (all|decision|result|config|bug|task|arch|note)
-/cc-mem search "auth flow"                        # FTS5 search
-/cc-mem topics                                    # Topic summaries
-/cc-mem progress                                  # Regenerate memory/PROGRESS.md and print
-/cc-mem supersedes 42                             # Walk the supersede chain for memory #42
-/cc-mem consolidate                               # Full LLM-backed consolidation
-/cc-mem cleanup                                   # Lightweight no-LLM cleanup
-/cc-mem add decision "Chose X" --importance 4     # Anti-patch upsert
-/cc-mem inject-show                               # What SessionStart injected last (ground truth)
-/cc-mem inject-usage                              # Whether Claude read PROGRESS.md / MEMORY.md
-/cc-mem encoding-check                            # Scan text tables for U+FFFD corruption
-/cc-mem dashboard                                 # Launch the Tkinter GUI
-/cc-mem serve                                     # Launch the browser-based web viewer
+# ── state and health ───────────────────────────────────────────────────────
+/cc-mem status                      Full health check (hooks, DB, API key, PROGRESS)
+/cc-mem stats                       Memory counts + supersede-chain count
+/cc-mem schema                      Live SQLite schema (tables, indexes, migrations)
+/cc-mem mode [code|research|writing] Show or set the project mode
+/cc-mem summary                     Latest session summary
+/cc-mem sessions                    Compaction history with archive paths
+/cc-mem observations                Raw PostToolUse rows awaiting extraction
 
-# Live plan anchor (v2.2):
-/cc-mem plan-status                               # Counters + freshness summary
-/cc-mem plan-show                                 # Regenerate + print memory/PLAN.md
-/cc-mem plan-set --raw "Build feature X by ..."   # Capture raw plan, mark needs_refine
-/cc-mem plan-set --from-refiner                   # Store structured JSON (stdin)
-/cc-mem plan-check                                # Reset counters + emit guardian hint
-/cc-mem plan-replan                               # Re-arm needs_refine on stored raw
-/cc-mem plan-clear                                # Drop the active plan
+# ── reading memory ─────────────────────────────────────────────────────────
+/cc-mem search "<query>"            FTS5 search
+/cc-mem list [category]             Recent memories, optionally by category
+/cc-mem topics                      Topic summaries
+/cc-mem keywords                    Project vocabulary by frequency
+/cc-mem supersedes <id>             Walk a memory's supersede chain
+/cc-mem sql "<SELECT ...>"          Read-only query (writes refused)
+
+# ── writing memory ─────────────────────────────────────────────────────────
+/cc-mem add <category> "<text>" [--importance N]   Anti-patch upsert
+/cc-mem archive <id>... [--supersedes ID]          Retire a WRONG fact (recoverable)
+/cc-mem consolidate                 Full LLM-backed consolidation
+/cc-mem cleanup                     Lightweight no-LLM cleanup + MEMORY.md regen
+/cc-mem encoding-check [--apply]    U+FFFD corruption scan
+
+# ── handoff ────────────────────────────────────────────────────────────────
+/cc-mem progress                    Regenerate memory/PROGRESS.md and print it
+/cc-mem inject-show                 What the last SessionStart injected
+/cc-mem inject-usage                Did Claude actually read PROGRESS.md / MEMORY.md
+
+# ── live plan anchor ───────────────────────────────────────────────────────
+/cc-mem plan-status                 Counters + freshness summary
+/cc-mem plan-show                   Regenerate + print memory/PLAN.md
+/cc-mem plan-set --raw "<text>"     Capture a raw plan, mark needs_refine
+/cc-mem plan-set --raw-file FILE    Same, from a file
+/cc-mem plan-set --from-refiner     Store structured JSON from stdin
+/cc-mem plan-check                  Reset drift counters + emit guardian hint
+/cc-mem plan-replan                 Re-arm needs_refine on the stored raw
+/cc-mem plan-clear --reason "<why>" Drop the active plan (reason required if unfinished)
+
+# ── directive ledger ───────────────────────────────────────────────────────
+/cc-mem directive-list [--status active|done|superseded|dropped|all]
+/cc-mem directive-add <slug> --demand "..." [--quote "..."] [--kind ...] [--times N]
+/cc-mem directive-close <slug> --evidence "<commit|file:line|gate>"
+
+# ── interfaces ─────────────────────────────────────────────────────────────
+/cc-mem dashboard                   Launch the Tkinter GUI
+/cc-mem serve [--port N]            Launch the loopback web viewer
 ```
 
-**Outside Claude Code** (shell, standalone-install path shown — adjust for
-marketplace install):
+Full per-subcommand semantics: [commands/cc-mem.md](commands/cc-mem.md).
+
+Outside Claude Code:
 
 ```bash
 # NOTE: $HOME, not ~. Bash expands a tilde BEFORE parameter expansion and does
-# not rescan the result, so a ~ stored inside a variable stays a literal
-# character and `$M status` dies with `can't open file '.../~/.claude/...'`.
-M="python $HOME/.claude/hooks/cc-memory/cli/mem.py --project ."
+# not rescan the result, so a ~ stored inside a variable stays a literal.
+M="python $HOME/.claude/hooks/cc-memory/cli/mem.py --project ."   # flat install
 $M status
 $M search "auth flow"
-# ... same subcommands as above
 ```
 
-## MCP tools
+### `cc-memory-plan` — the plan queue
 
-8 tools exposed via `cc_memory/mcp/server.py`:
+A task queue in the same database, distinct from the live plan **anchor**.
+
+```bash
+P="cc-memory-plan --project ."       # or python .../cli/plan.py --project .
+
+$P add "Task A" "Task B" "Task C"    # append drafts
+$P list                              # show the queue
+$P reorder <id> <position>           # move a task
+$P evaluate                          # draft → evaluating
+$P set-eval <id> "<verdict>"         # record a feasibility verdict
+$P approve --all                     # evaluating → ready
+$P exec --next                       # ready → executing, print the plan text
+$P done <id> "<result>"              # → done
+$P fail <id> "<why>"                 # → failed
+$P skip <id> "<why>"                 # → skipped
+$P status                            # queue summary
+$P clear                             # drop done/failed/skipped
+```
+
+Flow: `draft → evaluating → ready → executing → done | failed | skipped`.
+`exec` spawns nothing — it flips status and prints the plan text plus the
+`done` command to run afterwards. Every subcommand that names an id resolves it
+within `--project` first and exits 1 on an unknown or foreign id.
+
+### MCP tools
+
+8 tools over JSON-RPC 2.0 stdio. The server forces UTF-8 with LF newlines on
+both stdin and stdout itself — **no `PYTHONUTF8` / `PYTHONIOENCODING` env block
+is required**.
 
 | Tool | Purpose |
-|------|---------|
-| `memory_search` | FTS5 search (compact results) |
-| `memory_get_details` | Batch fetch full details by IDs |
-| `memory_add` | Add via anti-patch upsert |
+|---|---|
+| `memory_search` | FTS5 search, compact results |
+| `memory_get_details` | Batch fetch full details by id |
+| `memory_add` | Add through the anti-patch writer |
 | `memory_stats` | Project statistics |
-| `memory_topics` | List topic summaries |
+| `memory_topics` | Topic summaries (bounded) |
 | `memory_recent` | Recent memories with filters |
-| `progress_get` | Read PROGRESS.md state (structured fields) |
-| `progress_regenerate` | Force-rewrite memory/PROGRESS.md from SQL state |
-
-The server speaks JSON-RPC 2.0 over stdio, and forces UTF-8 with LF-only
-newlines on both stdin and stdout itself — **no `PYTHONUTF8` /
-`PYTHONIOENCODING` env block is needed**.
+| `progress_get` | Read the PROGRESS state as structured fields |
+| `progress_regenerate` | Force-rewrite `memory/PROGRESS.md` from SQL |
 
 **Marketplace / dev checkout — nothing to do.** `.claude-plugin/plugin.json`
-ships the registration inline:
+ships the registration inline.
 
-```jsonc
-"mcpServers": {
-  "cc-memory": {
-    "command": "python3",
-    "args": ["${CLAUDE_PLUGIN_ROOT}/cc_memory/mcp/server.py"]
-  }
-}
-```
-
-**Standalone install — register it by hand.** The installer copies the package
-and the five surfaces only; it never writes a client config, and the flat tree
-has no `.claude-plugin/` to be read. Note the **absent `cc_memory/` segment**:
+**Standalone install — register by hand.** Note the absent `cc_memory/` path
+segment in the flat layout:
 
 ```jsonc
 // <project>/.mcp.json, or the user-scoped equivalent
@@ -973,255 +399,297 @@ has no `.claude-plugin/` to be read. Note the **absent `cc_memory/` segment**:
 }
 ```
 
-`tools/call` arguments are validated against each tool's advertised
-`inputSchema` and rejected with `-32602` rather than coerced, so a malformed
-call fails loudly instead of writing something you did not ask for.
+### Configuration
 
-## Visual Dashboard
+`config.json` in your install root — flat: `~/.claude/hooks/cc-memory/config.json`;
+marketplace / dev checkout: `<plugin-root>/cc_memory/config.json`.
 
-```bash
-# Marketplace install or standalone — auto-resolves the plugin path:
-/cc-mem dashboard
+**Every key in this file is read by code.** Inert tunables were deleted rather
+than left in place, because editing one that does nothing looks like it does
+something.
 
-# Or invoke the CLI directly. Marketplace / dev checkout:
-python <plugin-root>/cc_memory/cli/mem.py --project . dashboard
-# Standalone install (FLAT — no cc_memory/ segment):
-python ~/.claude/hooks/cc-memory/cli/mem.py --project . dashboard
+| Key | Default | Meaning |
+|---|---|---|
+| `version` | `2.11.1` | Last-resort fallback for a flat install predating `core/version.py`, which is canonical |
+| `consolidation.auto_interval_sessions` | `5` | Sessions between async consolidation runs |
+| `ccl.enabled` | `false` | Local Ollama fallback — **opt-in** |
+| `ccl.ollama_url` | `http://localhost:11434` | Ollama endpoint |
+| `ccl.local_model` | `ccl-9b` | Local model name |
+| `excluded_projects` | `[]` | Absolute paths that opt OUT entirely. The only opt-out; there is no per-project override file |
+| `notes` | — | In-file documentation, including which module reads each value |
 
-# Or the standalone exe (Windows):
-cc-memory-dashboard.exe
-```
-
-7 tabs: Memories · Plans · Sessions · Keywords · SQL Console · Stats ·
-Progress / Plan (read-only view of the `progress` and `plan_active` rows behind
-PROGRESS.md and PLAN.md).
-
-Launching with no `--project` opens nothing: it lists the projects it knows and
-waits for you to pick one. Deletions are **archives** (`is_active=0`), and any
-non-`SELECT` statement in the SQL console requires a confirmation naming the
-statement.
-
-## Web viewer
-
-```bash
-/cc-mem serve
-# opens http://127.0.0.1:9377 in your browser
-```
-
-Browse, search, and **add** memories: the `+ Add memory` form POSTs JSON to
-`/api/memory`, which routes through `upsert_smart` like every other save path,
-so a near-duplicate merges or supersedes instead of stacking.
-
-Everything written through that endpoint is injected into your next Claude
-session, and `/api/sessions` returns whole session rows including
-`archive_path`. The server is guarded accordingly:
-
-- binds to `127.0.0.1` only;
-- sends **no** `Access-Control-Allow-Origin` header, and rejects any request
-  whose `Origin` is not this exact origin (`OPTIONS` answers 405 — no preflight
-  is ever granted);
-- rejects any request whose `Host` is not this loopback origin. Origin alone
-  cannot stop a DNS-rebound page, whose GETs are *same-origin* and carry no
-  `Origin` header at all;
-- requires `Content-Type: application/json` on POST, which an HTML form cannot
-  send without a preflight.
-
-## Plan Queue
-
-Task planning system using the same SQLite DB. This is the plan **queue**
-(`plans` table) — distinct from the live plan **anchor** (`plan_active` /
-`memory/PLAN.md`, driven by `/cc-mem plan-*`).
-
-```bash
-# Console script, if you installed the package with pip:
-P="cc-memory-plan --project ."
-# Or run the module from a standalone install (FLAT — no cc_memory/ segment).
-# Use $HOME, not ~: bash expands a tilde before parameter expansion and does not
-# rescan the result, so a ~ inside a variable is never expanded on use.
-P="python $HOME/.claude/hooks/cc-memory/cli/plan.py --project ."
-
-$P add "Task A" "Task B" "Task C"
-$P list
-$P evaluate           # mark draft → evaluating; Claude evaluates feasibility
-$P approve --all      # evaluating → ready
-$P exec --next        # ready → executing, and print the plan for Claude to run
-$P done 1 "Result"    # mark complete
-$P status             # queue summary
-$P clear              # drop done/failed/skipped
-```
-
-`exec` does **not** spawn anything — it flips status and prints the plan text
-plus the `done` command to run afterwards. Every subcommand that names plan IDs
-resolves them within `--project` first and exits 1 on an unknown or foreign ID.
-
-Status flow: `draft` → `evaluating` → `ready` → `executing` → `done`/`failed`/`skipped`.
-
-## Configuration
-
-Edit `config.json` in your install root — standalone (flat layout):
-`~/.claude/hooks/cc-memory/config.json`; marketplace / dev checkout:
-`<plugin-root>/cc_memory/config.json`.
-
-**Every key in this file is read by code.** Keys that nothing read were deleted
-in v2.5 rather than left in place — an inert tunable is worse than no tunable,
-because editing it looks like it does something. What remains:
-
-- `version` — last-resort version fallback for a flat install that has no
-  `core/version.py`. `cc_memory/core/version.py` is canonical.
-- `consolidation.auto_interval_sessions` — sessions between async consolidation
-  runs (default 5).
-- `ccl.enabled` / `ccl.ollama_url` / `ccl.local_model` — the local Ollama
-  fallback. **Opt-in; `enabled` defaults to `false`**, in which case the
-  Anthropic legs are the only backends.
-- `excluded_projects` — absolute paths that opt OUT of cc-memory entirely. A
-  listed directory *and everything beneath it* gets no `memory/` directory, no
-  DB, no observations, no extraction and no PROGRESS.md: **all six hooks <!--ce:hooks-->, plus
-  the MCP server**, consult `core.modes.is_excluded` as their first act — on
-  the RAW `cwd`, before the root anchor — and exit 0 (MCP answers `isError`);
-  the hooks since v2.10.0 route through the one shared gate
-  `hooks/_entry.py:resolve_project`, which owns that ordering. That is one shared
-  implementation, not a copy per caller — v2.5.0 shipped it as two private
-  copies in the only two hooks <!--ce:hooks:subset--> that *create* `memory/`, which left a project
-  that was initialised BEFORE it was listed fully instrumented: observations
-  kept accumulating, PROGRESS.md kept naming its files, and with a live
-  credential the Stop observer kept POSTing them to the Anthropic API. v2.5.1
-  fixed the six hooks <!--ce:hooks:asof--> and missed the seventh caller: **the MCP server had no
-  check at all** through v2.5.1 — it is loaded by default from the shipped
-  manifest and every call is model-initiated, so a listed project stayed fully
-  readable and writable by the model. v2.5.2 gates it in `_get_db`, the single
-  choke point all eight tools reach. Matching is on the resolved absolute path,
-  case-insensitive on Windows. This is the only opt-out.
-  **Since v2.5.2 the parser fails CLOSED**: a `config.json` that exists and
-  cannot be used — invalid JSON, not an object, not UTF-8 — excludes *every*
-  project and logs the reason, rather than guessing "not excluded" and storing
-  data irreversibly. An **absent or empty** config is not that case (no list,
-  nothing excluded). The file is read as `utf-8-sig` and a `~user` entry that
-  cannot be expanded now degrades to a literal comparison — a BOM (PowerShell's
-  `Out-File` default) and one bad `~` entry each used to switch the whole
-  opt-out off silently.
-- `notes` — in-file documentation, including which module owns each value that
-  used to live here.
-
-The removed tunables are module constants; change them there:
-anti-patch thresholds in `llm/memory_writer.py`, SessionStart injection budgets
-in `hooks/session_start.py`, the idle-reorg interval in `core/idle.py`, the
-per-mode observation skip-list in `core/modes.py`, the web viewer's default port
-in `ui/web_viewer.py`. MCP registration is the `mcpServers` block in
+Everything else is a module constant, documented in `notes.removed_keys`:
+writer thresholds in `llm/memory_writer.py`, injection budgets in
+`hooks/session_start.py`, the idle-reorg interval in `core/idle.py`, the
+per-mode observation skip-list in `core/modes.py`, the web viewer's default
+port in `ui/web_viewer.py`. MCP registration is the `mcpServers` block in
 `.claude-plugin/plugin.json`, not a config key.
 
-## API key
+**Environment variables**
 
-cc-memory auto-detects your Claude OAuth token from `~/.claude/.credentials.json`.
-No manual API key setup is needed if you're logged into Claude Code.
+| Variable | Effect |
+|---|---|
+| `ANTHROPIC_API_KEY` | Preferred credential; falls through to the Claude Code OAuth token when absent or dead |
+| `CLAUDE_PROJECT_DIR` | Consulted by the project-root resolver when it names a directory in the ancestor chain |
+| `CC_MEMORY_PLAN_ENFORCE=0` | Kill switch for Stop-hook plan enforcement |
 
-Resolution order: `ANTHROPIC_API_KEY` env var → Claude OAuth token.
+### Per-project files
 
-## Tests
+```
+<project>/memory/
+├── memory.db                   SQLite (WAL) — the source of truth
+├── MEMORY.md                   browsable index, refreshed after every write
+├── PROGRESS.md                 handoff; full-rewritten from the `progress` row
+├── PLAN.md                     live plan anchor; from the `plan_active` row
+├── .gitignore                  written by cc-memory; migrates on existing installs
+├── .last_save.json             status + trigger of the last PreCompact
+├── .last_inject.json           what SessionStart injected (observability)
+├── .last_consolidation.json    interval marker for the async leg
+├── .consolidation.lock         prevents overlapping async workers
+├── .pre_compact_attempt.json   start marker; survives ⇒ the last run was killed
+├── .plan_raw.md                last raw ExitPlanMode capture
+├── .plan_history/              append-only archive of replaced / cleared plans
+├── sessions/YYYY/MM/           per-session archives
+└── topics/                     reserved for per-topic exports
+```
 
-Six stdlib scripts, no pytest and no pip dependencies. **Nine release gates —
-run all of them.**
+### Database schema
+
+12 tables in one project-local SQLite file:
+
+| Table | Holds |
+|---|---|
+| `projects` | One row per project root |
+| `sessions` | Compaction / session history with archive paths |
+| `memories` | The facts, with `supersedes_id`, `content_hash`, `is_active` |
+| `topics` | Rolled-up topic summaries |
+| `keywords` | Project vocabulary by frequency |
+| `observations` | PostToolUse events, cleaned after extraction |
+| `session_summaries` | A structured summary per session |
+| `progress` | **One row per project** — the source of truth for PROGRESS.md |
+| `plan_active` | **One row per project** — the source of truth for PLAN.md |
+| `plans` | The plan **queue** (`cc-memory-plan`) |
+| `directives` | The user-intent ledger (`/cc-mem directive-*`) |
+| `_migrations` | Applied schema migrations |
+
+### Hook table
+
+Six hook commands <!--ce:hooks--> across five Claude Code events, declared in
+[hooks/hooks.json](hooks/hooks.json):
+
+| Event | Script | Timeout | Job |
+|---|---|---|---|
+| `UserPromptSubmit` | `hooks/user_prompt.py` | 8 s | Auto-init `memory/`, count the turn, seed the request on turn 1 |
+| `PostToolUse` | `hooks/post_tool_use.py` | 8 s | Live plan anchor **in every mode**, then one observation row per observed tool |
+| `Stop` | `hooks/stop.py` | 22 s | Haiku observer, per-turn PROGRESS patch, idle reorg every 5 turns, plan enforcement |
+| `PreCompact` (sync) | `hooks/pre_compact.py` | 120 s | Extract → reconcile → full-rewrite PROGRESS.md → archive |
+| `PreCompact` (async) | `hooks/consolidate_async.py` | 300 s | Budget-gated consolidation, off the blocking path |
+| `SessionStart` | `hooks/session_start.py` | 15 s | Inject layered context + the forced `<system-reminder>` |
+
+Hook contract, never violated: hooks never write to stderr (Claude Code renders
+stderr as error UI), never raise, and always exit 0.
+
+---
+
+## Architecture
+
+Full detail in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
+([简体中文](docs/ARCHITECTURE.zh.md)). The three hard contracts are specified in
+[docs/CONTRACTS.md](docs/CONTRACTS.md) ([简体中文](docs/CONTRACTS.zh.md)):
+
+- [Anti-patch contract](docs/CONTRACTS.md#anti-patch-contract) — how a write reconciles
+- [Handoff contract](docs/CONTRACTS.md#handoff-contract) — the PROGRESS.md spec
+- [Plan contract](docs/CONTRACTS.md#plan-contract) — PLAN.md, the carryover gate, the subagents
+
+**Two install layouts, both supported.** A marketplace / dev checkout keeps the
+nested `<plugin-root>/cc_memory/…` shape. The standalone installer lays the
+package **FLAT** under `~/.claude/hooks/cc-memory/` — `core/`, `hooks/`, `llm/`,
+`cli/`, `mcp/`, `ui/` directly under it, with **no `cc_memory/` path segment**.
+Any code or documentation that probes for an install must accept both.
+
+---
+
+## Development
+
+### Repository layout
+
+```
+cc-memory/
+├── .claude-plugin/          plugin.json (+ inline mcpServers) · marketplace.json
+├── .github/                 CI running every release gate · issue + PR templates
+├── agents/                  plan-refiner.md · plan-guardian.md
+├── commands/                cc-mem.md — the /cc-mem slash command
+├── hooks/hooks.json         hook declarations (6 commands / 5 events)
+├── skills/                  ccm-load/ · save-memories/
+├── cc_memory/               the Python package
+│   ├── core/                db · extractor · consolidate · plan · progress · privacy
+│   │                        modes · roots · atomic · markers · textsim · auth · …
+│   ├── hooks/               _entry (shared ladder) + the six hook entry points
+│   ├── llm/                 ccl_backend · memory_writer · parse
+│   ├── cli/                 mem.py · plan.py
+│   ├── mcp/                 server.py
+│   └── ui/                  installer · dashboard · web_viewer
+├── docs/                    ARCHITECTURE.md · CONTRACTS.md (+ .zh.md siblings)
+├── scripts/                 build_exe.py — PyInstaller build
+├── tests/                   4 suites + run_gates.py (one command, every gate)
+├── tools/                   citation_check · doc_claims · contracts · falsify_fixes · i18n_check
+├── CLAUDE.md                project instructions for Claude Code
+├── CHANGELOG.md · README.md · README.zh.md · LICENSE · pyproject.toml
+```
+
+### Release gates
+
+Ten gates, all pure stdlib — no pytest, no pip dependencies. Run them all with
+one command:
+
+```bash
+python tests/run_gates.py           # runs all 10, prints a table, exits nonzero on any red
+python tests/run_gates.py --list    # show what each gate is
+```
+
+Or individually:
 
 ```bash
 python -m compileall -q cc_memory tests tools
 python -c "import tomllib,pathlib;tomllib.loads(pathlib.Path('pyproject.toml').read_text(encoding='utf-8'))"
-
-python tests/smoke_test.py
-# expect a series of [OK] lines ending with "===== ALL SMOKE TESTS PASSED ====="
-
-python tests/test_plan_carryover.py
-# expect "RESULT: 20 passed, 0 failed"
-
-python tests/test_surfaces.py
-# expect "===== ALL SURFACE TESTS PASSED ====="   (§1-§9)
-
-python tools/i18n_check.py       # translation drift; nonzero exit on drift
-python tools/citation_check.py   # doc file:line citations; "0 unchecked, 0 stale"
-python tools/doc_claims.py       # prose counts vs tools/contracts.py; "0 problem(s)"
+python tests/smoke_test.py                    # end-to-end + the three doc gates + version agreement
+python tests/test_plan_carryover.py           # the carryover gate
+python tests/test_surfaces.py                 # installer · MCP · web viewer · opt-out · anchoring
+python tests/test_directive_enforcement.py    # the directive ledger + Stop enforcement
+python tools/i18n_check.py                    # translation drift
+python tools/citation_check.py                # every file.py:LINE citation in the tracked docs
+python tools/doc_claims.py                    # prose counts vs the sets computed from the tree
 ```
 
-The ninth gate is version-site agreement: `pyproject.toml`, both
-`.claude-plugin/*.json`, `cc_memory/config.json` and `cc_memory/core/version.py`
-must all carry the same string, which `smoke_test.py` asserts.
-
-- `tests/smoke_test.py` — the canonical end-to-end check: anti-patch writer
-  decisions, PROGRESS.md full-rewrite, the fill-only-empty refresh contract,
-  last-wins TodoWrite extraction, the tier-3 transcript fallback, legacy
-  `SESSION_HANDOFF.md` migration, the layout inspector, the two-hook PreCompact
-  shape, the bounded transcript window, the i18n drift gate, and — since v2.5.2
-  — `.gitignore` three-copy parity, the sqlite handle-count regression, PLAN.md
-  / MEMORY.md forgery resistance, the single-atomic-writer rule, the
-  keyword-only `project_id` on the plan mutators, and the three doc gates.
-- `tests/test_plan_carryover.py` — the v2.4.0 carryover gate (20 checks); the
-  only coverage of that feature.
-- `tests/test_surfaces.py` — new in v2.5, nine sections since v2.9.0, for
-  the surfaces neither of the others touches: §1 the MCP stdio server, §2 the
-  web viewer's request guards, §3 the standalone installer (surface
-  install/uninstall by name, malformed-`settings.json` handling, hook-timeout
-  lockstep with `hooks/hooks.json`), §4 `excluded_projects` across all six
-  hooks <!--ce:hooks--> (opening by asserting its own hook list equals
-  `hooks/hooks.json`), §5 the config.json parser shapes plus the MCP half
-  of the same opt-out, §6 the `settings.json` compare-and-swap, §7
-  project-root anchoring (the ladder over a real filesystem, the same hooks
-  driven from a subdirectory, and the source rule that every hook resolves
-  *after* the opt-out), §8 the v2.8.0 surfaces (the MCP launch-project scope
-  gate, the bounded `memory_topics`, the plan anchor driven through its own
-  hook in every mode, and `ui/dashboard.py` executed headlessly against a
-  hostile `package.json`), §9 the v2.9.0 dual-review surfaces (CLI project
-  scoping, the installer's per-entry strip and absent-file compare-and-swap,
-  the surface-manifest union, a 600 KiB PostToolUse payload, the empty-prompt
-  marker, the MCP `jsonrpc` member, and header-phase drip-feeders). Plus the
-  rule that every LLM-calling hook passes an absolute deadline.
-- `tools/i18n_check.py` — translation drift, by normalized content hash.
-- `tools/citation_check.py` — every `file.py:LINE` citation in all 13 markdown
-  files. `--fix` repairs; `--list` shows every verdict.
-- `tools/doc_claims.py` — prose that COUNTS something, checked against the set
-  `tools/contracts.py` computes from the tree. A citation gate proves a line
-  number still points at its symbol; this one proves the sentence around it is
-  still true. Since v2.8.0 it scans three surfaces with one grammar: the
-  tracked markdown, `cc_memory/config.json`, and the shipped package's
-  docstrings and comment runs — the first sweep of the latter two caught
-  three counts that were already wrong.
-
-All three dev checkers also run *inside* `smoke_test.py`, so a green suite
-already implies a green doc state:
+Two more scripts are **not** gates, and are the ones to reach for when you
+doubt a gate:
 
 ```bash
-python tools/i18n_check.py --list       # every English/翻译 pair + recorded vs current hash
-python tools/citation_check.py --fix    # rewrite stale line numbers in place
+python tools/contracts.py       # print what the code currently says each set contains
+python tools/falsify_fixes.py   # revert each registered fix on a COPY, assert its gate goes RED
 ```
 
-## Build executables
+Tests must use `tempfile` directories only and must remove them: all four
+suites redirect `HOME`/`USERPROFILE` **and** `TMPDIR`/`TEMP`/`TMP` into a
+sandbox before importing the package, assert `Path.home()` really moved, and
+tear the sandbox down in a `finally`. An uncleanable leak is a test failure.
+
+### Build the executables
 
 ```bash
 pip install pyinstaller
-python build_exe.py
-# produces:
-#   dist/cc-memory-installer.exe
+python scripts/build_exe.py
+# → dist/cc-memory-installer.exe
 #   dist/cc-memory-dashboard.exe
 ```
 
+### Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md). Security reports: [SECURITY.md](SECURITY.md).
+
+---
+
+## Troubleshooting
+
+| Symptom | Cause and fix |
+|---|---|
+| Hooks never fire on Windows | `hooks/hooks.json` invokes `python3`, and the python.org installer ships no `python3.exe`. Tick "Add Python to PATH" + "py launcher", or shim `python3 → python` |
+| `/cc-mem` says the plugin is not found | Both install layouts must be probed. Run `/cc-mem status` — it inspects the layout and reports which files are missing |
+| Nothing is being extracted | No credential. `/cc-mem status` checks it. Log in to Claude Code, or set `ANTHROPIC_API_KEY` |
+| A `memory/` appeared in a subdirectory | A stray from before root anchoring. `/cc-mem status` lists every separate database below the project root with its memory count. A stray is **reported, never merged or deleted** — pin a genuinely nested project with a `.ccm-root` file |
+| The plugin went completely silent | A `config.json` that exists but cannot be parsed **fails closed** and excludes every project. `SessionStart` prints one line saying so; fix the JSON |
+| Claude cannot end a turn | Plan enforcement is blocking. Read the refusal — it names the condition and the fix. It always degrades to an advisory after its escape budget; `CC_MEMORY_PLAN_ENFORCE=0` switches it off |
+| `Hook cancelled` on compaction | Fixed in v2.3.2 by moving consolidation to an `async` leg. If you still see it, file an issue with `memory/.last_save.json` |
+| A memory is simply wrong | `/cc-mem archive <id>` — reconciliation handles a *restatement*, `archive` handles a *repudiation* |
+
+---
+
+## What's new in v2.11.1
+
+**v2.11.0 shipped the enforcement engine with zero coverage — and shipped with
+a RED gate.** The directive ledger added three CLI subcommands and
+`commands/cc-mem.md` was never updated, so `tests/smoke_test.py` failed; and
+because it is one sequential function, that first failing assert also *hid* the
+one below it. Nothing caught either, because "run all ten gates" was a sentence
+in a markdown file rather than an executable. It is one now:
+`python tests/run_gates.py`, plus CI.
+
+Six defects in the path that can refuse your turn, each reproduced first:
+
+- **The escape budget could never release.** `write_marker` never raises — it
+  returns `False` — so the `except OSError` guarding the "cannot count, so do
+  not block" case was dead code. On any temp directory the marker layer
+  refuses, the hook blocked **forever**: measured `[1,1,1,1,1,1,1,1]` over eight
+  consecutive Stops. An unbreakable block is worse than no block.
+- **A stored directive reached Claude as a live authority marker.** The block
+  reason is fed back as a decision payload — higher authority than PROGRESS.md
+  — and was the one renderer in its module that never escaped. Now escaped on
+  the way in *and* the way out.
+- **A refusal's stdout was not a JSON document**, because a status line printed
+  first.
+- **A cleared plan enforced forever** — the hook tested a row that
+  `plan-clear` deliberately keeps as a tombstone.
+- **A just-stated directive was reported idle for N turns**, because idleness
+  came from the plan's counter rather than the directive's own history.
+- **Re-stating a directive erased its demand and quote** — the single operation
+  the ledger exists for.
+
+Also: concurrent directive writes are serialised; the install health check now
+**derives** its required-module list from the hooks' import graph instead of a
+hand-kept list that had gone stale three times; and a `.gitignore` pattern that
+silently took `.github/` to zero tracked files is gated. Nine new falsification
+cases, every one driven RED individually — two ran GREEN first, and the
+*checks* were fixed rather than the cases.
+
+Every earlier release is in **[CHANGELOG.md](CHANGELOG.md)**, which is the
+single history of this project — this README documents what the software *is*,
+not what it used to be.
+
+---
+
 ## Requirements
 
-- Python 3.8+ (stdlib only — no pip dependencies at runtime)
-- Claude Code with hooks support
-- PyInstaller (only for building the exe, not for running)
-- On Windows: ensure `python3` resolves to a Python 3 interpreter, since
-  `hooks/hooks.json` invokes `python3` and the python.org installer does
-  not provide `python3.exe` by default. The simplest fix is to symlink or
-  shim `python3` to `python` on PATH.
+- **Python 3.8+** — standard library only, zero runtime dependencies
+- **Claude Code** with hooks support
+- **Tkinter** only for the desktop dashboard (the CLI, MCP server and web
+  viewer do not need it)
+- **PyInstaller** only for building the executables
+- **Windows**: `python3` must resolve to a Python 3 interpreter (see
+  [Troubleshooting](#troubleshooting))
 
-## Documentation
+Developed Windows-first; cross-platform by construction and exercised on POSIX
+paths throughout.
 
-- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — full architecture overview
-  ([简体中文](docs/ARCHITECTURE.zh.md))
-- [docs/CONTRACTS.md](docs/CONTRACTS.md) — the three hard contracts
-  ([简体中文](docs/CONTRACTS.zh.md))
-- [docs/CONTRACTS.md#anti-patch-contract](docs/CONTRACTS.md#anti-patch-contract) — anti-patch write contract
-- [docs/CONTRACTS.md#handoff-contract](docs/CONTRACTS.md#handoff-contract) — PROGRESS.md spec
-- [docs/CONTRACTS.md#plan-contract](docs/CONTRACTS.md#plan-contract) — PLAN.md + subagent spec
-- [docs/ARCHITECTURE.md#9-documentation-language-convention-i18n](docs/ARCHITECTURE.md#9-documentation-language-convention-i18n) — documentation multilingual (English / 中文) version-control
-- [CHANGELOG.md](CHANGELOG.md) — version history
+---
+
+## Documentation map
+
+| Document | What it is for |
+|---|---|
+| [README.md](README.md) · [README.zh.md](README.zh.md) | What this is, what it does, how to use it |
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) · [.zh](docs/ARCHITECTURE.zh.md) | Module map, data flow, install layouts, the i18n convention |
+| [docs/CONTRACTS.md](docs/CONTRACTS.md) · [.zh](docs/CONTRACTS.zh.md) | The three hard contracts, in specification form |
+| [commands/cc-mem.md](commands/cc-mem.md) | Every `/cc-mem` subcommand, with semantics |
+| [CLAUDE.md](CLAUDE.md) | Instructions for Claude Code working *on* this repository |
+| [CHANGELOG.md](CHANGELOG.md) | The complete version history |
+| [CONTRIBUTING.md](CONTRIBUTING.md) · [SECURITY.md](SECURITY.md) | How to contribute; how to report a vulnerability |
+
+English is the canonical skeleton; each `*.zh.md` is a drift-tracked sibling
+bound to a normalised hash of its English source, and `tools/i18n_check.py`
+turns the suite red when one drifts. Memory **content** is language-agnostic —
+only the project's own documentation follows this convention.
+
+---
 
 ## License
 
-MIT
+[MIT](LICENSE) © skymanbp
+
+---
+
+<sub>**Keywords** — Claude Code plugin · Claude Code memory · persistent memory
+for LLM agents · agent long-term memory · context window management ·
+conversation compaction recovery · session handoff · AI coding assistant memory
+· Anthropic Claude · MCP server · Model Context Protocol · SQLite FTS5 memory
+store · retrieval for coding agents · prompt-injection hardening · pure-stdlib
+Python plugin.</sub>

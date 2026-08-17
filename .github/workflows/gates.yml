@@ -1,0 +1,76 @@
+name: release gates
+
+# The ten release gates were ten commands in a markdown list, run by hand.
+# The v2.11.0 release commit shipped with tests/smoke_test.py RED because of
+# it. This workflow is what makes "run all ten" an executable rather than a
+# sentence.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gates-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Windows is this project's primary platform (CLAUDE.md), it is where the
+  # gates are developed and verified, and it is the only OS where the whole
+  # set is known to pass. So it runs ALL ten.
+  full:
+    name: all 10 gates (windows)
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: no pip install step is required
+        run: python -c "import sys; print(sys.version)"
+        # cc-memory is pure standard library at runtime AND in every gate.
+        # If this job ever needs a `pip install`, that is a defect in the
+        # change that introduced it, not a missing step here.
+      - name: run every release gate
+        run: python tests/run_gates.py
+
+  # Linux runs the platform-independent subset. It deliberately does NOT claim
+  # to cover smoke_test/test_surfaces: those drive a Tk dashboard headlessly
+  # and exercise Windows-specific path shapes (junctions, drive-relative cwd),
+  # and asserting a coverage this job has never been observed to have is the
+  # exact class of untrue claim the doc gates exist to stop.
+  portable:
+    name: platform-independent gates (linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.11', '3.13']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: run the portable gate subset
+        run: python tests/run_gates.py --fast
+
+  # A gate that cannot go red is a gate that is lying. tools/falsify_fixes.py
+  # reverts each registered fix on a TEMPORARY COPY and asserts the gate
+  # catches it. --anchors is the cheap half: it proves the register itself has
+  # not rotted against the tree, without running the full revert matrix.
+  falsify-anchors:
+    name: falsification register is not rotted
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - run: python tools/falsify_fixes.py --anchors

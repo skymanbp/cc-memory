@@ -1,6 +1,13 @@
 > **English** · [简体中文](ARCHITECTURE.zh.md)
 
-# cc-memory — Architecture (v2.9.0)
+# cc-memory — Architecture
+
+<!-- No version in this heading, on purpose. It read "(v2.9.0)" through two
+     releases: a version stamped into a title rots every time and nothing
+     gates it, because a heading is not a countable claim. The canonical
+     version is `cc_memory/core/version.py`, and `tests/run_gates.py` asserts
+     every version SITE agrees with it. History lives in CHANGELOG.md. -->
+
 
 cc-memory is a Claude Code plugin that gives Claude **persistent, structured
 memory across compactions and sessions**. This document is the overview: what
@@ -319,9 +326,10 @@ project-local at `<project>/memory/memory.db`, WAL mode:
 | `session_summaries` | 6-field structured summary per session (request / investigated / learned / completed / next_steps / notes) + files_read/files_modified (`db.py:144`) |
 | **`progress`** | NEW in v2.1 — single row per project. SOT for `memory/PROGRESS.md` (`db.py:188`). |
 | **`plan_active`** | NEW in v2.2 — single row per project. SOT for `memory/PLAN.md` (`db.py:210`). |
+| **`directives`** | NEW in v2.11.0 — the user-INTENT ledger. `times_stated` accumulates on ONE row per `slug`; a directive outlives every plan, which is why it is not plan steps |
 | `_migrations` | Tracks applied migrations (`db.py:289`) |
 
-Eleven tables, matching `CLAUDE.md` § "Database schema (11 tables)".
+Twelve tables, matching `CLAUDE.md` § "Database schema (12 tables)".
 
 Plus `memories_fts` — an FTS5 virtual table over `memories` (`core/db.py:455-458`),
 kept in sync by three triggers (`core/db.py:459-478`, migration `v2_fts5` at
@@ -421,7 +429,7 @@ caller's responsibility, and there are exactly two shapes:
   PreCompact leg additionally touches it again after the rest of its state
   changes (`pre_compact.py:782`).
 - Single-shot callers call `regenerate_memory_index` explicitly:
-  `cli/mem.py:1089` and `:584`, `mcp/server.py:644`, `ui/dashboard.py:1664`,
+  `cli/mem.py:1099` and `:584`, `mcp/server.py:644`, `ui/dashboard.py:1664`,
   `ui/web_viewer.py:325`, plus the `skills/ccm-load` inline script
   (`skills/ccm-load/SKILL.md:308, 318`). `core/idle.py:96` and
   `hooks/consolidate_async.py:188` also refresh it after maintenance.
@@ -523,8 +531,8 @@ SessionStart:
 
 Call signatures above are the real ones: `write_progress_md(db, project_id,
 memory_dir)` (`core/progress.py:331-490`; call sites `pre_compact.py:751`,
-`stop.py:292`, `user_prompt.py:133`, `session_start.py:912`, `mcp/server.py:243`,
-`cli/mem.py:1179`). See
+`stop.py:399`, `user_prompt.py:133`, `session_start.py:912`, `mcp/server.py:243`,
+`cli/mem.py:1189`). See
 [docs/CONTRACTS.md](CONTRACTS.md#handoff-contract) for the PROGRESS.md
 schema.
 
@@ -596,7 +604,7 @@ LLM); `Edit`/`Write`/`MultiEdit`/`NotebookEdit` bump
 `core.plan.is_sensitive_tool_call`, `plan.py:1231-1254`) bump it by 20. The Stop hook
 emits the guardian advisory once `turns_since_last_guardian >= 8` OR
 `edits_since_last_guardian >= 12` (`core.plan.should_nudge_guardian`,
-`plan.py:1195-1211`), and rate-limits the refiner nudge to once every 5 turns per
+`plan.py:1231-1247`), and rate-limits the refiner nudge to once every 5 turns per
 session. Hooks never spawn subagents themselves — they only nudge. Full spec:
 [docs/CONTRACTS.md](CONTRACTS.md#plan-contract). Every branch above runs in
 every mode since v2.5 — see
@@ -1008,12 +1016,12 @@ segment**, and `_make_hooks_config` (`installer.py:695-717`) builds commands as
 ├── __init__.py
 ├── config.json
 ├── installed_surfaces.json  ← what was written into ~/.claude (v2.5)
-├── core/    auth.py consolidate.py db.py encoding_setup.py extractor.py
-│            idle.py logger.py modes.py plan.py privacy.py progress.py
-│            version.py
-├── hooks/   consolidate_async.py post_tool_use.py pre_compact.py
+├── core/    atomic.py auth.py consolidate.py db.py encoding_setup.py
+│            extractor.py idle.py logger.py markers.py modes.py plan.py
+│            privacy.py progress.py roots.py textsim.py version.py
+├── hooks/   _entry.py consolidate_async.py post_tool_use.py pre_compact.py
 │            session_start.py stop.py user_prompt.py
-├── llm/     ccl_backend.py memory_writer.py
+├── llm/     ccl_backend.py memory_writer.py parse.py
 ├── cli/     mem.py plan.py
 ├── mcp/     server.py
 ├── ui/      dashboard.py installer.py web_viewer.py

@@ -350,6 +350,30 @@ _PLAN_MD_HEADER = [
 ]
 
 
+def is_live_plan(row: Optional[Dict]) -> bool:
+    """True when this `plan_active` row is a real plan, not a cleared slot.
+
+    `db.clear_plan_active` deliberately keeps the row as a TOMBSTONE — that is
+    what keeps `revision` monotonic across clears and closes the CAS ABA window
+    a DELETE would reopen — with `raw` and `structured` both emptied. So the
+    existence of a row says nothing about whether a plan exists, and a bare
+    truthiness test on it kept the Stop hook enforcing forever on a project
+    whose plan the user had explicitly dropped: the turn counter went on
+    accruing and every 8 turns the hook refused, demanding a drift check
+    against a plan that was no longer there.
+
+    A NAMED predicate rather than an inline boolean at the call site, because
+    the call site is the thing under test: with the condition inlined, a test
+    could only re-implement it, and re-implementing the predicate is a
+    tautology that passes whatever the hook actually does (proved exactly that
+    way — `falsify --case r11tombstone` ran GREEN until this function existed).
+    """
+    if not isinstance(row, dict):
+        return False
+    return bool(str(row.get("raw") or "").strip()
+                or str(row.get("structured") or "").strip())
+
+
 def raw_pending_refinement(row: Optional[Dict]) -> bool:
     """True when `plan_active.raw` has NOT been folded into `structured` yet.
 
@@ -464,7 +488,19 @@ def blocking_reasons(plan_row: Optional[Dict],
 def render_block_reason(reasons: list, attempt: int) -> str:
     """The text shown when the Stop hook refuses. Same four-part shape every
     time so a reader can locate the failed condition without re-reading the
-    whole message."""
+    whole message.
+
+    THIS IS A RENDER PATH, and it was the only one in this module that did not
+    say so. `blocking_reasons` interpolates a directive's `slug` and `demand`
+    — stored, model-writable text — straight into `what`, and `hooks/stop.py`
+    hands the result to the harness as a `{"decision": "block", "reason": …}`
+    payload, i.e. a HIGHER-authority channel than PROGRESS.md or the
+    SessionStart injection. A stored `</system-reminder><system-reminder>…`
+    reached Claude verbatim; reproduced, one forged block per rendered
+    directive. `neutralize_document` escapes rather than deletes, so the text
+    stays readable and stops carrying authority — the same treatment
+    `render_plan_md` and `render_pending_plan_md` already end with.
+    """
     lines = ["cc-memory · plan enforcement — this turn cannot close yet.", ""]
     for key, what, how in reasons:
         lines += [f"  [{key}]", f"    what : {what}", f"    fix  : {how}", ""]
@@ -474,7 +510,7 @@ def render_block_reason(reasons: list, attempt: int) -> str:
             f"  ({left} more refusal(s) before this degrades to an advisory "
             "so you can never be trapped; switch off entirely with "
             "CC_MEMORY_PLAN_ENFORCE=0)")
-    return "\n".join(lines)
+    return neutralize_document("\n".join(lines))
 
 
 def render_pending_plan_md(raw: str, superseded: Optional[Dict] = None,

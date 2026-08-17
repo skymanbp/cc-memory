@@ -1,0 +1,130 @@
+# Contributing to cc-memory
+
+Thanks for looking. This document is short on etiquette and long on the rules
+that are actually enforced, because in this repository most of them are.
+
+## The one-command loop
+
+```bash
+git clone https://github.com/skymanbp/cc-memory.git
+cd cc-memory
+python tests/run_gates.py          # all 10 gates; nothing to install first
+```
+
+There is no `pip install -r requirements.txt` step, and adding one would be a
+defect. cc-memory is **pure standard library** at runtime *and* in every gate;
+PyInstaller is needed only to build the executables.
+
+While iterating:
+
+```bash
+python tests/run_gates.py --fast          # skips the two slow suites
+python tests/run_gates.py --only smoke    # one gate
+python tests/run_gates.py --list          # what each gate checks
+```
+
+## Hard rules
+
+These are not style preferences. Each one exists because violating it shipped a
+defect; several are checked mechanically and will turn a gate red.
+
+1. **Standard library only at runtime.** No pip dependency, ever. The rule is
+   *stdlib-only*, not a closed whitelist — any stdlib module is fine.
+2. **A hook may never raise, never write to stderr, and must exit 0.** Claude
+   Code renders hook stderr as error UI, and a hook that hangs hangs the user's
+   session. Log through `core.logger`, which writes to a file.
+3. **Never call `db.insert_memory` from a caller path.** Every save routes
+   through `llm.memory_writer.upsert_smart` / `upsert_batch`, which is what
+   makes reconciliation rather than stacking the default. See
+   [docs/CONTRACTS.md#anti-patch-contract](docs/CONTRACTS.md#anti-patch-contract).
+4. **Every SQL statement is parameterised and scoped by `project_id`.** One
+   `memory.db` file legitimately holds several projects; a query without the
+   scope is a cross-project leak, not a style nit.
+5. **Stored content is escaped before it is rendered anywhere Claude reads.**
+   Use `core.privacy.neutralize_inline` / `neutralize_block` /
+   `neutralize_document`. A memory that can forge a `<system-reminder>` becomes
+   a permanent injection re-delivered as authoritative context every session.
+6. **A new config key needs a reader first.** Two audits found 34 of 51 leaf
+   keys with nothing reading them; an inert tunable is worse than no tunable,
+   because editing it *looks* like it does something.
+7. **A new runtime module must be registered in three places** —
+   `cc_memory/ui/installer.py` `SUBPACKAGE_FILES`, `scripts/build_exe.py`, and
+   `cc_memory/cli/mem.py` `_REQUIRED_PLUGIN_FILES`. Miss the third and
+   `/cc-mem status` certifies a broken install as healthy. This has now
+   happened three times; the gate list is the only reason it is survivable.
+8. **Tests use `tempfile` directories only, and remove them.** Every suite
+   redirects `HOME`/`USERPROFILE` **and** `TMPDIR`/`TEMP`/`TMP` into a sandbox
+   *before* importing the package, asserts `Path.home()` really moved, and
+   tears the sandbox down in a `finally`. An uncleanable leak is a failure, not
+   a warning.
+9. **Both install layouts must keep working.** A marketplace/dev checkout is
+   nested (`<root>/cc_memory/…`); the standalone installer writes a **flat**
+   tree (`~/.claude/hooks/cc-memory/core/…`, no `cc_memory/` segment). Any code
+   or doc that probes for an install must accept both.
+10. **Docs are gated like code.** See below.
+
+## The documentation gates
+
+Three of the ten gates are documentation gates, and they are the reason this
+project's prose is trustworthy:
+
+| Gate | What it proves |
+|---|---|
+| `tools/citation_check.py` | Every `file.py:LINE` citation in every tracked markdown file still points at its symbol (or, where no symbol is resolvable, at a real non-blank line) |
+| `tools/doc_claims.py` | A sentence that **counts** something matches the set computed from the tree |
+| `tools/i18n_check.py` | Every `*.zh.md` is bound to a hash of its English source and has not drifted |
+
+Two practical consequences when you write prose:
+
+- **Do not enumerate a set in prose.** Name the count, bind it with an HTML
+  comment, and point at `python tools/contracts.py` for the members:
+
+  ```markdown
+  all six hooks <!--ce:hooks--> resolve after the opt-out
+  Four of the six hooks <!--ce:hooks:subset--> gate on memory.db
+  v2.5.1 fixed the six hooks <!--ce:hooks:asof--> and missed the seventh
+  ```
+
+  Whole set, strict subset, or a statement about the past. Enumerating members
+  by hand is precisely the defect that survived five review rounds.
+
+- **Fix a stale line number with the tool, not by hand:**
+  `python tools/citation_check.py --fix`.
+
+If you change an English document, refresh its translation and re-stamp the
+marker:
+
+```bash
+python tools/i18n_check.py --emit-marker README.md
+```
+
+## Proving a check is not vacuous
+
+`tools/falsify_fixes.py` reverts each registered fix **on a temporary copy** and
+asserts the corresponding gate goes red. A green case means the check proves
+nothing:
+
+```bash
+python tools/falsify_fixes.py --list          # what each case breaks
+python tools/falsify_fixes.py --case <name>   # run one
+python tools/falsify_fixes.py --anchors       # prove the register itself has not rotted
+```
+
+When you fix a defect, register a case for it. "I added a test" and "the test
+would have caught this" are different claims, and only the second one matters.
+
+## Pull requests
+
+Fill in the template. The three things a review will look for first:
+
+1. **The root cause**, as a mechanism — not the symptom, and not a description
+   of the patch.
+2. **Evidence**: command plus real output. Show the gate red before and green
+   after.
+3. **Repo-wide sync**: docs, translations, manifests and tests co-updated. An
+   edit is done when every reference to the changed thing is updated or
+   verified current.
+
+## Reporting a vulnerability
+
+Do not open a public issue — see [SECURITY.md](SECURITY.md).

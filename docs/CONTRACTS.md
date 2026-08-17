@@ -208,10 +208,10 @@ r8antipatch` proves the assertion goes red when a bypass caller appears.
 | Save path | Entry function |
 |-----------|---------------|
 | `PreCompact` hook | `upsert_batch(db, pid, sid, extracted_list, memory_dir)` (`hooks/pre_compact.py:672`) |
-| `Stop` observer | `upsert_batch(db, pid, None, observer_list, memory_dir)` (`hooks/stop.py:327`) |
+| `Stop` observer | `upsert_batch(db, pid, None, observer_list, memory_dir)` (`hooks/stop.py:360`) |
 | `SessionStart` retroactive save | `upsert_batch(db, pid, sid, memories, memory_dir=memory_dir)` — un-saved prior sessions (`hooks/session_start.py:1073`) |
 | `/save-memories` skill | `upsert_batch(db, pid, None, memories, memory_dir=Path(project) / 'memory')` (`skills/save-memories/SKILL.md:100`) |
-| `mem.py add` CLI | `upsert_smart(...)` + `regenerate_memory_index(...)` (`cli/mem.py:1089,524`) |
+| `mem.py add` CLI | `upsert_smart(...)` + `regenerate_memory_index(...)` (`cli/mem.py:1099,524`) |
 | `mcp/server.py handle_memory_add` | `upsert_smart(...)` + `regenerate_memory_index(...)` (`mcp/server.py:629-656,192`) |
 | Dashboard UI "Add Memory" | `upsert_smart(...)` + `regenerate_memory_index(...)` — routed since v2.2 (`ui/dashboard.py:1664,956`). `ui/dashboard.py` contains no `db.insert_memory` call. |
 | Dashboard UI "Save Session" | `upsert_batch(...)` (`ui/dashboard.py:2246`) |
@@ -314,7 +314,7 @@ so any hardcoded `python ~/.claude/hooks/cc-memory/.../mem.py` invocation fails
 there — this repo is a marketplace/directory install.
 
 If `Supersede chains: N update events recorded` shows up
-(`cli/mem.py:853`), the contract is working. Zero is fine (no facts have
+(`cli/mem.py:863`), the contract is working. Zero is fine (no facts have
 been refined yet), but a steadily growing number means real-world consolidation
 is happening.
 
@@ -358,8 +358,8 @@ at `db.py:176-190`, plus the two v5 session-annotation columns at `db.py:219-222
 | `files_touched` | JSON | `observations` table (`pre_compact.py:446-453` → `progress.py:128-134`; Stop per-turn patch `stop.py:193-211`; SessionStart tier-2C `session_start.py:882`) → tier-3 prior-transcript `extract_file_changes` (`session_start.py:882`) |
 | `transcript_ptr` | TEXT | PreCompact `transcript_path` resolved absolute (`pre_compact.py:750`) → tier-3 `find_latest_transcript(cwd, exclude_session_id=...)` (`session_start.py:881`) |
 | `updated_at` | TEXT | ISO timestamp, stamped by `upsert_progress` / `patch_progress` (`db.py:2099-2175`, `:937-943`) |
-| `trigger_type` | TEXT | "auto" \| "manual" (PreCompact passes the host's own trigger string through — `pre_compact.py:749,492`; `"precompact"` is only `collect_progress_state`'s default kwarg at `progress.py:200-260` and is always overridden) \| "stop" (`stop.py:434`) \| "user_prompt" \| "resume_request" (`user_prompt.py:193`) \| "session_start_refresh" (`session_start.py:825`) |
-| `current_session_id` | TEXT | `db.tag_progress_session` only (`db.py:2309-2333`) — tagged by PreCompact (`pre_compact.py:749`), Stop (`stop.py:434`), SessionStart (`session_start.py:825`), UserPromptSubmit (`user_prompt.py:193`) |
+| `trigger_type` | TEXT | "auto" \| "manual" (PreCompact passes the host's own trigger string through — `pre_compact.py:749,492`; `"precompact"` is only `collect_progress_state`'s default kwarg at `progress.py:200-260` and is always overridden) \| "stop" (`stop.py:467`) \| "user_prompt" \| "resume_request" (`user_prompt.py:193`) \| "session_start_refresh" (`session_start.py:825`) |
+| `current_session_id` | TEXT | `db.tag_progress_session` only (`db.py:2309-2333`) — tagged by PreCompact (`pre_compact.py:749`), Stop (`stop.py:467`), SessionStart (`session_start.py:825`), UserPromptSubmit (`user_prompt.py:193`) |
 | `session_started_at` | TEXT | `db.tag_progress_session` — reset only when the stored sid changes; `upsert_progress` preserves both across a full rewrite (`db.py:2099-2175`) |
 
 The rendered Markdown (sections 0-7 in
@@ -368,8 +368,8 @@ from this row. Hand-editing PROGRESS.md is pointless: any of the four automatic
 update paths (PreCompact / Stop / UserPromptSubmit / SessionStart refresh) —
 plus the two manual regenerators, `/cc-mem progress` (`cli/mem.py:1238`) and the
 MCP `progress_regenerate` tool (`mcp/server.py:742`) — will overwrite it.
-All six `write_progress_md` call sites: `pre_compact.py:751`, `stop.py:373`,
-`user_prompt.py:209`, `session_start.py:948`, `cli/mem.py:1277`,
+All six `write_progress_md` call sites: `pre_compact.py:751`, `stop.py:406`,
+`user_prompt.py:209`, `session_start.py:948`, `cli/mem.py:1287`,
 `mcp/server.py:243`.
 
 ### Rendered layout (§0-§7)
@@ -416,7 +416,7 @@ whitespace-flattened and truncated at 100 chars (`:210-234`).
 2. **Stop** (partial update, every turn):
    - `db.tag_progress_session(...)` then
      `db.patch_progress(files_touched=<from observations>, trigger_type="stop")`
-     (`stop.py:359`, `:211`).
+     (`stop.py:392`, `:211`).
    - `write_progress_md(...)` rewrites the file with the patched state (`:213`).
    - This keeps "Files Touched This Session" current without waiting for the
      next compaction.
@@ -897,7 +897,7 @@ Then re-pipe the JSON through `/cc-mem plan-set --from-refiner`.
 Resolve by re-running with `--reason "<why>"`. The reason is not decoration —
 it is written into the archive payload. Only after the gate passes does the
 command archive, `db.clear_plan_active(pid)`, and delete `memory/PLAN.md` +
-`memory/.plan_raw.md` (`cli/mem.py:1634`).
+`memory/.plan_raw.md` (`cli/mem.py:1649`).
 
 #### Backstop — append-only plan history
 
@@ -924,7 +924,7 @@ denial-of-service on planning.
 
 ### Nudge thresholds
 
-Hardcoded defaults in `core/plan.py:1195-1211` (`turn_threshold=8`,
+Hardcoded defaults in `core/plan.py:1231-1247` (`turn_threshold=8`,
 `edit_threshold=12`); the Stop hook calls `should_nudge_guardian(plan_row)` with
 no overrides (`hooks/stop.py`). There is NO `config.json` key for these —
 change the signature defaults, or pass explicit kwargs. The `+20` sensitive-call
@@ -932,19 +932,57 @@ bump is likewise hardcoded (`hooks/post_tool_use.py`):
 
 | Trigger                                  | Threshold      | What gets emitted |
 |------------------------------------------|----------------|-------------------|
-| `turns_since_last_guardian` reaches      | 8 (default)    | One-line Stop status |
-| `edits_since_last_guardian` reaches      | 12 (default)   | One-line Stop status |
-| Sensitive bash tool detected             | n/a (immediate via +20 bump) | One-line Stop status next turn |
-| `needs_refine = 1`                       | n/a (immediate) | "NEW PLAN captured" line |
+| `turns_since_last_guardian` reaches      | 8 (default)    | Stop **refusal** (`plan-drift`) |
+| `edits_since_last_guardian` reaches      | 12 (default)   | Stop **refusal** (`plan-drift`) |
+| Sensitive bash tool detected             | n/a (immediate via +20 bump) | Stop refusal next turn |
+| `needs_refine = 1`                       | n/a (immediate) | Stop **refusal** (`plan-unrefined`) |
+| An active directive idle past its threshold | 25 turns    | Stop **refusal** (`directive-idle:<slug>`) |
 
 `should_nudge_guardian` returns `(False, "no_active_plan")` without a
 schema-valid plan and `(False, "needs_refine_first")` while a raw plan is
-awaiting refinement, so the two nudges never collide (`core/plan.py:708-711`).
+awaiting refinement, so the two conditions never collide (`core/plan.py:708-711`).
 
-The Stop hook NEVER emits a `<system-reminder>` for plans — only a soft
-advisory status line (`hooks/stop.py:270-272`). Use `/cc-mem plan-check` to
-explicitly request a guardian sweep; it refreshes PLAN.md first so the subagent
-reads current state, then resets the counters (`cli/mem.py:834-836`).
+#### The Stop hook can refuse the turn (v2.11.0)
+
+**This section said the opposite until v2.11.0, and the sentence outlived the
+behaviour by a release.** What used to be true: the hook emitted only a soft
+advisory status line, rate-limited to once per five turns — which is precisely
+how a raw plan sat unrefined indefinitely while `PLAN.md`, `plan-status` and
+the drift guardian all answered from the *previous* plan.
+
+What is true now: `core.plan.blocking_reasons` returns the conditions that must
+stop a turn, and `hooks/stop.py:_emit_block` writes
+`{"decision": "block", "reason": …}` to stdout and exits 0. Three properties
+are load-bearing and a change must not break any of them:
+
+1. **The escape budget always releases.** After `_BLOCK_MAX_CONSECUTIVE`
+   refusals of the *same condition set* the hook degrades to a loud advisory,
+   and `_block_attempt` keys the counter by a digest of the condition keys, so
+   fixing one problem never spends the next one's budget. If the attempt count
+   cannot be persisted at all, the hook **advises instead of blocking** — an
+   unbreakable block is worse than no block.
+2. **A refusal writes a JSON document to stdout and nothing else.** The
+   per-turn status line is built first and emitted only on the paths where the
+   turn is allowed to close. `{"decision": …}` preceded by prose is not JSON,
+   and a harness that cannot parse it sees no decision — which silently
+   restores the advisory this release exists to end.
+3. **Only a LIVE plan is enforced.** `clear_plan_active` keeps a tombstone row
+   (that is what keeps `revision` monotonic across clears), so the hook tests
+   for non-empty `raw`/`structured` rather than for the row's existence. A
+   project with no plan is never enforced, which is what makes opting in the
+   thing that turns enforcement on.
+
+Kill switch: `CC_MEMORY_PLAN_ENFORCE=0` (`core.plan.enforcement_enabled`).
+`/cc-mem plan-check` remains the way to request a guardian sweep explicitly; it
+refreshes PLAN.md first so the subagent reads current state, then resets the
+counters (`cli/mem.py:834-836`).
+
+Stored directive text is escaped on the way in (`db.upsert_directive` →
+`clean_for_storage`) **and** on the way out (`render_block_reason` →
+`neutralize_document`). The block `reason` is fed back to Claude as a decision,
+which makes it a higher-authority channel than PROGRESS.md — a directive whose
+`demand` could forge a `<system-reminder>` reached the model verbatim before
+both halves were in place.
 
 ### Subagent contracts
 

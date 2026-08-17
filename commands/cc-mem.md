@@ -45,9 +45,24 @@ someone who knows the command exists.
 | `plan-check` | Reset guardian counters + emit plan-guardian invocation hint |
 | `plan-replan` | Re-arm `needs_refine` on the current raw |
 | `plan-clear` | Drop the active plan + delete PLAN.md. Archived to `memory/.plan_history/` first; **`--reason "<why>"` is required when unfinished steps exist** (refuses and exits 1 otherwise — v2.4.0 carryover gate) |
+| `directive-list [--status active\|done\|superseded\|dropped\|all]` | Standing user directives, **most-repeated first**. A directive is a unit of user INTENT and outlives every plan; a plan step is a unit of execution and dies with its plan. Default filter is `active` |
+| `directive-add <slug> [--quote "..."] [--demand "..."] [--kind standing\|feature\|process\|oneoff] [--times N]` | Record a directive. **Re-adding the same slug bumps `times_stated` on the ONE row** rather than creating a second — repetition is the importance signal a plan cannot express. `--times` sets the count outright, for backfilling from a transcript audit |
+| `directive-close <slug> --evidence "<checkable>" [--status done\|superseded\|dropped]` | Close a directive. **`--evidence` is mandatory** and refuses an empty value (exits 1): a commit sha, `file:line`, or a gate name. A directive closed on an assertion is the exact failure the ledger exists to prevent |
 | `inject-show` | Show exactly what the last SessionStart injected (ground truth) |
 | `inject-usage` | Deterministic signals: did Claude actually Read PROGRESS.md/MEMORY.md |
 | `encoding-check [--apply]` | Scan for U+FFFD corruption (read-only; `--apply` quarantines) |
+
+> **Directive ledger + Stop enforcement (v2.11).** The `directive-*` commands
+> back a ledger that is deliberately **not** plan steps: a plan step dies when
+> the plan is replaced, a directive outlives every plan. The Stop hook reads
+> both and can **refuse to end a turn** (`{"decision": "block"}`) while a plan
+> sits unrefined, a live plan has gone undrift-checked, or an active directive
+> has been idle past its threshold. The refusal always escapes: after
+> `_BLOCK_MAX_CONSECUTIVE` refusals of the *same* condition set it degrades to
+> a loud advisory, and the counter is keyed by a digest of the condition keys,
+> so fixing one problem never spends the next one's budget. Kill switch:
+> `CC_MEMORY_PLAN_ENFORCE=0`. A project with no `plan_active` row is never
+> enforced, so opting in is what turns it on.
 
 > **Memory quality (v2.3).** `consolidate` now also runs LLM-judged **semantic
 > de-duplication** (same fact reworded across sessions → merged, recoverable via

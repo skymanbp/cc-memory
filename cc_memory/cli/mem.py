@@ -275,6 +275,16 @@ _REQUIRED_PLUGIN_FILES = [
     # module level, and every hook imports memory_writer — an install missing
     # it loses all six hooks <!--ce:hooks--> at once.
     "cc_memory/core/textsim.py",
+    # v2.10.0, and the SAME shape a THIRD time — the comment two entries above
+    # named this list as "the copy that goes quiet" and was then proved right
+    # by the very next module added. `hooks/_entry.py` is THE hook entry ladder
+    # (stdin parse + the opt-out→anchor gate); all six hook <!--ce:hooks-->
+    # scripts below import it at module level, so an install missing this one
+    # file loses every hook at import — while `status` walked a list that did
+    # not mention it and certified the install healthy. Verified: the six
+    # hook <!--ce:hooks--> entries are listed here and each one does
+    # `from hooks._entry import …`.
+    "cc_memory/hooks/_entry.py",
     "cc_memory/hooks/pre_compact.py",
     "cc_memory/hooks/consolidate_async.py",
     "cc_memory/hooks/session_start.py",
@@ -1483,10 +1493,14 @@ def _print_raw_plan(raw, max_lines=20):
 
 def cmd_plan_status(args):
     """One-screen summary of the live plan: counters, active step, freshness."""
-    from core.plan import is_valid_structured
+    from core.plan import is_live_plan, is_valid_structured
     db, pid, _ = _plan_db(args.project)
+    # is_live_plan, NOT truthiness: `plan-clear` keeps a TOMBSTONE row, so a
+    # bare `if not row` fell through to the "raw plan captured" branch below and
+    # reported `Raw plan captured (0 chars) - NOT yet refined` for a plan the
+    # user had just deliberately dropped. Same root as the Stop hook's.
     row = db.get_plan_active(pid)
-    if not row:
+    if not is_live_plan(row):
         print("No active plan. Enter Claude's plan mode or run "
               "`/cc-mem plan-set --raw '<text>'`.")
         return
@@ -1610,10 +1624,11 @@ def cmd_plan_set(args):
 
 
 def cmd_plan_clear(args):
-    from core.plan import archive_plan, unfinished_steps
+    from core.plan import archive_plan, is_live_plan, unfinished_steps
     db, pid, memory_dir = _plan_db(args.project)
     row = db.get_plan_active(pid)
-    if not row:
+    # a TOMBSTONE is not a plan: clearing twice used to archive an empty one
+    if not is_live_plan(row):
         print("No active plan to clear.")
         return
     # R610 carryover gate (clear face): dropping a plan that still has
@@ -1663,11 +1678,12 @@ def cmd_plan_check(args):
     """Recommend a guardian check. Resets the guardian counters so the next
     nudge waits a full interval. The CLI itself doesn't invoke the subagent —
     the calling Claude is expected to follow up with `Task(...)`."""
-    from core.plan import (is_valid_structured, raw_pending_refinement,
-                           write_plan_md)
+    from core.plan import (is_live_plan, is_valid_structured,
+                           raw_pending_refinement, write_plan_md)
     db, pid, memory_dir = _plan_db(args.project)
     row = db.get_plan_active(pid)
-    if not row:
+    # a TOMBSTONE is not a plan: checking one reset counters for nothing
+    if not is_live_plan(row):
         print("No active plan to check.")
         return
     # FRESHNESS FIRST. core.plan.raw_pending_refinement's contract is that every
@@ -1735,7 +1751,21 @@ def cmd_directive_add(args):
     """Record a directive. Re-adding the same slug bumps its repetition count
     rather than creating a second row — the count IS the importance signal."""
     db, pid, _memory_dir = _plan_db(args.project)
-    fields = {"quote": args.quote, "demand": args.demand, "kind": args.kind}
+    # ONLY the flags actually supplied. `upsert_directive` keeps any field it
+    # is not given, but argparse defaults are '' / 'standing', not None — so
+    # re-stating a directive with `directive-add <slug>` and no flags passed
+    # three non-None values and WIPED the quote and the demand and reset the
+    # kind. Re-statement is the one operation this ledger exists for: the row
+    # that survived carried a repetition count and no longer said what the
+    # user had asked for. Sentinel defaults keep "omitted" distinguishable
+    # from "explicitly set to empty".
+    fields = {}
+    if args.quote:
+        fields["quote"] = args.quote
+    if args.demand:
+        fields["demand"] = args.demand
+    if args.kind is not None:
+        fields["kind"] = args.kind
     if args.times is not None:
         fields["times_stated"] = args.times
     action = db.upsert_directive(pid, args.slug, **fields)
@@ -2087,8 +2117,13 @@ def make_parser():
     pda.add_argument("slug", help="Stable short id, e.g. pause-on-quota")
     pda.add_argument("--quote", default="", help="The user's verbatim words")
     pda.add_argument("--demand", default="", help="What it requires, one line")
-    pda.add_argument("--kind", default="standing",
-                     choices=["standing", "feature", "process", "oneoff"])
+    # default=None, NOT "standing": these defaults are how a bare re-statement
+    # (`directive-add <slug>`) used to overwrite a directive's kind. The INSERT
+    # path in db.upsert_directive already falls back with `or "standing"`, so
+    # a genuinely new directive still lands as standing.
+    pda.add_argument("--kind", default=None,
+                     choices=["standing", "feature", "process", "oneoff"],
+                     help="Directive kind (default on creation: standing)")
     pda.add_argument("--times", type=int, default=None,
                      help="Set the repetition count outright (transcript audit)")
     pdc = sub.add_parser("directive-close",

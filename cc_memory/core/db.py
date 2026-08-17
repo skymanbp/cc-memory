@@ -1943,14 +1943,14 @@ class MemoryDB:
         normalized = content.strip().lower().encode("utf-8")
         return hashlib.sha256(normalized).hexdigest()[:16]
 
-    def is_duplicate_hash(self, project_id, content_hash):
-        with self._connect() as conn:
-            row = conn.execute(
-                "SELECT 1 FROM memories WHERE project_id = ? AND content_hash = ? "
-                "AND is_active = 1 LIMIT 1",
-                (project_id, content_hash)
-            ).fetchone()
-            return row is not None
+    # (`is_duplicate_hash` was deleted here. It answered "does this hash
+    # exist?" on its OWN connection, which is the pre-transaction shape the
+    # anti-patch contract removed: the hash check now happens inside
+    # `reconcile_upsert`'s single `BEGIN IMMEDIATE`, because a check on one
+    # connection and an insert on another is precisely how two concurrent
+    # savers of the same sentence both observed an empty table and both
+    # inserted. It had zero callers repo-wide — a dead helper whose signature
+    # still advertised the unsafe pattern is an invitation to re-adopt it.)
 
     def find_by_hash(self, project_id, content_hash):
         """Return the active memory matching this hash, or None."""
@@ -2608,7 +2608,33 @@ class MemoryDB:
         now = self._now()
         allowed = ("quote", "demand", "kind", "status", "times_stated",
                    "source", "evidence", "closed_at")
+        # WRITE-PATH CLEANING, the same half `upsert_smart` performs for a
+        # memory. `quote`, `demand` and `evidence` are free text that is later
+        # interpolated into the Stop hook's block `reason` — a decision payload
+        # the harness feeds back to Claude, which is a HIGHER-authority channel
+        # than PROGRESS.md. Escaping only at render leaves rows already stored
+        # by v2.11.0 armed, which is exactly why the marker defence is applied
+        # on both sides rather than one. Imported lazily: db.py deliberately
+        # keeps no module-level dependency on core.privacy.
+        from core.privacy import clean_for_storage
+        for _slot in ("quote", "demand", "evidence"):
+            if fields.get(_slot) is not None:
+                fields[_slot] = clean_for_storage(str(fields[_slot]))
+        # BEGIN IMMEDIATE, exactly as `reconcile_upsert` does for `memories`.
+        # The read-then-write below is the correct POLICY — "a slot the caller
+        # omitted keeps its stored value" cannot be expressed by an
+        # `ON CONFLICT DO UPDATE` arm, because `excluded.*` has already had the
+        # NOT NULL column defaults applied and can no longer be distinguished
+        # from an explicit empty string (tried, and it wiped `demand`/`quote`
+        # on every bare re-statement). What was actually wrong was the
+        # ISOLATION: `sqlite3` takes no write lock for a SELECT, so two
+        # concurrent creators of one slug both saw None and both INSERTed, and
+        # the loser died on `idx_directives_slug` with an IntegrityError out of
+        # a hook. `times_stated` — the entire point of this table — is exactly
+        # the counter a lost write corrupts. One write lock, taken up front,
+        # makes the whole read-decide-write atomic without changing the policy.
         with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
                 "SELECT * FROM directives WHERE project_id = ? AND slug = ?",
                 (project_id, slug)).fetchone()

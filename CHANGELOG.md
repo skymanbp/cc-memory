@@ -7,6 +7,139 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [2.11.1] — 2026-08-16
+
+### The release that shipped with a red gate, and the engine nobody drove
+
+v2.11.0 was tagged while `tests/smoke_test.py` was **failing**: the directive
+ledger added `directive-add` / `directive-close` / `directive-list` and
+`commands/cc-mem.md` was never updated, which its own doc-facts assertion
+checks. Worse, `main()` is one sequential function, so that first failing
+assert also **hid** the assertion below it — `core/db.py` had created **12**
+tables since `v8_directives` while three documents still said eleven. Two gate
+failures, one visible, neither caught, because "run all ten gates" was prose in
+`CLAUDE.md` rather than an executable.
+
+A seven-scope disjoint audit with adversarial verification then found that the
+v2.11.0 enforcement engine — the code that can **refuse to end a user's turn** —
+had zero test coverage of its own. The `[True, True, True, False, False]`
+evidence the entry below cites was real, and it exercised only the path where
+the marker is writable.
+
+### Fixed — the enforcement path
+
+- **The escape budget could never release, trapping the session.**
+  `core.markers.write_marker` **never raises** (first line of its docstring);
+  all three failure paths `return False`. `hooks/stop.py:_block_attempt` guarded
+  the "cannot persist the count, so advise instead of blocking" case with
+  `except OSError` — dead code — and discarded the return value. On any marker
+  directory `core.markers` refuses (a mode-1777 temp root, a planted reparse
+  point, a read-only temp), nothing persisted, every read came back empty, `n`
+  stayed 1, and the hook refused forever. Measured `[1,1,1,1,1,1,1,1]` over
+  eight consecutive Stops; after the fix, `[None × 5]` (degrades to advisory)
+  while the healthy path is unchanged at `[True, True, True, False, False]`.
+- **A stored directive reached Claude as a LIVE authority marker.**
+  `blocking_reasons` interpolates a directive's `slug` and `demand` into the
+  block text, and `render_block_reason` was the only renderer in `core/plan.py`
+  that did not neutralize — while `hooks/stop.py:_emit_block` hands the result
+  to the harness as `{"decision": "block", "reason": ...}`, a higher-authority
+  channel than PROGRESS.md. Reproduced: one forged `<system-reminder>` per
+  rendered directive. Escaped on **both** sides now — `db.upsert_directive`
+  routes `quote`/`demand`/`evidence` through `clean_for_storage`, and
+  `render_block_reason` ends with `neutralize_document`.
+- **A refusal's stdout was not a JSON document.** An unconditional per-turn
+  status line printed to the same stream before the decision object. The status
+  line is now built first and emitted only on the paths where the turn closes.
+- **A cleared plan enforced forever.** `clear_plan_active` keeps a tombstone row
+  on purpose (it is what keeps `revision` monotonic across clears and closes the
+  CAS ABA window); the hook tested the row's truthiness, so a project whose plan
+  the user had explicitly dropped kept accruing turns and being refused every 8.
+  `core.plan.is_live_plan` is now the named predicate — **named deliberately**,
+  because a test can only re-implement an inline condition and a
+  re-implementation passes whatever the hook does (proved: `falsify --case
+  r11tombstone` ran GREEN until the predicate existed).
+- **A just-stated directive was reported idle.** `_idle_directives` stamped
+  every active row with the PLAN's guardian counter, so a directive recorded
+  seconds ago was announced as "no progress for 40 turns" and blocked the turn.
+  It now requires the directive to be untouched since the guardian window
+  opened, comparing with `>=` because `MemoryDB._now()` stamps **whole
+  seconds** — a strict `>` reproduced the false block, caught by the new gate
+  rather than by review.
+- **Re-stating a directive erased it.** `cli/mem.py`'s argparse defaults are
+  `''` / `'standing'`, not `None`, so a bare `directive-add <slug>` passed three
+  non-None values and wiped `demand` and `quote` and reset `kind` — the single
+  operation the ledger exists for. Only supplied flags are forwarded now.
+- **Concurrent directive creates raced.** `sqlite3` takes no write lock for a
+  SELECT, so two creators of one slug both saw no row and both INSERTed; the
+  loser died on `idx_directives_slug` out of a hook, and `times_stated` is
+  exactly the counter a lost write corrupts. `BEGIN IMMEDIATE`, the same idiom
+  `reconcile_upsert` uses. Measured: 8 concurrent creators → 0 exceptions, 1
+  row, `times_stated = 8`.
+
+### Fixed — packaging and repository integrity
+
+- **`cc_memory/hooks/_entry.py` was absent from `cli/mem.py`'s
+  `_REQUIRED_PLUGIN_FILES`**, so `/cc-mem status` certified an install where all
+  six hooks die at import as healthy. This was the **third** recurrence
+  (`core/roots.py`, then `core/markers.py`), and the list's own comments
+  predicted each next one without preventing it — so the requirement is now
+  **derived**: `smoke_test.py` walks the hooks' module-level import graph with
+  `ast` and asserts every reachable module is listed.
+- **A `.gitignore` blanket `.*/` silently removed `.github/` from the
+  repository** — zero tracked files, invisible to `git status`, so the
+  release-gate CI would never have been committed — and matched
+  `.claude-plugin/` too, where the two existing files survived only because they
+  were already tracked. Re-included by negation and gated: eight shipped paths
+  must stay tracked-able, two private paths must stay ignored.
+- `MemoryDB.is_duplicate_hash` deleted — zero callers repo-wide, and its
+  signature still advertised the check-then-write shape the anti-patch
+  transaction removed.
+
+### Added
+
+- **`tests/run_gates.py`** — one command runs all ten gates, prints a table and
+  exits nonzero on any red. `--list`, `--only`, `--fast`. The gate COUNT in
+  `CLAUDE.md` is now asserted against `len(GATES)` instead of typed, and every
+  suite/checker on disk must appear both in that list and in the runner.
+- **`.github/`** — `workflows/gates.yml` (all ten gates on Windows, the
+  platform-independent subset on Linux, plus `falsify_fixes --anchors`), issue
+  templates and a PR template.
+- **`CONTRIBUTING.md`** and **`SECURITY.md`**.
+- **`tests/test_directive_enforcement.py` §5** — checks over `_block_attempt`,
+  `_emit_block`, `_idle_directives`, `is_live_plan`, the write path and the
+  CLI, all of which previously had **zero** executable coverage.
+- **Nine falsification cases** (`r11budget`, `r11blockmarker`, `r11idle`,
+  `r11tombstone`, `r11directiverace`, `r11restate`, `r11gitignore`,
+  `r11flattree`, `r11entryreq`), each driven RED individually. Two ran GREEN
+  first; the **checks** were fixed, not the cases. Register 151 → 160.
+- A gate asserting the flat-install tree diagram names every shipped module in
+  both language siblings — it had fallen six behind.
+
+### Changed
+
+- **`build_exe.py` moved to `scripts/build_exe.py`**; `ROOT` resolves to the
+  checkout rather than the script's directory, and `smoke_test.py` asserts no
+  copy remains at the repository root.
+- **README rewritten** — 1228 → ~690 lines. The reverse-chronological release
+  archaeology (640 lines, 52% of the file) moved out to this changelog, which
+  already carried all of it; what replaces it is a table of contents, a
+  quickstart, a feature index in eight categories, full CLI/MCP/config
+  reference, and a troubleshooting table. `README.zh.md` rewritten to match.
+- **Discoverability**: GitHub topics 0 → 20, a new repository description and
+  homepage; `pyproject.toml` keywords 9 → 24 and classifiers 7 → 18; both
+  plugin manifests carry 22 keywords.
+- `docs/ARCHITECTURE.md` no longer stamps a version into its title — it read
+  "(v2.9.0)" through two releases, and a heading is not a countable claim, so
+  nothing gated it.
+- `docs/CONTRACTS.md` § Plan contract said the Stop hook "NEVER" emits anything
+  but an advisory status line, and cited a symbol the hook no longer calls. It
+  now specifies the three load-bearing properties of a refusal.
+- `LICENSE` names its copyright holder.
+- `CLAUDE.md`'s citations to `memory/*.md` registers are marked
+  maintainer-local: `/memory/` is git-ignored by design, so no clone has them.
+
+---
+
 ## [2.11.0] — 2026-08-15
 
 ### Advisory became enforced, because advisory did not work

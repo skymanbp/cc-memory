@@ -2,7 +2,7 @@
 
 ## Project: cc-memory
 
-**Claude Code persistent memory plugin (v2.11.0)** — anti-patch reconcile-on-write
+**Claude Code persistent memory plugin (v2.11.1)** — anti-patch reconcile-on-write
 + LLM-judged semantic de-duplication, forced PROGRESS.md handoff with
 per-session annotation, live PLAN.md anchor with plan-refiner / plan-guardian
 subagents + mandatory carryover gate, **an enforced directive ledger**, bounded
@@ -10,9 +10,61 @@ transcript reads, injection observability, FTS5 search, AI-judged extraction
 with Haiku (optional local Ollama fallback).
 
 - **Language**: Python 3.8+ (pure stdlib, zero pip dependencies at runtime)
-- **Version**: 2.11.0
+- **Version**: 2.11.1
 - **License**: MIT
 - **Platform**: Windows-primary, cross-platform compatible (Tkinter required for GUI)
+
+## What changed in v2.11.1 (over v2.11.0)
+
+**The enforcement engine shipped with zero coverage, and the gate list was
+prose.** v2.11.0 was released with `tests/smoke_test.py` **RED** — the directive
+ledger added three CLI subcommands and `commands/cc-mem.md` was never updated —
+and because `main()` is one sequential function, that first failing assert also
+hid the `12 tables` assert below it. Nothing caught either, because "run all ten
+gates" was a sentence in this file rather than an executable.
+
+Six defects in the enforcement path, each reproduced before it was fixed:
+
+1. **The escape budget could never release.** `core.markers.write_marker`
+   **never raises** (its docstring's first line); all three failure paths
+   `return False`. `_block_attempt`'s `except OSError` was therefore dead code
+   and the return value was discarded, so on any temp directory `core.markers`
+   refuses, nothing persisted, every read came back empty, `n` stayed 1, and the
+   hook refused **forever** — measured `[1,1,1,1,1,1,1,1]` over eight Stops.
+   "An unbreakable block is worse than no block" is the v2.11.0 invariant this
+   line exists to hold, and it did not hold.
+2. **A stored directive reached Claude as a live authority marker.**
+   `render_block_reason` was the ONLY renderer in `core/plan.py` that did not
+   neutralize, and the block `reason` is fed back as a `{"decision": "block"}`
+   payload — a higher-authority channel than PROGRESS.md. Escaped on **both**
+   sides now (`db.upsert_directive` → `clean_for_storage`, and
+   `neutralize_document` on the way out).
+3. **A refusal's stdout was not a JSON document.** An unconditional status line
+   printed before the decision. The status line is now built first and emitted
+   only on the paths where the turn is allowed to close.
+4. **A cleared plan enforced forever.** `clear_plan_active` keeps a tombstone
+   (that is what keeps `revision` monotonic across clears); the hook tested the
+   row's truthiness. `core.plan.is_live_plan` is now the named predicate —
+   **named on purpose**, because a test can only re-implement an inline
+   condition, and a re-implementation is a tautology (`falsify --case
+   r11tombstone` ran GREEN until the predicate existed).
+5. **A just-stated directive was reported idle** — `_idle_directives` stamped
+   every row with the PLAN's counter. It now requires the directive to be
+   untouched since the guardian window opened, comparing with `>=` because
+   `_now()` stamps WHOLE SECONDS.
+6. **Re-stating a directive erased it.** The CLI's argparse defaults are `''` /
+   `'standing'`, not `None`, so a bare `directive-add <slug>` overwrote `demand`
+   and `quote` — the one operation the ledger exists for.
+
+Plus: `upsert_directive` takes `BEGIN IMMEDIATE` (8 concurrent creators of one
+slug → 0 exceptions, 1 row, `times_stated=8`); `hooks/_entry.py` joined
+`_REQUIRED_PLUGIN_FILES` — the THIRD time that list went stale, so the
+requirement is now **derived** from the hooks' module-level import graph rather
+than hand-maintained; and a `.*/` line in `.gitignore` had taken `.github/` to
+zero tracked files invisibly, which is now gated.
+
+Nine new falsification cases (`r11*`), **every one driven RED individually** —
+two of them ran GREEN first and the CHECKS were fixed, not the cases.
 
 ## What changed in v2.11.0 (over v2.10.1)
 
@@ -92,9 +144,12 @@ baseline (487 → 818 functions, 12,514 → 20,836 function-LOC) found exactly O
 structural duplication worth a mechanism — and confirmed the rest of the
 growth is machinery this file already documents (atomic / textsim / markers /
 roots / snapshot-verdict guards, each line traceable to a measured defect).
-Full register: the complexity data and per-finding dispositions are in the
-session's `memory/arch-review-2026-08-10.md`. The invariant a future change
-must not break:
+Full register: the complexity data and per-finding dispositions were written to
+`memory/arch-review-2026-08-10.md` — which is **maintainer-local and in no
+clone**, because `/memory/` is git-ignored by design (see `.gitignore`). Cited
+here as provenance for how the round was conducted, NOT as a file a reader can
+open; anything a future change must actually obey is restated below or in
+CHANGELOG.md. The invariant a future change must not break:
 
 1. **`hooks/_entry.py` is THE hook entry ladder.** Every hook parses stdin
    through `parse_payload` (read-to-EOF, JSON, object check — the guard
@@ -120,7 +175,9 @@ modes, not duplication); `db.py`'s snapshot-verdict cluster and
 `session_start._refresh_progress_row`'s three-tier fill are essential
 complexity (every branch is a distinct measured defect); the dashboard's three
 cx-47..100 functions stay untouched because they have ZERO executable coverage
-(recorded in `memory/falsify-coverage.md`) and refactoring an untested 2.9k-line
+(measured into `memory/falsify-coverage.md`, maintainer-local — `/memory/` is
+git-ignored, so no clone has it; re-derive with `python tools/falsify_fixes.py
+--list` rather than looking for the file) and refactoring an untested 2.9k-line
 GUI is the exact越改越错 entry point this round exists to avoid — user-ratified
 deferral, 2026-08-10.
 
@@ -777,7 +834,16 @@ cc-memory/
 │   ├── CONTRACTS.md             ← anti-patch + forced handoff + live plan anchor
 │   └── CONTRACTS.zh.md
 ├── README.md / README.zh.md     ← drift-tracked pair
-├── tools/i18n_check.py          ← translation drift checker (dev/CI only)
+├── .github/                     ← CI + community health (v2.11.1)
+│   ├── workflows/gates.yml      the release gates, as an executable
+│   ├── ISSUE_TEMPLATE/          bug_report.yml, feature_request.yml
+│   └── PULL_REQUEST_TEMPLATE.md
+├── tools/                       ← dev/CI checkers, NEVER packaged
+│   ├── i18n_check.py            translation drift
+│   ├── citation_check.py        every file.py:LINE citation in tracked docs
+│   ├── doc_claims.py            prose counts vs the computed sets
+│   ├── contracts.py             computes each set from the tree (not a gate)
+│   └── falsify_fixes.py         reverts each fix on a COPY (not a gate)
 ├── cc_memory/
 │   ├── __init__.py              (re-exports core/version.py)
 │   ├── config.json
@@ -793,16 +859,19 @@ cc-memory/
 │   ├── mcp/                     server
 │   └── ui/                      installer, dashboard, web_viewer
 ├── tests/
+│   ├── run_gates.py             ← THE gate runner: one command, all 10 (v2.11.1)
 │   ├── smoke_test.py            end-to-end anti-patch + PROGRESS.md +
 │   │                            tier-3 transcript + layout-inspector +
 │   │                            live-plan + i18n gate + bounded-window tests
 │   ├── test_plan_carryover.py   carryover gate (v2.4.0+), 20 checks
-│   └── test_surfaces.py         installer surfaces + settings shapes + timeout
-│                                lockstep, MCP stdio, web-viewer guards, hook
-│                                LLM deadline (v2.5.0)
-├── build_exe.py
+│   ├── test_surfaces.py         installer surfaces + settings shapes + timeout
+│   │                            lockstep, MCP stdio, web-viewer guards, hook
+│   │                            LLM deadline (v2.5.0)
+│   └── test_directive_enforcement.py
+│                                directive ledger + Stop enforcement (v2.11.0)
+├── scripts/build_exe.py         ← PyInstaller build (moved off the root, v2.11.1)
 ├── pyproject.toml
-├── README.md
+├── CONTRIBUTING.md / SECURITY.md
 ├── CLAUDE.md                    ← This file
 ├── CHANGELOG.md
 └── LICENSE
@@ -837,7 +906,7 @@ Hook contract (NEVER violate):
   - `PreCompact` (sync) stdout → ONE status line (shows in next session's compacted context)
   - `PreCompact` (async) / `PostToolUse` / `UserPromptSubmit` stdout → empty
 
-## Database schema (11 tables)
+## Database schema (12 tables)
 
 Defined in `cc_memory/core/db.py`. See `docs/ARCHITECTURE.md` for full diagram.
 
@@ -846,6 +915,7 @@ Defined in `cc_memory/core/db.py`. See `docs/ARCHITECTURE.md` for full diagram.
 - `session_summaries` (6-field structured summary per session)
 - `progress` (v2.1: single row per project, SOT for PROGRESS.md)
 - `plan_active` (NEW in v2.2: single row per project, SOT for PLAN.md)
+- `directives` (NEW in v2.11.0: the user-INTENT ledger, `v8_directives`)
 - `_migrations` (tracks applied migrations)
 
 Key columns added in v2.1:
@@ -916,15 +986,20 @@ The `plan_active` table (one row per project) backs PLAN.md. Lifecycle:
 - `PostToolUse` on `TodoWrite` mechanically syncs todos → step statuses
   via trigram-Jaccard match (no LLM). On `Edit`/`Write`/`MultiEdit`, it
   bumps `edits_since_last_guardian`; a sensitive Bash call bumps it by 20.
-- `Stop` hook emits a single status line when guardian thresholds are
-  crossed (default: 8 turns OR 12 edits). Main Claude responds by
+- `Stop` **refuses the turn** when guardian thresholds are crossed (default:
+  8 turns OR 12 edits), when a raw plan is unrefined, or when an active
+  directive has been idle past its threshold. Main Claude responds by
   invoking the **`plan-guardian`** subagent (also in `agents/`), then
-  `/cc-mem plan-check` to reset counters. The refiner nudge is rate-limited
-  to once every 5 turns per session (`hooks/stop.py:_claim_refine_nudge`);
-  only `plan.apply_refined_plan` may clear `needs_refine`.
+  `/cc-mem plan-check` to reset counters. Only `plan.apply_refined_plan` may
+  clear `needs_refine`.
+  (`_claim_refine_nudge` — the once-per-5-turns rate limiter — was DELETED in
+  v2.11.0 along with the advisory it throttled. Do not cite it; a rate-limited
+  advisory is how a 51,237-char plan sat unrefined while every reader answered
+  from the previous one. Its temp-marker prefix stays registered in
+  `ui/installer.py` so an uninstall still sweeps what older installs wrote.)
 
 **All of the `PostToolUse` legs above run in EVERY mode, above the
-`should_observe` gate** (`hooks/post_tool_use.py:184`). They shipped below it
+`should_observe` gate** (`hooks/post_tool_use.py:188`). They shipped below it
 from v2.2 through v2.4.3, which made the entire anchor dead through its own
 hook — `TodoWrite` is in every mode's `skip_tools` and `ExitPlanMode` is in no
 mode's `observe_tools`. Plan control is not observation: mode selects what is
@@ -997,15 +1072,31 @@ standalone installs.
 
 ## Tests
 
-**NINE release gates. Run all nine — three suites, three dev checkers,
-`compileall`, a `tomllib` parse of `pyproject.toml`, and version-site
-agreement.** `tests/smoke_test.py` asserts that this section names every gate
-script, so the list below cannot silently fall behind the list you must run.
-(It said EIGHT / two dev checkers while its own closing paragraph said "all
-six scripts" and the runnable block below listed nine commands: `doc_claims`
-joined in v2.8.0 and this arithmetic was not updated. "gates" is not a
-`doc_claims` trigger noun and there is no contract to bind it to, so the
-number is stated once, here, and derived from the block below.)
+**TEN release gates, and there is now ONE command that runs them:**
+
+```bash
+python tests/run_gates.py          # all 10; prints a table, exits nonzero on any red
+python tests/run_gates.py --list   # what each gate checks
+python tests/run_gates.py --fast   # skips the 2 slow suites — NOT a release run
+```
+
+Ten = four suites, three dev checkers, `compileall`, a `tomllib` parse of
+`pyproject.toml`, and version-site agreement. `tests/smoke_test.py` asserts
+that this section names every gate script, that every suite/checker ON DISK is
+on that list, and that `run_gates.py` actually runs each one — so the list
+cannot fall behind the tree in either direction.
+
+**Run the runner, not the list.** "Run all ten" was a sentence in this file
+and nothing executed it: v2.11.0 was released with `smoke_test.py` RED (the
+directive ledger added three CLI subcommands and `commands/cc-mem.md` was not
+updated), and because `main()` is one sequential function, that first failing
+assert also hid the `12 tables` assert below it. A gate list that is prose is
+a gate list that does not run. `.github/workflows/gates.yml` runs the full set
+on Windows and the platform-independent subset on Linux.
+
+(This paragraph said EIGHT, then NINE, each time by hand. It is now derived:
+`run_gates.py:GATES` is the single list, and the count above is asserted
+against `len(GATES)` rather than typed.)
 
 `tests/smoke_test.py` is the canonical end-to-end check. In a throwaway temp
 project it exercises: v3/v6 migrations, `upsert_smart` decisions
@@ -1138,12 +1229,17 @@ claiming three hooks <!--ce:hooks:asof--> imported a module that two hooks
 output.
 
 ```bash
+python tests/run_gates.py
+# THE command. expect: "[OK] all 10 gates green"
+# Individually, when you need one gate's own output:
 python tests/smoke_test.py
 # expect: [OK] lines ending with "===== ALL SMOKE TESTS PASSED ====="
 python tests/test_plan_carryover.py
 # expect: "RESULT: 20 passed, 0 failed"
 python tests/test_surfaces.py
 # expect: "===== ALL SURFACE TESTS PASSED ====="  (§1-§9)
+python tests/test_directive_enforcement.py
+# expect: "ALL CHECKS PASSED"
 python tools/i18n_check.py
 # expect: "3 in-sync", exit 0
 python tools/citation_check.py

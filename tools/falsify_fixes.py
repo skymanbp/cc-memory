@@ -1753,6 +1753,98 @@ def _break_r10entryorder(root):
            "    return anchored")
 
 
+# ── v2.11.1: the enforcement engine, which shipped with ZERO coverage ──────
+# v2.11.0 made the Stop hook able to REFUSE a turn and registered no case for
+# any of it. Each breakage below reproduces the shipped defect exactly.
+
+@case("r11budget", ["tests/test_directive_enforcement.py"],
+      "discard write_marker's return -> the escape budget never releases and traps the session")
+def _break_r11budget(root):
+    # write_marker NEVER RAISES (its docstring's first line), so the original
+    # `except OSError` was dead and the False return was dropped: nothing
+    # persisted, every read came back empty, n stayed 1, and the block repeated
+    # forever. Restoring the dead handler restores the trap.
+    _patch(root, f"{PKG}/hooks/stop.py",
+           "    if not write_marker(f, f\"{digest}:{n}\"):",
+           "    write_marker(f, f\"{digest}:{n}\")\n"
+           "    if False:  # BREAKAGE: the dead except-OSError shape")
+
+
+@case("r11blockmarker", ["tests/test_directive_enforcement.py"],
+      "stop escaping the block reason -> a stored directive forges a live <system-reminder>")
+def _break_r11blockmarker(root):
+    # The block `reason` is fed back to Claude as a DECISION, which is a higher
+    # authority channel than PROGRESS.md. render_block_reason was the only
+    # renderer in core/plan.py that did not neutralize.
+    _patch(root, f"{PKG}/core/plan.py",
+           '    return neutralize_document("\\n".join(lines))\n\n\ndef render_pending_plan_md',
+           '    return "\\n".join(lines)  # BREAKAGE\n\n\ndef render_pending_plan_md')
+
+
+@case("r11idle", ["tests/test_directive_enforcement.py"],
+      "stamp every directive with the plan counter -> a just-stated directive blocks the turn")
+def _break_r11idle(root):
+    _patch(root, f"{PKG}/hooks/stop.py",
+           "        if window_start and touched >= window_start:",
+           "        if False:  # BREAKAGE: no touched-since guard")
+
+
+@case("r11tombstone", ["tests/test_directive_enforcement.py"],
+      "enforce on a truthy plan row -> a CLEARED plan keeps refusing turns forever")
+def _break_r11tombstone(root):
+    # anchor moved 2026-08-16: the inline condition became the named predicate
+    # core.plan.is_live_plan, precisely so a test could drive the HOOK'S rule
+    # instead of re-implementing it (with it inlined, this case ran GREEN).
+    _patch(root, f"{PKG}/core/plan.py",
+           '    return bool(str(row.get("raw") or "").strip()\n'
+           '                or str(row.get("structured") or "").strip())',
+           '    return True  # BREAKAGE: a tombstone counts as a live plan')
+
+
+@case("r11directiverace", ["tests/test_directive_enforcement.py"],
+      "drop BEGIN IMMEDIATE -> concurrent creators of one slug collide on the unique index")
+def _break_r11directiverace(root):
+    _patch(root, f"{PKG}/core/db.py",
+           '        with self._connect() as conn:\n'
+           '            conn.execute("BEGIN IMMEDIATE")\n'
+           '            row = conn.execute(\n'
+           '                "SELECT * FROM directives WHERE project_id = ? AND slug = ?",',
+           '        with self._connect() as conn:\n'
+           '            row = conn.execute(  # BREAKAGE: no write lock\n'
+           '                "SELECT * FROM directives WHERE project_id = ? AND slug = ?",')
+
+
+@case("r11restate", ["tests/test_directive_enforcement.py"],
+      "argparse defaults back to '' -> a bare re-statement wipes the directive's demand and quote")
+def _break_r11restate(root):
+    _patch(root, f"{PKG}/cli/mem.py",
+           '    fields = {}\n    if args.quote:',
+           '    fields = {"quote": args.quote, "demand": args.demand,\n'
+           '              "kind": args.kind}  # BREAKAGE\n    if False and args.quote:')
+
+
+@case("r11gitignore", ["tests/smoke_test.py"],
+      "blanket-ignore dotted dirs -> .github/ goes to zero tracked files, invisibly")
+def _break_r11gitignore(root):
+    _patch(root, ".gitignore", ".*/\n!.github/\n!.claude-plugin/\n", ".*/\n")
+
+
+@case("r11flattree", ["tests/smoke_test.py"],
+      "drop a module from the flat-install diagram -> the docs describe a tree that is not shipped")
+def _break_r11flattree(root):
+    _patch(root, "docs/ARCHITECTURE.md",
+           "├── hooks/   _entry.py consolidate_async.py",
+           "├── hooks/   consolidate_async.py")
+
+
+@case("r11entryreq", ["tests/smoke_test.py"],
+      "drop hooks/_entry.py from _REQUIRED_PLUGIN_FILES -> status certifies a dead install healthy")
+def _break_r11entryreq(root):
+    _patch(root, f"{PKG}/cli/mem.py",
+           '    "cc_memory/hooks/_entry.py",\n',
+           '')
+
+
 def verify_anchors():
     """Count every registered case's breakage anchors WITHOUT running a gate.
 

@@ -1085,9 +1085,156 @@ def main():
         f"{sorted(_dc_cmds - _dc_named)}")
     # the gate list a future Claude is told to run must be the gate list
     _dc_claude = (_REPO / "CLAUDE.md").read_text(encoding="utf-8")
+    # v2.11.0 added a FOURTH suite and this tuple was not updated, so the one
+    # gate for the release's headline feature was in no list anybody runs.
+    # tests/run_gates.py is the executable form of the same list; a gate named
+    # in neither is a gate that exists only in a commit message.
     _dc_gates = ("tests/smoke_test.py", "tests/test_plan_carryover.py",
-                 "tests/test_surfaces.py", "tools/i18n_check.py",
+                 "tests/test_surfaces.py", "tests/test_directive_enforcement.py",
+                 "tools/i18n_check.py",
                  "tools/citation_check.py", "tools/doc_claims.py")
+    # every suite/checker on disk must BE on that list — the tuple above is
+    # hand-written, and a hand-written list is what went stale. This closes it
+    # in the other direction, so a fifth suite cannot be added silently.
+    _dc_on_disk = sorted(
+        [f"tests/{p.name}" for p in (_REPO / "tests").glob("test_*.py")]
+        + ["tests/smoke_test.py"]
+        + [f"tools/{p.name}" for p in (_REPO / "tools").glob("*_check.py")]
+        + ["tools/doc_claims.py"])
+    assert set(_dc_on_disk) <= set(_dc_gates), (
+        "gate scripts exist on disk but are in no gate list: "
+        f"{sorted(set(_dc_on_disk) - set(_dc_gates))}")
+    # and run_gates.py, the executable list, must cover them too
+    _dc_runner = (_REPO / "tests" / "run_gates.py").read_text(encoding="utf-8")
+    for _dc_g in _dc_on_disk:
+        assert _dc_g in _dc_runner, \
+            f"tests/run_gates.py does not run {_dc_g}"
+    # ── _REQUIRED_PLUGIN_FILES must cover every module a hook needs ────────
+    # THIRD recurrence of one defect: a new module lands, `ui/installer.py` and
+    # `scripts/build_exe.py` get it (smoke_test asserts THEIR parity), and
+    # `cli/mem.py`'s health list does not — so `/cc-mem status` certifies an
+    # install where every hook dies at import. It happened for core/roots.py,
+    # then core/markers.py, then hooks/_entry.py, and the list's own comments
+    # predicted each next one without preventing it. Prose cannot: the fix is
+    # to DERIVE the requirement. Every module reachable from a hook by
+    # module-level import must be on the list, because that is exactly the set
+    # whose absence turns a hook into an import error.
+    import ast as _rq_ast
+    _rq_pkg = _REPO / "cc_memory"
+    _rq_hooks = sorted(p.name for p in (_rq_pkg / "hooks").glob("*.py")
+                       if p.name != "__init__.py")
+
+    def _rq_toplevel_imports(rel):
+        """Modules imported at MODULE level (not inside a def/if) by `rel`."""
+        try:
+            tree = _rq_ast.parse((_rq_pkg / rel).read_text(encoding="utf-8"))
+        except OSError:
+            return set()
+        found = set()
+        for node in tree.body:            # body only == module level
+            if isinstance(node, _rq_ast.ImportFrom) and node.module:
+                parts = node.module.split(".")
+                if parts[0] in ("core", "hooks", "llm", "cli", "mcp", "ui"):
+                    found.add("/".join(parts) + ".py")
+        return found
+
+    _rq_seen, _rq_queue = set(), list(_rq_hooks)
+    _rq_queue = [f"hooks/{h}" for h in _rq_hooks]
+    while _rq_queue:
+        _rq_cur = _rq_queue.pop()
+        if _rq_cur in _rq_seen:
+            continue
+        _rq_seen.add(_rq_cur)
+        _rq_queue.extend(_rq_toplevel_imports(_rq_cur))
+    _rq_listed = set(_dc_re.findall(
+        r'"(cc_memory/[a-z_]+/[a-z_]+\.py)"',
+        (_rq_pkg / "cli" / "mem.py").read_text(encoding="utf-8")))
+    _rq_need = {f"cc_memory/{m}" for m in _rq_seen
+                if (_rq_pkg / m).is_file()}
+    _rq_missing = sorted(_rq_need - _rq_listed)
+    assert not _rq_missing, (
+        f"cli/mem.py:_REQUIRED_PLUGIN_FILES omits module(s) a hook imports at "
+        f"module level, so `/cc-mem status` would certify a broken install as "
+        f"healthy: {_rq_missing}")
+    print(f"[OK] _REQUIRED_PLUGIN_FILES covers all {len(_rq_need)} modules "
+          f"reachable from the {len(_rq_hooks)} hooks by module-level import")
+
+    # ── the FLAT-install tree diagram must name every shipped module ───────
+    # docs/ARCHITECTURE.md §8 draws the standalone layout module by module, and
+    # it silently fell six behind (_entry, atomic, markers, parse, roots,
+    # textsim) — a reader probing a flat install against that diagram would
+    # conclude six real files were strays. A hand-drawn enumeration of a
+    # computed set is the same defect doc_claims exists for; it just happens to
+    # live in a fenced block, which that gate deliberately does not scan.
+    _ft_inst = (_REPO / "cc_memory" / "ui" / "installer.py").read_text(
+        encoding="utf-8")
+    _ft_block = _dc_re.search(r"SUBPACKAGE_FILES = \{(.*?)\n\}", _ft_inst,
+                              _dc_re.S).group(1)
+    _ft_mods = set(_dc_re.findall(r'"([a-z_]+\.py)"', _ft_block))
+    # Anchored on the SECTION MARKER, not on the install directory's name:
+    # the marker is what identifies the diagram, and matching the literal
+    # directory instead would both hardcode a user-home path and re-break
+    # whenever the diagram's first line is reworded.
+    for _ft_doc, _ft_marker in (("docs/ARCHITECTURE.md", "(FLAT)"),
+                                ("docs/ARCHITECTURE.zh.md", "（FLAT）")):
+        _ft_text = (_REPO / _ft_doc).read_text(encoding="utf-8")
+        assert _ft_marker in _ft_text, \
+            f"{_ft_doc} no longer marks its flat-install section with {_ft_marker}"
+        _ft_after = _ft_text[_ft_text.index(_ft_marker):]
+        _ft_open = _ft_after.index("```")
+        _ft_flat = _ft_after[_ft_open:_ft_after.index("```", _ft_open + 3)]
+        _ft_absent = sorted(m for m in _ft_mods if m not in _ft_flat)
+        assert not _ft_absent, (
+            f"{_ft_doc}'s flat-install tree omits shipped module(s): "
+            f"{_ft_absent}")
+    print(f"[OK] flat-install diagram names all {len(_ft_mods)} shipped "
+          f"modules in both language siblings")
+
+    # ── SHIPPED DIRECTORIES MUST NOT BE GIT-IGNORED ────────────────────────
+    # A one-line `.*/` in .gitignore took `.github/` to ZERO tracked files and
+    # removed it from `git status` entirely — the release-gate CI would never
+    # have been committed and nothing would have said so. `.claude-plugin/`
+    # matched too; its two files survived only because they were already
+    # tracked, so the next file added there would have vanished. An ignore rule
+    # that hides its own damage is the /memory/ lesson one pattern later.
+    import subprocess as _gi_sp
+    for _gi_probe in (".github/workflows/gates.yml",
+                      ".github/ISSUE_TEMPLATE/bug_report.yml",
+                      ".claude-plugin/plugin.json",
+                      ".claude-plugin/A_FUTURE_FILE.json",
+                      "commands/cc-mem.md", "agents/plan-refiner.md",
+                      "skills/ccm-load/SKILL.md", "hooks/hooks.json"):
+        _gi_rc = _gi_sp.run(["git", "check-ignore", "-q", "--no-index", _gi_probe],
+                            cwd=str(_REPO), capture_output=True).returncode
+        assert _gi_rc != 0, (
+            f".gitignore excludes a SHIPPED path: {_gi_probe}. A directory the "
+            f"plugin or its CI is made of must never be ignored — re-include it "
+            f"with a `!` negation.")
+    # …and the converse, so the rule above cannot be satisfied by deleting
+    # every ignore: per-user state MUST still be ignored.
+    for _gi_priv in (".claude/settings.json", "memory/memory.db"):
+        _gi_rc = _gi_sp.run(["git", "check-ignore", "-q", "--no-index", _gi_priv],
+                            cwd=str(_REPO), capture_output=True).returncode
+        assert _gi_rc == 0, \
+            f".gitignore no longer excludes per-user state: {_gi_priv}"
+    print("[OK] gitignore: 8 shipped paths tracked-able, 2 private paths ignored")
+
+    # CLAUDE.md's gate COUNT is derived, not typed. It was hand-written as
+    # EIGHT and then NINE, and was wrong both times; run_gates.py:GATES is the
+    # one list, so the prose number is asserted against len(GATES).
+    sys.path.insert(0, str(_REPO / "tests"))
+    import run_gates as _dc_rg
+    _dc_words = {8: "EIGHT", 9: "NINE", 10: "TEN", 11: "ELEVEN", 12: "TWELVE"}
+    _dc_n = len(_dc_rg.GATES)
+    assert f"**{_dc_words[_dc_n]} release gates" in _dc_claude, (
+        f"CLAUDE.md § Tests must open with '**{_dc_words[_dc_n]} release "
+        f"gates' — tests/run_gates.py defines {_dc_n}")
+    # every gate the runner declares must be a real, runnable thing
+    for _dc_key, _dc_title, _dc_argv, _dc_fn in _dc_rg.GATES:
+        assert _dc_argv or _dc_fn, f"gate {_dc_key} does nothing"
+        if _dc_argv and _dc_argv[-1].endswith(".py"):
+            assert (_REPO / _dc_argv[-1]).is_file(), \
+                f"gate {_dc_key} runs a script that does not exist: {_dc_argv[-1]}"
     for _dc_gate in _dc_gates:
         assert _dc_gate in _dc_claude, \
             f"CLAUDE.md § Tests does not tell anyone to run {_dc_gate}"
@@ -1592,14 +1739,27 @@ def main():
 
     _v5_inst_src = (_REPO / "cc_memory" / "ui" / "installer.py").read_text(
         encoding="utf-8")
-    _v5_bx_src = (_REPO / "build_exe.py").read_text(encoding="utf-8")
+    # build_exe.py moved to scripts/ — assert it is not ALSO still at the root,
+    # because a leftover copy there is what a stale `python build_exe.py` in a
+    # doc or a CI step would silently keep building from.
+    assert not (_REPO / "build_exe.py").exists(), \
+        "build_exe.py lives in scripts/ now; a copy at the repo root is a stray"
+    _v5_bx_path = _REPO / "scripts" / "build_exe.py"
+    assert _v5_bx_path.is_file(), f"missing {_v5_bx_path}"
+    _v5_bx_src = _v5_bx_path.read_text(encoding="utf-8")
     for _v5_head, _v5_tail in (("SUBPACKAGE_FILES = {", "\n}\n"),
                                ("SURFACE_FILES = [", "\n]\n")):
         assert _v5_manifest_block(_v5_inst_src, _v5_head, _v5_tail) == \
             _v5_manifest_block(_v5_bx_src, _v5_head, _v5_tail), \
             f"ui/installer.py and build_exe.py {_v5_head.split()[0]} have drifted"
-    sys.path.append(str(_REPO))
+    sys.path.append(str(_REPO / "scripts"))
     import build_exe as _v5_bx
+    # the move must not have broken its root resolution: every bundled source
+    # path is derived from ROOT, so a wrong ROOT means a build of nothing.
+    assert _v5_bx.ROOT == _REPO, \
+        f"scripts/build_exe.py resolves ROOT to {_v5_bx.ROOT}, not {_REPO}"
+    assert all(_p.is_file() for _p, _ in _v5_bx._flat_file_list()), \
+        "scripts/build_exe.py's bundle list points at files that do not exist"
     assert _inst.SUBPACKAGE_FILES == _v5_bx.SUBPACKAGE_FILES
     assert _inst.SURFACE_FILES == _v5_bx.SURFACE_FILES
     print(f"[OK] v2.5.0 installer manifest: ships all {len(_v5_on_disk)} runtime "

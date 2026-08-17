@@ -32,7 +32,11 @@ import subprocess
 import sys
 from pathlib import Path
 
-ROOT = Path(__file__).parent
+# This file lives in scripts/, so ROOT is the PARENT of its directory.
+# `.resolve()` first: on a relative invocation (`python scripts/build_exe.py`)
+# a bare `.parent` yields "scripts", whose parent is "", and every bundled
+# path would then resolve against the process cwd instead of the checkout.
+ROOT = Path(__file__).resolve().parent.parent
 SRC = ROOT / "cc_memory"
 DIST = ROOT / "dist"
 BUILD = ROOT / "build"

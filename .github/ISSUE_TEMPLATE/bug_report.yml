@@ -1,0 +1,76 @@
+name: Bug report
+description: Something in cc-memory behaves differently from what it documents
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before filing: run `/cc-mem status` inside the affected project. It
+        checks the install layout, the database, the credential, and lists any
+        stray `memory.db` below the project root — most reports are answered by
+        its output alone.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you observed, and what you expected instead.
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. In project X, run ...
+        2. Compact the conversation (/compact)
+        3. Observe ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: status
+    attributes:
+      label: Output of `/cc-mem status`
+      description: Redact any path you do not want public.
+      render: text
+    validations:
+      required: true
+
+  - type: dropdown
+    id: install
+    attributes:
+      label: Install layout
+      options:
+        - marketplace / dev checkout (nested cc_memory/)
+        - standalone installer (flat, no cc_memory/ segment)
+        - standalone .exe
+        - not sure
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: cc-memory version
+      placeholder: "2.11.0"
+    validations:
+      required: true
+
+  - type: input
+    id: platform
+    attributes:
+      label: OS and Python version
+      placeholder: "Windows 11 · Python 3.13.2"
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant hook log
+      description: >
+        Hooks never write to stderr; they log to
+        `~/.claude/hooks/cc-memory/logs/`. Paste the tail of the relevant file.
+      render: text
