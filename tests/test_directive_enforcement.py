@@ -291,9 +291,7 @@ def section_5():
     check("the text is escaped, not deleted",
           "system-reminder" in txt)
 
-    # (c) a directive touched inside the current guardian window is NOT idle.
-    # `_idle_directives` used to stamp every active row with the PLAN's counter,
-    # so a directive recorded seconds ago was reported idle for N turns.
+    # (c) idleness is PER-DIRECTIVE, measured on the v9 monotonic clock.
     db, pid = _mk_db("idle")
     db.upsert_plan_active(pid, raw="do the thing", needs_refine=0)
     db.bump_plan_turn_counter(pid, n=99)
@@ -302,22 +300,47 @@ def section_5():
     check("a just-stated directive is not reported idle",
           [r["slug"] for r in rows] == [], f"rows={[r['slug'] for r in rows]}")
 
-    # …and the MIRROR, or the guard above would just have made the whole
-    # directive-idle condition inert. A directive that predates the current
-    # guardian window and has not moved since MUST still stop the turn.
-    with db._connect() as _c:
-        _c.execute("UPDATE plan_active SET last_guardian_at = ? "
-                   "WHERE project_id = ?", ("2999-01-01T00:00:00", pid))
+    # …and the MIRROR, or the guard above would have made the whole
+    # directive-idle condition inert: let the clock run past the threshold and
+    # the untouched directive MUST stop the turn.
+    db.bump_plan_turn_counter(pid, n=30)
     rows = S._idle_directives(db, pid, idle_turns=25)
     check("a genuinely untouched directive IS still reported idle",
           [r["slug"] for r in rows] == ["fresh"],
           f"rows={[r['slug'] for r in rows]}")
-    check("and it carries the turn count blocking_reasons needs",
-          bool(rows) and rows[0].get("turns_idle") == 99,
+    check("and it carries its OWN elapsed turns, not the project's",
+          bool(rows) and rows[0].get("turns_idle") == 30,
           f"turns_idle={rows[0].get('turns_idle') if rows else None}")
     # below the threshold, nothing is idle no matter how old
     check("under the turn threshold nothing is idle",
           S._idle_directives(db, pid, idle_turns=1000) == [])
+
+    # THE v9 PROPERTY the v2.11.1 approximation could not hold: a guardian
+    # check resets `turns_since_last_guardian`, and the old code measured
+    # idleness against THAT — so running `/cc-mem plan-check` made a directive
+    # untouched for 30 turns look freshly attended to. The monotonic clock is
+    # untouched by the reset, so real neglect survives a guardian check.
+    db.reset_plan_guardian_counters(pid)
+    after = db.get_plan_active(pid)
+    check("plan-check resets the DRIFT counter",
+          int(after["turns_since_last_guardian"]) == 0,
+          f"turns_since_last_guardian={after['turns_since_last_guardian']}")
+    check("...but never the monotonic clock",
+          int(after["turns_total"]) == 129, f"turns_total={after['turns_total']}")
+    rows = S._idle_directives(db, pid, idle_turns=25)
+    check("a guardian check does NOT forgive an idle directive",
+          [r["slug"] for r in rows] == ["fresh"],
+          f"rows={[r['slug'] for r in rows]}")
+
+    # touching the directive DOES clear it — that is what progress means
+    db.upsert_directive(pid, "fresh", demand="just stated")
+    check("re-stating it restarts its idleness clock",
+          S._idle_directives(db, pid, idle_turns=25) == [])
+    # …and so does closing it
+    db.bump_plan_turn_counter(pid, n=50)
+    db.set_directive_status(pid, "fresh", "active", evidence="reopened")
+    check("a status change also restarts the clock",
+          S._idle_directives(db, pid, idle_turns=25) == [])
 
     # (d) a CLEARED plan leaves a tombstone; it must not keep enforcing.
     db2, pid2 = _mk_db("tomb")

@@ -39,15 +39,16 @@ jobs:
       - name: run every release gate
         run: python tests/run_gates.py
 
-  # Linux runs the platform-independent subset. It deliberately does NOT claim
-  # to cover smoke_test/test_surfaces: those drive a Tk dashboard headlessly
-  # and exercise Windows-specific path shapes (junctions, drive-relative cwd),
-  # and asserting a coverage this job has never been observed to have is the
-  # exact class of untrue claim the doc gates exist to stop.
-  portable:
-    name: platform-independent gates (linux)
+  # Linux runs the FULL set too. It used to run only the fast subset with a
+  # comment explaining that smoke_test/test_surfaces "drive a Tk dashboard
+  # headlessly and exercise Windows-specific path shapes" — which was an
+  # assumption, never a measurement, and it left the single largest unknown in
+  # the project: whether cc-memory works on Linux at all. `python3-tk` is the
+  # one real dependency those suites need; everything else is standard library.
+  linux:
+    name: all 10 gates (linux)
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -57,8 +58,10 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
-      - name: run the portable gate subset
-        run: python tests/run_gates.py --fast
+      - name: install tkinter (the dashboard suite drives it headlessly)
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq python3-tk
+      - name: run every release gate
+        run: python tests/run_gates.py
 
   # A gate that cannot go red is a gate that is lying. tools/falsify_fixes.py
   # reverts each registered fix on a TEMPORARY COPY and asserts the gate

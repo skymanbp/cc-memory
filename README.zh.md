@@ -1,4 +1,4 @@
-<!-- i18n-source: README.md | sha256: f0ea002640bf442e | version: 2.11.1 | translated: 2026-08-16 -->
+<!-- i18n-source: README.md | sha256: 938064d36d3a269b | version: 2.11.2 | translated: 2026-08-16 -->
 > [English](README.md) · **简体中文**
 
 <div align="center">
@@ -9,7 +9,7 @@
 项目里的决策、结果、缺陷与计划，能挺过上下文压缩、会话边界和关掉的终端——
 并且下一个会话在动手之前会被**强制**先读它们。
 
-[![version](https://img.shields.io/badge/version-2.11.1-blue.svg)](CHANGELOG.md)
+[![version](https://img.shields.io/badge/version-2.11.2-blue.svg)](CHANGELOG.md)
 [![license](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![python](https://img.shields.io/badge/python-3.8%2B-blue.svg)](pyproject.toml)
 [![dependencies](https://img.shields.io/badge/runtime%20deps-0-brightgreen.svg)](#运行要求)
@@ -45,7 +45,7 @@
 - [架构](#架构)
 - [开发](#开发)
 - [故障排查](#故障排查)
-- [v2.11.1 有什么新东西](#v2111-有什么新东西)
+- [v2.11.2 有什么新东西](#v2112-有什么新东西)
 - [文档地图](#文档地图)
 - [许可](#许可)
 
@@ -401,7 +401,7 @@ LF 换行——**不需要任何 `PYTHONUTF8` / `PYTHONIOENCODING` 环境变量*
 
 | 键 | 默认值 | 含义 |
 |---|---|---|
-| `version` | `2.11.1` | 给早于 `core/version.py` 的扁平安装的最后兜底；`core/version.py` 才是权威 |
+| `version` | `2.11.2` | 给早于 `core/version.py` 的扁平安装的最后兜底；`core/version.py` 才是权威 |
 | `consolidation.auto_interval_sessions` | `5` | 两次异步整理之间相隔的会话数 |
 | `ccl.enabled` | `false` | 本地 Ollama 兜底——**需显式开启** |
 | `ccl.ollama_url` | `http://localhost:11434` | Ollama 端点 |
@@ -591,34 +591,25 @@ python scripts/build_exe.py
 
 ---
 
-## v2.11.1 有什么新东西
+## v2.11.2 有什么新东西
 
-**v2.11.0 把强制执行引擎以零覆盖发布了出去——而且是带着一道红闸门发布的。**
-指令账本新增了三个 CLI 子命令而 `commands/cc-mem.md` 从未同步，于是
-`tests/smoke_test.py` 失败；又因为它是一个顺序执行的函数，那第一个失败的断言
-还**掩盖**了它下面的一个。两者都没被发现，因为"跑完十道闸门"是一句写在 markdown
-里的话，而不是一个可执行物。现在它是了：`python tests/run_gates.py`，外加 CI。
+**v2.11.1 记录为"仍未闭合"的三项，全部闭合——包括它自己糊过去的那一项。**
 
-能拒绝你这一轮的那条路径上有六个缺陷，每一个都先复现再修：
+- **指令闲置度终于有了真实基准。** v2.11.1 是拿 `turns_since_last_guardian`
+  来量的，而**那个计数器会被重置**——`/cc-mem plan-check` 和每次计划替换都会
+  把它清零。于是一条真正三十轮没人碰的指令，只要有人跑一次 guardian 检查就
+  显得刚被照料过：这个账本恰好赦免了它存在意义所在的那种疏忽。schema **v9**
+  新增一个任何东西都不会重置的单调计数器 `turns_total`，每条指令记录自己上次
+  被触碰时的轮次。闲置度变成两个只增不减的数字相减，任何重置都扭曲不了它。
+- **Linux 现在跑全部十道闸门。** 它此前只跑平台无关子集，注释里断言另外两个
+  是 Windows 专属——那是假设，不是测量，而它留下了本项目最大的未知：
+  cc-memory 在 Linux 上到底能不能用。现在全量套件在 Linux 的 3.11 与 3.13
+  上运行。
+- **一个游离的 `.pytest_cache/`** ——在一个明确声明"不用 pytest"的项目里——已清除。
 
-- **逃生预算根本无法释放。** `write_marker` 从不抛异常——它返回 `False`——所以
-  那个用来兜住"数不了就别拦"的 `except OSError` 是死代码。在任何被 marker 层
-  拒绝的临时目录上，钩子会**永远**拦下去：实测连续八次 Stop 得到
-  `[1,1,1,1,1,1,1,1]`。逃不出去的 block 比没有 block 更糟。
-- **存储的指令文本以活的权威标记抵达 Claude。** block reason 是作为决策回喂的
-  ——权威等级高于 PROGRESS.md——而它是所在模块里唯一不做转义的渲染函数。现在
-  写入与输出两侧都转义。
-- **拒绝时的 stdout 不是一份 JSON 文档**，因为状态行先打印了。
-- **被清空的计划会永久强制执行**——钩子判断的那一行正是 `plan-clear` 刻意保留的
-  墓碑。
-- **刚刚被提出的指令会被判为闲置 N 轮**，因为闲置度取自计划的计数器而不是指令
-  自身的历史。
-- **重述一条指令会抹掉它的 demand 和 quote**——而重述正是这个账本唯一的存在理由。
-
-此外：并发的指令写入被串行化；安装健康检查现在从钩子的导入图**推导**所需模块
-清单，而不再依赖那份已经三次失效的手工清单；一条会把 `.github/` 静默清零的
-`.gitignore` 规则也有了闸门。新增九个证伪用例，每一个都单独跑红过——其中两个
-最初跑绿，于是被修的是**检查**而不是用例。
+v2.11.1 自身闭合了六个位于"可以拒绝你这一轮"那条代码路径上的缺陷：永不释放的
+逃生预算、以活权威标记抵达 Claude 的指令文本、不是 JSON 的拒绝输出、被清空后
+仍永久强制执行的计划，等等。全部细节在 **[CHANGELOG.md](CHANGELOG.md)**。
 
 更早的每个版本都在 **[CHANGELOG.md](CHANGELOG.md)** 里，那是本项目唯一的历史；
 这份 README 记录的是这个软件**是什么**，而不是它曾经是什么。

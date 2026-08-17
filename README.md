@@ -9,7 +9,7 @@ Your project's decisions, results, bugs and plans survive compaction, session
 boundaries, and closed terminals — and the next session is *forced* to read
 them before it does anything.
 
-[![version](https://img.shields.io/badge/version-2.11.1-blue.svg)](CHANGELOG.md)
+[![version](https://img.shields.io/badge/version-2.11.2-blue.svg)](CHANGELOG.md)
 [![license](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![python](https://img.shields.io/badge/python-3.8%2B-blue.svg)](pyproject.toml)
 [![dependencies](https://img.shields.io/badge/runtime%20deps-0-brightgreen.svg)](#requirements)
@@ -45,7 +45,7 @@ them before it does anything.
 - [Architecture](#architecture)
 - [Development](#development)
 - [Troubleshooting](#troubleshooting)
-- [What's new in v2.11.1](#whats-new-in-v2111)
+- [What's new in v2.11.2](#whats-new-in-v2112)
 - [Documentation map](#documentation-map)
 - [License](#license)
 
@@ -410,7 +410,7 @@ something.
 
 | Key | Default | Meaning |
 |---|---|---|
-| `version` | `2.11.1` | Last-resort fallback for a flat install predating `core/version.py`, which is canonical |
+| `version` | `2.11.2` | Last-resort fallback for a flat install predating `core/version.py`, which is canonical |
 | `consolidation.auto_interval_sessions` | `5` | Sessions between async consolidation runs |
 | `ccl.enabled` | `false` | Local Ollama fallback — **opt-in** |
 | `ccl.ollama_url` | `http://localhost:11434` | Ollama endpoint |
@@ -604,42 +604,31 @@ See [CONTRIBUTING.md](CONTRIBUTING.md). Security reports: [SECURITY.md](SECURITY
 
 ---
 
-## What's new in v2.11.1
+## What's new in v2.11.2
 
-**v2.11.0 shipped the enforcement engine with zero coverage — and shipped with
-a RED gate.** The directive ledger added three CLI subcommands and
-`commands/cc-mem.md` was never updated, so `tests/smoke_test.py` failed; and
-because it is one sequential function, that first failing assert also *hid* the
-one below it. Nothing caught either, because "run all ten gates" was a sentence
-in a markdown file rather than an executable. It is one now:
-`python tests/run_gates.py`, plus CI.
+**The three things v2.11.1 recorded as still open, closed — including the one
+it had papered over.**
 
-Six defects in the path that can refuse your turn, each reproduced first:
+- **Directive idleness now has a real baseline.** v2.11.1 measured it against
+  `turns_since_last_guardian`, and *that counter resets* — `/cc-mem plan-check`
+  and every plan replacement zero it. So a directive genuinely untouched for
+  thirty turns looked freshly attended to the moment anyone ran a guardian
+  check: the ledger forgiving exactly the neglect it exists to surface. Schema
+  **v9** adds a monotonic `turns_total` that nothing resets, and each directive
+  records the turn it was last touched at. Idleness became subtraction between
+  two numbers that only increase, which no reset can distort.
+- **Linux runs all ten gates.** It used to run the platform-independent subset
+  with a comment asserting the other two were Windows-specific — an assumption,
+  never a measurement, and it left the largest unknown in the project: whether
+  cc-memory works on Linux at all. The full suite now runs on Linux for 3.11
+  and 3.13.
+- **A stray `.pytest_cache/`** in a project that documents "no pytest" is gone.
 
-- **The escape budget could never release.** `write_marker` never raises — it
-  returns `False` — so the `except OSError` guarding the "cannot count, so do
-  not block" case was dead code. On any temp directory the marker layer
-  refuses, the hook blocked **forever**: measured `[1,1,1,1,1,1,1,1]` over eight
-  consecutive Stops. An unbreakable block is worse than no block.
-- **A stored directive reached Claude as a live authority marker.** The block
-  reason is fed back as a decision payload — higher authority than PROGRESS.md
-  — and was the one renderer in its module that never escaped. Now escaped on
-  the way in *and* the way out.
-- **A refusal's stdout was not a JSON document**, because a status line printed
-  first.
-- **A cleared plan enforced forever** — the hook tested a row that
-  `plan-clear` deliberately keeps as a tombstone.
-- **A just-stated directive was reported idle for N turns**, because idleness
-  came from the plan's counter rather than the directive's own history.
-- **Re-stating a directive erased its demand and quote** — the single operation
-  the ledger exists for.
-
-Also: concurrent directive writes are serialised; the install health check now
-**derives** its required-module list from the hooks' import graph instead of a
-hand-kept list that had gone stale three times; and a `.gitignore` pattern that
-silently took `.github/` to zero tracked files is gated. Nine new falsification
-cases, every one driven RED individually — two ran GREEN first, and the
-*checks* were fixed rather than the cases.
+v2.11.1 itself closed six defects in the code path that can refuse your turn —
+an escape budget that could never release, a stored directive reaching Claude as
+a live authority marker, a refusal whose stdout was not JSON, a cleared plan
+that enforced forever, and more. All of it is in
+**[CHANGELOG.md](CHANGELOG.md)**.
 
 Every earlier release is in **[CHANGELOG.md](CHANGELOG.md)**, which is the
 single history of this project — this README documents what the software *is*,

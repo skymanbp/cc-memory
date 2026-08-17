@@ -2,7 +2,7 @@
 
 ## Project: cc-memory
 
-**Claude Code persistent memory plugin (v2.11.1)** — anti-patch reconcile-on-write
+**Claude Code persistent memory plugin (v2.11.2)** — anti-patch reconcile-on-write
 + LLM-judged semantic de-duplication, forced PROGRESS.md handoff with
 per-session annotation, live PLAN.md anchor with plan-refiner / plan-guardian
 subagents + mandatory carryover gate, **an enforced directive ledger**, bounded
@@ -10,9 +10,44 @@ transcript reads, injection observability, FTS5 search, AI-judged extraction
 with Haiku (optional local Ollama fallback).
 
 - **Language**: Python 3.8+ (pure stdlib, zero pip dependencies at runtime)
-- **Version**: 2.11.1
+- **Version**: 2.11.2
 - **License**: MIT
 - **Platform**: Windows-primary, cross-platform compatible (Tkinter required for GUI)
+
+## What changed in v2.11.2 (over v2.11.1)
+
+**The three items v2.11.1 recorded as open, closed — including the one it had
+approximated rather than fixed.** Invariants a future change must not break:
+
+1. **Directive idleness is measured on a MONOTONIC clock, never on
+   `turns_since_last_guardian`.** That counter is RESET by `/cc-mem plan-check`
+   and by every plan replacement, so v2.11.1's "has it been touched since the
+   guardian window opened?" guard — which correctly killed v2.11.0's false
+   positives — inherited a worse failure from the counter it still read: a
+   directive genuinely untouched for 30 turns looked freshly attended to the
+   moment anyone ran a guardian check. The ledger forgave exactly the neglect
+   it exists to surface. Schema **v9** adds `plan_active.turns_total` (only ever
+   incremented; `bump_plan_turn_counter` bumps both, nothing resets this one)
+   and `directives.turns_at_touch`. Idleness is now
+   `turns_total - turns_at_touch` — subtraction between two numbers that only
+   increase. **Do not re-point it at a resettable counter**, and do not make any
+   caller responsible for supplying the stamp: `upsert_directive` and
+   `set_directive_status` read the clock inside their own `BEGIN IMMEDIATE`,
+   because the one caller that forgot would write a row that can never be seen
+   as idle. Gate: `falsify --case r11resetforgives` proves a guardian check no
+   longer forgives; `--case r11idle` proves the per-row measurement.
+
+2. **Linux runs ALL TEN gates**, not a subset. The workflow used to run
+   `--fast` on Linux behind a comment asserting `smoke_test`/`test_surfaces`
+   were Windows-specific. That was an assumption, never a measurement, and it
+   left the single largest unknown in the project unmeasured — whether this
+   plugin works on Linux at all. `python3-tk` is the one real dependency those
+   suites need. If a genuinely platform-specific case ever appears, skip THAT
+   CASE with a stated reason; do not silently shrink the job back to `--fast`.
+
+Also: the stray `.pytest_cache/` is gone from a project that documents "no
+pytest", and `tests/test_directive_enforcement.py` is 53 checks (the v2.11.0
+entry's "27" is historical and correct for that release).
 
 ## What changed in v2.11.1 (over v2.11.0)
 
@@ -602,7 +637,7 @@ not be imported at all — `cli/plan.py` now has a `main()`.
 
 **Residual limits, recorded rather than papered over:**
 
-- `core/db.py`'s three plan mutators — `update_plan_status` (`db.py:2905-2949`),
+- `core/db.py`'s three plan mutators — `update_plan_status` (`db.py:2992-3036`),
   `delete_plan` (`:1410`) and `update_plan_content` (`:1427`) — all accept
   `project_id`, and `cli/plan.py` + `ui/dashboard.py` pass it at every call
   site, but none of them *requires* it (it defaults to `None`). An unscoped raw

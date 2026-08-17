@@ -369,6 +369,33 @@ _MIGRATIONS = [
     ("v8_directives_status_idx",
      "CREATE INDEX IF NOT EXISTS idx_directives_status "
      "ON directives (project_id, status)"),
+
+    # ── v9: a MONOTONIC turn clock, so directive idleness has a real baseline ─
+    #
+    # v2.11.1 measured a directive's idleness from
+    # `plan_active.turns_since_last_guardian`, which is a project-wide counter
+    # that every active directive was stamped with — so one recorded ten
+    # seconds ago was announced as "no progress for 40 turns" and refused the
+    # user's turn over it. The v2.11.1 fix was a "has it been touched since the
+    # guardian window opened?" guard: it removed the false positive but it is
+    # an approximation, because that counter RESETS (`/cc-mem plan-check` and
+    # every plan replacement zero it). Under it, a directive genuinely untouched
+    # for 100 turns looks fresh again the moment anyone runs a guardian check —
+    # the ledger silently forgives exactly the neglect it exists to surface.
+    #
+    # `turns_total` is therefore a SECOND counter that is only ever incremented
+    # (`bump_plan_turn_counter` bumps both; nothing resets this one), and each
+    # directive records the value it was last touched at. Idleness becomes
+    # subtraction between two monotonic numbers, which no reset can distort.
+    # Both DEFAULT 0, so an upgraded database reads every existing directive as
+    # touched at turn 0 — i.e. as old as the project, which is the safe
+    # direction for a ledger whose job is to notice neglect.
+    ("v9_plan_turns_total",
+     "ALTER TABLE plan_active ADD COLUMN turns_total INTEGER NOT NULL "
+     "DEFAULT 0"),
+    ("v9_directives_turns_at_touch",
+     "ALTER TABLE directives ADD COLUMN turns_at_touch INTEGER NOT NULL "
+     "DEFAULT 0"),
 ]
 
 
@@ -2569,14 +2596,22 @@ class MemoryDB:
             )
 
     def bump_plan_turn_counter(self, project_id, n=1):
-        """Atomically increment turns_since_last_guardian."""
+        """Atomically increment BOTH turn counters.
+
+        `turns_since_last_guardian` is the drift counter and is reset by every
+        guardian check and plan replacement. `turns_total` (v9) is never reset
+        by anything — it is the monotonic clock directive idleness is measured
+        against, because a resettable counter forgives neglect the moment
+        somebody runs `/cc-mem plan-check`.
+        """
         with self._connect() as conn:
             conn.execute(
                 """UPDATE plan_active
                    SET turns_since_last_guardian = turns_since_last_guardian + ?,
+                       turns_total = turns_total + ?,
                        updated_at = ?
                    WHERE project_id = ?""",
-                (n, self._now(), project_id),
+                (n, n, self._now(), project_id),
             )
 
     def reset_plan_guardian_counters(self, project_id):
@@ -2635,37 +2670,54 @@ class MemoryDB:
         # makes the whole read-decide-write atomic without changing the policy.
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            row = conn.execute(
-                "SELECT * FROM directives WHERE project_id = ? AND slug = ?",
-                (project_id, slug)).fetchone()
-            if row is None:
-                data = {k: fields.get(k) for k in allowed}
+            # v9: stamp the monotonic turn clock INSIDE the same transaction,
+            # read here rather than passed in — every caller would otherwise
+            # have to know that a directive's idleness is measured in plan
+            # turns, and the one that forgot would write a row that can never
+            # be seen as idle. Absent plan row -> 0, which reads as "touched at
+            # the beginning of time" and is the safe direction for a ledger
+            # whose job is to notice neglect.
+            turns_now = self._project_turns_total(conn, project_id)
+            if row := conn.execute(
+                    "SELECT * FROM directives WHERE project_id = ? AND slug = ?",
+                    (project_id, slug)).fetchone():
+                sets, params = [], []
+                for key in allowed:
+                    if key in fields and fields[key] is not None:
+                        sets.append(f"{key} = ?")
+                        params.append(fields[key])
+                if "times_stated" not in fields:
+                    sets.append("times_stated = times_stated + 1")
+                sets += ["last_seen_at = ?", "updated_at = ?",
+                         "turns_at_touch = ?"]
+                params += [now, now, turns_now, project_id, slug]
                 conn.execute(
-                    """INSERT INTO directives
-                       (project_id, slug, quote, demand, kind, status,
-                        times_stated, source, evidence, first_seen_at,
-                        last_seen_at, closed_at, created_at, updated_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (project_id, slug,
-                     data["quote"] or "", data["demand"] or "",
-                     data["kind"] or "standing", data["status"] or "active",
-                     int(data["times_stated"] or 1),
-                     data["source"] or "user", data["evidence"] or "",
-                     now, now, data["closed_at"] or "", now, now))
-                return "created"
-            sets, params = [], []
-            for key in allowed:
-                if key in fields and fields[key] is not None:
-                    sets.append(f"{key} = ?")
-                    params.append(fields[key])
-            if "times_stated" not in fields:
-                sets.append("times_stated = times_stated + 1")
-            sets += ["last_seen_at = ?", "updated_at = ?"]
-            params += [now, now, project_id, slug]
+                    f"UPDATE directives SET {', '.join(sets)} "
+                    "WHERE project_id = ? AND slug = ?", params)
+                return "updated"
+            data = {k: fields.get(k) for k in allowed}
             conn.execute(
-                f"UPDATE directives SET {', '.join(sets)} "
-                "WHERE project_id = ? AND slug = ?", params)
-            return "updated"
+                """INSERT INTO directives
+                   (project_id, slug, quote, demand, kind, status,
+                    times_stated, source, evidence, first_seen_at,
+                    last_seen_at, closed_at, created_at, updated_at,
+                    turns_at_touch)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (project_id, slug,
+                 data["quote"] or "", data["demand"] or "",
+                 data["kind"] or "standing", data["status"] or "active",
+                 int(data["times_stated"] or 1),
+                 data["source"] or "user", data["evidence"] or "",
+                 now, now, data["closed_at"] or "", now, now, turns_now))
+            return "created"
+
+    @staticmethod
+    def _project_turns_total(conn, project_id):
+        """The project's monotonic turn count, or 0 when it has no plan row."""
+        row = conn.execute(
+            "SELECT turns_total FROM plan_active WHERE project_id = ?",
+            (project_id,)).fetchone()
+        return int(row["turns_total"]) if row else 0
 
     def list_directives(self, project_id, status=None):
         """Directives for a project, most-repeated first. status=None → all."""
@@ -2680,15 +2732,24 @@ class MemoryDB:
 
     def set_directive_status(self, project_id, slug, status, evidence=""):
         """Close/reopen a directive. Closing without evidence is refused by the
-        CLI layer, not here — the DB records what it is told."""
+        CLI layer, not here — the DB records what it is told.
+
+        Stamps `turns_at_touch` too (v9): a status change IS progress on the
+        directive, so it must restart the idleness clock. Without it, reopening
+        a closed directive produced a row that was instantly "idle" by however
+        many turns had passed while it was closed.
+        """
         now = self._now()
         closed = now if status in ("done", "superseded", "dropped") else ""
         with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            turns_now = self._project_turns_total(conn, project_id)
             cur = conn.execute(
                 """UPDATE directives
-                   SET status = ?, closed_at = ?, evidence = ?, updated_at = ?
+                   SET status = ?, closed_at = ?, evidence = ?, updated_at = ?,
+                       turns_at_touch = ?
                    WHERE project_id = ? AND slug = ?""",
-                (status, closed, evidence, now, project_id, slug))
+                (status, closed, evidence, now, turns_now, project_id, slug))
             return cur.rowcount
 
     # ── FTS5 search ─────────────────────────────────────────────────────────

@@ -180,7 +180,7 @@ bypassing `upsert_smart`:
 2. **Patch updates without history.** If a fact genuinely changes ("we
    switched from lr=3e-4 to lr=1e-4 because…"), the supersede path
    preserves the old fact as `is_active=0` linked via `supersedes_id`.
-   `db.get_supersede_chain(id)` (`core/db.py:1387-1402`) walks the history. No
+   `db.get_supersede_chain(id)` (`core/db.py:1414-1429`) walks the history. No
    "git blame for memories" hack needed.
 
 3. **MEMORY.md staleness.** Auto-regeneration after every batch write
@@ -208,7 +208,7 @@ r8antipatch` proves the assertion goes red when a bypass caller appears.
 | Save path | Entry function |
 |-----------|---------------|
 | `PreCompact` hook | `upsert_batch(db, pid, sid, extracted_list, memory_dir)` (`hooks/pre_compact.py:672`) |
-| `Stop` observer | `upsert_batch(db, pid, None, observer_list, memory_dir)` (`hooks/stop.py:360`) |
+| `Stop` observer | `upsert_batch(db, pid, None, observer_list, memory_dir)` (`hooks/stop.py:357`) |
 | `SessionStart` retroactive save | `upsert_batch(db, pid, sid, memories, memory_dir=memory_dir)` — un-saved prior sessions (`hooks/session_start.py:1073`) |
 | `/save-memories` skill | `upsert_batch(db, pid, None, memories, memory_dir=Path(project) / 'memory')` (`skills/save-memories/SKILL.md:100`) |
 | `mem.py add` CLI | `upsert_smart(...)` + `regenerate_memory_index(...)` (`cli/mem.py:1099,524`) |
@@ -279,9 +279,9 @@ therefore not loosened anywhere.
 
 - Don't call `db.insert_memory` directly from any save path. (It's still
   exposed for migration / bulk-load, but not for everyday writes —
-  `core/db.py:450`.)
+  `core/db.py:1144-1159`.)
 - Don't roll your own `"SELECT content FROM memories ..."` dedup. That's
-  what `db.find_by_hash` (`core/db.py:1955-1963`) and the writer's `_find_similar`
+  what `db.find_by_hash` (`core/db.py:1982-1990`) and the writer's `_find_similar`
   (`llm/memory_writer.py:179`) are for. (There is no `db.find_similar`; the
   matcher lives in the writer, private by design.)
 - Don't "patch" MEMORY.md by hand or expect another path to refresh it. Call
@@ -357,10 +357,10 @@ at `db.py:176-190`, plus the two v5 session-annotation columns at `db.py:219-222
 | `critical_context` | JSON | Top 10 memories with importance ≥ 4, content truncated to 200 chars (`progress.py:107-113`; `session_start.py:882`) |
 | `files_touched` | JSON | `observations` table (`pre_compact.py:446-453` → `progress.py:128-134`; Stop per-turn patch `stop.py:193-211`; SessionStart tier-2C `session_start.py:882`) → tier-3 prior-transcript `extract_file_changes` (`session_start.py:882`) |
 | `transcript_ptr` | TEXT | PreCompact `transcript_path` resolved absolute (`pre_compact.py:750`) → tier-3 `find_latest_transcript(cwd, exclude_session_id=...)` (`session_start.py:881`) |
-| `updated_at` | TEXT | ISO timestamp, stamped by `upsert_progress` / `patch_progress` (`db.py:2099-2175`, `:937-943`) |
-| `trigger_type` | TEXT | "auto" \| "manual" (PreCompact passes the host's own trigger string through — `pre_compact.py:749,492`; `"precompact"` is only `collect_progress_state`'s default kwarg at `progress.py:200-260` and is always overridden) \| "stop" (`stop.py:467`) \| "user_prompt" \| "resume_request" (`user_prompt.py:193`) \| "session_start_refresh" (`session_start.py:825`) |
-| `current_session_id` | TEXT | `db.tag_progress_session` only (`db.py:2309-2333`) — tagged by PreCompact (`pre_compact.py:749`), Stop (`stop.py:467`), SessionStart (`session_start.py:825`), UserPromptSubmit (`user_prompt.py:193`) |
-| `session_started_at` | TEXT | `db.tag_progress_session` — reset only when the stored sid changes; `upsert_progress` preserves both across a full rewrite (`db.py:2099-2175`) |
+| `updated_at` | TEXT | ISO timestamp, stamped by `upsert_progress` / `patch_progress` (`db.py:2199-2275`, `:937-943`) |
+| `trigger_type` | TEXT | "auto" \| "manual" (PreCompact passes the host's own trigger string through — `pre_compact.py:749,492`; `"precompact"` is only `collect_progress_state`'s default kwarg at `progress.py:200-260` and is always overridden) \| "stop" (`stop.py:464`) \| "user_prompt" \| "resume_request" (`user_prompt.py:193`) \| "session_start_refresh" (`session_start.py:825`) |
+| `current_session_id` | TEXT | `db.tag_progress_session` only (`db.py:2336-2360`) — tagged by PreCompact (`pre_compact.py:749`), Stop (`stop.py:464`), SessionStart (`session_start.py:825`), UserPromptSubmit (`user_prompt.py:193`) |
+| `session_started_at` | TEXT | `db.tag_progress_session` — reset only when the stored sid changes; `upsert_progress` preserves both across a full rewrite (`db.py:2199-2275`) |
 
 The rendered Markdown (sections 0-7 in
 [`cc_memory/core/progress.py`](../cc_memory/core/progress.py)) is generated
@@ -368,7 +368,7 @@ from this row. Hand-editing PROGRESS.md is pointless: any of the four automatic
 update paths (PreCompact / Stop / UserPromptSubmit / SessionStart refresh) —
 plus the two manual regenerators, `/cc-mem progress` (`cli/mem.py:1238`) and the
 MCP `progress_regenerate` tool (`mcp/server.py:742`) — will overwrite it.
-All six `write_progress_md` call sites: `pre_compact.py:751`, `stop.py:406`,
+All six `write_progress_md` call sites: `pre_compact.py:751`, `stop.py:403`,
 `user_prompt.py:209`, `session_start.py:948`, `cli/mem.py:1287`,
 `mcp/server.py:243`.
 
@@ -409,14 +409,14 @@ whitespace-flattened and truncated at 100 chars (`:210-234`).
      `extracted_memories + observations + session_summaries`
      (`progress.py:332`).
    - `db.tag_progress_session(...)` runs FIRST so the tag survives
-     (`pre_compact.py:749`; see the preservation logic at `db.py:2309-2333`).
+     (`pre_compact.py:749`; see the preservation logic at `db.py:2336-2360`).
    - `db.upsert_progress(**all_fields)` overwrites the row (`pre_compact.py:750`).
    - `write_progress_md(db, pid, memory_dir)` rewrites the file (`:501`).
 
 2. **Stop** (partial update, every turn):
    - `db.tag_progress_session(...)` then
      `db.patch_progress(files_touched=<from observations>, trigger_type="stop")`
-     (`stop.py:392`, `:211`).
+     (`stop.py:389`, `:211`).
    - `write_progress_md(...)` rewrites the file with the patched state (`:213`).
    - This keeps "Files Touched This Session" current without waiting for the
      next compaction.

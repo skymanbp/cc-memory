@@ -1784,9 +1784,25 @@ def _break_r11blockmarker(root):
 @case("r11idle", ["tests/test_directive_enforcement.py"],
       "stamp every directive with the plan counter -> a just-stated directive blocks the turn")
 def _break_r11idle(root):
+    # anchor moved 2026-08-17: v9 replaced the touched-since heuristic with
+    # subtraction on a monotonic clock, so the breakage is now "measure every
+    # directive from the project counter again" rather than "drop the guard".
     _patch(root, f"{PKG}/hooks/stop.py",
-           "        if window_start and touched >= window_start:",
-           "        if False:  # BREAKAGE: no touched-since guard")
+           "        idle = turns_total - int(row.get(\"turns_at_touch\") or 0)",
+           "        idle = turns_total  # BREAKAGE: project clock, not per-row")
+
+
+@case("r11resetforgives", ["tests/test_directive_enforcement.py"],
+      "measure idleness off the RESETTABLE counter -> plan-check forgives real neglect")
+def _break_r11resetforgives(root):
+    # The v2.11.1 approximation read `turns_since_last_guardian`, which
+    # `/cc-mem plan-check` zeroes — so a directive untouched for 30 turns
+    # looked freshly attended to the moment anyone ran a guardian check. This
+    # is the exact property the v9 monotonic clock exists to hold.
+    _patch(root, f"{PKG}/hooks/stop.py",
+           '    turns_total = int(plan_row.get("turns_total") or 0)',
+           '    turns_total = int(plan_row.get("turns_since_last_guardian")'
+           ' or 0)  # BREAKAGE')
 
 
 @case("r11tombstone", ["tests/test_directive_enforcement.py"],

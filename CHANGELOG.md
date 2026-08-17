@@ -7,6 +7,68 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [2.11.2] — 2026-08-17
+
+### The debts v2.11.1 recorded, paid — including the one it had approximated
+
+v2.11.1 closed six defects and then wrote down three things it had *not*
+closed. This release closes all three. One of them was not merely deferred: it
+was a fix that looked complete and was not.
+
+### Fixed
+
+- **Directive idleness was measured against a counter that RESETS.**
+  v2.11.0 stamped every active directive with the project's
+  `turns_since_last_guardian`, so one recorded ten seconds ago was announced as
+  "no progress for 40 turns" and refused the user's turn. v2.11.1 replaced that
+  with a "has it been touched since the guardian window opened?" guard, which
+  killed the false positive — and inherited a worse one from the counter it
+  still read. `/cc-mem plan-check` and every plan replacement zero
+  `turns_since_last_guardian`, so a directive genuinely untouched for 30 turns
+  looked freshly attended to the moment anybody ran a guardian check. **The
+  ledger forgave exactly the neglect it exists to surface**, and it did so
+  silently, because "no directive is idle" is indistinguishable from "the
+  ledger is working".
+
+  A resettable counter cannot measure elapsed neglect; the answer is a clock
+  that never resets, not a cleverer comparison against one that does. Schema
+  **v9** adds `plan_active.turns_total` — incremented by
+  `bump_plan_turn_counter` alongside the drift counter, reset by nothing — and
+  `directives.turns_at_touch`. Idleness is now `turns_total - turns_at_touch`:
+  subtraction between two monotonic numbers. Both columns DEFAULT 0, so an
+  upgraded database reads every existing directive as touched at turn 0 — as
+  old as the project, the safe direction for a ledger whose job is to notice
+  neglect.
+
+  The stamp is read inside `upsert_directive`'s and `set_directive_status`'s own
+  `BEGIN IMMEDIATE`, not passed in by callers: every caller would otherwise have
+  to know that idleness is counted in plan turns, and the one that forgot would
+  write a row that could never be seen as idle. A status change stamps too —
+  reopening a closed directive used to produce a row instantly "idle" by however
+  many turns had passed while it was closed.
+
+- **`.pytest_cache/`** removed — a stray directory in a project whose
+  contributing rules document "no pytest, no pip dependencies".
+
+### Changed
+
+- **Linux runs all ten gates.** The workflow ran `--fast` on Linux behind a
+  comment asserting `smoke_test` / `test_surfaces` were Windows-specific: an
+  assumption, never a measurement, and it left the largest unknown in the
+  project unmeasured — whether cc-memory works on Linux at all. Both suites now
+  run there on 3.11 and 3.13, with `python3-tk` (the one real dependency they
+  need; everything else is standard library).
+- `tests/test_directive_enforcement.py` is **53 checks**, up from the 27 the
+  v2.11.0 entry records for that release.
+
+### Added
+
+- Falsification cases `r11resetforgives` (a guardian check must not forgive an
+  idle directive) and a re-anchored `r11idle` (idleness is per-row, not the
+  project clock), both driven RED individually. Register 160 → 161.
+
+---
+
 ## [2.11.1] — 2026-08-16
 
 ### The release that shipped with a red gate, and the engine nobody drove

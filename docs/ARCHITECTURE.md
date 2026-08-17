@@ -343,11 +343,11 @@ The `supersedes_id` column on `memories` (migration `v3_supersedes`,
 `db.py:168`) makes the anti-patch chain explicit: when `upsert_smart` decides a
 new memory supersedes an old one, the new row links back to the old row's ID
 (and the old row is archived). Walking the chain via
-`db.get_supersede_chain(memory_id)` (`db.py:1387-1402`) shows the full update
-history. `content_hash` (migration `v2_content_hash`, `db.py:1387-1402`) is
+`db.get_supersede_chain(memory_id)` (`db.py:1414-1429`) shows the full update
+history. `content_hash` (migration `v2_content_hash`, `db.py:1414-1429`) is
 `sha256[:16]` of the normalized content, used for the cheap exact-duplicate
-check (`db.compute_content_hash` at `db.py:1942-1944`, `db.find_by_hash` at
-`db.py:1942-1944`).
+check (`db.compute_content_hash` at `db.py:1969-1971`, `db.find_by_hash` at
+`db.py:1969-1971`).
 
 Migrations are applied in order from the `_MIGRATIONS` list (`db.py:121-284`) and
 recorded in `_migrations`. Levels shipped so far: **v1** (topic column +

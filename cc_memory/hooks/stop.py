@@ -201,43 +201,40 @@ def _idle_directives(db, project_id, idle_turns=25):
     stale because many turns of work went by without it moving. Returns rows
     with `turns_idle` filled in, the shape plan.blocking_reasons expects.
 
-    TOUCHED-SINCE guard: the counter is a PROJECT clock, so stamping every
-    active directive with it reported a directive recorded ten seconds ago as
-    "no progress for 40 turns" — and blocked the turn over it. A directive is
-    only idle if it has not been touched since the current guardian window
-    OPENED (`plan_active.last_guardian_at`, or the plan's own `created_at`
-    when no guardian check has ever run). Both columns and `last_seen_at` are
-    written by the same `_now()`, so the comparison is between like clocks.
+    PER-DIRECTIVE, from the MONOTONIC clock (v9). Idleness is
+    `plan_active.turns_total - directives.turns_at_touch`: two counters that
+    only ever increase, so the answer is plain subtraction and no reset can
+    distort it.
+
+    Two earlier shapes were wrong and are worth naming, because both looked
+    right. v2.11.0 stamped EVERY active directive with the project's
+    `turns_since_last_guardian`, so one recorded ten seconds ago was announced
+    as "no progress for 40 turns" and refused the user's turn. v2.11.1 added a
+    "touched since the guardian window opened?" guard, which killed that false
+    positive but inherited a worse one from the counter it still read: that
+    counter is RESET by `/cc-mem plan-check` and by every plan replacement, so
+    a directive genuinely untouched for 100 turns looked fresh again the moment
+    anybody ran a guardian check — the ledger forgiving exactly the neglect it
+    exists to surface. A resettable counter cannot measure elapsed neglect; the
+    fix is a clock that never resets, not a cleverer comparison against one
+    that does.
     """
     try:
         rows = db.list_directives(project_id, status="active")
     except Exception:
-        # why: the v8 table may be absent on a DB an older ccm created and a
-        # newer one has not opened yet. No ledger simply means no directive
+        # why: the v8/v9 columns may be absent on a DB an older ccm created and
+        # a newer one has not opened yet. No ledger simply means no directive
         # conditions — never a crash in the Stop path.
         return []
     plan_row = db.get_plan_active(project_id) or {}
-    turns = int(plan_row.get("turns_since_last_guardian") or 0)
-    if turns < idle_turns:
-        return []
-    window_start = str(plan_row.get("last_guardian_at") or "") \
-        or str(plan_row.get("created_at") or "")
+    turns_total = int(plan_row.get("turns_total") or 0)
     out = []
     for row in rows:
         row = dict(row)
-        touched = str(row.get("last_seen_at") or "")
-        # `>=`, not `>`: `MemoryDB._now()` stamps WHOLE SECONDS, so a directive
-        # recorded in the same second the window opened compares EQUAL, and a
-        # strict `>` reported it as idle — which is the exact false block this
-        # guard exists to remove (caught by §5(c) of the enforcement gate, not
-        # by review). Equality resolves toward "not idle": failing to block is
-        # recoverable, blocking a turn over a directive the user just stated is
-        # the failure that makes people switch enforcement off.
-        if window_start and touched >= window_start:
-            # stated or amended inside this very window — that is progress,
-            # not silence, and it is the case that produced false blocks.
+        idle = turns_total - int(row.get("turns_at_touch") or 0)
+        if idle < idle_turns:
             continue
-        row["turns_idle"] = turns
+        row["turns_idle"] = idle
         out.append(row)
     return out
 

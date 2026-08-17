@@ -1,4 +1,4 @@
-<!-- i18n-source: ARCHITECTURE.md | sha256: ecd1974b14b7e643 | version: 2.11.1 | translated: 2026-08-16 -->
+<!-- i18n-source: ARCHITECTURE.md | sha256: 6592e6a348ff8695 | version: 2.11.2 | translated: 2026-08-16 -->
 > [English](ARCHITECTURE.md) · **简体中文**
 
 # cc-memory — 架构
@@ -309,10 +309,10 @@ SQLite 表（定义在 [`cc_memory/core/db.py`](../cc_memory/core/db.py)），�
 
 `memories` 上的 `supersedes_id` 列（迁移 `v3_supersedes`，`db.py:168`）把反补丁的
 取代链显式化：当 `upsert_smart` 判定一条新记忆取代了一条旧记忆时，新行会回链到旧行
-的 ID（旧行被归档）。通过 `db.get_supersede_chain(memory_id)`（`db.py:1387-1402`）走一遍
-链条，就能看到完整的更新历史。`content_hash`（迁移 `v2_content_hash`，`db.py:1942-1944`）
+的 ID（旧行被归档）。通过 `db.get_supersede_chain(memory_id)`（`db.py:1414-1429`）走一遍
+链条，就能看到完整的更新历史。`content_hash`（迁移 `v2_content_hash`，`db.py:1969-1971`）
 是归一化内容的 `sha256[:16]`，用于廉价的精确重复检查（`db.compute_content_hash` 在
-`db.py:1955-1963`，`db.find_by_hash` 在 `db.py:1955-1963`）。
+`db.py:1982-1990`，`db.find_by_hash` 在 `db.py:1982-1990`）。
 
 迁移按 `_MIGRATIONS` 列表（`db.py:121-284`）的顺序应用，并记录在 `_migrations` 中。目前
 已交付的层级：**v1**（topic 列 + 索引）、**v2**（content_hash、observations、
@@ -482,7 +482,7 @@ SessionStart：
 ```
 
 上面的调用签名都是真实的：`write_progress_md(db, project_id, memory_dir)`
-（`core/progress.py:331-490`；调用点 `pre_compact.py:751`、`stop.py:406`、
+（`core/progress.py:331-490`；调用点 `pre_compact.py:751`、`stop.py:403`、
 `user_prompt.py:133`、`session_start.py:912`、`mcp/server.py:243`、
 `cli/mem.py:1189`）。PROGRESS.md 的结构规格见
 [docs/CONTRACTS.md](CONTRACTS.md#handoff-contract)。
