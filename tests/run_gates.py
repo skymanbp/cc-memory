@@ -30,6 +30,24 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 PY = sys.executable
 
+# This runner's OWN stdout must not depend on the console codepage. GitHub's
+# Windows runner gives Python a cp1252 stdout, and the first thing that hit it
+# was this file's own box-drawing separator: `UnicodeEncodeError: 'charmap'
+# codec can't encode characters` — the runner crashed while reporting a
+# failure, turning a diagnosable red gate into a traceback about printing. The
+# gates it spawns emit non-ASCII too (test_directive_enforcement prints Chinese
+# section headers, several suites print box drawing), and all of it flows back
+# through here. Reconfigured rather than importing core.encoding_setup: this
+# script is deliberately hermetic and imports nothing from cc_memory.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, ValueError):
+        # why: reconfigure() needs a real TextIOWrapper; under an already-
+        # wrapped or redirected stream there is nothing to change, and a
+        # runner must never fail because it could not adjust its own output.
+        pass
+
 # Every version site that must carry the same string. `core/version.py` is
 # canonical; the rest are copies that have gone stale before (two of cli/mem.py's
 # literals were, in v2.4.x). smoke_test.py asserts this too — it is duplicated
