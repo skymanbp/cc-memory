@@ -82,7 +82,17 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 
 # ── sandbox: must be installed BEFORE importing anything from cc_memory ─────
-_SANDBOX = Path(tempfile.mkdtemp(prefix="cc-memory-surfaces-"))
+# `.resolve()` at the ROOT, so every path derived from the sandbox — the home
+# boundary, the temp dir, every fixture built under either — is in the SAME
+# spelling the package answers in. `core.roots.project_root` resolves its cwd
+# before walking, and on a Windows profile carrying an 8.3 short name the
+# example below is what `tempfile.mkdtemp` returns instead of the long form:
+#   example only, NOT a path this code uses:  <drive>:\Users\RUNNER~1\...
+# Expectations and answers were then two spellings of one directory and
+# compared unequal. Resolving here rather than at each fixture is the point —
+# there were two sources (this sandbox and the roots ladder's own box), and
+# fixing only the first left the `~`-boundary case still failing.
+_SANDBOX = Path(tempfile.mkdtemp(prefix="cc-memory-surfaces-")).resolve()
 _HOME = _SANDBOX / "home"
 _TMP = _SANDBOX / "tmp"
 _HOME.mkdir(parents=True, exist_ok=True)
