@@ -2522,6 +2522,41 @@ def _skill_body(skill):
     return rel, o, lines[o + 2:c - 1]
 
 
+_BASH_USABLE = None
+
+
+def _usable_bash():
+    """True only when `bash` is a POSIX shell that actually parses.
+
+    `shutil.which("bash")` is NOT that question on Windows. A stock Windows
+    install carries `C:\\Windows\\System32\\bash.exe` — the **WSL launcher** —
+    which `which` finds happily and which exits NONZERO with an empty stderr
+    when no distribution is installed. The check below then read that as "the
+    skill is not valid shell" and failed the suite over a file it had never
+    parsed: measured on GitHub's windows-latest runner, where the assertion
+    printed its message with nothing in the stderr slot at all.
+
+    So probe with a script that is unambiguously valid and assume nothing from
+    the binary's existence. Cached: the probe costs a process and this is
+    called once per skill.
+    """
+    global _BASH_USABLE
+    if _BASH_USABLE is None:
+        _BASH_USABLE = False
+        if shutil.which("bash"):
+            try:
+                probe = subprocess.run(
+                    ["bash", "-n"], input='echo "ok"\n', capture_output=True,
+                    text=True, encoding="utf-8", errors="replace", timeout=60)
+                _BASH_USABLE = probe.returncode == 0
+            except (OSError, subprocess.SubprocessError):
+                # why: a bash that cannot even be launched is exactly the
+                # "absent" case this function reports, not a suite failure —
+                # the character scan in _skill_shell_metachars still runs.
+                _BASH_USABLE = False
+    return _BASH_USABLE
+
+
 def _skill_parses_as_shell(skill, rel, offset, body):
     """Hand the WHOLE command to bash -n. The blocklist below cannot lead.
 
@@ -2536,7 +2571,7 @@ def _skill_parses_as_shell(skill, rel, offset, body):
     Skipped where bash is absent (this suite must run on a bare Windows box);
     the character scan still runs there, which is why both exist.
     """
-    if not shutil.which("bash"):
+    if not _usable_bash():
         return False
     # On stdin, not as a path argument: Git Bash resolves a Windows-style
     # path through its own POSIX layer and reported "No such file or
@@ -2549,7 +2584,7 @@ def _skill_parses_as_shell(skill, rel, offset, body):
     assert proc.returncode == 0, (
         f"{rel}'s body is not valid shell — bash refuses to parse the "
         f"command it is pasted into, so the skill cannot run at all:\n  "
-        + proc.stderr.strip().replace("\n", "\n  ")[:400]
+        + (proc.stderr.strip().replace("\n", "\n  ")[:400] or "(no stderr)")
         + f"\n  (body starts at {rel}:{offset + 3})")
     return True
 
