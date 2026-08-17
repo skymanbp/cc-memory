@@ -1820,14 +1820,14 @@ def _break_r11tombstone(root):
 @case("r11directiverace", ["tests/test_directive_enforcement.py"],
       "drop BEGIN IMMEDIATE -> concurrent creators of one slug collide on the unique index")
 def _break_r11directiverace(root):
+    # anchor moved 2026-08-17: v9 inserted the monotonic-clock read between the
+    # BEGIN IMMEDIATE and the SELECT, so the old multi-line anchor no longer
+    # matched. Anchored on the single line that IS the fix.
     _patch(root, f"{PKG}/core/db.py",
-           '        with self._connect() as conn:\n'
            '            conn.execute("BEGIN IMMEDIATE")\n'
-           '            row = conn.execute(\n'
-           '                "SELECT * FROM directives WHERE project_id = ? AND slug = ?",',
-           '        with self._connect() as conn:\n'
-           '            row = conn.execute(  # BREAKAGE: no write lock\n'
-           '                "SELECT * FROM directives WHERE project_id = ? AND slug = ?",')
+           '            # v9: stamp the monotonic turn clock',
+           '            # BREAKAGE: no write lock\n'
+           '            # v9: stamp the monotonic turn clock')
 
 
 @case("r11restate", ["tests/test_directive_enforcement.py"],

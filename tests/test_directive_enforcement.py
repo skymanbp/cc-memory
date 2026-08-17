@@ -406,11 +406,20 @@ def section_5():
     import threading
     db3, pid3 = _mk_db("race")
     db3_path = Path(db3.db_path) if hasattr(db3, "db_path") else None
-    errs, N = [], 8
+    errs, N = [], 16
+    # A BARRIER, not just N threads. Without one the racers drift apart and the
+    # collision is timing-dependent: `falsify --case r11directiverace` ran
+    # GREEN against an un-locked upsert because eight threads happened to
+    # serialise on a fast machine. A race gate that only sometimes fires is not
+    # a gate. Every worker now blocks until all of them are ready and they enter
+    # the critical section together.
+    gate = threading.Barrier(N)
 
     def _racer():
         try:
-            MemoryDB(db3_path).upsert_directive(pid3, "contended", demand="d")
+            db_local = MemoryDB(db3_path)     # connect BEFORE the barrier
+            gate.wait(timeout=30)
+            db_local.upsert_directive(pid3, "contended", demand="d")
         except Exception as exc:                # noqa: BLE001 — any raise is the finding
             errs.append(repr(exc))
 
