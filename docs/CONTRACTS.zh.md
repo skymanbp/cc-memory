@@ -1,4 +1,4 @@
-<!-- i18n-source: CONTRACTS.md | sha256: 8334630342dd7cd5 | version: 2.11.4 | translated: 2026-08-17 -->
+<!-- i18n-source: CONTRACTS.md | sha256: 5bc7714d0ae2da44 | version: 2.11.4 | translated: 2026-08-18 -->
 > [English](CONTRACTS.md) · **简体中文**
 
 # cc-memory — 契约（Contracts）
