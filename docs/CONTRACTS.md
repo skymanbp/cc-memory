@@ -492,7 +492,7 @@ The bilingual resume-token list is deliberate and must stay in sync with
 (`session_start.py:270-271`; see [ARCHITECTURE.md](ARCHITECTURE.md#9-documentation-language-convention-i18n)).
 
 Claude treats `<system-reminder>` blocks as authoritative, much like
-cc-enslaver's discipline rules. The wording is deliberate:
+cc-enforcer's discipline rules. The wording is deliberate:
 
 - "You MUST" — not "please consider".
 - "Use the Read tool on `<absolute path>`" — no ambiguity about which file.
@@ -532,7 +532,7 @@ catastrophic failure mode; just a missed handoff for one session.
 If you observe that Claude is systematically ignoring the reminder, the
 likely fix is to (a) tighten the wording in `_build_forced_reminder`, or
 (b) add a `PreToolUse(Read)` hook that blocks the FIRST Read if it isn't of
-PROGRESS.md (analogous to cc-enslaver's rule 08 enforcement). As of v2.4.2 no
+PROGRESS.md (analogous to cc-enforcer's rule 08 enforcement). As of v2.4.2 no
 such hook exists — `hooks/hooks.json` declares 5 events / 6 command hooks
 <!--ce:hooks--> (PreCompact carries two legs: the 120s sync one and the 300s
 `async` consolidation one; run `python tools/contracts.py` for the computed

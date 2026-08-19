@@ -33,7 +33,7 @@ projects.json
 # The PLUGIN itself ships its hooks/skills/commands/agents from the repo
 # root (hooks.json, skills/, commands/, agents/), not from .claude/. So
 # everything under .claude/ is the maintainer's local Claude Code config
-# (cc-enslaver enforcement, personal skill toolkits, etc.) and stays local.
+# (cc-enforcer enforcement, personal skill toolkits, etc.) and stays local.
 .claude/
 
 .ce/

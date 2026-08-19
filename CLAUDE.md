@@ -1097,7 +1097,7 @@ standalone installs.
 - **Plugin-agnostic.** Don't add project-specific keywords (e.g. ML/astro
   vocab) to `extractor.py` or `consolidate.py`. Those were removed in v2.1
   for a reason.
-- Read files before modifying them; respect the cc-enslaver-style discipline.
+- Read files before modifying them; respect the cc-enforcer-style discipline.
 
 ## Data & safety rules
 

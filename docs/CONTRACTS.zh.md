@@ -439,7 +439,7 @@ Spec: `docs/CONTRACTS.md#handoff-contract`.
 保持同步——它带有一条 `# i18n Tier 3` 守卫注释（`session_start.py:270-271`；见
 [ARCHITECTURE.md](ARCHITECTURE.md#9-documentation-language-convention-i18n)）。
 
-Claude 会把 `<system-reminder>` 块当作权威，就像对待 cc-enslaver 的纪律规则一样。
+Claude 会把 `<system-reminder>` 块当作权威，就像对待 cc-enforcer 的纪律规则一样。
 措辞是刻意的：
 
 - “You MUST”——不是“请考虑一下”。
@@ -476,7 +476,7 @@ This is a JSONL file: one message per line. Read with the Read tool.
 
 如果你观察到 Claude 在系统性地无视这条提醒，可能的修法是：(a) 收紧
 `_build_forced_reminder` 里的措辞，或者 (b) 加一个 `PreToolUse(Read)` 钩子，在第一次
-Read 的目标不是 PROGRESS.md 时阻断它（类比 cc-enslaver 对规则 08 的强制执行）。
+Read 的目标不是 PROGRESS.md 时阻断它（类比 cc-enforcer 对规则 08 的强制执行）。
 截至 v2.4.2 还不存在这样的钩子——`hooks/hooks.json` 声明了 5 个事件 / 6 条命令钩子
 <!--ce:hooks-->（PreCompact 带两条支路：120 秒的同步支路和 300 秒的 `async`
 整理支路；成员由 `python tools/contracts.py` 计算给出）——这条提醒依然只是建议性的。
