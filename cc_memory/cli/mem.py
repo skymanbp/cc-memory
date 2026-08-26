@@ -1079,15 +1079,41 @@ def cmd_sql(args):
     # see core.db.readonly_connect.
     from core.db import readonly_connect
     conn = readonly_connect(db_path)
-    print(f"\nSQL: {args.query}\n")
+    if not args.json:
+        # Suppressed in --json mode on purpose: stdout is then ONE JSON
+        # document a consumer can pipe straight into a parser.
+        print(f"\nSQL: {args.query}\n")
     try:
         rows = conn.execute(args.query).fetchall()
     except sqlite3.Error as e:
         print(f"SQL Error: {e}")
         conn.close()
         sys.exit(1)
+    if args.json:
+        # Autoshop report #4 + #5 in one mechanism. #4: the table renderer
+        # caps columns at 60 chars, so long text was unreadable through the
+        # CLI at all. #5: the CLI emits UTF-8 (enable_utf8_io) but the
+        # capturing shell chooses its own decode codec — PowerShell 5.1
+        # decodes native output with the console codepage (cp936 on zh-CN
+        # boxes), turning valid UTF-8 CJK into U+FFFD before any consumer
+        # sees it. `ensure_ascii=True` (json.dumps' default, stated on
+        # purpose) escapes every non-ASCII char to \\uXXXX, a wire format no
+        # capture codec can damage. `default=str` covers BLOB columns.
+        print(json.dumps([dict(r) for r in rows], ensure_ascii=True,
+                         default=str, indent=1))
+        conn.close()
+        return
     if not rows:
         print("(no rows)")
+    elif args.full:
+        # Untruncated record blocks: one `column: value` line per column,
+        # so a 500-char `demand` is finally readable without bypassing the
+        # CLI into raw sqlite3 (which is what the field report had to do).
+        for i, r in enumerate(rows, 1):
+            print(f"-- row {i} --")
+            for k in r.keys():
+                print(f"{k}: {r[k]}")
+        print(f"\n({len(rows)} rows)")
     else:
         _table(list(rows[0].keys()), [list(r) for r in rows])
         print(f"\n({len(rows)} rows)")
@@ -1178,8 +1204,9 @@ def cmd_topics(args):
 
 def cmd_consolidate(args):
     from core import consolidate as consolidate_mod
-    from core.consolidate import run_consolidation
-    _, db_path, _ = _resolve_db(args.project)
+    from core.consolidate import (deep_dedup, run_consolidation,
+                                  write_consolidation_marker)
+    memory_dir, db_path, _ = _resolve_db(args.project)
     if not db_path.exists():
         print(f"Error: no memory database at {db_path} — nothing to consolidate.")
         sys.exit(1)
@@ -1190,10 +1217,34 @@ def cmd_consolidate(args):
     consolidate_mod._cli_echo = print
     print(f"\n{'='*50}\n  Consolidating memory for {args.project}\n{'='*50}\n")
     use_llm = not args.no_llm
+    deep_totals = None
+    if getattr(args, "deep", False):
+        # --deep FIRST, full pipeline after: the loop pays the semantic
+        # backlog down until the judge runs dry, and run_consolidation then
+        # re-summarizes topics from the post-dedup survivors, so the
+        # summaries SessionStart injects describe the cleaned state.
+        if use_llm:
+            db = MemoryDB(db_path)
+            pid = db.upsert_project(args.project)
+            deep_totals = deep_dedup(db, pid, use_llm=True, echo=print)
+        else:
+            print("[!] --deep is the LLM judge loop; with --no-llm it "
+                  "cannot run — skipping the deep rounds.")
     results = run_consolidation(args.project, use_llm=use_llm, verbose=True)
     if not results:
         print("\n[FAIL] consolidation returned no results.")
         sys.exit(1)
+    if deep_totals is not None:
+        results = {**results,
+                   "deep_rounds": deep_totals["rounds"],
+                   "deep_groups_judged": deep_totals["groups_judged"],
+                   "deep_archived": deep_totals["memories_archived"]}
+    # Stamp the cadence marker (v2.12.0). The CLI never wrote it, so a manual
+    # run left the Stop hook's backpressure probe still reading "due" and it
+    # kicked a redundant background pass over a freshly-consolidated DB.
+    db = MemoryDB(db_path)
+    pid = db.upsert_project(args.project)
+    write_consolidation_marker(db, pid, memory_dir, str(args.project), results)
     print(f"\n{'='*50}\n  Results:")
     for k, v in results.items():
         print(f"    {k}: {v}")
@@ -1243,6 +1294,38 @@ def cmd_schema(args):
             print(r["sql"])
         print()
     conn.close()
+
+
+def cmd_paths(args):
+    """Print the resolved per-project artifact paths (Autoshop report #6).
+
+    `status` reported counts with no locations, so the one way to find the
+    database was an rglob for `*.db` — whose first hit on the reporting
+    machine was ANOTHER project's database, excluded only by probing its
+    tables. Read-only by the same policy as `_require_db_path`: a question
+    never creates state, and an absent artifact is an answer, not an error.
+    """
+    memory_dir, db_path, _ = _resolve_db(args.project)
+    entries = [
+        ("project_root", Path(args.project).resolve()),
+        ("memory_dir",   memory_dir),
+        ("database",     db_path),
+        ("progress_md",  memory_dir / "PROGRESS.md"),
+        ("plan_md",      memory_dir / "PLAN.md"),
+        ("memory_md",    memory_dir / "MEMORY.md"),
+    ]
+    if args.json:
+        # ensure_ascii (the json.dumps default, stated on purpose): a pure-
+        # ASCII wire format cannot be garbled by whatever codec the capturing
+        # shell decodes with — see cmd_sql's --json note.
+        print(json.dumps({k: {"path": str(p), "exists": p.exists()}
+                          for k, p in entries}, ensure_ascii=True, indent=1))
+        return
+    for k, p in entries:
+        note = "exists" if p.exists() else "absent"
+        if k == "database" and p.exists():
+            note += f", {p.stat().st_size} bytes"
+        print(f"  {k:<12} : {p}  [{note}]")
 
 
 def cmd_observations(args):
@@ -1592,6 +1675,34 @@ def cmd_plan_set(args):
             print("    `context` is free text and is NOT compared at all — "
                   "re-read it yourself. The outgoing plan is archived under "
                   "memory/.plan_history/.")
+        # Directive step-reference audit (v2.12.0, Autoshop report #1): step
+        # ids are positional and this replacement just re-assigned them, so
+        # any ACTIVE directive whose text says "step #N" may now be pointing
+        # at nothing — or, worse, at a DIFFERENT step that still resolves.
+        # Advisory, not a refusal: the rot lives in the ledger, and holding
+        # the plan hostage to it would punish the fix. The durable rule is
+        # documented at docs/CONTRACTS.md#plan-contract: reference by TITLE.
+        try:
+            refs = plan_mod.stale_directive_step_refs(
+                db.list_directives(pid, status="active"), outgoing, result)
+        except Exception:
+            refs = []
+        if refs:
+            print(f"[!] directive ledger advisory — {len(refs)} step-number "
+                  "reference(s) in active directives no longer point where "
+                  "they did:")
+            for f in refs:
+                if f["kind"] == "dead":
+                    was = f" (was {f['old_title']!r})" if f["old_title"] else ""
+                    print(f"      - {f['slug']}: step #{f['ref']} no longer "
+                          f"exists{was} — DEAD reference")
+                else:
+                    print(f"      - {f['slug']}: step #{f['ref']} now names "
+                          f"{f['new_title']!r}, was {f['old_title']!r} — "
+                          "SILENTLY RETARGETED (reads correct, points wrong)")
+            print("    Repair each with `/cc-mem directive-edit <slug> "
+                  "--demand '...'` (no count bump), and reference steps by "
+                  "TITLE, never by number.")
         return
 
     if args.raw_file:
@@ -1729,22 +1840,49 @@ def cmd_directive_list(args):
     db, pid, _memory_dir = _plan_db(args.project)
     status = None if args.status == "all" else args.status
     rows = db.list_directives(pid, status=status)
+    if args.json:
+        # Same encoding-proof wire format as `sql --json` (Autoshop #4/#5):
+        # full rows, pure ASCII, no truncation.
+        print(json.dumps(rows, ensure_ascii=True, default=str, indent=1))
+        return
     if not rows:
         print(f"No {args.status} directives recorded.")
         print("  Record one: /cc-mem directive-add <slug> --demand '...' "
               "--quote '<the user's words>'")
         return
     print(f"{len(rows)} {args.status} directive(s), most-repeated first:\n")
+    # --full lifts the per-field cuts below; the default stays truncated
+    # because this listing is a per-turn overview, not the record of record.
+    cut = (lambda t, w: t) if args.full else (lambda t, w: t[:w])
     for row in rows:
-        mark = {"active": "[ ]", "done": "[x]"}.get(row["status"], "[~]")
+        mark = {"active": "[ ]", "done": "[x]",
+                "blocked": "[b]"}.get(row["status"], "[~]")
         print(f"  {mark} {row['slug']}  ×{row['times_stated']}  "
               f"({row['kind']})")
         if row.get("demand"):
-            print(f"        {row['demand'][:96]}")
+            print(f"        {cut(row['demand'], 96)}")
         if row.get("quote"):
-            print(f"        原话: {row['quote'][:88]}")
+            print(f"        原话: {cut(row['quote'], 88)}")
         if row.get("evidence"):
-            print(f"        证据: {row['evidence'][:88]}")
+            print(f"        证据: {cut(row['evidence'], 88)}")
+
+
+def _warn_step_number_refs(*texts):
+    """One advisory line when directive text pins itself to plan step NUMBERS.
+
+    The documented rule (docs/CONTRACTS.md#plan-contract, from the Autoshop
+    field report's #1 finding): a directive outlives every plan, step ids are
+    re-assigned on every replacement, so an ordinal reference rots — 11 dead
+    and 4 silently-retargeted references measured after two replans. Warn at
+    WRITE time, where the author can still switch to the step's title.
+    """
+    from core.plan import directive_step_refs
+    refs = directive_step_refs("\n".join(t for t in texts if t))
+    if refs:
+        print(f"[!] step-number reference(s) {refs} in the directive text. "
+              "Step ids are re-assigned on every plan replacement, so these "
+              "WILL rot — reference the step's TITLE instead. "
+              "(plan-set audits active directives on every replacement.)")
 
 
 def cmd_directive_add(args):
@@ -1772,6 +1910,46 @@ def cmd_directive_add(args):
     row = [r for r in db.list_directives(pid) if r["slug"] == args.slug][0]
     print(f"[OK] directive {action}: {args.slug} "
           f"(stated ×{row['times_stated']}, {row['kind']}, {row['status']})")
+    _warn_step_number_refs(args.demand, args.quote)
+
+
+def cmd_directive_edit(args):
+    """Correct a directive's record WITHOUT counting a re-statement.
+
+    Autoshop report #2: `directive-add` was the only edit path and it bumps
+    `times_stated` unconditionally — nine reference repairs there inflated
+    the count on nine rows, and `directive-list` sorts by that count, so the
+    MOST-EDITED directives outranked the most-demanded ones. This is the
+    maintenance door: fields change, the repetition signal does not.
+
+    `--status` here accepts only `active`/`blocked` — `blocked` parks a
+    directive that is waiting on the USER (idle enforcement skips it, since
+    the idle scan reads active rows only), and un-parking is `--status
+    active`. Closure stays in `directive-close`, whose evidence gate this
+    door must not bypass.
+    """
+    db, pid, _memory_dir = _plan_db(args.project)
+    fields = {}
+    for key in ("demand", "quote", "kind", "status"):
+        value = getattr(args, key)
+        if value is not None:
+            fields[key] = value
+    if not fields:
+        print("[FAIL] nothing to edit — pass at least one of "
+              "--demand / --quote / --kind / --status.")
+        print("       To RE-STATE a directive (which bumps its count), "
+              "use directive-add.")
+        sys.exit(1)
+    n = db.edit_directive(pid, args.slug, **fields)
+    if not n:
+        print(f"[FAIL] no directive named {args.slug!r} in this project — "
+              "directive-edit never creates. Record it with directive-add.")
+        sys.exit(1)
+    row = [r for r in db.list_directives(pid) if r["slug"] == args.slug][0]
+    print(f"[OK] directive edited: {args.slug} "
+          f"(stated ×{row['times_stated']} — unchanged, {row['kind']}, "
+          f"{row['status']})")
+    _warn_step_number_refs(args.demand, args.quote)
 
 
 def cmd_directive_close(args):
@@ -2032,6 +2210,13 @@ def make_parser():
     pq = sub.add_parser("sql", help="Raw SQL query (READ-ONLY: SELECT/PRAGMA/"
                                     "EXPLAIN/WITH...SELECT)")
     pq.add_argument("query")
+    pq_out = pq.add_mutually_exclusive_group()
+    pq_out.add_argument("--json", action="store_true",
+                        help="Rows as pure-ASCII JSON (untruncated, and "
+                             "immune to the capturing shell's decode codec)")
+    pq_out.add_argument("--full", action="store_true",
+                        help="Untruncated column:value blocks instead of the "
+                             "60-char table cells")
 
     pa = sub.add_parser("add", help="Add memory (anti-patch upsert)")
     pa.add_argument("category",
@@ -2046,9 +2231,17 @@ def make_parser():
 
     pc = sub.add_parser("consolidate", help="Full consolidation (LLM-backed)")
     pc.add_argument("--no-llm", action="store_true")
+    pc.add_argument("--deep", action="store_true",
+                    help="Loop the semantic-dedup judge until it runs dry "
+                         "(pays a backlog down in one sitting), then run the "
+                         "full pipeline")
 
     sub.add_parser("cleanup", help="Lightweight no-LLM cleanup")
     sub.add_parser("schema", help="Show DB schema")
+    pp = sub.add_parser("paths", help="Print resolved project artifact paths "
+                                      "(DB / PROGRESS.md / PLAN.md / MEMORY.md)")
+    pp.add_argument("--json", action="store_true",
+                    help="Machine-readable, pure-ASCII")
     sub.add_parser("progress", help="Regenerate memory/PROGRESS.md from DB")
 
     psup = sub.add_parser("supersedes", help="Show supersede chain for a memory ID")
@@ -2110,8 +2303,20 @@ def make_parser():
     pdl = sub.add_parser("directive-list",
                          help="Standing user directives, most-repeated first")
     pdl.add_argument("--status", default="active",
-                     choices=["active", "done", "superseded", "dropped", "all"],
+                     choices=["active", "blocked", "done", "superseded",
+                              "dropped", "all"],
                      help="Filter by status (default: active)")
+    pdl_out = pdl.add_mutually_exclusive_group()
+    pdl_out.add_argument("--json", action="store_true",
+                         help="Full rows as pure-ASCII JSON (untruncated, "
+                              "capture-codec-proof)")
+    pdl_out.add_argument("--full", action="store_true",
+                         help="Untruncated demand/quote/evidence text")
+    # `constraint` (v2.12.0): a standing PROHIBITION — "never do X" — that by
+    # construction has no recordable positive action, so idle enforcement
+    # skips it (core.plan.blocking_reasons).
+    _DIRECTIVE_KINDS = ["standing", "feature", "process", "oneoff",
+                        "constraint"]
     pda = sub.add_parser("directive-add",
                          help="Record a directive (re-adding bumps its count)")
     pda.add_argument("slug", help="Stable short id, e.g. pause-on-quota")
@@ -2121,11 +2326,23 @@ def make_parser():
     # (`directive-add <slug>`) used to overwrite a directive's kind. The INSERT
     # path in db.upsert_directive already falls back with `or "standing"`, so
     # a genuinely new directive still lands as standing.
-    pda.add_argument("--kind", default=None,
-                     choices=["standing", "feature", "process", "oneoff"],
+    pda.add_argument("--kind", default=None, choices=_DIRECTIVE_KINDS,
                      help="Directive kind (default on creation: standing)")
     pda.add_argument("--times", type=int, default=None,
                      help="Set the repetition count outright (transcript audit)")
+    pde = sub.add_parser(
+        "directive-edit",
+        help="Correct a directive's fields WITHOUT bumping its count "
+             "(never creates; closure stays with directive-close)")
+    pde.add_argument("slug")
+    pde.add_argument("--demand", default=None, help="Replacement demand text")
+    pde.add_argument("--quote", default=None, help="Replacement verbatim quote")
+    pde.add_argument("--kind", default=None, choices=_DIRECTIVE_KINDS)
+    # active <-> blocked ONLY. `blocked` parks a directive waiting on the
+    # USER (idle enforcement skips it); done/superseded/dropped would bypass
+    # directive-close's evidence gate, which is the ledger's whole point.
+    pde.add_argument("--status", default=None, choices=["active", "blocked"],
+                     help="Park (blocked) or un-park (active) the directive")
     pdc = sub.add_parser("directive-close",
                          help="Close a directive — evidence is mandatory")
     pdc.add_argument("slug")
@@ -2208,7 +2425,8 @@ def main():
         "sessions": cmd_sessions, "sql": cmd_sql, "add": cmd_add,
         "keywords": cmd_keywords, "topics": cmd_topics,
         "consolidate": cmd_consolidate, "cleanup": cmd_cleanup,
-        "schema": cmd_schema, "progress": cmd_progress, "supersedes": cmd_supersedes,
+        "schema": cmd_schema, "paths": cmd_paths,
+        "progress": cmd_progress, "supersedes": cmd_supersedes,
         "archive": cmd_archive,
         "observations": cmd_observations, "mode": cmd_mode,
         "summary": cmd_summary, "serve": cmd_serve, "dashboard": cmd_dashboard,
@@ -2217,6 +2435,7 @@ def main():
         "plan-replan": cmd_plan_replan, "plan-check": cmd_plan_check,
         "directive-list": cmd_directive_list,
         "directive-add": cmd_directive_add,
+        "directive-edit": cmd_directive_edit,
         "directive-close": cmd_directive_close,
         "inject-show": cmd_inject_show, "inject-usage": cmd_inject_usage,
         "encoding-check": cmd_encoding_check,

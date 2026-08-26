@@ -17,6 +17,7 @@ from sources that bypass the writer (manual SQL, legacy paths).
 v2.1: project-neutral. The previous astrophysics _GROUPS dict has been
 removed; topic clusters are derived purely from keyword frequency.
 """
+import json
 import re
 import sys
 import time
@@ -437,13 +438,23 @@ def _judge_group_llm(group, api_key, deadline=None):
 
 
 def semantic_dedup(db, project_id, budget=None, use_llm=True,
-                   max_groups=12, dry_run=False):
+                   max_groups=12, dry_run=False, skip_signatures=None):
     """LLM-judged semantic de-duplication. Conservative + recoverable.
 
     For each confirmed-duplicate group: survivor = max importance, then oldest
     (lowest id); its content is updated to the LLM's canonical_content; the
     others are archived (is_active=0) with supersedes_id -> survivor so the
     lineage is preserved and recoverable.
+
+    `skip_signatures` (v2.12.0) is `deep_dedup`'s convergence state: a
+    mutable set of frozenset(member-ids) this run has already put in front
+    of the judge. Nomination is deterministic, so without it every extra
+    round re-judged the same refused groups forever and "run until dry"
+    could never terminate. When supplied, nomination over-fetches by the
+    number of already-seen signatures so the cap cannot mask unseen groups,
+    already-seen groups are filtered out, and every group actually sent to
+    the judge is recorded — including ones whose verdict errors, so a dead
+    API ends the loop instead of spinning it.
 
     Returns {"groups_judged": N, "memories_archived": N, "proposals": [...]}.
     Gated by `budget` (BudgetGate) and no-ops without an API key.
@@ -469,7 +480,13 @@ def semantic_dedup(db, project_id, budget=None, use_llm=True,
         memories = sorted(memories,
                           key=lambda m: (m.get("updated_at") or "", m["id"]),
                           reverse=True)[:_MAX_PAIRWISE_ROWS]
-    groups = _nominate_groups(memories, max_groups=max_groups)
+    nominate_cap = max_groups + (len(skip_signatures)
+                                 if skip_signatures else 0)
+    groups = _nominate_groups(memories, max_groups=nominate_cap)
+    if skip_signatures:
+        groups = [g for g in groups
+                  if frozenset(m["id"] for m in g) not in skip_signatures]
+    groups = groups[:max_groups]
     if not groups:
         return result
 
@@ -478,6 +495,8 @@ def semantic_dedup(db, project_id, budget=None, use_llm=True,
         if not budget.can_spend(PER_CALL_COST):
             _log.info("dedup: budget exhausted, deferring remaining groups")
             break
+        if skip_signatures is not None:
+            skip_signatures.add(frozenset(m["id"] for m in group))
         verdict = _judge_group_llm(group, api_key, deadline=budget.deadline())
         result["groups_judged"] += 1
         if not verdict or not verdict.get("duplicates"):
@@ -549,6 +568,49 @@ def semantic_dedup(db, project_id, budget=None, use_llm=True,
                       f"another active row; survivor keeps its own wording")
 
     return result
+
+
+def deep_dedup(db, project_id, use_llm=True, budget=None, max_rounds=50,
+               echo=None):
+    """Round `semantic_dedup` until it runs dry (v2.12.0 — `consolidate --deep`).
+
+    One `semantic_dedup` pass judges at most `max_groups` (12) groups, which
+    is sized for the budget-gated background run — against a real backlog
+    (this repository measured 349 unreconciled rows accumulated in one month)
+    a single pass is a trickle. This loop exists to pay the backlog down in
+    one sitting: each round re-nominates from the post-archive state, the
+    shared `skip_signatures` set stops refused groups from being re-judged,
+    and the loop ends when a round sends the judge nothing new.
+
+    Bounded three ways, none silent: the `max_rounds` cap and an exhausted
+    `budget` are both announced through `echo` (the CLI's narration sink;
+    hooks leave it None → file log), and a dead API converges via the
+    recorded-even-on-error signatures. Returns
+    {"rounds": N, "groups_judged": N, "memories_archived": N}.
+    """
+    say = echo or _log.info
+    seen: set = set()
+    totals = {"rounds": 0, "groups_judged": 0, "memories_archived": 0}
+    per_call = _worst_call_cost(_JUDGE_HAIKU_S, _JUDGE_FALLBACK_S)
+    for _ in range(max_rounds):
+        r = semantic_dedup(db, project_id, budget=budget, use_llm=use_llm,
+                           skip_signatures=seen)
+        totals["rounds"] += 1
+        totals["groups_judged"] += r["groups_judged"]
+        totals["memories_archived"] += r["memories_archived"]
+        say(f"deep dedup round {totals['rounds']}: "
+            f"{r['groups_judged']} group(s) judged, "
+            f"{r['memories_archived']} archived")
+        if r["groups_judged"] == 0:
+            break
+        if budget is not None and not budget.can_spend(per_call):
+            say("deep dedup: budget exhausted before convergence — "
+                "re-run to continue")
+            break
+    else:
+        say(f"deep dedup: stopped at the {max_rounds}-round cap "
+            f"without convergence — re-run to continue")
+    return totals
 
 
 # ── 3. Topic assignment (frequency-driven, project-neutral) ─────────────────
@@ -1006,6 +1068,128 @@ def archive_consolidated(db, project_id, keep_per_topic=5, dup_threshold=0.65):
         # Hash-guarded like the other two snapshot-verdict stages above.
         return db.archive_if_unchanged(to_archive)
     return 0
+
+
+# ── Consolidation cadence: marker + backpressure (v2.12.0) ─────────────────
+# Until v2.11.4 consolidation had exactly ONE automatic trigger: the async
+# PreCompact leg, gated on "≥ interval sessions since the last run". Both
+# halves of that predicate assume compactions happen: a project worked in
+# short sessions never compacts, so `sessions` never grows, so consolidation
+# never runs — measured on this repository, 349 memories written in one month
+# with the last consolidation 17 days old, while the SessionStart injection
+# served topic summaries three minor versions stale. The write path
+# reconciles per-row (anti-patch), but cross-topic rewordings and topic
+# summaries are BATCH work, and batch work needs a trigger that watches the
+# batch: rows-since-last-run, not compactions-since-last-run.
+
+# Unconsolidated writes that make the backlog "due" on their own.
+BACKLOG_ROWS = 50
+# Staleness trigger: due after this many days IF anything new was written at
+# all (the floor below) — an idle project must not burn LLM calls on a timer.
+BACKLOG_DAYS = 7.0
+_BACKLOG_MIN_ROWS_FOR_DAYS = 10
+
+
+def read_consolidation_marker(memory_dir: Path, cwd: str) -> Dict:
+    """memory/.last_consolidation.json, or {} when absent / corrupt / FOREIGN.
+
+    The path check is the same rule consolidate_async enforces (register C4 /
+    r6-B8): the marker follows the DIRECTORY but its counters describe a
+    project ROW keyed by path, so after a rename the stale marker must read
+    as never-run — the price is one early consolidation, async and budgeted.
+    """
+    try:
+        marker = json.loads((memory_dir / ".last_consolidation.json")
+                            .read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(marker, dict):
+        return {}
+    # normcase, not ==: the hook path writes the cwd Claude Code handed it
+    # ("d:\\Projects\\x") while the CLI writes an anchored resolve()
+    # ("D:\\Projects\\x"). Windows paths are case-insensitive; this check
+    # exists to catch RENAMES, and a case-only mismatch reading as "foreign"
+    # would make every manual `/cc-mem consolidate` invisible to the
+    # backpressure probe — the exact redundant-run the shared marker writer
+    # exists to prevent.
+    import os as _os
+    if (_os.path.normcase(str(marker.get("project_path") or ""))
+            != _os.path.normcase(str(cwd))):
+        return {}
+    return marker
+
+
+def write_consolidation_marker(db, project_id, memory_dir: Path, cwd: str,
+                               results: Dict) -> Dict:
+    """Stamp the cadence marker after a completed consolidation run.
+
+    ONE writer for both the async hook and the manual CLI path (`/cc-mem
+    consolidate`) — the CLI never wrote the marker at all before v2.12.0, so
+    a hand-run deep clean left the backlog predicate still reading "due" and
+    the next Stop hook kicked a redundant background run over a database
+    that had just been consolidated. `last_memory_id` is the row-id
+    watermark `consolidation_backlog` subtracts against.
+    """
+    marker = {
+        "last_session_count": db.get_session_count(project_id),
+        "project_path": str(cwd),
+        "ts": datetime.now().isoformat(timespec="seconds"),
+        "last_memory_id": db.max_memory_id(project_id),
+        "final_active": results.get("final_active"),
+        "final_topics": results.get("final_topics"),
+        "semantic_dedup_archived": results.get("semantic_dedup_archived"),
+        "archived_obsolete": results.get("archived_obsolete"),
+    }
+    try:
+        (memory_dir / ".last_consolidation.json").write_text(
+            json.dumps(marker, ensure_ascii=False), encoding="utf-8")
+    except OSError as e:
+        # why: the marker is cadence bookkeeping; a failed write only means
+        # the next trigger may re-consolidate — never a correctness issue.
+        _log.error(f".last_consolidation.json write failed: {e}")
+    return marker
+
+
+def consolidation_backlog(db, project_id, marker: Dict,
+                          now: Optional[datetime] = None) -> Optional[str]:
+    """Why consolidation is due NOW, or None. Pure decision, no side effects.
+
+    Two triggers, both measured against the marker's watermark:
+      * ROWS — `BACKLOG_ROWS`+ memories written since the last run: the
+        backlog is large enough to be worth a budgeted background pass.
+      * DAYS — `BACKLOG_DAYS`+ days since the last run AND at least
+        `_BACKLOG_MIN_ROWS_FOR_DAYS` new rows: topic summaries injected at
+        SessionStart go stale by TIME, but an idle project has nothing to
+        integrate and must not pay for a run on schedule alone.
+
+    A marker with no usable watermark falls back the way
+    `count_memories_since` documents (created_at, then the full count):
+    a never-consolidated project is one big backlog, which is the reading
+    that ends the starvation this predicate exists to end.
+    """
+    n_new = db.count_memories_since(
+        project_id,
+        row_id=int(marker.get("last_memory_id") or 0),
+        since_ts=str(marker.get("ts") or ""))
+    if n_new >= BACKLOG_ROWS:
+        return (f"{n_new} unconsolidated memories "
+                f"(threshold {BACKLOG_ROWS})")
+    if n_new < _BACKLOG_MIN_ROWS_FOR_DAYS:
+        return None
+    ts = str(marker.get("ts") or "")
+    if ts:
+        try:
+            age_days = ((now or datetime.now())
+                        - datetime.fromisoformat(ts)).total_seconds() / 86400.0
+        except ValueError:
+            age_days = float("inf")
+    else:
+        age_days = float("inf")
+    if age_days >= BACKLOG_DAYS:
+        return (f"{n_new} unconsolidated memories and "
+                f"{age_days:.0f} day(s) since the last run "
+                f"(threshold {BACKLOG_DAYS:.0f})")
+    return None
 
 
 # ── Master orchestration ────────────────────────────────────────────────────

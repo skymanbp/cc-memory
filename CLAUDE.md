@@ -2,17 +2,91 @@
 
 ## Project: cc-memory
 
-**Claude Code persistent memory plugin (v2.11.4)** — anti-patch reconcile-on-write
-+ LLM-judged semantic de-duplication, forced PROGRESS.md handoff with
-per-session annotation, live PLAN.md anchor with plan-refiner / plan-guardian
-subagents + mandatory carryover gate, **an enforced directive ledger**, bounded
-transcript reads, injection observability, FTS5 search, AI-judged extraction
-with Haiku (optional local Ollama fallback).
+**Claude Code persistent memory plugin (v2.12.0)** — anti-patch reconcile-on-write
++ LLM-judged semantic de-duplication with **backpressure-triggered
+consolidation**, forced PROGRESS.md handoff with per-session annotation, live
+PLAN.md anchor with plan-refiner / plan-guardian subagents + mandatory
+carryover gate, **an enforced directive ledger**, bounded transcript reads,
+injection observability, FTS5 search, AI-judged extraction with Haiku
+(optional local Ollama fallback).
 
 - **Language**: Python 3.8+ (pure stdlib, zero pip dependencies at runtime)
-- **Version**: 2.11.4
+- **Version**: 2.12.0
 - **License**: MIT
 - **Platform**: Windows-primary, cross-platform compatible (Tkinter required for GUI)
+
+## What changed in v2.12.0 (over v2.11.4)
+
+**The field-report release: consolidation that actually runs, and a ledger you
+can maintain.** Driven by two measurements — this repository's own database
+(349 memories written in one month against a consolidation marker 17 days old,
+SessionStart injecting topic summaries that still said "v2.5.4") and a
+seven-finding field report from the Autoshop project (2026-08-25). Full
+narrative in `CHANGELOG.md`. Invariants a future change must not break:
+
+1. **Consolidation has a BACKPRESSURE trigger, and the marker has ONE
+   writer.** The sessions-interval gate assumes compactions happen; a project
+   worked in short sessions never compacts, so batch work (cross-topic
+   dedup, topic summaries) starved while the per-row write path looked
+   healthy. `core.consolidate.consolidation_backlog` measures the backlog
+   against the marker's `last_memory_id` row-id watermark (50 rows, or 7 days
+   with ≥ 10 new rows — an idle project never pays on schedule alone); the
+   Stop hook probes it every turn and spawns `consolidate_async.py --cwd`
+   DETACHED; the worker re-checks under the lock. Marker I/O is
+   `read_consolidation_marker` / `write_consolidation_marker` in core,
+   shared by the async hook AND `/cc-mem consolidate` — the CLI never wrote
+   the marker, so a manual run left the probe reading "due" and a redundant
+   background pass followed. The read compares paths with `normcase`
+   (hook-written `d:\…` vs CLI-written `D:\…`); an exact compare makes every
+   manual run invisible to the probe. The `.consolidation.kick` cooldown
+   fails CLOSED (cannot write → do not spawn): a spawn that cannot be
+   rate-limited is a spawn storm behind one failing worker.
+
+2. **`deep_dedup` converges because judged groups are REMEMBERED.**
+   Nomination is deterministic, so "loop until dry" re-judges the same
+   refused groups forever without the `skip_signatures` set. Signatures are
+   recorded even when the judge errors (a dead API must end the loop, not
+   spin it), and nomination over-fetches past the seen set so the 12-group
+   cap cannot mask unseen groups. Both the round cap and budget exhaustion
+   are announced — no silent caps.
+
+3. **Only `directive-add` may bump `times_stated`.** The count is the
+   ledger's one importance signal and `directive-list` sorts by it; when
+   `directive-add` was also the only edit path, nine reference repairs
+   inflated nine counts and the most-EDITED directives outranked the
+   most-DEMANDED ones. `db.edit_directive` corrects fields without touching
+   the count or `last_seen_at`, stamps `turns_at_touch` (an edit is
+   attention), and REFUSES to create — an edit door that creates is a second
+   upsert with divergent defaults. The CLI's `directive-edit --status`
+   accepts only `active`/`blocked`, so the edit door cannot bypass
+   `directive-close`'s evidence gate. Gate: `falsify --case r12nobump`.
+
+4. **Idle enforcement skips `status='blocked'` and `kind='constraint'`.**
+   Blocked = waiting on the USER (the idle scan reads active rows only);
+   constraint = a standing prohibition with no recordable positive action —
+   its success is that nothing happens. The constraint skip lives in
+   `core.plan.blocking_reasons` (the policy point) and ONLY there; putting
+   it in the scan too is how two copies drift. Gate: `falsify --case
+   r12constraint`.
+
+5. **Directives reference plan steps by TITLE, never by number.** Step ids
+   are positional and die with their plan; Autoshop measured 11 dead and 4
+   silently-RETARGETED references after two replans — the retargeted ones
+   read correctly and point at the wrong work. `core.plan.
+   stale_directive_step_refs` audits active directives on every `plan-set
+   --from-refiner` (dead / retargeted, carry judged at the carryover gate's
+   own bar) and `directive-add`/`edit` warn at write time. Advisory by
+   design: the rot lives in the ledger and must not hold the plan hostage.
+   Gate: `falsify --case r12stepref`.
+
+Also: `sql`/`directive-list` gained `--full` (untruncated) and `--json`
+(pure-ASCII wire format — the capturing shell picks its own decode codec, and
+PowerShell 5.1 uses the console codepage, so UTF-8 CJK reached consumers as
+`�`; `\uXXXX` escapes cannot be garbled by any codec); `/cc-mem paths` prints
+the resolved artifact paths without creating anything; the Stop refusal's
+contradictory "or" became the one real sequence; and `docs/ARCHITECTURE.md`
+§3/§5 stopped describing the v2.10-era advisory nudge two releases after
+enforcement replaced it.
 
 ## What changed in v2.11.3 (over v2.11.2)
 
@@ -660,7 +734,7 @@ not be imported at all — `cli/plan.py` now has a `main()`.
 
 **Residual limits, recorded rather than papered over:**
 
-- `core/db.py`'s three plan mutators — `update_plan_status` (`db.py:2992-3036`),
+- `core/db.py`'s three plan mutators — `update_plan_status` (`db.py:3069-3113`),
   `delete_plan` (`:1410`) and `update_plan_content` (`:1427`) — all accept
   `project_id`, and `cli/plan.py` + `ui/dashboard.py` pass it at every call
   site, but none of them *requires* it (it defaults to `None`). An unscoped raw
@@ -894,6 +968,7 @@ cc-memory/
 ├── README.md / README.zh.md     ← drift-tracked pair
 ├── .github/                     ← CI + community health (v2.11.1)
 │   ├── workflows/gates.yml      the release gates, as an executable
+│   ├── workflows/release.yml    tag push → gates → build exes → RUN them → Release
 │   ├── ISSUE_TEMPLATE/          bug_report.yml, feature_request.yml
 │   └── PULL_REQUEST_TEMPLATE.md
 ├── tools/                       ← dev/CI checkers, NEVER packaged
@@ -948,9 +1023,9 @@ blocking sync leg + a background `async` leg.
 | Hook | Entry | Timeout | Purpose |
 |------|-------|---------|---------|
 | `PreCompact` (sync) | `cc_memory/hooks/pre_compact.py` | 120s | LLM extract → memory_writer.upsert_batch → FULL-REWRITE PROGRESS.md → archive (fast, ~1-5s) |
-| `PreCompact` (async) | `cc_memory/hooks/consolidate_async.py` | 300s, `async:true` | Background consolidation every N sessions (interval marker + lock, budget-gated) — off the blocking path |
+| `PreCompact` (async) | `cc_memory/hooks/consolidate_async.py` | 300s, `async:true` | Background consolidation every N sessions OR on write backlog (interval marker + lock, budget-gated) — off the blocking path; also spawnable standalone (`--cwd`) by the Stop probe |
 | `SessionStart` | `cc_memory/hooks/session_start.py` | 15s | Inject layered context + FORCED `<system-reminder>` to Read PROGRESS.md |
-| `Stop` | `cc_memory/hooks/stop.py` | 22s | Observer (Haiku) + per-turn PROGRESS.md patch + idle reorg every 5 turns |
+| `Stop` | `cc_memory/hooks/stop.py` | 22s | Observer (Haiku) + per-turn PROGRESS.md patch + idle reorg every 5 turns + consolidation backpressure probe (v2.12.0) + plan enforcement |
 | `PostToolUse` | `cc_memory/hooks/post_tool_use.py` | 8s | Live plan anchor in EVERY mode (ExitPlanMode capture / TodoWrite step sync / drift counters), THEN an observation row for observed tools only (no LLM) |
 | `UserPromptSubmit` | `cc_memory/hooks/user_prompt.py` | 8s | Auto-init memory/ + turn count + seed `progress.current_request` on turn 1 |
 
@@ -1387,9 +1462,23 @@ error UI for missing-command hooks).
 
 ```bash
 pip install pyinstaller
-python build_exe.py
+python scripts/build_exe.py
 # produces dist/cc-memory-installer.exe + dist/cc-memory-dashboard.exe
 ```
+
+**Release binaries come from CI, not from this machine (v2.12.0).**
+`.github/workflows/release.yml` runs on a `v*` tag push and does, in order:
+refuse a tag that disagrees with `core/version.py`; `python
+tests/run_gates.py` on the tagged commit (tag pushes do not trigger
+`gates.yml`); `scripts/build_exe.py`; **run both exes** — the installer does
+a real `--cli` install and `--uninstall` against a sandboxed `USERPROFILE`
+and must refuse an unknown flag with exit 2, the dashboard is launched with
+`--help` and must exit 0 (the v2.5.4 rule: run them, never PE-inspect);
+`gh release create` with both exes attached and the CHANGELOG section as the
+body (`scripts/release_notes.py` — fails loud if the section is missing).
+Release procedure is therefore: bump the five version sites → write the
+CHANGELOG entry → gates green → commit → `git tag vX.Y.Z` → `git push
+origin main vX.Y.Z`. Never upload a locally built exe to a release.
 
 ## Sync protocol
 
@@ -1412,8 +1501,9 @@ session — no copy step.
 
 `~/.claude/hooks/cc-memory/` only holds `logs/` now (logger output target).
 
-To deploy to another machine without a git checkout, build
-`cc-memory-installer.exe` (see `build_exe.py`). That installer lays the package
+To deploy to another machine without a git checkout, use
+`cc-memory-installer.exe` from the GitHub Release (built by
+`.github/workflows/release.yml` via `scripts/build_exe.py`). That installer lays the package
 **FLAT** under `~/.claude/hooks/cc-memory/` — `core/`, `hooks/`, `llm/`, `cli/`,
 `mcp/`, `ui/` directly under that directory, with **no `cc_memory/` path
 segment** — copies the 5 surfaces into `~/.claude/{commands,agents,skills}`, and

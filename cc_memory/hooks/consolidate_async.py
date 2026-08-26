@@ -18,20 +18,25 @@ in hooks/hooks.json), so even the async worker itself is never killed mid-write
 
 Cadence + safety (this hook fires on EVERY compaction, same as the sync leg):
   * Interval marker (memory/.last_consolidation.json) records the session count
-    at the last successful consolidation. We run only when
-    ``get_session_count() - last >= AUTO_INTERVAL``. This is race-immune against
-    the sibling sync hook (which inserts the session row concurrently): a ±1
-    drift in the count cannot cause a double-run or a miss, and it never inserts
-    its own session row.
+    at the last successful consolidation. The hook path runs when
+    ``get_session_count() - last >= AUTO_INTERVAL`` OR when
+    ``core.consolidate.consolidation_backlog`` says the write backlog is due
+    (v2.12.0 — the sessions interval alone starved projects that never
+    compact). This is race-immune against the sibling sync hook (which
+    inserts the session row concurrently): a ±1 drift in the count cannot
+    cause a double-run or a miss, and it never inserts its own session row.
   * Lock file (memory/.consolidation.lock) prevents two overlapping workers
     from churning the same DB when compactions fire close together; a stale lock
     (older than STALE_LOCK_S) is reclaimed.
 
-Stdin (JSON):  session_id, transcript_path, cwd, trigger
+Entry (two ways):
+  hook       — stdin JSON: session_id, transcript_path, cwd, trigger
+  standalone — ``consolidate_async.py --cwd <path>`` (v2.12.0): spawned
+               DETACHED by the Stop hook's backpressure probe; gates on the
+               backlog predicate only, re-checked under the lock.
 Output:        stdout empty (async stdout is not shown inline). File log only.
                Always exits 0 — a background hook must never disrupt the session.
 """
-import json
 import os
 import sys
 import time
@@ -163,27 +168,20 @@ def _release_lock(lock_path):
         pass
 
 
-def _read_marker(marker_path):
-    try:
-        return json.loads(marker_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError, ValueError):
-        return {}
-
-
-def _write_marker(marker_path, data):
-    try:
-        marker_path.write_text(json.dumps(data, ensure_ascii=False),
-                               encoding="utf-8")
-    except OSError as e:
-        # why: marker is observability + cadence bookkeeping; a write failure
-        # only means the next run may re-consolidate — not a correctness issue.
-        _log.error(f".last_consolidation.json write failed: {e}")
-
-
 def main():
-    # Logged: this hook is rare, and a skipped consolidation is worth being
-    # able to explain afterwards.
-    data = parse_payload(log=_log)
+    # Standalone spawn mode (v2.12.0): the Stop hook's backpressure probe
+    # launches this same script DETACHED with `--cwd <path>` and no stdin.
+    # Everything downstream — the opt-out→anchor gate, the lock, the budget,
+    # the marker — is identical to the hook path; only the cadence predicate
+    # differs (backlog-only: a spawned worker was launched BECAUSE of the
+    # backlog, so the sessions-interval gate would wrongly veto it).
+    standalone = len(sys.argv) >= 3 and sys.argv[1] == "--cwd"
+    if standalone:
+        data = {"cwd": sys.argv[2]}
+    else:
+        # Logged: this hook is rare, and a skipped consolidation is worth
+        # being able to explain afterwards.
+        data = parse_payload(log=_log)
     if data is None:
         sys.exit(0)
 
@@ -214,7 +212,6 @@ def main():
         sys.exit(0)
 
     lock_path = memory_dir / ".consolidation.lock"
-    marker_path = memory_dir / ".last_consolidation.json"
     acquired = False
     try:
         db = MemoryDB(db_path)
@@ -222,28 +219,35 @@ def main():
 
         n_sessions = db.get_session_count(project_id)
         interval = _auto_interval()
-        marker = _read_marker(marker_path)
-        # The marker follows the DIRECTORY, but session counts follow the
-        # project ROW, which is keyed by path — so after a rename the same
-        # memory/ carried a marker counted against the OLD row while the new
-        # row's count restarted at 0, and `n_sessions - last` went negative:
-        # consolidation silently stalled for interval+last more sessions
-        # (register C4, measured: marker last=6, new row sessions=0, next
-        # run at session 11). Any marker not stamped for THIS path — a
-        # different path OR no path at all — is treated as never-run
-        # (register r6-B8): grandfathering pathless legacy markers kept the
-        # rename residual open for exactly the upgrade-then-rename sequence,
-        # and the price of not grandfathering is ONE early consolidation per
-        # project, async and budget-gated.
-        if marker and str(marker.get("project_path") or "") != cwd:
-            _log.info(f"consolidation marker is for "
-                      f"{marker.get('project_path')!r}, project is at "
-                      f"{cwd!r} — treating as never run")
-            marker = {}
+        # The marker read is path-validated (core.consolidate.
+        # read_consolidation_marker): the marker follows the DIRECTORY, but
+        # session counts follow the project ROW, which is keyed by path — so
+        # after a rename the same memory/ carried a marker counted against
+        # the OLD row while the new row's count restarted at 0, and
+        # `n_sessions - last` went negative: consolidation silently stalled
+        # for interval+last more sessions (register C4, measured: marker
+        # last=6, new row sessions=0, next run at session 11). Any marker not
+        # stamped for THIS path — a different path OR no path at all — reads
+        # as never-run (register r6-B8): grandfathering pathless legacy
+        # markers kept the rename residual open, and the price is ONE early
+        # consolidation per project, async and budget-gated.
+        from core.consolidate import (consolidation_backlog,
+                                      read_consolidation_marker,
+                                      write_consolidation_marker)
+        marker = read_consolidation_marker(memory_dir, cwd)
         last = int(marker.get("last_session_count", 0) or 0)
 
-        # Interval-since-last gate (race-immune; see module docstring).
-        if n_sessions - last < interval:
+        # Cadence gate (race-immune; see module docstring). Two ways to be
+        # due since v2.12.0: the sessions interval (the v2.3.2 rule — only
+        # meaningful when compactions happen), OR a write backlog
+        # (core.consolidate.consolidation_backlog — the trigger that ends
+        # the starvation of projects that never compact). A standalone
+        # spawn checks the backlog ONLY: it was launched because of it,
+        # and this re-check under the lock is what makes a racing spawn a
+        # no-op instead of a double-run.
+        due_sessions = (not standalone) and (n_sessions - last >= interval)
+        backlog_reason = consolidation_backlog(db, project_id, marker)
+        if not due_sessions and backlog_reason is None:
             sys.exit(0)
 
         if not _acquire_lock(lock_path):
@@ -252,7 +256,9 @@ def main():
         acquired = True
 
         _log.info(f"async consolidation start (session #{n_sessions}, "
-                  f"last={last}, interval={interval})")
+                  f"last={last}, interval={interval}, "
+                  f"backlog={backlog_reason or 'none'}, "
+                  f"standalone={standalone})")
 
         from core.consolidate import run_consolidation, BudgetGate
         gate = BudgetGate(total_s=_BUDGET_TOTAL_S, safety_s=_BUDGET_SAFETY_S)
@@ -267,15 +273,10 @@ def main():
         except Exception as e:
             _log.error(f"MEMORY.md regen after consolidation failed: {e}")
 
-        _write_marker(marker_path, {
-            "last_session_count": n_sessions,
-            "project_path": cwd,
-            "ts": datetime.now().isoformat(timespec="seconds"),
-            "final_active": results.get("final_active"),
-            "final_topics": results.get("final_topics"),
-            "semantic_dedup_archived": results.get("semantic_dedup_archived"),
-            "archived_obsolete": results.get("archived_obsolete"),
-        })
+        # ONE marker writer (core.consolidate.write_consolidation_marker),
+        # shared with the manual CLI path; it stamps `last_memory_id`, the
+        # row-id watermark the backpressure predicate subtracts against.
+        write_consolidation_marker(db, project_id, memory_dir, cwd, results)
         _log.info(f"async consolidation OK: {results.get('final_active')} active "
                   f"memories, {results.get('final_topics')} topics")
 

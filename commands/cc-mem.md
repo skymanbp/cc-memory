@@ -27,11 +27,12 @@ someone who knows the command exists.
 | `sessions` | Compaction history with archive paths |
 | `observations` | Raw PostToolUse rows still awaiting extraction |
 | `schema` | Print the live SQLite schema (tables, indexes, migrations) |
-| `sql "<SELECT ...>"` | Run a **read-only** query. Write statements are refused — only plain `SELECT`, `WITH … SELECT`, `EXPLAIN` and read-only `PRAGMA` run, and the `PRAGMA name(value)` setter form is refused too (an `=`-only test used to let it through) |
+| `paths [--json]` | Print the resolved project artifact paths — database, `PROGRESS.md`, `PLAN.md`, `MEMORY.md` — each with an exists/absent verdict. Read-only: an absent artifact is an answer, not an error. Exists because `status` reports counts with no locations, and hunting for the DB with an rglob found another project's file first |
+| `sql "<SELECT ...>" [--json\|--full]` | Run a **read-only** query. Write statements are refused — only plain `SELECT`, `WITH … SELECT`, `EXPLAIN` and read-only `PRAGMA` run, and the `PRAGMA name(value)` setter form is refused too (an `=`-only test used to let it through). The default table truncates cells at 60 chars; `--full` prints untruncated `column: value` blocks, and `--json` emits pure-ASCII JSON (`\uXXXX` escapes), which no capturing shell's decode codec can garble — use it whenever CJK text comes back as `�` |
 | `progress` | Force-regenerate `memory/PROGRESS.md` from DB and print it |
 | `supersedes <id>` | Walk the supersede chain for a memory ID (anti-patch history) |
 | `archive <id>... [--supersedes ID]` | Retire memories found to be WRONG: `is_active=0`, recoverable, never `DELETE`. The supported exit from "this stored fact is false" — `sql` is read-only and `add` reconciles only when the new text scores similar enough to the old. `--supersedes` records which memory replaced them, keeping the chain walkable. Refuses ids from another project (`memories.id` is global to the DB file) |
-| `consolidate` | Run full LLM-backed consolidation pipeline |
+| `consolidate [--deep] [--no-llm]` | Run the full LLM-backed consolidation pipeline, then stamp the cadence marker (so the Stop hook's backpressure probe doesn't re-run what you just ran). `--deep` first loops the semantic-dedup judge until a round confirms nothing new — the way to pay a months-old backlog down in one sitting; already-refused groups are never re-judged within the run |
 | `cleanup` | Lightweight no-LLM cleanup + MEMORY.md regen |
 | `summary` | Latest session summary (request/done/next_steps) |
 | `mode [name]` | Show/set project mode (code/research/writing) |
@@ -45,8 +46,9 @@ someone who knows the command exists.
 | `plan-check` | Reset guardian counters + emit plan-guardian invocation hint |
 | `plan-replan` | Re-arm `needs_refine` on the current raw |
 | `plan-clear` | Drop the active plan + delete PLAN.md. Archived to `memory/.plan_history/` first; **`--reason "<why>"` is required when unfinished steps exist** (refuses and exits 1 otherwise — v2.4.0 carryover gate) |
-| `directive-list [--status active\|done\|superseded\|dropped\|all]` | Standing user directives, **most-repeated first**. A directive is a unit of user INTENT and outlives every plan; a plan step is a unit of execution and dies with its plan. Default filter is `active` |
-| `directive-add <slug> [--quote "..."] [--demand "..."] [--kind standing\|feature\|process\|oneoff] [--times N]` | Record a directive. **Re-adding the same slug bumps `times_stated` on the ONE row** rather than creating a second — repetition is the importance signal a plan cannot express. `--times` sets the count outright, for backfilling from a transcript audit |
+| `directive-list [--status active\|blocked\|done\|superseded\|dropped\|all] [--json\|--full]` | Standing user directives, **most-repeated first**. A directive is a unit of user INTENT and outlives every plan; a plan step is a unit of execution and dies with its plan. Default filter is `active`; `blocked` rows show as `[b]`. `--full` lifts the per-field truncation, `--json` emits full rows as pure-ASCII JSON |
+| `directive-add <slug> [--quote "..."] [--demand "..."] [--kind standing\|feature\|process\|oneoff\|constraint] [--times N]` | Record a directive. **Re-adding the same slug bumps `times_stated` on the ONE row** rather than creating a second — repetition is the importance signal a plan cannot express. `--times` sets the count outright, for backfilling from a transcript audit. **Reference plan steps by TITLE, never by number** — step ids are re-assigned on every replacement, and the command warns when the text contains `step #N` / `步骤 N` |
+| `directive-edit <slug> [--demand ...] [--quote ...] [--kind ...] [--status active\|blocked]` | Correct a directive's record **without bumping its count** — an edit is maintenance, not a re-statement, and `directive-list` sorts by the count. Never creates (exits 1 on an unknown slug). `--status blocked` parks a directive that is waiting on the *user* — idle enforcement skips it — and `--status active` un-parks it; closure stays with `directive-close`, whose evidence gate this door must not bypass |
 | `directive-close <slug> --evidence "<checkable>" [--status done\|superseded\|dropped]` | Close a directive. **`--evidence` is mandatory** and refuses an empty value (exits 1): a commit sha, `file:line`, or a gate name. A directive closed on an assertion is the exact failure the ledger exists to prevent |
 | `inject-show` | Show exactly what the last SessionStart injected (ground truth) |
 | `inject-usage` | Deterministic signals: did Claude actually Read PROGRESS.md/MEMORY.md |
@@ -67,10 +69,19 @@ someone who knows the command exists.
 > **What "idle" counts (v2.11.2).** Turns since *that directive* was last
 > written, not since the project was last drift-checked: `turns_total`
 > (monotonic, reset by nothing) minus the directive's own `turns_at_touch`.
-> Re-stating a directive or changing its status restarts its clock — those are
-> progress. Running `/cc-mem plan-check` does **not**: it resets the drift
-> counter, and if idleness were measured against that, a guardian check would
-> forgive a directive nobody had touched in thirty turns.
+> Re-stating a directive, editing it, or changing its status restarts its
+> clock — those are attention. Running `/cc-mem plan-check` does **not**: it
+> resets the drift counter, and if idleness were measured against that, a
+> guardian check would forgive a directive nobody had touched in thirty turns.
+>
+> **Two shapes idle enforcement deliberately skips (v2.12.0).** A directive
+> with `--status blocked` is waiting on the *user* (material to deliver, a
+> decision to make) — the assistant cannot progress it, so counting its idle
+> turns only manufactured re-statements to silence the block, inflating the
+> count. And a `--kind constraint` is a standing prohibition ("never commit
+> the token") with no recordable positive action by construction: its success
+> is that nothing happens, so it is enforced by being injected, never by
+> being "worked".
 
 > **Memory quality (v2.3).** `consolidate` now also runs LLM-judged **semantic
 > de-duplication** (same fact reworded across sessions → merged, recoverable via

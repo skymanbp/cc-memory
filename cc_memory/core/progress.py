@@ -52,6 +52,7 @@ MEMORY_GITIGNORE_LINES = [
     ".last_inject.json",
     ".last_consolidation.json",
     ".consolidation.lock",
+    ".consolidation.kick",
     ".pre_compact_attempt.json",
     ".plan_raw.md",
     ".plan_history/",

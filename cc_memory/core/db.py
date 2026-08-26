@@ -1139,6 +1139,39 @@ class MemoryDB:
                 (project_id,)
             ).fetchone()[0]
 
+    def count_memories_since(self, project_id, row_id=0, since_ts=""):
+        """Memories written after a consolidation watermark (v2.12.0).
+
+        Prefers the ROW-ID watermark (monotonic, clock-immune — the same
+        reasoning that moved the observer watermark off ISO timestamps);
+        falls back to `created_at > since_ts` for a marker written before
+        `last_memory_id` existed, and to the full count when there is no
+        watermark at all — a project that has never consolidated IS one big
+        backlog, which is the correct reading.
+        """
+        with self._connect() as conn:
+            if row_id:
+                sql = ("SELECT COUNT(*) FROM memories "
+                       "WHERE project_id = ? AND id > ?")
+                params = (project_id, row_id)
+            elif since_ts:
+                sql = ("SELECT COUNT(*) FROM memories "
+                       "WHERE project_id = ? AND created_at > ?")
+                params = (project_id, since_ts)
+            else:
+                sql = "SELECT COUNT(*) FROM memories WHERE project_id = ?"
+                params = (project_id,)
+            return int(conn.execute(sql, params).fetchone()[0])
+
+    def max_memory_id(self, project_id):
+        """Highest memories.id this project holds (0 when empty) — the
+        watermark `count_memories_since` reads back."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT MAX(id) FROM memories WHERE project_id = ?",
+                (project_id,)).fetchone()
+            return int(row[0] or 0)
+
     # ── memories: insert / read ──────────────────────────────────────────────
 
     def insert_memory(self, project_id, session_id, category, content,
@@ -2729,6 +2762,50 @@ class MemoryDB:
         sql += " ORDER BY times_stated DESC, id ASC"
         with self._connect() as conn:
             return [dict(r) for r in conn.execute(sql, params).fetchall()]
+
+    def edit_directive(self, project_id, slug, **fields):
+        """Correct a directive's fields WITHOUT bumping `times_stated`.
+
+        v2.12.0, from the Autoshop field report: `directive-add` was the only
+        way to fix a typo or a rotten reference in `demand`, and it counts
+        every call as a re-statement — nine reference repairs there inflated
+        the count on nine rows, and `directive-list` orders by that count, so
+        the MOST-EDITED directives floated to the top regardless of how often
+        the user actually asked for them. An edit is maintenance of the
+        record, not a statement of intent, and must not touch the signal.
+
+        Refuses (returns 0) when the slug does not exist: an edit that
+        silently creates would be `upsert_directive` with the count semantics
+        stripped — a second write path with divergent defaults.
+        `last_seen_at` is deliberately NOT touched either: it records when
+        the user last STATED the directive. `turns_at_touch` IS stamped —
+        any write to the row is attention, and the idleness clock measures
+        neglect, not statements. Same write-path cleaning as
+        `upsert_directive`, for the same reason (the text reaches the Stop
+        hook's block `reason`, a higher-authority channel than PROGRESS.md).
+        """
+        now = self._now()
+        allowed = ("quote", "demand", "kind", "status", "source", "evidence")
+        from core.privacy import clean_for_storage
+        sets, params = [], []
+        for key in allowed:
+            if key in fields and fields[key] is not None:
+                value = fields[key]
+                if key in ("quote", "demand", "evidence"):
+                    value = clean_for_storage(str(value))
+                sets.append(f"{key} = ?")
+                params.append(value)
+        if not sets:
+            return 0
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            turns_now = self._project_turns_total(conn, project_id)
+            sets += ["updated_at = ?", "turns_at_touch = ?"]
+            params += [now, turns_now, project_id, slug]
+            cur = conn.execute(
+                f"UPDATE directives SET {', '.join(sets)} "
+                "WHERE project_id = ? AND slug = ?", params)
+            return cur.rowcount
 
     def set_directive_status(self, project_id, slug, status, evidence=""):
         """Close/reopen a directive. Closing without evidence is refused by the

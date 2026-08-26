@@ -386,6 +386,76 @@ def _observer_evaluate(cwd, session_id, memory_dir):
         return 0
 
 
+# Backpressure spawn rate limit. The spawned worker re-checks the backlog
+# under the consolidation lock, so a duplicate spawn is a no-op — but a worker
+# that keeps FAILING before it writes the marker would otherwise be re-spawned
+# on every single turn. Ten minutes matches the worker's own stale-lock
+# horizon (consolidate_async._STALE_LOCK_S = 360s) with margin.
+_CONSOLIDATE_KICK_COOLDOWN_S = 600.0
+
+
+def _maybe_kick_consolidation(cwd, memory_dir, db, project_id):
+    """Spawn a DETACHED background consolidation when the write backlog is due.
+
+    v2.12.0. Consolidation's only automatic trigger used to be the async
+    PreCompact leg gated on "≥ N sessions since last run" — both halves
+    assume compactions happen, so a project worked in short sessions starved:
+    this repository measured 349 memories written in one month against a
+    17-day-old consolidation marker, with SessionStart injecting topic
+    summaries three minor versions stale. The Stop hook fires every turn, so
+    it is where backpressure can be SEEN; the decision lives in
+    `core.consolidate.consolidation_backlog` and the work stays in
+    consolidate_async.py (spawned `--cwd`, budget-gated, lock-guarded) so
+    this hook's 22s envelope only ever pays for one COUNT query and a
+    detached Popen.
+
+    Returns True when a worker was spawned. Never raises past its caller's
+    try (hook contract).
+    """
+    from core.consolidate import (consolidation_backlog,
+                                  read_consolidation_marker)
+    marker = read_consolidation_marker(memory_dir, str(cwd))
+    reason = consolidation_backlog(db, project_id, marker)
+    if reason is None:
+        return False
+    if (memory_dir / ".consolidation.lock").exists():
+        return False  # a worker is already on it (or its stale-lock sweep is)
+    kick = memory_dir / ".consolidation.kick"
+    try:
+        if (kick.exists() and
+                time.time() - kick.stat().st_mtime
+                < _CONSOLIDATE_KICK_COOLDOWN_S):
+            return False
+    except OSError:
+        # why: an unstatable kick marker reads as "recently kicked" below
+        # via the write failing too — the fail-closed direction.
+        return False
+    try:
+        kick.write_text(datetime.now().isoformat(timespec="seconds"),
+                        encoding="utf-8")
+    except OSError:
+        # why: cannot persist the rate limit -> do not spawn. A spawn we
+        # cannot rate-limit is a spawn storm waiting for a failing worker;
+        # the PreCompact leg still consolidates on its own cadence.
+        return False
+    import subprocess
+    worker = _PKG_ROOT / "hooks" / "consolidate_async.py"
+    kwargs = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL,
+              "stderr": subprocess.DEVNULL, "close_fds": True}
+    # Detach exactly as cli/mem.py:cmd_dashboard does, for the same reason:
+    # an inherited pipe would make the harness wait on the worker.
+    if sys.platform == "win32":
+        kwargs["creationflags"] = (
+            getattr(subprocess, "DETACHED_PROCESS", 0x00000008)
+            | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200))
+    else:
+        kwargs["start_new_session"] = True
+    subprocess.Popen([sys.executable, str(worker), "--cwd", str(cwd)],
+                     **kwargs)
+    _log.info(f"backpressure: spawned background consolidation — {reason}")
+    return True
+
+
 def _patch_progress_from_recent_obs(db, project_id, memory_dir):
     """Drip-update PROGRESS.md files_touched from the latest observations."""
     obs = db.get_recent_observations(project_id, limit=40)
@@ -463,6 +533,13 @@ def main():
         # current_session_id.
         db.tag_progress_session(project_id, session_id)
         _patch_progress_from_recent_obs(db, project_id, memory_dir)
+
+        # Job 3.5: consolidation backpressure (v2.12.0). Own try: a probe
+        # failure must cost neither the status line nor plan enforcement.
+        try:
+            _maybe_kick_consolidation(cwd, memory_dir, db, project_id)
+        except Exception:
+            _log.error_tb("backpressure probe failed")
 
         # Compact status line for Claude (one line, every turn).
         #

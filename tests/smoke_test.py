@@ -993,11 +993,28 @@ def main():
     assert _ca._acquire_lock(lock) is False, "second acquire (fresh lock) must fail"
     _ca._release_lock(lock)
     assert not lock.exists(), "release must remove the lock"
-    marker = tmp_ca / ".last_consolidation.json"
-    assert _ca._read_marker(marker) == {}, "missing marker reads as {}"
-    _ca._write_marker(marker, {"last_session_count": 42})
-    assert _ca._read_marker(marker)["last_session_count"] == 42
-    print("[OK] v2.3.2 consolidate_async: importable + lock/marker/interval logic")
+    # Marker I/O lives in core.consolidate since v2.12.0: a path-VALIDATED
+    # read (a marker stamped for another path — a rename — reads as
+    # never-run, and the comparison is normcase so a CLI-written "D:\..."
+    # matches a hook-written "d:\...") plus ONE writer shared between the
+    # async hook and the manual CLI path, which stamps `last_memory_id` —
+    # the row-id watermark the backpressure predicate subtracts against.
+    assert C.read_consolidation_marker(tmp_ca, str(tmp_ca)) == {}, \
+        "missing marker reads as {}"
+    db_ca = MemoryDB(tmp_ca / "memory.db")
+    pid_ca = db_ca.upsert_project(str(tmp_ca))
+    _written = C.write_consolidation_marker(db_ca, pid_ca, tmp_ca,
+                                            str(tmp_ca), {"final_active": 0})
+    assert "last_memory_id" in _written and "ts" in _written, \
+        "marker must carry the row-id watermark"
+    assert C.read_consolidation_marker(
+        tmp_ca, str(tmp_ca))["last_session_count"] == 0
+    assert C.read_consolidation_marker(tmp_ca, str(tmp_ca).upper()) != {}, \
+        "marker path check must be case-insensitive (normcase)"
+    assert C.read_consolidation_marker(tmp_ca, str(tmp_ca) + "-other") == {}, \
+        "a marker for another path must read as never-run"
+    print("[OK] v2.3.2 consolidate_async: importable + lock/interval logic; "
+          "v2.12.0 marker I/O in core (path-validated, watermarked)")
 
     # === i18n: documentation multilingual drift gate =========================
     # Import the dev checker (lives in tools/, outside the package) and assert no
@@ -1205,6 +1222,7 @@ def main():
     # that hides its own damage is the /memory/ lesson one pattern later.
     import subprocess as _gi_sp
     for _gi_probe in (".github/workflows/gates.yml",
+                      ".github/workflows/release.yml",
                       ".github/ISSUE_TEMPLATE/bug_report.yml",
                       ".claude-plugin/plugin.json",
                       ".claude-plugin/A_FUTURE_FILE.json",
@@ -4781,6 +4799,163 @@ def main():
           "transitive archive, malformed todos survivable, PLAN.md slots "
           "escaped, CJK criteria bar aligned, link guards junction-aware")
 
+
+    # === v2.12.0: consolidation backpressure + deep dedup + CLI output modes =
+    import json as _r12_json
+    import core.consolidate as _r12_C
+    import core.auth as _r12_auth
+    _r12_repo = Path(__file__).resolve().parent.parent
+
+    # (a) consolidation_backlog: rows trigger, idle floor, watermark reset.
+    #     The starvation this closes: consolidation's only automatic trigger
+    #     was "≥ N sessions since last run" on the async PreCompact leg, so a
+    #     project worked in short sessions NEVER consolidated (measured on
+    #     this repository: 349 rows in a month, marker 17 days old).
+    _r12_root = Path(tempfile.mkdtemp(prefix="cc-mem-r12-"))
+    _r12_mem = _r12_root / "memory"; _r12_mem.mkdir()
+    _r12_db = MemoryDB(_r12_mem / "memory.db")
+    _r12_pid = _r12_db.upsert_project(str(_r12_root))
+    assert _r12_C.consolidation_backlog(_r12_db, _r12_pid, {}) is None, \
+        "an empty project must never be due"
+    for _i in range(_r12_C.BACKLOG_ROWS):
+        _r12_db.insert_memory(_r12_pid, None, "note",
+                              f"r12 backlog row {_i} with detail {_i * 7}",
+                              importance=3)
+    assert _r12_C.consolidation_backlog(_r12_db, _r12_pid, {}) is not None, \
+        "a never-consolidated backlog must read as due"
+    _r12_marker = _r12_C.write_consolidation_marker(
+        _r12_db, _r12_pid, _r12_mem, str(_r12_root), {"final_active": 1})
+    assert _r12_marker.get("last_memory_id"), \
+        "the marker must carry the row-id watermark"
+    assert _r12_C.consolidation_backlog(_r12_db, _r12_pid, _r12_marker) is None, \
+        "the watermark must absorb the rows just consolidated"
+    _r12_stale = dict(_r12_marker, ts="2000-01-01T00:00:00")
+    assert _r12_C.consolidation_backlog(_r12_db, _r12_pid, _r12_stale) is None, \
+        "an idle project must not pay for a run on schedule alone"
+    for _i in range(10):
+        _r12_db.insert_memory(_r12_pid, None, "note",
+                              f"r12 fresh row {_i} extra {_i * 13}",
+                              importance=3)
+    assert _r12_C.consolidation_backlog(_r12_db, _r12_pid, _r12_stale), \
+        "a week-stale marker with 10 new rows must be due"
+    # The ROWS trigger alone, against a FRESH marker ts — the one shape the
+    # days trigger cannot also explain (falsify --case r12backlogrows).
+    assert _r12_C.consolidation_backlog(_r12_db, _r12_pid, _r12_marker) \
+        is None, "precondition: 10 rows under a fresh ts is not yet due"
+    for _i in range(_r12_C.BACKLOG_ROWS - 10):
+        _r12_db.insert_memory(_r12_pid, None, "note",
+                              f"r12 rows-only trigger {_i} tag {_i * 19}",
+                              importance=3)
+    assert _r12_C.consolidation_backlog(_r12_db, _r12_pid, _r12_marker), \
+        "50 rows past the watermark must be due even with a fresh ts"
+
+    # (b) deep_dedup converges: a refused group is never re-judged within one
+    #     run (nomination is deterministic, so without the signature set the
+    #     loop would re-judge the same refusals forever).
+    _r12_db2 = MemoryDB(Path(tempfile.mkdtemp(prefix="cc-mem-r12d-"))
+                        / "memory.db")
+    _r12_pid2 = _r12_db2.upsert_project("r12-deep")
+    for _t in ("alpha deploy pipeline uses docker compose profile one",
+               "alpha deploy pipeline uses docker compose profile two",
+               "beta cache layer keeps redis hashes warm daily",
+               "beta cache layer keeps redis hashes warm nightly"):
+        _r12_db2.insert_memory(_r12_pid2, None, "note", _t, importance=3)
+    _r12_real_key = _r12_auth.get_api_key
+    _r12_real_judge = _r12_C._judge_group_llm
+    _r12_judged = []
+    try:
+        _r12_auth.get_api_key = lambda: ("smoke-key", "env")
+
+        def _r12_fake_judge(group, api_key, deadline=None):
+            _r12_judged.append(frozenset(m["id"] for m in group))
+            return {"duplicates": False, "reason": "distinct facts"}
+
+        _r12_C._judge_group_llm = _r12_fake_judge
+        _r12_totals = _r12_C.deep_dedup(_r12_db2, _r12_pid2, use_llm=True,
+                                        max_rounds=10)
+    finally:
+        _r12_auth.get_api_key = _r12_real_key
+        _r12_C._judge_group_llm = _r12_real_judge
+    assert _r12_judged, "the fixture must nominate at least one group"
+    assert _r12_totals["rounds"] < 10, \
+        "all-refused groups must converge, not spin to the round cap"
+    assert len(_r12_judged) == len(set(_r12_judged)), \
+        f"a refused group was re-judged within one deep run: {_r12_judged}"
+    assert _r12_totals["groups_judged"] == len(_r12_judged)
+
+    # (c) the Stop hook's backpressure probe: lock defers, due spawns ONE
+    #     detached worker, the kick cooldown stops a respawn storm.
+    sys.path.insert(0, str(_r12_repo / "cc_memory" / "hooks"))
+    import stop as _r12_stop
+    _r12_spawned = []
+    _r12_real_popen = subprocess.Popen
+    try:
+        subprocess.Popen = (lambda cmd, **kw:
+                            _r12_spawned.append(cmd) or
+                            type("_P", (), {"pid": 0})())
+        (_r12_mem / ".consolidation.lock").write_text("held")
+        assert _r12_stop._maybe_kick_consolidation(
+            str(_r12_root), _r12_mem, _r12_db, _r12_pid) is False, \
+            "a held lock must defer the spawn"
+        (_r12_mem / ".consolidation.lock").unlink()
+        (_r12_mem / ".last_consolidation.json").unlink()   # backlog -> due
+        assert _r12_stop._maybe_kick_consolidation(
+            str(_r12_root), _r12_mem, _r12_db, _r12_pid) is True
+        assert len(_r12_spawned) == 1 and \
+            "--cwd" in [str(c) for c in _r12_spawned[0]], \
+            f"spawn shape wrong: {_r12_spawned}"
+        assert (_r12_mem / ".consolidation.kick").exists(), \
+            "the cooldown marker must be written before the spawn"
+        assert _r12_stop._maybe_kick_consolidation(
+            str(_r12_root), _r12_mem, _r12_db, _r12_pid) is False and \
+            len(_r12_spawned) == 1, "the cooldown must stop a respawn"
+    finally:
+        subprocess.Popen = _r12_real_popen
+    from core.progress import MEMORY_GITIGNORE_LINES as _r12_gitignore
+    assert ".consolidation.kick" in _r12_gitignore, \
+        "the kick marker must be in the canonical ignore set (3-copy parity)"
+
+    # (d) CLI: `paths` answers without creating state; `sql --json` is ONE
+    #     pure-ASCII JSON document (the capture-codec-proof wire format —
+    #     PowerShell 5.1 decodes native output with the console codepage, so
+    #     UTF-8 CJK reached consumers as U+FFFD; \uXXXX escapes cannot).
+    _r12_cli = _r12_repo / "cc_memory" / "cli" / "mem.py"
+    _r12_empty = Path(tempfile.mkdtemp(prefix="cc-mem-r12p-"))
+
+    def _r12_run(proj, *argv):
+        return subprocess.run(
+            [sys.executable, str(_r12_cli), "--project", str(proj), *argv],
+            capture_output=True, text=True, encoding="utf-8",
+            errors="replace",
+            env={**os.environ, "PYTHONIOENCODING": "utf-8"})
+
+    _r12_p = _r12_run(_r12_empty, "paths")
+    assert _r12_p.returncode == 0 and "absent" in _r12_p.stdout, \
+        f"paths on a memoryless project: {_r12_p.stdout[:200]}"
+    assert not (_r12_empty / "memory").exists(), \
+        "`paths` must never create state — a question is not an init"
+    _r12_pj = _r12_json.loads(_r12_run(_r12_empty, "paths", "--json").stdout)
+    assert _r12_pj["database"]["exists"] is False
+    _r12_db.insert_memory(_r12_pid, None, "note",
+                          "中文记忆内容编码测试，用于线格式验证",
+                          importance=3, topic="中文主题")
+    _r12_sq = _r12_run(_r12_root, "sql",
+                       "SELECT topic FROM memories WHERE topic LIKE '%主题%'",
+                       "--json")
+    _r12_body = _r12_sq.stdout.strip()
+    assert _r12_body.startswith("["), \
+        f"--json stdout must be one JSON document, got: {_r12_body[:80]}"
+    assert _r12_json.loads(_r12_body)[0]["topic"] == "中文主题"
+    assert "\\u" in _r12_body and _r12_body.isascii(), \
+        "sql --json must escape non-ASCII so no capture codec can garble it"
+    _r12_sf = _r12_run(_r12_root, "sql",
+                       "SELECT content FROM memories WHERE topic LIKE '%主题%'",
+                       "--full")
+    assert "线格式验证" in _r12_sf.stdout, \
+        "--full must print the untruncated value"
+
+    print("[OK] v2.12.0 backpressure: backlog predicate + watermark marker + "
+          "deep-dedup convergence + Stop spawn/cooldown + paths/--json/--full")
 
     print("\nProduced files:")
     for f in sorted(mem_dir.rglob("*")):

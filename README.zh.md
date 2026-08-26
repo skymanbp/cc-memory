@@ -1,4 +1,4 @@
-<!-- i18n-source: README.md | sha256: e44d79672225eabb | version: 2.11.4 | translated: 2026-08-17 -->
+<!-- i18n-source: README.md | sha256: 35c83dcc92bb6abf | version: 2.12.0 | translated: 2026-08-26 -->
 > [English](README.md) · **简体中文**
 
 <div align="center">
@@ -7,9 +7,10 @@
 
 **给 Claude Code 的持久化记忆。**
 项目里的决策、结果、缺陷与计划，能挺过上下文压缩、会话边界和关掉的终端——
-并且下一个会话在动手之前会被**强制**先读它们。
+下一个会话在动手之前会被**强制**先读它们，而存下来的东西是**被调和过的**，
+绝不是堆叠出来的。
 
-[![version](https://img.shields.io/badge/version-2.11.4-blue.svg)](CHANGELOG.md)
+[![version](https://img.shields.io/badge/version-2.12.0-blue.svg)](CHANGELOG.md)
 [![license](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![python](https://img.shields.io/badge/python-3.8%2B-blue.svg)](pyproject.toml)
 [![dependencies](https://img.shields.io/badge/runtime%20deps-0-brightgreen.svg)](#运行要求)
@@ -22,41 +23,47 @@
 
 ## 目录
 
-- [要解决的问题](#要解决的问题)
-- [60 秒看懂它怎么工作](#60-秒看懂它怎么工作)
+- [这是什么](#这是什么)
+- [它攻击的问题](#它攻击的问题)
+- [它做什么——六项能力](#它做什么六项能力)
+- [它怎么工作](#它怎么工作)
+- [这一个为什么不一样](#这一个为什么不一样)
 - [快速开始](#快速开始)
-- [功能总览](#功能总览)
-  - [1 · 记忆采集](#1--记忆采集)
-  - [2 · 记忆质量——反补丁契约](#2--记忆质量反补丁契约)
-  - [3 · 会话交接——PROGRESS.md](#3--会话交接progressmd)
-  - [4 · 计划与意图——PLAN.md 与指令账本](#4--计划与意图planmd-与指令账本)
-  - [5 · 检索](#5--检索)
-  - [6 · 各类接口](#6--各类接口)
-  - [7 · 隐私与安全](#7--隐私与安全)
-  - [8 · 可靠性工程](#8--可靠性工程)
+- [实战实录](#实战实录)
+- [实测数字](#实测数字)
 - [参考手册](#参考手册)
-  - [`/cc-mem`——32 个子命令](#cc-mem32-个子命令)
+  - [`/cc-mem`——34 个子命令](#cc-mem34-个子命令)
   - [`cc-memory-plan`——计划队列](#cc-memory-plan计划队列)
   - [MCP 工具](#mcp-工具)
   - [配置](#配置)
   - [每个项目的文件](#每个项目的文件)
   - [数据库表](#数据库表)
   - [钩子一览](#钩子一览)
+- [设计哲学](#设计哲学)
 - [架构](#架构)
 - [开发](#开发)
 - [故障排查](#故障排查)
-- [v2.11.3 有什么新东西](#v2113-有什么新东西)
+- [路线图与已知限制](#路线图与已知限制)
+- [v2.12.0 有什么新东西](#v2120-有什么新东西)
 - [文档地图](#文档地图)
 - [许可](#许可)
 
 ---
 
-## 要解决的问题
+## 这是什么
+
+一个 Claude Code 插件——六个钩子 <!--ce:hooks-->、一套 CLI、一个 MCP 服务器、
+一个桌面看板和一个网页查看器，全都架在同一个项目本地的 SQLite 数据库之上——它在
+每个对话边界采集结构化记忆，把每条新事实与已存内容**调和**而不是追加，向下一个
+会话递交一份强制阅读的交接文档，维护一个带**强制执行**的用户意图账本的实时计划
+锚点，并在写入积压提示"该整理了"的时候在后台整理这个库。纯 Python 标准库，零
+运行时依赖，一切都在你的机器上。
+
+## 它攻击的问题
 
 上下文窗口填满时，Claude Code 会**压缩**（compact）对话。被丢掉的那些轮次里的
-东西就没了：三小时前做的决策、量出来的基准数字、已经修过一次的 bug、你说过
-还得再说一遍的约束。正常结束的会话——关掉终端、合上笔记本——同样会悄无声息地
-丢掉这些。
+东西就没了：三小时前做的决策、量出来的基准数字、已经修过一次的 bug、你说过还得
+再说一遍的约束。正常结束的会话——关掉终端、合上笔记本——同样会悄无声息地丢掉这些。
 
 常见的几种应付办法，在长周期项目里都撑不住：
 
@@ -66,14 +73,53 @@
 | 每个会话把上下文再粘回去 | 手工、有损，而且烧掉的正是你想省下的 token |
 | 更大的上下文窗口 | 只是把压缩推迟，并没有消除它 |
 | 只追加的记忆文件 | 同一个事实每个会话重述一遍、越堆越高，文件最后变成噪音 |
+| 一个没人被强制去读的记忆库 | 下一个会话可以无视的注入只是一句建议，而建议在赶进度时总会输 |
 
-cc-memory 四个一起解决。它在每个对话边界采集结构化记忆，把每条新事实与已存
-内容**归并**而不是追加，并在会话开始时发出一段 `<system-reminder>`，要求下一个
-Claude 在回应**之前**先读交接文档。
+最后两行正是多数记忆工具止步的地方，也是本项目投入最多工程量的地方：**写入做
+调和**（merge / supersede / insert，由相似度决定——绝不是追加了事），**阅读被
+强制**（会话开始时的 `<system-reminder>` 要求下一个 Claude 回应之前先读交接
+文档——计划状态过期时 Stop 钩子还能拒绝结束一轮）。
 
----
+## 它做什么——六项能力
 
-## 60 秒看懂它怎么工作
+**能力一——采集。** 记忆在每个对话边界被抽取：按轮（Haiku 观察者读该轮的工具
+observation）、压缩时（有界的 head+tail transcript 窗口，2 GiB 的 transcript
+也杀不死钩子），以及会话启动时对压缩从未处理过的 transcript 做追溯保存。AI 判定
+的 `{category, content, importance, topic}` 结构化记录，没有凭据时退化为与项目
+无关的正则兜底。中英文都是一等公民。
+
+**能力二——写入即调和（反补丁契约）。** 每条保存路径都经由同一个 writer，由它
+决定 **SKIP**（完全重复）、**MERGE**（近似重述，就地改写）、**SUPERSEDE**
+（事实变了——归档旧行，新行链回它）还是 **INSERT**（真正的新事实）。任何东西都
+不会被删除；被取代的历史始终可以走链回溯。相似度是 CJK 感知的（中文连续段内用
+字符 bigram——纯 trigram 会把一个十字中文事实的一字修正打到 0.45 分，于是每次
+修正都被存成一条新的、互相矛盾的事实）。
+
+**能力三——强制交接。** `memory/PROGRESS.md` 是"我们做到哪了"的唯一真相来源：
+当前请求、已完成 / 进行中 / 受阻、待办、触碰过的文件、一个 transcript 指针。
+永远由一行 SQL **全量重写**——它不可能自相矛盾——而 SessionStart 发出的
+`<system-reminder>` 会*强制*下一个会话先读它。到底读没读，
+`/cc-mem inject-usage` 会告诉你。
+
+**能力四——计划锚点 + 指令账本，带强制执行。** `memory/PLAN.md` 跟踪实时计划
+（ExitPlanMode 的输出被自动捕获；TodoWrite 机械地同步步骤状态）。替换计划要过
+**强制的结转闸门**——每条未完成步骤必须被结转或被显式处置，没有 force 开关。
+与之独立的**指令账本**记录*用户*提了什么要求，因为计划步骤随计划一起死，而指令
+的寿命长于任何一份计划；重复提出同一要求会让计数在**同一行**上累加，闭环必须给
+出可核查的 `--evidence`，而当计划未精炼或某条指令闲置过久时，Stop 钩子可以拒绝
+结束这一轮——带保证释放的逃生预算，因为一个逃不出去的拦截比没有拦截更糟。
+
+**能力五——检索与注入。** FTS5 全文检索、主题摘要、关键词词汇表，以及各层带
+预算的分层 SessionStart 注入（主题 + 关键记忆 + 近期时间线 + PROGRESS 预览）。
+`.last_inject.json` 精确记录注入了什么，所以注入是可观测的，不是想当然的。
+
+**能力六——带背压的整理（v2.12.0）。** 后台维护——LLM 判定的同事实换述去重、
+过时检测、主题重摘要、陈旧度衰减——在阻塞路径之外、墙钟预算之下运行。它按压缩
+节奏触发，**也按写入积压触发**（50 条未整理行，或 7 天未动且有新行），因为只按
+节奏触发会饿死从不压缩的项目：本仓库实测一个月积了 349 条记忆，整理标记 17 天
+没动。`/cc-mem consolidate --deep` 把已有的积压一次清完——循环裁判直到跑干。
+
+## 它怎么工作
 
 ```
 ┌──────────────────────── 你的 Claude Code 会话 ────────────────────────────┐
@@ -85,11 +131,12 @@ Claude 在回应**之前**先读交接文档。
 │                       TodoWrite → 步骤同步、编辑 → 漂移计数器）             │
 │                       + 每次被观察的工具调用写一行 observation             │
 │                                                                          │
-│  Stop            ──▶ Haiku 读本轮 observation 写记忆 ·                     │
-│                       增量更新 PROGRESS.md · 强制执行计划                   │
+│  Stop            ──▶ Haiku 读本轮 observation 写记忆 · 增量更新             │
+│                       PROGRESS.md · 强制执行计划 · 写入积压到期时           │
+│                       拉起后台整理                                        │
 │                                                                          │
 │  PreCompact      ──▶ 同步腿：从有界的 transcript 窗口抽取                   │
-│                       → 归并 → 全量重写 PROGRESS.md → 归档                 │
+│                       → 调和 → 全量重写 PROGRESS.md → 归档                 │
 │                       异步腿：LLM 整理，不在阻塞路径上                       │
 │                                                                          │
 │  SessionStart    ──▶ 注入主题 + 关键记忆 + 时间线，然后                     │
@@ -104,10 +151,38 @@ Claude 在回应**之前**先读交接文档。
 ```
 
 一切都是**项目本地**的。`memory/` 就在你的仓库里，由 cc-memory 自己写的
-`.gitignore` 忽略掉，除了发往 Anthropic 的抽取调用之外不出本机——而那次调用
-你可以用 `<private>` 标签划定范围，或者按项目整个关掉。
+`.gitignore` 忽略掉，除了发往 Anthropic 的抽取调用之外不出本机——而那次调用你
+可以用 `<private>` 标签划定范围，或者按项目整个关掉。
 
----
+## 这一个为什么不一样
+
+多数记忆插件是"一个向量库加一段提示词"；cc-memory 是**一个恰好用来存记忆的
+数据完整性系统**。下面每一条的背后，都是一个用实测代价换来的缺陷教训：
+
+- **写入在写入时刻、在同一个事务里调和。** 整棵决策树——哈希检查、相似度扫描、
+  分支写入——跑在一个 `BEGIN IMMEDIATE` 里，所以两个并发保存同一句话的写入方
+  不可能都插入成功。"先追加、以后再去重"正是本项目立项要否定的设计；赶进度时，
+  "以后"永远不会来。
+- **阅读被强制，而且强制是真的。** 交接提醒不是暗示——自 v2.11.0 起，Stop 钩子
+  可以因计划状态过期而拒绝结束一轮。起因是一个真实项目实测出一份 51,237 字符的
+  原始计划一直没被精炼，而每个计划读取面都在按它的前任回答；一个用户分六次提出
+  的要求，实现量为零。每次拒绝都带有界的逃生预算和关闭开关
+  （`CC_MEMORY_PLAN_ENFORCE=0`）：从不触发的建议和永不释放的拦截都是失败模式，
+  两个都有测试。
+- **没有任何东西被原样插进 Claude 会读的内容里。** 存储内容在写入路径转义，在
+  每条渲染路径上再转义一次，因为一条能把 `<system-reminder>` 伪造进你下一个
+  会话的记忆行，就是一枚永久的提示注入。隐私过滤器**失败即关闭**（悬空的
+  `<private>` 起始标签会丢弃剩余部分而不是泄漏它），读不了的 `config.json`
+  同样如此（排除所有项目而不是靠猜）。
+- **闸门能变红，而且这一点本身被检查。** 每次改动跑十一道发布闸门——四个测试
+  套件、四道文档闸门，外加构建检查。一份可证伪登记册（`tools/falsify_fixes.py`）
+  把每条已登记的修复在临时副本上撤销，断言它的闸门在那里确实**失败**：一个不
+  可能变红的检查只是一条消耗 CI 时间的注释。截至 v2.12.0 已登记 166 个破坏
+  用例，每一个都被单独驱动到红过才保留。
+- **文档和代码过同样的闸门。** 文档里每条 `file.py:LINE` 引用都被机械核对；
+  每个计数断言（"全部六个钩子……" <!--ce:hooks-->）都绑定到从代码算出的集合；中文文档以哈希
+  绑定英文源，漂移即构建失败；还有一道闸门追问每个公开面**到底有没有**被文档
+  写到——两种语言都查。
 
 ## 快速开始
 
@@ -145,127 +220,101 @@ Windows 上也可以从 [Releases](https://github.com/skymanbp/cc-memory/release
 /cc-mem status
 ```
 
-要让某个目录完全不参与，把它列进 `excluded_projects`——见[配置](#配置)。
+要让某个目录完全不参与，把它列进 `excluded_projects`——见[配置](#配置)。要知道
+所有东西都在哪：`/cc-mem paths`。
 
----
+## 实战实录
 
-## 功能总览
+真实输出，不是摆拍。下面是反补丁 writer 拒绝堆叠的样子，以及一次深度整理收敛的
+样子——2026-08-26 从一个 v2.12.0 演示项目里逐字截取。
 
-### 1 · 记忆采集
+**写入时调和。** 同一事实的重述被跳过；数值变了的事实取代前任，历史仍然可走：
 
-| 功能 | 做什么 |
+```text
+$ cc-mem add decision "Use SQLite WAL mode for the memory store"
+[inserted] #1 sim=0.00
+
+$ cc-mem add decision "Use SQLite WAL mode for the memory store"     # 逐字重述
+[skipped] #1 (hash_match) sim=1.00
+
+$ cc-mem add config "PreCompact hook timeout is 45 seconds"
+[inserted] #5 sim=0.00
+
+$ cc-mem add config "PreCompact hook timeout is 120 seconds"         # 事实变了
+[superseded] #5 -> #6 sim=0.77
+
+$ cc-mem supersedes 6
+Supersede chain for #6 (2 versions, newest first):
+  v2  #6  [ACTIVE]    config   PreCompact hook timeout is 120 seconds
+  v1  #5  [archived]  config   PreCompact hook timeout is 45 seconds
+```
+
+**深度整理。** 低于词法阈值的换述（同一演示里一段换述实测 sim 0.45）正是 LLM
+裁判存在的意义——`--deep` 循环它，直到某一轮确认再无新发现：
+
+```text
+$ cc-mem consolidate --deep
+deep dedup round 1: 1 group(s) judged, 1 archived
+deep dedup round 2: 1 group(s) judged, 1 archived
+deep dedup round 3: 0 group(s) judged, 0 archived
+consolidation done: 2 active memories
+```
+
+六次写入，两条存活事实，零数据销毁——每条被归档的行都是 `is_active=0`，可恢复。
+
+**会话开始时看到的东西**（注入是真实上下文，按 token 预算分层，并记录进
+`.last_inject.json`）：
+
+```text
+=== CC-MEMORY: Context Restored ===
+Project: cc-memory  |  2026-08-26 15:06
+### Knowledge Base (by topic)
+**[testing]** Testing infrastructure spans five core suites: …
+**[release]** The cc-memory project has completed release cycles through v2.11 …
+### Critical memories
+- #506 [release] v2.9.0 released with commit 0313339, tag v2.9.0 …
+### <system-reminder>
+You MUST Read memory/PROGRESS.md before responding …
+```
+
+**以及它在真实项目里抓到的失败**——驱动最近三个版本的那些测量，留在这里是因为
+它们才是诚实的卖点：
+
+| 事件（项目，日期） | cc-memory 的机制做了什么 |
 |---|---|
-| **AI 判定的抽取** | 由 Haiku 读对话并返回结构化的 `{category, content, importance}` 记录——不是关键词刮取 |
-| **正则兜底** | 没有可用凭据时启用一层与项目无关的模式匹配，所以采集不依赖网络 |
-| **可选的本地兜底** | Ollama 后端，通过 `ccl.enabled` **显式开启**（默认 `false`） |
-| **两个采集点** | `Stop` 按轮从该轮的工具 observation 采集；`PreCompact` 在上下文被销毁前从 transcript 采集 |
-| **有界的 transcript 读取** | 读头尾窗口（40 条记录 + 32 MiB）而不是整个文件——一个 2.11 GiB 的 transcript 从 88 秒降到 1.66 秒，钩子因此不会被写到一半杀掉 |
-| **从最新往回摘要** | 抽取预算从最近的记录往回填；从最旧往前填会把每次抽取都钉死在会话最开头的几小时 |
-| **七个类别** | `decision` · `result` · `config` · `bug` · `task` · `arch` · `note` |
-| **五档重要性** | `1` 噪音 → `5` 关键/永不遗忘 |
-| **三种项目模式** | `code` · `research` · `writing`——各有自己的被观察工具集与注入优先级（`/cc-mem mode`） |
-| **内容与语言无关** | 抽取与恢复信号检测按设计同时识别英文**和**中文；存下来的记忆可以是任何语言 |
+| 一份 51,237 字符的原始计划一直没被精炼，而 PLAN.md、`plan-status` 和漂移守卫全都在按*上一份*计划回答；一个提了 6 次的要求实现量为零（`lore_disaster`，2026-08-15） | 逼出了 v2.11.0 的重设计：带逃生预算的 Stop 钩子**强制执行**，以及指令账本——寿命长于计划的意图 |
+| 两次计划重编在指令文本里留下 11 条死的"步骤 #N"引用和 4 条*无声指向了错误步骤*的引用（`Autoshop`，2026-08-25） | v2.12.0：`plan-set` 在替换时审计每条活跃指令，把每个引用点名为 `DEAD` 或 `SILENTLY RETARGETED`；同一会话里结转闸门自己也已两次拒绝了不合格的替换 |
+| 一个月积累 349 条记忆而整理 17 天前才跑过；注入的主题摘要落后三个小版本（本仓库，2026-08-26） | v2.12.0：背压触发器——整理现在按*写入积压*运行，而不是只等压缩发生 |
 
-### 2 · 记忆质量——反补丁契约
+## 实测数字
 
-这是差异点所在。多数记忆工具只做追加；而追加正是把记忆库变成噪音的原因。
+不是一套合成基准——这些是各项修复立项时依据的前后对照测量，从
+[CHANGELOG.md](CHANGELOG.md) 复述，每行标注做出该测量的版本。
 
-| 功能 | 做什么 |
-|---|---|
-| **写入即归并** | 每条保存路径都走同一个 writer，由它决定 **MERGE**（就地覆盖近似行）、**SUPERSEDE**（归档旧行，用 `supersedes_id` 链接新行）还是 **INSERT** |
-| **相似度基座** | trigram-Jaccard，且**在 CJK 连续段内改用字符 bigram**——纯 trigram 在中文上会塌陷，一个十字中文事实的一字修正只得 0.4545 分，于是每次修正都被存成一条新的、互相矛盾的事实 |
-| **LLM 判定的语义去重** | 同一事实每个会话换个说法，trigram 分数很低；第二遍用词级 Jaccard 提名候选组，再让 Haiku 确认是不是同一事实后才合并 |
-| **过时检测** | 给出 `{过时, 当前}` 配对，并带时间守卫，避免一个历史动作把仍然成立的事实判为过时 |
-| **可回溯的历史** | `supersedes_id` 构成 DAG（拒绝成环，用 `COALESCE` 保住最早的血缘事实）；`/cc-mem supersedes <id>` 可以走这条链 |
-| **从不真正删除** | 归档是 `is_active=0`，永远可恢复。`/cc-mem archive` 是退役一条**被发现是错的**事实的正式出口 |
-| **保住来源信息** | 标签与存活行的标签取并集，不是替换，并设上限 |
+| 测什么 | 之前 | 之后 | 测量版本 |
+|---|---|---|---|
+| PreCompact 钩子里加载一份 2.11 GiB 的 transcript | 约 88 秒（钩子被杀） | 1.66 秒（整个钩子 14.33 秒） | v2.4.2 |
+| 16,000 个未闭合 `<private>` 标签过隐私过滤器 | 9,517.4 毫秒，尾部**泄漏** | 0.0 毫秒，尾部丢弃（失败即关闭） | v2.5.0 |
+| 十字中文事实的一字修正，相似度得分 | 0.45 → 存成一条*新的矛盾事实* | CJK bigram → 正确调和 | v2.8.0 |
+| 51 条记忆的主题里做同事实扫描（上限曾是 50） | 0.95 相似的行永远比不到 → 插入重复 | 扫得到并调和（上限 500，截断有日志） | v2.5.5 |
+| 两个并发写入方保存同一句话 | 双双插入（2 行、1 个哈希） | 单一事务 → 1 行 | v2.8.0 |
+| 2,000 会话规模下的会话新近度查询 | 557.68 毫秒（二次方） | 4.31 毫秒（走索引） | v2.8.0 |
+| 并发写入下 MEMORY.md 的 0 字节读取 | 16,071 次采样中 4,867 次 | 0 次（原子 tmp + `os.replace`） | v2.5.2 |
+| GBK 机器上 MCP stdio 非 ASCII 载荷往返 | 7 中 1 | 7 中 7（强制 UTF-8） | v2.5.0 |
+| 一条空闲 TCP 连接下的网页查看器 | 永久卡死 | 0.02 秒内 200（多线程 + 截止时限） | v2.5.0 |
+| LLM 腿全部卡死时 Stop 钩子最坏情况（预算 22 秒） | 25.45 秒（写到一半被杀） | 15.99 秒（绝对截止时刻） | v2.5.0 |
+| 从不压缩的工作流下的整理 | 从不运行（349 行 / 17 天） | 50 行或 7 天陈旧即到期 | v2.12.0 |
+| 文档引用的首次机械核查 | 594 条中 163 条已失效 | 0 条失效，每次改动都被闸门看住 | v2.5.2 |
 
-### 3 · 会话交接——PROGRESS.md
-
-| 功能 | 做什么 |
-|---|---|
-| **唯一真相来源** | `memory/PROGRESS.md` 永远由一行 SQL **全量重写**，从不追加——它不可能过期，也不可能自相矛盾 |
-| **强制阅读** | `SessionStart` 发出 `<system-reminder>`，要求下一个 Claude 在回应*之前*先读它 |
-| **11 个面向用户的字段** | 当前请求 · 已完成 · 进行中 · 受阻 · 待办 · 计划 · 关键上下文 · 触碰过的文件 · transcript 指针 · 更新时间 · 触发类型 |
-| **四个写入者，一份契约** | `PreCompact` 全量覆盖；`Stop` 每轮增量更新触碰文件；`UserPromptSubmit` 在第 1 轮播种请求；`SessionStart` **只填仍为空**的字段 |
-| **按会话标注** | 该行记录当前是哪个会话在说话、何时开始 |
-| **被杀死的运行可见** | 起始标记能挺过超时击杀，因此一次写到一半死掉的压缩是可证明的，而不是无痕的 |
-| **注入可观测** | `.last_inject.json` 精确记录注入了什么；`/cc-mem inject-show` 打印实况，`/cc-mem inject-usage` 报告 Claude 到底读没读 |
-
-### 4 · 计划与意图——PLAN.md 与指令账本
-
-两件不同的事，刻意分开：**计划步骤**是执行单元，计划被替换时它就死了；**指令**
-是用户意图单元，它的寿命长于任何一份计划。
-
-| 功能 | 做什么 |
-|---|---|
-| **实时计划锚点** | `memory/PLAN.md` 由 `plan_active` 行全量重写；`ExitPlanMode` 的输出会被自动捕获 |
-| **随插件发布的两个子代理** | `plan-refiner` 把原始计划规范成结构化 JSON；`plan-guardian` 做只读的 ≤150 词漂移检查 |
-| **机械式步骤同步** | `TodoWrite` 事件按标题相似度同步步骤状态——不用 LLM，也就不会漂 |
-| **漂移计数器** | 编辑会加计数；一次敏感 Bash 调用（`git push`、`rm -rf`、部署）一次加 20 |
-| **强制的结转闸门** | 替换计划时，每条未完成步骤都必须被自动结转、或被显式给出理由地处置。**按设计没有 force 开关** |
-| **成功判据结转提示** | 替换中消失的判据会被点名——一个只覆盖 `steps` 的闸门，对其余部分什么都没说 |
-| **只追加的计划历史** | 每份被换下的计划都归档进 `memory/.plan_history/` |
-| **指令账本** | `/cc-mem directive-add` 记录**用户**提了什么要求。重复提同一个 slug 会让 `times_stated` 在**同一行**上累加——重复次数是计划表达不了的重要性信号 |
-| **闭环必须有证据** | `/cc-mem directive-close` **没有 `--evidence` 就拒绝**：一个 commit、一个 `file:line`、或一个闸门名。凭断言关掉一条指令，正是这个账本要防的失败 |
-| **Stop 强制执行** | 当计划未被 refine、活跃计划未做漂移检查、或某条活跃指令闲置过久时，`Stop` 钩子可以拒绝结束本轮——带有保证释放的逃生预算，以及关闭开关 `CC_MEMORY_PLAN_ENFORCE=0` |
-
-### 5 · 检索
-
-| 功能 | 做什么 |
-|---|---|
-| **FTS5 全文检索** | `/cc-mem search "auth flow"`，带 `LIKE ? ESCAPE` 兜底与上下夹紧的 limit |
-| **主题摘要** | 记忆汇总成主题，由整理流程刷新 |
-| **关键词词汇表** | 按词频统计的项目词汇，跨会话生长 |
-| **分层注入** | `SessionStart` 注入主题 + 关键记忆 + 近期时间线 + PROGRESS 预览，各层都有预算 |
-| **索引自动新鲜** | 每次批量写入后重新生成 `memory/MEMORY.md` |
-| **编码损坏扫描** | `/cc-mem encoding-check` 在文本表里找 U+FFFD 损坏；`--apply` 可恢复地隔离它们 |
-
-### 6 · 各类接口
-
-| 接口 | 入口 | 你得到什么 |
-|---|---|---|
-| **斜杠命令** | `/cc-mem <sub>` | 32 个子命令，与路径无关，自动替你解析 `--project .` |
-| **Shell CLI** | `cc-memory` / `cli/mem.py` | 同样的 32 个子命令，在 Claude Code 之外用 |
-| **计划队列 CLI** | `cc-memory-plan` / `cli/plan.py` | 12 个子命令，`draft → ready → executing → done` 的任务队列 |
-| **MCP 服务器** | `cc_memory/mcp/server.py` | 8 个工具，JSON-RPC 2.0 over stdio，在插件清单里内联注册 |
-| **桌面看板** | `/cc-mem dashboard` | Tkinter 图形界面，7 个页签：Memories · Plans · Sessions · Keywords · SQL Console · Stats · Progress/Plan |
-| **网页查看器** | `/cc-mem serve` | 仅回环的浏览器界面：浏览、检索、添加记忆 |
-| **技能** | `/ccm-load`、`/save-memories` | 一次性激活与引导；经反补丁 writer 的手动保存 |
-| **子代理** | `plan-refiner`、`plan-guardian` | 随插件发布，两种安装布局下都能被发现 |
-
-### 7 · 隐私与安全
-
-| 功能 | 做什么 |
-|---|---|
-| **按项目退出** | `excluded_projects`——被列出的目录*及其下所有内容*没有 `memory/`、没有数据库、没有 observation、没有抽取、没有注入。每个钩子和 MCP 服务器都会执行，判断用的是**原始** cwd，且在项目根锚定**之前** |
-| **失败即关闭** | 一个存在但无法使用的 `config.json` 会排除**每一个**项目并记录原因，而不是猜"没被排除"然后不可逆地存下数据 |
-| **`<private>` 区段** | `<private>` 标签之间的文本在发往 Anthropic 和写入数据库之前就被剥离——线性时间、无上限，且一个未闭合的起始标签会丢弃剩余部分而不是泄漏它 |
-| **权威标记中和** | 存储内容在写入路径和每一条渲染路径上都被**转义，绝不原样插入**——一条记忆无法把 `<system-reminder>` 伪造进你的下一个会话 |
-| **只读 SQL** | `/cc-mem sql` 拒绝一切写语句，包括 `PRAGMA name(value)` 这种 setter 形式 |
-| **仅回环的网页查看器** | 不发 CORS 头，`Origin` 与 `Host` 双重校验（防 DNS 重绑定），POST 要求 JSON content-type，请求头**与**请求体两个阶段都有时限，并发有上限 |
-| **MCP 模式校验** | `tools/call` 的参数按声明的 `inputSchema` 校验，不合法就用 `-32602` 拒绝，而不是强行转换 |
-| **无遥测** | 除了发往 Anthropic（或你自己的 Ollama）的抽取/整理调用之外什么都不外发，用的是你已有的 Claude Code 凭据 |
-
-### 8 · 可靠性工程
-
-| 功能 | 做什么 |
-|---|---|
-| **零运行时依赖** | 纯 Python 标准库。PyInstaller 只在构建期用到 |
-| **原子化产物写入** | 只有一个 writer——临时文件 + `os.replace`，带按墙钟计的重试预算。契约是：*要么完整替换，要么抛异常；绝不截断* |
-| **项目根锚定** | `cwd` 会跟着代理自己的 `cd` 走；解析器沿祖先链行走（数据库 → `CLAUDE_PROJECT_DIR` → 项目标记），所以不会在子目录里生出游离数据库。项目容器目录和依赖树永远不是候选 |
-| **共用的钩子入口阶梯** | stdin 解析 → 退出检查 → 根锚定，只实现一次；每个钩子各自的策略仍留在各自那里 |
-| **有界的 LLM 墙钟** | 每个调用 LLM 的钩子都传绝对截止时刻，而不只是单腿超时，因此不可能超出宿主的硬性钩子超时 |
-| **移出阻塞路径** | 整理作为 `PreCompact` 的 `async` 腿在预算闸门下运行，因此永远不会表现为 `Hook cancelled` |
-| **按项目限定作用域** | 每个会碰表的命令都用 `project_id` 限定——一个数据库文件里合法地存着多个项目 |
-| **11 道发布闸门** | 四道文档闸门、四个测试套件、`compileall`、一次 `pyproject` 解析，以及版本站点一致性。见[发布闸门](#发布闸门) |
-| **一份可证伪登记册** | 每条已登记的修复都会在临时副本上被撤销，以证明它的闸门确实会**变红**。一个不可能失败的闸门，就是一个在说谎的闸门 |
+代价也被测量了，不只测收益：每次操作都关闭数据库连接的成本是每操作 +340%
+（120 秒压缩预算上 +0.6 秒），但保留了这个做法，因为泄漏的 WAL 句柄更糟——
+理由在 [CHANGELOG.md](CHANGELOG.md) 的 v2.5.2 条目里。
 
 ---
 
 ## 参考手册
 
-### `/cc-mem`——32 个子命令
+### `/cc-mem`——34 个子命令
 
 在 Claude Code 内（与路径无关——包装脚本会解析插件根）：
 
@@ -273,6 +322,7 @@ Windows 上也可以从 [Releases](https://github.com/skymanbp/cc-memory/release
 # ── 状态与健康 ─────────────────────────────────────────────────────────────
 /cc-mem status                      完整健康检查（钩子、DB、API key、PROGRESS）
 /cc-mem stats                       记忆计数 + supersede 链计数
+/cc-mem paths [--json]              解析后的 DB / PROGRESS.md / PLAN.md / MEMORY.md 路径
 /cc-mem schema                      实时 SQLite schema（表、索引、迁移）
 /cc-mem mode [code|research|writing] 查看或设置项目模式
 /cc-mem summary                     最近一次会话摘要
@@ -285,12 +335,13 @@ Windows 上也可以从 [Releases](https://github.com/skymanbp/cc-memory/release
 /cc-mem topics                      主题摘要
 /cc-mem keywords                    按词频的项目词汇
 /cc-mem supersedes <id>             走一条记忆的 supersede 链
-/cc-mem sql "<SELECT ...>"          只读查询（写语句被拒）
+/cc-mem sql "<SELECT ...>" [--json|--full]   只读查询（写语句被拒）
 
 # ── 写入记忆 ───────────────────────────────────────────────────────────────
 /cc-mem add <category> "<text>" [--importance N]   反补丁式 upsert
 /cc-mem archive <id>... [--supersedes ID]          退役一条**错的**事实（可恢复）
-/cc-mem consolidate                 完整的 LLM 整理流程
+/cc-mem consolidate [--deep]        完整的 LLM 整理；--deep 循环去重裁判
+                                    直到跑干
 /cc-mem cleanup                     轻量、不用 LLM 的清理 + 重建 MEMORY.md
 /cc-mem encoding-check [--apply]    U+FFFD 损坏扫描
 
@@ -304,20 +355,27 @@ Windows 上也可以从 [Releases](https://github.com/skymanbp/cc-memory/release
 /cc-mem plan-show                   重建并打印 memory/PLAN.md
 /cc-mem plan-set --raw "<text>"     捕获原始计划，标记 needs_refine
 /cc-mem plan-set --raw-file FILE    同上，从文件读
-/cc-mem plan-set --from-refiner     从 stdin 存入结构化 JSON
+/cc-mem plan-set --from-refiner     从 stdin 存入结构化 JSON（替换时会审计
+                                    指令里的步骤引用）
 /cc-mem plan-check                  重置漂移计数器 + 给出 guardian 提示
 /cc-mem plan-replan                 对已存的原始计划重新置位 needs_refine
 /cc-mem plan-clear --reason "<why>" 丢弃活跃计划（有未完成步骤时必须给理由）
 
 # ── 指令账本 ───────────────────────────────────────────────────────────────
-/cc-mem directive-list [--status active|done|superseded|dropped|all]
+/cc-mem directive-list [--status active|blocked|done|superseded|dropped|all] [--json|--full]
 /cc-mem directive-add <slug> --demand "..." [--quote "..."] [--kind ...] [--times N]
+/cc-mem directive-edit <slug> [--demand ...] [--quote ...] [--kind ...] [--status active|blocked]
 /cc-mem directive-close <slug> --evidence "<commit|file:line|闸门名>"
 
 # ── 接口 ───────────────────────────────────────────────────────────────────
 /cc-mem dashboard                   启动 Tkinter 图形界面
 /cc-mem serve [--port N]            启动仅回环的网页查看器
 ```
+
+三条值得记住的输出约定：`--full` 取消表格的 60 字符截断；`--json` 输出**纯
+ASCII** 的 JSON（`\uXXXX` 转义），任何捕获它的 shell 的解码码页都糟蹋不了它
+——凡是 CJK 输出变成 `�`，就用它；`directive-edit` 修正记录**而不**累加重复
+计数（只有 `directive-add` 会计数）。
 
 每个子命令的完整语义见 [commands/cc-mem.md](commands/cc-mem.md)。
 
@@ -401,8 +459,8 @@ LF 换行——**不需要任何 `PYTHONUTF8` / `PYTHONIOENCODING` 环境变量*
 
 | 键 | 默认值 | 含义 |
 |---|---|---|
-| `version` | `2.11.4` | 给早于 `core/version.py` 的扁平安装的最后兜底；`core/version.py` 才是权威 |
-| `consolidation.auto_interval_sessions` | `5` | 两次异步整理之间相隔的会话数 |
+| `version` | `2.12.0` | 给早于 `core/version.py` 的扁平安装的最后兜底；`core/version.py` 才是权威 |
+| `consolidation.auto_interval_sessions` | `5` | 两次异步整理之间相隔的会话数（积压触发器与它无关——那些阈值是 `core/consolidate.py` 里的模块常量） |
 | `ccl.enabled` | `false` | 本地 Ollama 兜底——**需显式开启** |
 | `ccl.ollama_url` | `http://localhost:11434` | Ollama 端点 |
 | `ccl.local_model` | `ccl-9b` | 本地模型名 |
@@ -410,10 +468,10 @@ LF 换行——**不需要任何 `PYTHONUTF8` / `PYTHONIOENCODING` 环境变量*
 | `notes` | — | 文件内文档，包括每个值由哪个模块读取 |
 
 其余全是模块常量，记录在 `notes.removed_keys` 里：writer 阈值在
-`llm/memory_writer.py`，注入预算在 `hooks/session_start.py`，空闲整理间隔在
-`core/idle.py`，各模式的 observation 跳过名单在 `core/modes.py`，网页查看器的
-默认端口在 `ui/web_viewer.py`。MCP 注册是 `.claude-plugin/plugin.json` 里的
-`mcpServers` 块，不是配置键。
+`llm/memory_writer.py`，积压阈值在 `core/consolidate.py`，注入预算在
+`hooks/session_start.py`，空闲整理间隔在 `core/idle.py`，各模式的 observation
+跳过名单在 `core/modes.py`，网页查看器的默认端口在 `ui/web_viewer.py`。MCP
+注册是 `.claude-plugin/plugin.json` 里的 `mcpServers` 块，不是配置键。
 
 **环境变量**
 
@@ -434,14 +492,19 @@ LF 换行——**不需要任何 `PYTHONUTF8` / `PYTHONIOENCODING` 环境变量*
 ├── .gitignore                  由 cc-memory 写入；对既有安装会迁移
 ├── .last_save.json             上次 PreCompact 的状态与触发方式
 ├── .last_inject.json           SessionStart 注入了什么（可观测性）
-├── .last_consolidation.json    异步腿的间隔标记
+├── .last_consolidation.json    节奏标记 + 积压触发器的行号水位线
 ├── .consolidation.lock         防止异步 worker 重叠
+├── .consolidation.kick         背压拉起冷却（v2.12.0）
 ├── .pre_compact_attempt.json   起始标记；它还在 ⇒ 上次运行被杀了
 ├── .plan_raw.md                最近一次 ExitPlanMode 的原始捕获
 ├── .plan_history/              被替换/清除计划的只追加归档
 ├── sessions/YYYY/MM/           每个会话的归档
 └── topics/                     预留给按主题导出
 ```
+
+注意：这个 `memory/` 位于**你的项目目录**里——它与
+`~/.claude/projects/<slug>/memory/` 无关，后者是某些 Claude Code 配置自己的
+按项目笔记。`/cc-mem paths` 精确打印本插件为当前项目读写的每个文件。
 
 ### 数据库表
 
@@ -471,9 +534,9 @@ LF 换行——**不需要任何 `PYTHONUTF8` / `PYTHONIOENCODING` 环境变量*
 |---|---|---|---|
 | `UserPromptSubmit` | `hooks/user_prompt.py` | 8 秒 | 自动初始化 `memory/`、计轮次、第 1 轮播种请求 |
 | `PostToolUse` | `hooks/post_tool_use.py` | 8 秒 | **在每种模式下**维护实时计划锚点，然后为被观察的工具各写一行 observation |
-| `Stop` | `hooks/stop.py` | 22 秒 | Haiku 观察者、按轮增量更新 PROGRESS、每 5 轮空闲整理、计划强制执行 |
-| `PreCompact`（同步） | `hooks/pre_compact.py` | 120 秒 | 抽取 → 归并 → 全量重写 PROGRESS.md → 归档 |
-| `PreCompact`（异步） | `hooks/consolidate_async.py` | 300 秒 | 预算闸门下的整理，不在阻塞路径上 |
+| `Stop` | `hooks/stop.py` | 22 秒 | Haiku 观察者、按轮增量更新 PROGRESS、每 5 轮空闲整理、背压探针、计划强制执行 |
+| `PreCompact`（同步） | `hooks/pre_compact.py` | 120 秒 | 抽取 → 调和 → 全量重写 PROGRESS.md → 归档 |
+| `PreCompact`（异步） | `hooks/consolidate_async.py` | 300 秒 | 预算闸门下的整理，不在阻塞路径上；也是独立运行的背压工作者 |
 | `SessionStart` | `hooks/session_start.py` | 15 秒 | 注入分层上下文 + 强制的 `<system-reminder>` |
 
 钩子契约，绝不违反：钩子从不写 stderr（Claude Code 会把 stderr 渲染成报错界面）、
@@ -481,15 +544,38 @@ LF 换行——**不需要任何 `PYTHONUTF8` / `PYTHONIOENCODING` 环境变量*
 
 ---
 
+## 设计哲学
+
+技术栈刻意保持无聊：**纯 Python 标准库**（`sqlite3`、`json`、`pathlib`、
+`urllib`、`tkinter`、`http.server`），运行时零 pip 依赖，PyInstaller 只用来构建
+可选的 Windows 可执行文件。一个跑在编辑器钩子预算里的插件，没资格携带依赖树。
+
+工程文化没那么无聊，而它才是真正的产品：
+
+- **测量优先于假设。** 功能与修复进入本项目时都附带一个数字：一个被复现的
+  缺陷、一个被量出的延迟、一个被数过的爆炸半径。当一个假设被保留时（比如
+  macOS 支持），文档写"未测量"，而不是暗示有证据。
+- **失败即关闭，逃生常开。** 隐私过滤、配置解析和归属检查都朝着*不泄漏*、
+  *不靠猜*的方向失败。强制执行——唯一一个"失败即关闭"会困住用户的地方——则改配
+  有界的逃生预算和关闭开关。
+- **不可能变红的检查不是检查。** 每条已登记的修复都有一个可证伪用例：在副本上
+  撤销修复、证明闸门失败。好几个用例抓到的是*检查本身*形同虚设而不是修复有错；
+  处理方式全都是加强检查，从不删除用例。
+- **数数的文字绑定到定义它的代码。** 这些文档里的"全部六个钩子" <!--ce:hooks--> 是对着钩子清单
+  机器核对的；在文字里手工枚举一个集合被当作一类缺陷对待，因为闸门出现之前它
+  烂过三次。
+- **历史只追加。** CHANGELOG 条目从不为迎合现状而改写；记忆行归档、从不删除；
+  被取代的事实留在可走的链上。一个以记忆为业的系统，不该自己靠覆盖来遗忘。
+
 ## 架构
 
 完整细节见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
-（[English](docs/ARCHITECTURE.md)）。三条硬契约的规范在
-[docs/CONTRACTS.md](docs/CONTRACTS.md)：
+（[简体中文](docs/ARCHITECTURE.zh.md)）。三条硬契约的规范在
+[docs/CONTRACTS.md](docs/CONTRACTS.md)（[简体中文](docs/CONTRACTS.zh.md)）：
 
-- [反补丁契约](docs/CONTRACTS.md#anti-patch-contract)——一次写入如何归并
+- [反补丁契约](docs/CONTRACTS.md#anti-patch-contract)——一次写入如何调和
 - [交接契约](docs/CONTRACTS.md#handoff-contract)——PROGRESS.md 规范
-- [计划契约](docs/CONTRACTS.md#plan-contract)——PLAN.md、结转闸门、子代理
+- [计划契约](docs/CONTRACTS.md#plan-contract)——PLAN.md、结转闸门、指令账本、子代理
 
 **两种安装布局，都受支持。** marketplace / dev checkout 保持嵌套的
 `<plugin-root>/cc_memory/…` 形状。独立安装器把包铺成**扁平**的
@@ -506,7 +592,8 @@ LF 换行——**不需要任何 `PYTHONUTF8` / `PYTHONIOENCODING` 环境变量*
 ```
 cc-memory/
 ├── .claude-plugin/          plugin.json（含内联 mcpServers）· marketplace.json
-├── .github/                 跑全部发布闸门的 CI · issue 与 PR 模板
+├── .github/                 CI：gates.yml（每次 push 跑全部闸门）· release.yml
+│                            （tag → 闸门 → exe → 实际运行 → Release）· 模板
 ├── agents/                  plan-refiner.md · plan-guardian.md
 ├── commands/                cc-mem.md —— /cc-mem 斜杠命令
 ├── hooks/hooks.json         钩子声明（6 条命令 / 5 个事件）
@@ -520,9 +607,11 @@ cc-memory/
 │   ├── mcp/                 server.py
 │   └── ui/                  installer · dashboard · web_viewer
 ├── docs/                    ARCHITECTURE.md · CONTRACTS.md（各带 .zh.md 兄弟文件）
-├── scripts/                 build_exe.py —— PyInstaller 构建
+├── scripts/                 build_exe.py（PyInstaller）· release_notes.py
+│                            （CHANGELOG 段落 → 发布正文）
 ├── tests/                   4 个套件 + run_gates.py（一条命令跑完所有闸门）
-├── tools/                   citation_check · doc_claims · contracts · falsify_fixes · i18n_check
+├── tools/                   citation_check · doc_claims · doc_coverage · contracts ·
+│                            falsify_fixes · i18n_check
 ├── CLAUDE.md                给 Claude Code 的项目说明
 ├── CHANGELOG.md · README.md · README.zh.md · LICENSE · pyproject.toml
 ```
@@ -532,7 +621,7 @@ cc-memory/
 十一道闸门，全部纯标准库——没有 pytest，没有 pip 依赖。一条命令跑完：
 
 ```bash
-python tests/run_gates.py           # 跑全部 10 道，打印表格，任一变红即非零退出
+python tests/run_gates.py           # 跑全部 11 道，打印表格，任一变红即非零退出
 python tests/run_gates.py --list    # 看每道闸门查什么
 ```
 
@@ -571,6 +660,14 @@ python scripts/build_exe.py
 #   dist/cc-memory-dashboard.exe
 ```
 
+[Releases](https://github.com/skymanbp/cc-memory/releases) 页面上的可执行文件
+**不是**在维护者机器上构建的。`.github/workflows/release.yml` 在 `v*` tag 推送时
+构建它们——先对被打 tag 的提交重跑全部发布闸门，然后在发布前**实际运行**它们：
+安装器对一个沙箱 home 目录做一次真实的 `--cli` 安装与 `--uninstall`，且必须拒绝
+未知参数；看板以 `--help` 启动且必须干净退出。只有这些都过了，才创建 GitHub
+Release，附上两个 exe，并以对应的 CHANGELOG 段落作为正文。与 `core/version.py`
+不一致的 tag、或没有 CHANGELOG 条目的 tag，都发不出去。
+
 ### 参与贡献
 
 见 [CONTRIBUTING.md](CONTRIBUTING.md)。安全问题报告见 [SECURITY.md](SECURITY.md)。
@@ -584,51 +681,54 @@ python scripts/build_exe.py
 | Windows 上钩子从不触发 | `hooks/hooks.json` 调用的是 `python3`，而 python.org 的安装包默认不提供 `python3.exe`。勾选 "Add Python to PATH" + "py launcher"，或在 PATH 上把 `python3` 指向 `python` |
 | `/cc-mem` 说找不到插件 | 两种布局都必须探测。跑 `/cc-mem status`——它会检查布局并报告缺了哪些文件 |
 | 什么都没被抽取 | 没有凭据。`/cc-mem status` 会检查。登录 Claude Code，或设置 `ANTHROPIC_API_KEY` |
+| 数据库到底在哪？ | `/cc-mem paths` 打印解析后的 DB / PROGRESS.md / PLAN.md / MEMORY.md 及各自的存在/缺失结论——不要用递归 glob 去找；它先找到的那个 `*.db` 可能属于别的工具 |
+| CJK 输出显示成 `�` | 是*捕获输出的 shell* 用自己的码页解码了 UTF-8（PowerShell 5.1 用的是控制台码页）。改用 `--json`——纯 ASCII 输出，任何捕获码页都糟蹋不了 |
 | 子目录里冒出一个 `memory/` | 根锚定之前留下的游离数据库。`/cc-mem status` 会列出项目根之下每一个独立数据库及其记忆数。游离库只被**报告，绝不合并或删除**——真正的嵌套子项目请用 `.ccm-root` 文件钉住 |
 | 插件彻底不出声了 | 存在但无法解析的 `config.json` 会**失败即关闭**并排除所有项目。`SessionStart` 会打印一行说明；把 JSON 修好即可 |
 | Claude 结束不了一轮 | 计划强制执行正在拦截。读那段拒绝文本——它会指明是哪个条件以及怎么修。逃生预算耗尽后它一定会退化成建议；`CC_MEMORY_PLAN_ENFORCE=0` 可以整个关掉 |
+| 某条指令总在拦截，但它明明在等*我* | `/cc-mem directive-edit <slug> --status blocked` 把它停靠起来（闲置强制执行会跳过它）；`--status active` 解除停靠。"绝不做 X"类规则应该用 `--kind constraint`——它根本不做闲置检查 |
 | 压缩时出现 `Hook cancelled` | v2.3.2 已通过把整理移到 `async` 腿修掉。若仍出现，请带上 `memory/.last_save.json` 提 issue |
-| 某条记忆就是错的 | `/cc-mem archive <id>`——归并处理的是*重述*，`archive` 处理的是*推翻* |
+| 某条记忆就是错的 | `/cc-mem archive <id>`——调和处理的是*重述*，`archive` 处理的是*推翻* |
 
 ---
 
-## v2.11.3 有什么新东西
+## 路线图与已知限制
 
-**文档追上了代码。** v2.11.2 改掉了指令闲置度的量法——那是一次带着承重规则的
-schema 变更——而十道闸门照样全绿，因为它们查的是引用行号、绑定计数和翻译哈希。
-**没有任何一道会问"这个新设计有没有被写下来"。** 规范文档里当时是零处提及。
+记录下来，而不是糊过去——没写出来的限制，就得由别人重新踩一遍才能发现：
 
-- `docs/CONTRACTS.md` 的计划契约新增第四条承重性质：闲置度是
-  `turns_total - turns_at_touch`，且**绝不可**改回用会被每次 guardian 检查
-  重置的 `turns_since_last_guardian` 来量。
-- `docs/ARCHITECTURE.md` 的数据库表用其他行已有的"自迁移 X 起带有 Y"格式
-  记录了两个 v9 新列。
-- `commands/cc-mem.md` 说清了对用户而言"闲置"到底怎么算：从**那一条指令**上次
-  被写入起的轮次——重述或关闭它会重置这个时钟，跑 `/cc-mem plan-check` 不会。
-- 两个中文兄弟文件同步更新。
+- **macOS 未测量。** 十一道闸门全部在 CI 的 Windows 与 Linux（3.11、3.13）上
+  运行；macOS 预期可用（与 Linux 演练的是同一套 POSIX 路径），但没有被测量过，
+  本文档不会说它被验证过。
+- **步骤引用审计是词法层面的。** 它抓 `步骤 N` / `step #N` / `#N` 这些形状；
+  用文字转述编号的指令（"第十二步"）匹配不到。长期规则是按标题引用步骤——审计
+  是为规则已经被违反的场合准备的。
+- **积压阈值是模块常量**（50 行 / 7 天），不是配置键——这是刻意的，等真实使用
+  证明它们需要按项目调整再说。提高阈值意味着编辑 `core/consolidate.py`，并且
+  知道自己为什么这么做。
+- **Tkinter 看板的外壳没有可执行覆盖。** 其逻辑核心已被抽成纯函数并做了无头
+  测试（v2.10.1）；在没有测试的前提下重构剩下的 2.9k 行 GUI 被刻意推迟。
+- **候选的后续工作：** 在 Stop 状态行里呈现 `inject-usage` 信号；看板里的
+  `directive-*` 界面；面向多数据库机器的更丰富的 `paths` 式诊断。
 
-另外更正：本 README 曾声称"按构造跨平台"，那不是证据。现在全部十道闸门在 CI 上
-同时跑 Windows **与** Linux（3.11、3.13）；macOS 仍未被测量，文中已如实说明。
+---
 
-## v2.11.2 有什么新东西
+## v2.12.0 有什么新东西
 
-**v2.11.1 记录为"仍未闭合"的三项，全部闭合——包括它自己糊过去的那一项。**
+**真正会运行的整理，和一个可维护的账本。** 由两个测量驱动：本仓库自己的数据库
+（一个月 349 条记忆对着一个 17 天没动的整理标记），以及一个真实消费项目的七条
+实地反馈。
 
-- **指令闲置度终于有了真实基准。** v2.11.1 是拿 `turns_since_last_guardian`
-  来量的，而**那个计数器会被重置**——`/cc-mem plan-check` 和每次计划替换都会
-  把它清零。于是一条真正三十轮没人碰的指令，只要有人跑一次 guardian 检查就
-  显得刚被照料过：这个账本恰好赦免了它存在意义所在的那种疏忽。schema **v9**
-  新增一个任何东西都不会重置的单调计数器 `turns_total`，每条指令记录自己上次
-  被触碰时的轮次。闲置度变成两个只增不减的数字相减，任何重置都扭曲不了它。
-- **Linux 现在跑全部十道闸门。** 它此前只跑平台无关子集，注释里断言另外两个
-  是 Windows 专属——那是假设，不是测量，而它留下了本项目最大的未知：
-  cc-memory 在 Linux 上到底能不能用。现在全量套件在 Linux 的 3.11 与 3.13
-  上运行。
-- **一个游离的 `.pytest_cache/`** ——在一个明确声明"不用 pytest"的项目里——已清除。
-
-v2.11.1 自身闭合了六个位于"可以拒绝你这一轮"那条代码路径上的缺陷：永不释放的
-逃生预算、以活权威标记抵达 Claude 的指令文本、不是 JSON 的拒绝输出、被清空后
-仍永久强制执行的计划，等等。全部细节在 **[CHANGELOG.md](CHANGELOG.md)**。
+- **背压触发的整理**——50 条未整理行或 7 天陈旧即到期，Stop 钩子每轮探测，由
+  同一个预算闸门下的后台工作者执行；外加 `consolidate --deep`，循环语义去重
+  裁判直到跑干。手动路径现在经由同一个共享写入方盖章同一个节奏标记。
+- **`directive-edit`**——修正一条指令而不累加它的重复计数（计数是账本的重要性
+  信号；修修补补曾把它越修越高）。`--status blocked` 停靠在等用户的工作；
+  `--kind constraint` 标记从不做闲置检查的禁令。
+- **计划替换会审计指令的步骤引用**——活跃指令文本里的每个 `步骤 #N` 都会对照
+  出入两份步骤表检查，并被报告为 `DEAD` 或 `SILENTLY RETARGETED`。成文规则：
+  按标题引用步骤，绝不按编号。
+- **`paths`、`--json`、`--full`**——找到你的产物、不截断地读它们、拿到任何捕获
+  码页都糟蹋不了的输出。
 
 更早的每个版本都在 **[CHANGELOG.md](CHANGELOG.md)** 里，那是本项目唯一的历史；
 这份 README 记录的是这个软件**是什么**，而不是它曾经是什么。
@@ -643,11 +743,9 @@ v2.11.1 自身闭合了六个位于"可以拒绝你这一轮"那条代码路径�
 - **PyInstaller** 只在构建可执行文件时需要
 - **Windows**：`python3` 必须能解析到一个 Python 3 解释器（见[故障排查](#故障排查)）
 
-以 Windows 为首要平台开发。**全部发布闸门在 CI 上同时跑 Windows 与 Linux
-（Python 3.11 与 3.13）**——此前这句话建立在"写的时候就考虑了可移植"之上，而那
-不是证据；直到 v2.11.3 之前 Linux 只跑子集，而"另外两个套件是 Windows 专属"这个
-假设后来被证明是错的。macOS 未被 CI 覆盖：预期可用（与 Linux 演练的是同一套 POSIX
-路径），但**没有被测量过**，本文档不会说它被验证过。
+以 Windows 为首要平台开发。**全部十一道发布闸门在 CI 上同时跑 Windows 与 Linux
+（Python 3.11 与 3.13）**；macOS 未被 CI 覆盖——预期可用但没有被测量过，本文档
+不会说它被验证过。
 
 ---
 

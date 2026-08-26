@@ -1880,6 +1880,43 @@ def _break_r11doccoverage(root):
            "BREAKAGE: the column is undocumented")
 
 
+@case("r12nobump", ["tests/test_directive_enforcement.py"],
+      "make directive-edit bump times_stated again -> nine repairs reorder the ledger")
+def _break_r12nobump(root):
+    # The anchor is unique to edit_directive: upsert_directive's tail also
+    # stamps last_seen_at, so its sets-line differs.
+    _patch(root, f"{PKG}/core/db.py",
+           '            sets += ["updated_at = ?", "turns_at_touch = ?"]',
+           '            sets += ["times_stated = times_stated + 1",  # BREAKAGE\n'
+           '                     "updated_at = ?", "turns_at_touch = ?"]')
+
+
+@case("r12constraint", ["tests/test_directive_enforcement.py"],
+      "idle-enforce constraint directives again -> a prohibition blocks the turn forever")
+def _break_r12constraint(root):
+    _patch(root, f"{PKG}/core/plan.py",
+           '        if row.get("kind") == "constraint":\n            continue',
+           '        if False:  # BREAKAGE: constraints accrue idle again\n'
+           '            continue')
+
+
+@case("r12backlogrows", ["tests/smoke_test.py"],
+      "kill the rows trigger -> a 50-row backlog under a fresh marker is never due")
+def _break_r12backlogrows(root):
+    _patch(root, f"{PKG}/core/consolidate.py",
+           "    if n_new >= BACKLOG_ROWS:",
+           "    if False:  # BREAKAGE: rows never trigger")
+
+
+@case("r12stepref", ["tests/test_directive_enforcement.py"],
+      "blind the retargeted-reference branch -> a reference that reads right and points wrong passes silently")
+def _break_r12stepref(root):
+    _patch(root, f"{PKG}/core/plan.py",
+           "            elif n in old_steps and not _carried(old_steps[n], "
+           "new_steps[n]):",
+           "            elif False:  # BREAKAGE: retargeting is invisible")
+
+
 def verify_anchors():
     """Count every registered case's breakage anchors WITHOUT running a gate.
 

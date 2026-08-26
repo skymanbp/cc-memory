@@ -1,4 +1,4 @@
-<!-- i18n-source: ARCHITECTURE.md | sha256: 1b80b1dee2a34843 | version: 2.11.4 | translated: 2026-08-17 -->
+<!-- i18n-source: ARCHITECTURE.md | sha256: dcb3a5a10972a6ac | version: 2.12.0 | translated: 2026-08-26 -->
 > [English](ARCHITECTURE.md) · **简体中文**
 
 # cc-memory — 架构
@@ -120,10 +120,17 @@ cc-memory/
 │   ├── cli/                     ← mem.py, plan.py
 │   ├── mcp/                     ← server.py（MCP stdio）
 │   └── ui/                      ← installer, dashboard, web_viewer
-├── tests/                       ← smoke_test.py（规范的端到端检查）+
-│                                  test_plan_carryover.py + test_surfaces.py
-├── tools/i18n_check.py          ← 文档翻译漂移检查器（仅 dev/CI）
-├── build_exe.py                 ← PyInstaller 构建
+├── .github/workflows/           ← gates.yml（每次 push/PR 跑全部闸门）+
+│                                  release.yml（tag → 闸门 → 构建 exe →
+│                                  实际运行 → GitHub Release，v2.12.0）
+├── tests/                       ← run_gates.py（唯一的闸门运行器）+ 四个
+│                                  套件：smoke_test、test_plan_carryover、
+│                                  test_surfaces、test_directive_enforcement
+├── tools/                       ← dev/CI 检查器，从不打包：i18n_check、
+│                                  citation_check、doc_claims、doc_coverage、
+│                                  contracts、falsify_fixes
+├── scripts/                     ← build_exe.py（PyInstaller）+
+│                                  release_notes.py（CHANGELOG → 发布正文）
 ├── pyproject.toml
 ├── README.md
 ├── README.zh.md                 ← 受漂移跟踪的翻译（见 §9）
@@ -188,9 +195,9 @@ v2.4.3 把原本 5 份的 `docs/` 目录合并为 2 份。全部 79 处仓库内
 | 钩子 | 入口 | 超时 | 职责 |
 |------|-------|---------|-----|
 | `PreCompact`（同步） | [`cc_memory/hooks/pre_compact.py`](../cc_memory/hooks/pre_compact.py) | 120s | 读取**有界**的 head+tail transcript 窗口（`extractor.load_transcript_window`）；经 Haiku 用 LLM 抽取记忆；经 `memory_writer.upsert_batch` 路由；**整篇重写** `memory/PROGRESS.md`；归档会话。写入一个起始标记，使被杀死的运行可被检测。 |
-| `PreCompact`（异步） | [`cc_memory/hooks/consolidate_async.py`](../cc_memory/hooks/consolidate_async.py) | 300s，`async: true` | 每 N 次会话一次的 LLM 整理，在 v2.3.2 中被移出阻塞式压缩路径（间隔标记 + 锁，受预算门约束）。 |
+| `PreCompact`（异步） | [`cc_memory/hooks/consolidate_async.py`](../cc_memory/hooks/consolidate_async.py) | 300s，`async: true` | LLM 整理，在 v2.3.2 中被移出阻塞式压缩路径（间隔标记 + 锁，受预算门约束）。每 N 次会话到期，**或**写入积压判定到期（v2.12.0）；也可由 Stop 钩子的背压探针以独立进程方式拉起（`--cwd <root>`）。 |
 | `SessionStart` | [`cc_memory/hooks/session_start.py`](../cc_memory/hooks/session_start.py) | 15s | 注入分层上下文（主题 / 关键项 / 时间线 / PROGRESS 预览 / 页脚）；发出强制的 `<system-reminder>`，要求 Read `PROGRESS.md` + `MEMORY.md`；追溯保存未保存的 JSONL。 |
-| `Stop` | [`cc_memory/hooks/stop.py`](../cc_memory/hooks/stop.py) | 22s | 观察者：经 Haiku 从上一回合的 observations 抽取；每回合 `patch_progress(files_touched, ...)`；每 5 个回合运行 `idle.maybe_run_idle`（清理 + 重新生成 MEMORY.md）；当有活动计划时，累加其回合计数器并发出**一行**建议——若计划仍未精炼则是 plan-refiner 提示，否则在漂移阈值触发后给出 guardian 检查提示。 |
+| `Stop` | [`cc_memory/hooks/stop.py`](../cc_memory/hooks/stop.py) | 22s | 观察者：经 Haiku 从上一回合的 observations 抽取；每回合 `patch_progress(files_touched, ...)`；每 5 个回合运行 `idle.maybe_run_idle`（清理 + 重新生成 MEMORY.md）；探测整理积压，到期时拉起独立的异步工作者（v2.12.0）；当计划**在活**时，累加其回合计数器并**强制执行**——对未精炼的计划、未做漂移检查的计划或闲置的指令**拒绝收官**（`{"decision": "block"}`），逃生预算见 CONTRACTS.md（v2.11.0；本行从前描述的建议行已不存在）。 |
 | `PostToolUse` | [`cc_memory/hooks/post_tool_use.py`](../cc_memory/hooks/post_tool_use.py) | 8s | **先**做实时计划集成，且所有模式一视同仁：`ExitPlanMode` → `plan_active.raw`，`TodoWrite` → 机械式步骤同步，`Edit`/`Write`/`MultiEdit`/`NotebookEdit` → 漂移计数器 +1，敏感 Bash 调用 → +20。**然后**才为被观测的工具调用向 `observations` 插入一行（模式白名单 / 跳过列表——`core.modes.should_observe`）。不调用 LLM。端到端实测约 180-290 ms，其中约 75-120 ms 是解释器启动。 |
 | `UserPromptSubmit` | [`cc_memory/hooks/user_prompt.py`](../cc_memory/hooks/user_prompt.py) | 8s | 首次接触时自动初始化 `memory/`；跟踪回合数；为 Stop 观察者保存提示；在第 1 回合给会话打标签并为 `progress.current_request` 播种（依据双语恢复信号白名单，把触发类型判定为 `resume_request` 还是 `user_prompt`）。 |
 
@@ -204,7 +211,7 @@ v2.4.3 把原本 5 份的 `docs/` 目录合并为 2 份。全部 79 处仓库内
 - `PreCompact`（同步）的 stdout → **一行**状态行（会出现在下一次会话的压缩后
   上下文中）。
 - `PreCompact`（异步）/ `PostToolUse` / `UserPromptSubmit` 的 stdout → 空。异步
-  支路的 stdout 根本不会内联显示（`consolidate_async.py:31`）。
+  支路的 stdout 根本不会内联显示（`consolidate_async.py:37`）。
 
 ### PreCompact：为什么是两条支路
 
@@ -216,15 +223,29 @@ v2.3.2 把这个事件拆开了：
   `pre_compact.py:5-20`）。
 - **异步支路**在一个 `BudgetGate` 之下运行 `core.consolidate.run_consolidation`，
   其中 `_BUDGET_TOTAL_S = 240.0`、`_BUDGET_SAFETY_S = 8.0`
-  （`consolidate_async.py:65`），因此它启动的最后一次 LLM 调用会在
+  （`consolidate_async.py:70`），因此它启动的最后一次 LLM 调用会在
   `total_s - safety_s` = 232 秒之前完成，小于钩子自身的 300 秒超时——工作者绝不会
   在写入中途被杀。
 - 节奏由**间隔标记 + 锁**决定，而不是脆弱的 `session_count % N` 检查：
   `memory/.last_consolidation.json` 记录上一次成功运行时的会话计数，
   `memory/.consolidation.lock` 防止工作者重叠（比 `_STALE_LOCK_S = 360.0`
-  更旧的锁会被回收，见 `consolidate_async.py:69`）。这对并发的同步支路是
+  更旧的锁会被回收，见 `consolidate_async.py:74`）。这对并发的同步支路是
   竞态免疫的——计数上 ±1 的漂移既不会导致重复运行，也不会导致漏跑
   （`consolidate_async.py:19-28`）。
+- **背压是第三个触发器（v2.12.0）。** 会话间隔假设压缩会发生；一个只在短会话里
+  工作的项目从不压缩，于是整理被饿死——在本仓库上实测：一个月写入 349 行，而
+  标记已经 17 天没动，SessionStart 注入的主题摘要落后了三个小版本。
+  `core.consolidate.consolidation_backlog` 读取标记里的 `last_memory_id`
+  行号水位线，在 50 条未整理行、或 7 天且新增 ≥ 10 行时判定到期。Stop 钩子
+  每回合探测一次（一条 COUNT 查询，`stop.py:_maybe_kick_consolidation`），并以
+  **分离进程**方式拉起同一个异步工作者（`consolidate_async.py --cwd`）；工作者
+  会在整理锁之下重新检查判据，因此竞态的拉起是空操作，而 `.consolidation.kick`
+  冷却（10 分钟）为反复失败的工作者的重启设了上界。标记 I/O 与手动 CLI 路径
+  共享同一实现（`core.consolidate.read_consolidation_marker` /
+  `write_consolidation_marker`），后者现在也会盖章标记——另外
+  `/cc-mem consolidate --deep` 会循环语义去重裁判直到跑干
+  （`core.consolidate.deep_dedup`），一次把积压清完。完整节奏契约：
+  [CONTRACTS.md §整理到底何时运行](CONTRACTS.md#when-consolidation-actually-runs-v2120--backpressure)。
 
 ### 超时被声明了两次，必须保持完全同步
 
@@ -294,25 +315,26 @@ SQLite 表（定义在 [`cc_memory/core/db.py`](../cc_memory/core/db.py)），�
 | `observations` | 原始 PostToolUse 事件，抽取后清理（`db.py:131`） |
 | `session_summaries` | 每会话 6 字段结构化摘要（request / investigated / learned / completed / next_steps / notes）+ files_read/files_modified（`db.py:144`） |
 | **`progress`** | v2.1 新增——每项目一行。`memory/PROGRESS.md` 的唯一真相来源（`db.py:188`）。 |
-| **`plan_active`** | v2.2 新增——每项目一行。`memory/PLAN.md` 的唯一真相来源（`db.py:210`）。自 `v9_plan_turns_total` 起带有 `turns_total`：一个**单调**轮次计数，任何东西都不会重置它；与之相对的 `turns_since_last_guardian` 会被每次 guardian 检查和计划替换清零 |
-| **`directives`** | v2.11.0 新增——用户**意图**账本。`times_stated` 累加在同一 `slug` 的**一行**上；指令的寿命长于任何一份计划，这正是它不能被折叠成计划步骤的原因。自 `v9_directives_turns_at_touch` 起带有 `turns_at_touch`——最后一次写入时的 `turns_total` 值，因此闲置度是两个单调数字相减 |
-| `_migrations` | 记录已应用的迁移（`db.py:289`） |
+| **`plan_active`** | v2.2 新增——每项目一行。`memory/PLAN.md` 的唯一真相来源（`db.py:212`）。自 `v9_plan_turns_total` 起带有 `turns_total`：一个**单调**轮次计数，任何东西都不会重置它；与之相对的 `turns_since_last_guardian` 会被每次 guardian 检查和计划替换清零 |
+| **`directives`** | v2.11.0 新增——用户**意图**账本。`times_stated` 累加在同一 `slug` 的**一行**上；指令的寿命长于任何一份计划，这正是它不能被折叠成计划步骤的原因。自 `v9_directives_turns_at_touch` 起带有 `turns_at_touch`——最后一次写入时的 `turns_total` 值，因此闲置度是两个单调数字相减。自 v2.12.0 起 `status` 还可以是 `blocked`（停在用户那边，闲置豁免），`kind` 还可以是 `constraint`（长期禁令，闲置豁免）——只是词汇扩充，无 schema 变更；只有 `directive-add` 可以累加计数（`directive-edit` 修正字段但不碰它） |
+| `_migrations` | 记录已应用的迁移（`db.py:651`） |
 
 共十二张表，与 `CLAUDE.md` 的 §“Database schema (12 tables)” 一致。
 
 此外还有 `memories_fts`——一个建立在 `memories` 之上的 FTS5 虚拟表
 （`core/db.py:455-458`），由三个触发器保持同步（`core/db.py:459-478`，迁移 `v2_fts5` 在
-`db.py:2742-2776`）。它只在本地 SQLite 构建带 FTS5 时才会创建；否则
-`db.search_fts`（`core/db.py:2742-2776`）回退到 `LIKE ? ESCAPE '\'`
-（`core/db.py:2742-2776`）。FTS5 在 `.claude-plugin/plugin.json:4` 与 `:12` 中被
+`db.py:2906-2940`）。它只在本地 SQLite 构建带 FTS5 时才会创建；否则
+`db.search_fts`（`core/db.py:2906-2940`）回退到 `LIKE ? ESCAPE '\'`
+（`core/db.py:2906-2940`）。FTS5 在 `.claude-plugin/plugin.json:4` 与 `:12` 中被
 宣传，`/cc-mem status` 会报告当前实际走哪条路径（`cli/mem.py` 的 `cmd_status`）。
 
 `memories` 上的 `supersedes_id` 列（迁移 `v3_supersedes`，`db.py:168`）把反补丁的
 取代链显式化：当 `upsert_smart` 判定一条新记忆取代了一条旧记忆时，新行会回链到旧行
-的 ID（旧行被归档）。通过 `db.get_supersede_chain(memory_id)`（`db.py:1414-1429`）走一遍
-链条，就能看到完整的更新历史。`content_hash`（迁移 `v2_content_hash`，`db.py:1969-1971`）
-是归一化内容的 `sha256[:16]`，用于廉价的精确重复检查（`db.compute_content_hash` 在
-`db.py:1982-1990`，`db.find_by_hash` 在 `db.py:1982-1990`）。
+的 ID（旧行被归档）。通过 `db.get_supersede_chain(memory_id)`（`db.py:1447-1462`）走一遍
+链条，就能看到完整的更新历史。`content_hash`（迁移 `v2_content_hash`，`db.py:1447-1462`）
+是归一化内容的 `sha256[:16]`，用于廉价的精确重复检查
+（`db.compute_content_hash` 在 `db.py:2002-2004`，`db.find_by_hash` 在
+`db.py:2002-2004`）。
 
 迁移按 `_MIGRATIONS` 列表（`db.py:121-284`）的顺序应用，并记录在 `_migrations` 中。目前
 已交付的层级：**v1**（topic 列 + 索引）、**v2**（content_hash、observations、
@@ -389,8 +411,8 @@ regenerate_memory_index(db, project_id, memory_dir)   ← MEMORY.md 刷新
   所有钩子调用方都会传（`pre_compact.py:435`、`stop.py:166`、
   `session_start.py:1056`）；同步 PreCompact 支路还会在其余状态变更之后再刷一次
   （`pre_compact.py:782`）。
-- 单发调用方显式调用 `regenerate_memory_index`：`cli/mem.py:1099` 与 `:584`、
-  `mcp/server.py:644`、`ui/dashboard.py:1664`、`ui/web_viewer.py:65`，外加
+- 单发调用方显式调用 `regenerate_memory_index`：`cli/mem.py:1125` 与 `:584`、
+  `mcp/server.py:644`、`ui/dashboard.py:1664`、`ui/web_viewer.py:1034`，外加
   `skills/ccm-load` 的内联脚本（`skills/ccm-load/SKILL.md:308, 318`）。
   `core/idle.py:96` 与 `hooks/consolidate_async.py:188` 也会在维护之后刷新它。
 
@@ -482,9 +504,9 @@ SessionStart：
 ```
 
 上面的调用签名都是真实的：`write_progress_md(db, project_id, memory_dir)`
-（`core/progress.py:331-490`；调用点 `pre_compact.py:751`、`stop.py:403`、
+（`core/progress.py:331-490`；调用点 `pre_compact.py:751`、`stop.py:473`、
 `user_prompt.py:133`、`session_start.py:912`、`mcp/server.py:243`、
-`cli/mem.py:1189`）。PROGRESS.md 的结构规格见
+`cli/mem.py:1216`）。PROGRESS.md 的结构规格见
 [docs/CONTRACTS.md](CONTRACTS.md#handoff-contract)。
 
 ### 被杀运行检测（v2.4.2）
@@ -543,16 +565,18 @@ transcript 得到 0 条腿、0 条记忆。第 3 级从
 机械地同步步骤状态（不调用 LLM）；`Edit`/`Write`/`MultiEdit`/`NotebookEdit` 会累加
 `edits_since_last_guardian`，而敏感的 Bash 调用（`git push`、`rm -rf`、
 `DROP TABLE`、`npm publish`、`kubectl apply`、`terraform apply`……见
-`core.plan.is_sensitive_tool_call`，`plan.py:1231-1254`）一次加 20。一旦
-`turns_since_last_guardian >= 8` 或 `edits_since_last_guardian >= 12`，Stop 钩子
-就发出 guardian 建议（`core.plan.should_nudge_guardian`，`plan.py:1231-1247`），并把
-refiner 提示限速为每会话每 5 个回合至多一次。钩子自己绝不派生子代理——它们只提示。
+`core.plan.is_sensitive_tool_call`，`plan.py:1284-1307`）一次加 20。一旦
+`turns_since_last_guardian >= 8` 或 `edits_since_last_guardian >= 12`
+（`core.plan.should_nudge_guardian`，`plan.py:1248-1264`），Stop 钩子就**拒绝
+收官**而不是给建议（v2.11.0——这句话从前描述的那个限速提示已被删除；逃生预算见
+[CONTRACTS.md](CONTRACTS.md#the-stop-hook-can-refuse-the-turn-v2110)）。钩子自己
+绝不派生计划子代理——由拒绝理由指示主 Claude 去调用。
 完整规格见 [docs/CONTRACTS.md](CONTRACTS.md#plan-contract)。**自 v2.5 起，上面的
 每一条分支在每种模式下都会运行**——此前遮蔽它们的是什么，见
 [observation 闸门](#observation-闸门不再遮蔽计划分支v25-已修)。
 
 尚未精炼的原始计划也不再是隐形的：`core.plan.raw_pending_refinement`
-（`plan.py:630-678`）是共享判据，`write_plan_md` 与 `/cc-mem plan-status` 都会以一条
+（`plan.py:683-731`）是共享判据，`write_plan_md` 与 `/cc-mem plan-status` 都会以一条
 PENDING REFINEMENT 横幅加逐字原文开头，并把更旧的结构化计划明确标注为已被取代。
 那段逐字块的围栏宽度会超过原始文本里最长的一串反引号，因为计划模式的输出里经常
 带有代码围栏。
@@ -583,7 +607,7 @@ BudgetGate 来说仍是已知量。候选顺序与传输格式（`core/auth.py:2
 “[WARNING: OAuth expired — LLM extraction disabled]” 页脚
 （`session_start.py:594`）。钩子调用方用它来*提供*传给 `call_llm` 的凭据：
 `pre_compact.py:80 → :166`、`stop.py:85`、`session_start.py:594`、
-`core/consolidate.py:355, 549, 724`。
+`core/consolidate.py:425, 549, 724`。
 
 逐级回退是 v2.3.4 为一个具体故障加入的：一个失效的环境变量密钥（例如额度为零 →
 HTTP 400）过去会把排在它后面的健康订阅令牌黑洞掉，从而无声地把每一次 LLM 调用推给
@@ -660,8 +684,10 @@ v2.4.2 才成立：`_extract_via_llm` 的 `except` 元组此前不包含 `Runtim
 ├── PLAN.md                      从 `plan_active` 行整篇重写（v2.2）
 ├── .last_save.json              上一次 PreCompact 的状态（含 auto/manual 触发方式）
 ├── .last_inject.json            SessionStart 实际注入了什么（v2.3）
-├── .last_consolidation.json     上一次整理时的会话计数（v2.3.2）
+├── .last_consolidation.json     上一次整理时的会话计数 + 行号水位线
+│                                （v2.3.2；水位线 v2.12.0）
 ├── .consolidation.lock          防止异步工作者重叠（v2.3.2）
+├── .consolidation.kick          背压拉起冷却（v2.12.0）
 ├── .pre_compact_attempt.json    起始标记；残留 ⇒ 上一次运行被杀（v2.4.2）
 ├── .plan_raw.md                 最近一次 ExitPlanMode 原始捕获（v2.2）
 ├── .plan_history/               被替换/清除计划的只追加归档（v2.4.0）
@@ -675,11 +701,13 @@ v2.4.2 才成立：`_extract_via_llm` 的 `except` 元组此前不包含 `Runtim
 写入方，便于溯源：`MEMORY.md` ← `memory_writer.regenerate_memory_index`
 （`memory_writer.py:261-370`）；`PROGRESS.md` ← `core.progress.write_progress_md`
 （`progress.py:331-490, 366`）；`PLAN.md` ← `core.plan.write_plan_md`
-（`plan.py:630-678`）；`.plan_history/` ← `plan.py:630-678`；`.last_save.json` ←
+（`plan.py:683-731`）；`.plan_history/` ← `plan.py:683-731`；`.last_save.json` ←
 `pre_compact.py:737, 771`；`.last_inject.json` ← `session_start.py:291-309`
 （临时文件 + `os.replace`，是真正原子的，不同于 `.last_save.json` 用的普通写）；
-`.last_consolidation.json` / `.consolidation.lock` ←
-`consolidate_async.py:112-128`；`.pre_compact_attempt.json` ←
+`.last_consolidation.json` ← `core.consolidate.write_consolidation_marker`
+（唯一写入方，异步钩子 + CLI 共用）；`.consolidation.lock` ← `_acquire_lock`
+（`consolidate_async.py:121-155`）；`.consolidation.kick` ←
+`stop.py:_maybe_kick_consolidation`；`.pre_compact_attempt.json` ←
 `pre_compact.py:284-311`。`sessions/` 与 `topics/` 由最先接触该项目的那条路径创建
 ——自动初始化时是 `user_prompt.py:57-63`，否则是 `pre_compact.py:342-343`。
 

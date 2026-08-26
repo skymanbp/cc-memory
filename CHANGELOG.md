@@ -7,6 +7,160 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [2.12.0] — 2026-08-26
+
+### The field report release: consolidation that actually runs, and a ledger you can maintain
+
+Two inputs drove this release, both measurements rather than speculation: the
+maintainer's own database (349 memories written in one month against a
+consolidation marker 17 days old, with SessionStart injecting topic summaries
+that still said "v2.5.4" at v2.11.4), and a seven-finding field report from
+the Autoshop project (2026-08-25) written against real use.
+
+### Added — consolidation backpressure (the "memories only ever stack" fix)
+
+- **A write-backlog trigger for consolidation.** Its only automatic trigger
+  was the async PreCompact leg gated on "≥ N sessions since the last run" —
+  and both halves of that predicate assume compactions happen, so a project
+  worked in short sessions **starved**: the write path reconciles per row
+  (anti-patch), but cross-topic rewordings and topic summaries are batch work
+  that simply never ran. `core.consolidate.consolidation_backlog` reads a new
+  `last_memory_id` row-id watermark from the cadence marker and declares a
+  run due at **50 unconsolidated rows**, or **7 days** with at least 10 new
+  rows (an idle project never pays for a run on schedule alone). The Stop
+  hook probes it every turn — one COUNT query — and spawns the SAME async
+  worker detached (`consolidate_async.py --cwd <root>`, new standalone entry);
+  the worker re-checks the predicate under the consolidation lock, so a
+  racing spawn is a no-op, and a `.consolidation.kick` cooldown (10 min,
+  fail-closed when unwritable) bounds respawn of a failing worker.
+- **`/cc-mem consolidate --deep`** — pay the backlog down in one sitting.
+  `core.consolidate.deep_dedup` loops the semantic-dedup judge until a round
+  confirms nothing new; a `skip_signatures` set remembers every group already
+  judged (including error verdicts, so a dead API converges instead of
+  spinning), nomination over-fetches past the seen set so the 12-group cap
+  cannot mask unseen groups, and both the round cap and an exhausted budget
+  are announced, never silent. The per-run 12-group cap was sized for the
+  budget-gated background pass; against a 500-row backlog it is a trickle,
+  which is why the loop exists.
+- **One marker writer.** `write_consolidation_marker` /
+  `read_consolidation_marker` moved into `core/consolidate.py`, shared by the
+  async hook and the CLI. The CLI **never wrote the marker at all**, so a
+  manual consolidation left the backpressure probe still reading "due" and a
+  redundant background run followed. The read is path-validated (the v2.3.2
+  rename rule) and compares with `os.path.normcase` — the hook writes the cwd
+  Claude Code handed it (`d:\…`) while the CLI writes a resolved path
+  (`D:\…`), and a case-only mismatch would have made every manual run
+  invisible to the probe.
+
+### Added / fixed — the Autoshop field report (7 findings, all closed)
+
+1. **[severe] Plan replacement now audits directive step references.** Step
+   ids are positional; two replans (23 → 12 → 14 steps) left 11 dead
+   references in directive text and 4 that still resolved but to a
+   *different* step — text that reads correctly and executes the wrong work.
+   `core.plan.stale_directive_step_refs` compares every ordinal reference in
+   active directives against the outgoing and incoming step tables (carry
+   judged at the carryover gate's own `_carried` bar) and `plan-set
+   --from-refiner` prints each finding as `DEAD` or `SILENTLY RETARGETED`.
+   `directive-add`/`directive-edit` warn at write time, and the documented
+   rule is now in the plan contract: **reference steps by TITLE, never by
+   number.** Advisory, not a refusal — the rot lives in the ledger, and
+   holding the plan hostage to it would punish the fix.
+2. **`/cc-mem directive-edit`** — the maintenance door. `directive-add` was
+   the only edit path and it bumps `times_stated` unconditionally, so nine
+   reference repairs inflated nine counts and `directive-list` (which sorts
+   by that count) floated the most-EDITED directives above the most-DEMANDED
+   ones. `db.edit_directive` corrects `demand`/`quote`/`kind`/`status`
+   without touching the count or `last_seen_at`, stamps `turns_at_touch`
+   (an edit is attention), refuses to create, and cleans the write path
+   exactly like `upsert_directive`.
+3. **Idle enforcement skips what cannot be worked.** `--status blocked`
+   parks a directive waiting on the *user* (the idle scan reads active rows
+   only); `--kind constraint` marks a standing prohibition with no recordable
+   positive action — `blocking_reasons` skips the kind at the policy point.
+   Both existed as complaints in the report: the only way to silence the
+   block was re-stating, which fed finding 2. `directive-edit --status`
+   accepts only `active`/`blocked`, so the edit door cannot bypass
+   `directive-close`'s evidence gate.
+4. **`sql --full` / `directive-list --full`** — untruncated output. The table
+   renderer caps cells at 60 chars and `directive-list` hand-cut at 96/88,
+   so long `demand` text could not be read through the CLI at all; the field
+   workaround was bypassing it into raw `sqlite3`.
+5. **`sql --json` / `directive-list --json` / `paths --json`** — a pure-ASCII
+   wire format (`ensure_ascii`, `\uXXXX` escapes). The CLI has emitted UTF-8
+   since v2.0, but the *capturing shell* chooses its own decode codec —
+   PowerShell 5.1 decodes native output with the console codepage (cp936 on
+   zh-CN boxes), so valid CJK reached consumers as `�`. An ASCII-only wire
+   format cannot be garbled by any capture codec. `--json` stdout is exactly
+   one JSON document (no banner line), pipeable into a parser.
+6. **`/cc-mem paths`** — prints the resolved database / PROGRESS.md /
+   PLAN.md / MEMORY.md paths with exists/absent verdicts. `status` reports
+   counts with no locations; the field workaround was an rglob whose first
+   hit was **another project's** database. Read-only by the same policy as
+   every other question: it never creates state.
+7. **The Stop refusal's "or" was a contradiction.** It said "Run `/cc-mem
+   plan-check`, or invoke @plan-guardian" while plan-check's own output ends
+   "Now invoke the plan-guardian subagent" — two commands presented as
+   alternatives that the flow wants in sequence. The refusal now states the
+   one sequence.
+
+   (Report items 7b — the `memory/` name collision with
+   `~/.claude/projects/<slug>/memory/` — and 7c — a stale v2.1.0
+   marketplace-cache registration — are a docs clarification and a local
+   cache cleanup respectively; 7b's answer is `/cc-mem paths`.)
+
+### Changed
+
+- `hooks/stop.py` gained Job 3.5 (the backpressure probe) — decision in
+  core, spawn mechanics beside the other detached spawn, own `try` so a
+  probe failure costs neither the status line nor plan enforcement.
+- `consolidate_async.py` gates on *sessions-interval OR backlog* on the hook
+  path, backlog-only on the standalone path (it was spawned because of it);
+  the module keeps the lock and the BudgetGate unchanged.
+- `memory/.gitignore` gains `.consolidation.kick` in all three copies
+  (canonical + installer + skill), and `memory/.last_consolidation.json`
+  gains `last_memory_id`.
+- `docs/ARCHITECTURE.md` §3/§5 no longer describe the v2.10-era **advisory
+  nudge** — those two passages had outlived v2.11.0's enforcement by two
+  releases. (Found while editing the adjacent cadence text: nothing gates
+  prose that describes superseded *behaviour*, only counts and citations.)
+- **Release binaries are built on CI.** `.github/workflows/release.yml` runs
+  on a `v*` tag push: it refuses a tag that disagrees with
+  `core/version.py`, runs every release gate on the tagged commit (tag
+  pushes do not trigger `gates.yml`), builds both exes with
+  `scripts/build_exe.py`, **runs them** — the installer performs a real
+  `--cli` install and `--uninstall` against a sandboxed `USERPROFILE` and
+  must refuse an unknown flag with exit 2; the dashboard is launched with
+  `--help` and must exit 0 — and publishes the GitHub Release with both exes
+  attached and the CHANGELOG section as its body (`scripts/release_notes.py`,
+  which fails loud when the section is absent and writes UTF-8 itself
+  rather than through the shell's codec). The exes were previously built
+  and verified by hand on the maintainer's machine; now the artefact on the
+  release page is provably built from the tagged commit after green gates.
+- `README.md` restructured around what the plugin is, the problem, six
+  capabilities, how it works, why it differs, quick start, real captured
+  output (a supersede chain and a genuine `consolidate --deep` convergence),
+  a measured-numbers table sourced from this file, the reference, the
+  design philosophy, and a roadmap that records the known limits.
+  `README.zh.md` retranslated in full.
+
+### Tests
+
+- `tests/test_directive_enforcement.py` §6 (25 new checks): edit-no-bump,
+  never-creates, blocked/constraint exemptions and their mirrors, the
+  step-reference audit (dead / retargeted / inactive-skipped / same-title
+  clean), and the CLI wiring driven as subprocesses.
+- `tests/smoke_test.py` v2.12.0 block: the backlog predicate's four edges,
+  watermarked marker round-trip (path-validated, normcase), deep-dedup
+  convergence with a stubbed judge (no group judged twice), the Stop probe's
+  lock/spawn/cooldown three states, `paths` creating nothing, and the
+  `--json` wire format being one ASCII-only document.
+- `tools/falsify_fixes.py` registers `r12nobump`, `r12constraint`,
+  `r12backlogrows`, `r12stepref` — each reverts one of this release's
+  load-bearing fixes on a copy and proves its gate goes RED.
+
+---
+
 ## [2.11.4] — 2026-08-17
 
 ### The eleventh gate: is it written down at all?

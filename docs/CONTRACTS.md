@@ -180,7 +180,7 @@ bypassing `upsert_smart`:
 2. **Patch updates without history.** If a fact genuinely changes ("we
    switched from lr=3e-4 to lr=1e-4 because…"), the supersede path
    preserves the old fact as `is_active=0` linked via `supersedes_id`.
-   `db.get_supersede_chain(id)` (`core/db.py:1414-1429`) walks the history. No
+   `db.get_supersede_chain(id)` (`core/db.py:1447-1462`) walks the history. No
    "git blame for memories" hack needed.
 
 3. **MEMORY.md staleness.** Auto-regeneration after every batch write
@@ -211,7 +211,7 @@ r8antipatch` proves the assertion goes red when a bypass caller appears.
 | `Stop` observer | `upsert_batch(db, pid, None, observer_list, memory_dir)` (`hooks/stop.py:357`) |
 | `SessionStart` retroactive save | `upsert_batch(db, pid, sid, memories, memory_dir=memory_dir)` — un-saved prior sessions (`hooks/session_start.py:1073`) |
 | `/save-memories` skill | `upsert_batch(db, pid, None, memories, memory_dir=Path(project) / 'memory')` (`skills/save-memories/SKILL.md:100`) |
-| `mem.py add` CLI | `upsert_smart(...)` + `regenerate_memory_index(...)` (`cli/mem.py:1099,524`) |
+| `mem.py add` CLI | `upsert_smart(...)` + `regenerate_memory_index(...)` (`cli/mem.py:1125,524`) |
 | `mcp/server.py handle_memory_add` | `upsert_smart(...)` + `regenerate_memory_index(...)` (`mcp/server.py:629-656,192`) |
 | Dashboard UI "Add Memory" | `upsert_smart(...)` + `regenerate_memory_index(...)` — routed since v2.2 (`ui/dashboard.py:1664,956`). `ui/dashboard.py` contains no `db.insert_memory` call. |
 | Dashboard UI "Save Session" | `upsert_batch(...)` (`ui/dashboard.py:2246`) |
@@ -241,7 +241,7 @@ backstop, not a save path, and it operates on memories that ALREADY exist:
   is no longer a difference between them — the MERGE branch used to write
   `set(incoming + ["merged"])` and destroyed the surviving row's provenance
   tags outright.
-- `decay_and_archive` (reference-aware staleness net, `consolidate.py:822-861`)
+- `decay_and_archive` (reference-aware staleness net, `consolidate.py:876-920`)
   archives ONLY very old + low-importance + never-injected rows — a
   zero-false-archive safety net. Effective age is
   `now - COALESCE(last_referenced_at, created_at)` (`core/db.py:224-234`;
@@ -254,7 +254,7 @@ backstop, not a save path, and it operates on memories that ALREADY exist:
   accepted. Measured: `/cc-mem add note "lr=3e-4 wins"` reported `[inserted]`
   and five turns later the table held zero rows. It now imports the single
   floor from `llm.memory_writer` and archives through
-  `db.archive_if_unchanged` (`core/db.py:1546-1581`), like the other two
+  `db.archive_if_unchanged` (`core/db.py:1606-1641`), like the other two
   snapshot-verdict stages. That variant, not `bulk_archive`: this stage's
   verdict is computed from a snapshot read in a SEPARATE transaction while the
   PreCompact writer runs concurrently, so a row whose garbage content was
@@ -275,13 +275,46 @@ backstop, not a save path, and it operates on memories that ALREADY exist:
 Nothing in the consolidation path removes a row; the SAVE-path rule is
 therefore not loosened anywhere.
 
+#### When consolidation actually RUNS (v2.12.0 — backpressure)
+
+The write path reconciles per row; the backstop above is BATCH work, and
+until v2.11.4 its only automatic trigger was the async PreCompact leg gated
+on "≥ N sessions since the last run". Both halves of that predicate assume
+compactions happen: a project worked in short sessions never compacts, so it
+starved — measured on this repository, **349 memories written in one month
+against a 17-day-old consolidation marker**, with SessionStart injecting
+topic summaries three minor versions stale. Three triggers now exist, one
+predicate and one marker behind all of them:
+
+- **Compaction cadence** (v2.3.2, unchanged): the async PreCompact leg runs
+  when `sessions - last ≥ auto_interval_sessions` — OR when the backlog
+  predicate below says so.
+- **Backpressure** (`core.consolidate.consolidation_backlog`): due when
+  `BACKLOG_ROWS` (50) memories landed since the marker's `last_memory_id`
+  row-id watermark, or `BACKLOG_DAYS` (7) elapsed with at least 10 new rows —
+  an idle project never pays for a run on schedule alone. The Stop hook
+  probes this every turn (`hooks/stop.py:_maybe_kick_consolidation` — one
+  COUNT query) and spawns `consolidate_async.py --cwd <root>` DETACHED; the
+  worker re-checks the predicate under the consolidation lock, so a racing
+  spawn is a no-op, and a `.consolidation.kick` cooldown (10 min) bounds
+  respawn of a failing worker.
+- **Manual** (`/cc-mem consolidate`), which since v2.12.0 also stamps the
+  marker through the ONE shared writer
+  (`core.consolidate.write_consolidation_marker`) — it never did, so a hand
+  run left the probe still reading "due" and a redundant background pass
+  followed. `--deep` first loops `semantic_dedup` until a round confirms
+  nothing new (`core.consolidate.deep_dedup`; refused groups are remembered
+  within the run and never re-judged), which is how a months-old backlog is
+  paid down in one sitting — the per-run 12-group cap is sized for the
+  budget-gated background pass, not for a backlog.
+
 ### What you should NOT do
 
 - Don't call `db.insert_memory` directly from any save path. (It's still
   exposed for migration / bulk-load, but not for everyday writes —
   `core/db.py:1144-1159`.)
 - Don't roll your own `"SELECT content FROM memories ..."` dedup. That's
-  what `db.find_by_hash` (`core/db.py:1982-1990`) and the writer's `_find_similar`
+  what `db.find_by_hash` (`core/db.py:2015-2023`) and the writer's `_find_similar`
   (`llm/memory_writer.py:179`) are for. (There is no `db.find_similar`; the
   matcher lives in the writer, private by design.)
 - Don't "patch" MEMORY.md by hand or expect another path to refresh it. Call
@@ -343,7 +376,7 @@ PreCompact under v2.1+ (one-shot migration `migrate_legacy_handoff`,
 from the `progress` SQL row. Schema (`cc_memory/core/db.py:_MIGRATIONS:v3_progress`
 at `db.py:176-190`, plus the two v5 session-annotation columns at `db.py:219-222`).
 §0 additionally reads the `sessions` / `session_summaries` tables via
-`db.get_recent_sessions` (`core/progress.py:301`; `core/db.py:2335-2389`):
+`db.get_recent_sessions` (`core/progress.py:302`; `core/db.py:2395-2449`):
 
 | Column | Type | Primary source · Fallbacks |
 |--------|------|---------------------------|
@@ -351,15 +384,15 @@ at `db.py:176-190`, plus the two v5 session-annotation columns at `db.py:219-222
 | `current_request` | TEXT | UserPromptSubmit turn 1 (`user_prompt.py:145`) → PreCompact `_first_user_request(window.head)` (`pre_compact.py:269-311`) — scans up to 200 records past the leading `queue-operation` / `attachment` meta rows and skips empty-content user rows (`pre_compact.py:269-311`, v2.4.2) → `session_summaries.request` (`progress.py:241`) |
 | `status_done` | TEXT | `session_summaries.completed` (`progress.py:236`), which PreCompact fills from the extraction's `result` / `decision` memories (`pre_compact.py:666-700`), falling back to the observed Edit/Write paths only when the extractor returned no outcome. Before v2.8.0 it was ALWAYS that path list, so §2 "Done" rendered a file dump instead of what was accomplished. SessionStart fills it if empty (`session_start.py:589-590`) |
 | `status_in_flight` | TEXT | `session_summaries.learned`, filled from the extraction's `arch` / `config` / `bug` memories (`pre_compact.py:666-700`). Before v2.8.0 PreCompact hard-coded it to `""`, so §2 "In-flight" rendered `*(none active)*` unconditionally — structurally, not because nothing was in flight |
-| `status_blocked` | TEXT | Explicit `patch_progress(status_blocked=...)` — no in-tree caller does this today; it is an API for external tooling. A repo-wide grep finds only the schema default (`core/db.py:2268-2307,853`), the empty seed (`core/progress.py:253`) and the read (`core/progress.py:253`) |
-| `open_todos` | JSON | PreCompact `extract_latest_todo_state(window)` via `ext["latest_todos"]` (`core/extractor.py:478-513,558`; `pre_compact.py:630,656`) → SessionStart tier-3 prior-transcript mine (`session_start.py:882`) → LAST RESORT `session_summary.next_steps` split by `;` (`session_start.py:882`). Only non-`completed` todos are kept (`progress.py:253`) |
+| `status_blocked` | TEXT | Explicit `patch_progress(status_blocked=...)` — no in-tree caller does this today; it is an API for external tooling. A repo-wide grep finds only the schema default (`core/db.py:2328-2367,853`), the empty seed (`core/progress.py:254`) and the read (`core/progress.py:254`) |
+| `open_todos` | JSON | PreCompact `extract_latest_todo_state(window)` via `ext["latest_todos"]` (`core/extractor.py:478-513,558`; `pre_compact.py:630,656`) → SessionStart tier-3 prior-transcript mine (`session_start.py:882`) → LAST RESORT `session_summary.next_steps` split by `;` (`session_start.py:882`). Only non-`completed` todos are kept (`progress.py:254`) |
 | `plan` | TEXT | `session_summaries.next_steps` — sourced from the latest TodoWrite pending items if any, else from LLM-extracted `task` memories (`pre_compact.py:462-468`); propagated at `progress.py:255`, filled-if-empty at `session_start.py:882` |
 | `critical_context` | JSON | Top 10 memories with importance ≥ 4, content truncated to 200 chars (`progress.py:107-113`; `session_start.py:882`) |
 | `files_touched` | JSON | `observations` table (`pre_compact.py:446-453` → `progress.py:128-134`; Stop per-turn patch `stop.py:193-211`; SessionStart tier-2C `session_start.py:882`) → tier-3 prior-transcript `extract_file_changes` (`session_start.py:882`) |
 | `transcript_ptr` | TEXT | PreCompact `transcript_path` resolved absolute (`pre_compact.py:750`) → tier-3 `find_latest_transcript(cwd, exclude_session_id=...)` (`session_start.py:881`) |
 | `updated_at` | TEXT | ISO timestamp, stamped by `upsert_progress` / `patch_progress` (`db.py:2199-2275`, `:937-943`) |
-| `trigger_type` | TEXT | "auto" \| "manual" (PreCompact passes the host's own trigger string through — `pre_compact.py:749,492`; `"precompact"` is only `collect_progress_state`'s default kwarg at `progress.py:200-260` and is always overridden) \| "stop" (`stop.py:464`) \| "user_prompt" \| "resume_request" (`user_prompt.py:193`) \| "session_start_refresh" (`session_start.py:825`) |
-| `current_session_id` | TEXT | `db.tag_progress_session` only (`db.py:2336-2360`) — tagged by PreCompact (`pre_compact.py:749`), Stop (`stop.py:464`), SessionStart (`session_start.py:825`), UserPromptSubmit (`user_prompt.py:193`) |
+| `trigger_type` | TEXT | "auto" \| "manual" (PreCompact passes the host's own trigger string through — `pre_compact.py:749,492`; `"precompact"` is only `collect_progress_state`'s default kwarg at `progress.py:200-260` and is always overridden) \| "stop" (`stop.py:534`) \| "user_prompt" \| "resume_request" (`user_prompt.py:193`) \| "session_start_refresh" (`session_start.py:825`) |
+| `current_session_id` | TEXT | `db.tag_progress_session` only (`db.py:2369-2393`) — tagged by PreCompact (`pre_compact.py:749`), Stop (`stop.py:534`), SessionStart (`session_start.py:825`), UserPromptSubmit (`user_prompt.py:193`) |
 | `session_started_at` | TEXT | `db.tag_progress_session` — reset only when the stored sid changes; `upsert_progress` preserves both across a full rewrite (`db.py:2199-2275`) |
 
 The rendered Markdown (sections 0-7 in
@@ -368,8 +401,8 @@ from this row. Hand-editing PROGRESS.md is pointless: any of the four automatic
 update paths (PreCompact / Stop / UserPromptSubmit / SessionStart refresh) —
 plus the two manual regenerators, `/cc-mem progress` (`cli/mem.py:1238`) and the
 MCP `progress_regenerate` tool (`mcp/server.py:742`) — will overwrite it.
-All six `write_progress_md` call sites: `pre_compact.py:751`, `stop.py:403`,
-`user_prompt.py:209`, `session_start.py:948`, `cli/mem.py:1287`,
+All six `write_progress_md` call sites: `pre_compact.py:751`, `stop.py:473`,
+`user_prompt.py:209`, `session_start.py:948`, `cli/mem.py:1370`,
 `mcp/server.py:243`.
 
 ### Rendered layout (§0-§7)
@@ -407,16 +440,16 @@ whitespace-flattened and truncated at 100 chars (`:210-234`).
    - Triggered: Claude Code's automatic compaction OR manual `/compact`.
    - `collect_progress_state(...)` builds the full state from
      `extracted_memories + observations + session_summaries`
-     (`progress.py:332`).
+     (`progress.py:333`).
    - `db.tag_progress_session(...)` runs FIRST so the tag survives
-     (`pre_compact.py:749`; see the preservation logic at `db.py:2336-2360`).
+     (`pre_compact.py:749`; see the preservation logic at `db.py:2369-2393`).
    - `db.upsert_progress(**all_fields)` overwrites the row (`pre_compact.py:750`).
    - `write_progress_md(db, pid, memory_dir)` rewrites the file (`:501`).
 
 2. **Stop** (partial update, every turn):
    - `db.tag_progress_session(...)` then
      `db.patch_progress(files_touched=<from observations>, trigger_type="stop")`
-     (`stop.py:389`, `:211`).
+     (`stop.py:459`, `:211`).
    - `write_progress_md(...)` rewrites the file with the patched state (`:213`).
    - This keeps "Files Touched This Session" current without waiting for the
      next compaction.
@@ -596,7 +629,7 @@ unstable.
 
 Both share the same SQLite database (`plan_active` and `progress` tables
 respectively) so they cannot drift out of sync with their source of truth.
-`write_plan_md` (`core/plan.py:630-678`) is a full rewrite from the row, and
+`write_plan_md` (`core/plan.py:683-731`) is a full rewrite from the row, and
 the generated file carries a DO-NOT-EDIT banner naming the SQL table and the
 three legitimate edit entries (`core/plan.py:257-260`).
 
@@ -747,7 +780,7 @@ When `TodoWrite` is observed, `core.plan.sync_todos_to_steps`
    is (`:215-223`).
 
 The whole path is mechanical — no LLM. `apply_todowrite_sync`
-(`core/plan.py:1149-1190`) persists the updated plan and rewrites PLAN.md, but
+(`core/plan.py:1202-1243`) persists the updated plan and rewrites PLAN.md, but
 returns `{"skipped": "no_active_plan"}` without touching anything if there is no
 row or the stored `structured` is not schema-valid (`:551-554`).
 
@@ -882,7 +915,7 @@ Then re-pipe the JSON through `/cc-mem plan-set --from-refiner`.
 
 #### Door 2 — CLEAR (`/cc-mem plan-clear`)
 
-`cmd_plan_clear` (`cli/mem.py:1612-1641`) refuses with exit 1 when
+`cmd_plan_clear` (`cli/mem.py:1734-1764`) refuses with exit 1 when
 `unfinished_steps(row["structured"])` is non-empty and no `--reason` was given
 (`:788-798`):
 
@@ -897,7 +930,7 @@ Then re-pipe the JSON through `/cc-mem plan-set --from-refiner`.
 Resolve by re-running with `--reason "<why>"`. The reason is not decoration —
 it is written into the archive payload. Only after the gate passes does the
 command archive, `db.clear_plan_active(pid)`, and delete `memory/PLAN.md` +
-`memory/.plan_raw.md` (`cli/mem.py:1649`).
+`memory/.plan_raw.md` (`cli/mem.py:1760`).
 
 #### Backstop — append-only plan history
 
@@ -924,7 +957,7 @@ denial-of-service on planning.
 
 ### Nudge thresholds
 
-Hardcoded defaults in `core/plan.py:1231-1247` (`turn_threshold=8`,
+Hardcoded defaults in `core/plan.py:1248-1264` (`turn_threshold=8`,
 `edit_threshold=12`); the Stop hook calls `should_nudge_guardian(plan_row)` with
 no overrides (`hooks/stop.py`). There is NO `config.json` key for these —
 change the signature defaults, or pass explicit kwargs. The `+20` sensitive-call
@@ -952,8 +985,10 @@ the drift guardian all answered from the *previous* plan.
 
 What is true now: `core.plan.blocking_reasons` returns the conditions that must
 stop a turn, and `hooks/stop.py:_emit_block` writes
-`{"decision": "block", "reason": …}` to stdout and exits 0. Three properties
-are load-bearing and a change must not break any of them:
+`{"decision": "block", "reason": …}` to stdout and exits 0. Six properties
+are load-bearing and a change must not break any of them (this line said
+"three" while the list below held four — the count is now maintained with the
+list):
 
 1. **The escape budget always releases.** After `_BLOCK_MAX_CONSECUTIVE`
    refusals of the *same condition set* the hook degrades to a loud advisory,
@@ -987,13 +1022,41 @@ are load-bearing and a change must not break any of them:
    neglect; the fix is a clock that never resets, not a cleverer comparison
    against one that does.
 
-   The stamp is written by `db.upsert_directive` and `db.set_directive_status`
-   **inside their own `BEGIN IMMEDIATE`**, read from the database rather than
-   supplied by the caller. Do not push it out to callers: each would have to
-   know that idleness is counted in plan turns, and the one that forgot would
-   write a row that can never be seen as idle. A status change stamps too — a
-   reopened directive would otherwise be instantly "idle" by however many turns
-   passed while it was closed.
+   The stamp is written by `db.upsert_directive`, `db.edit_directive` and
+   `db.set_directive_status` **inside their own `BEGIN IMMEDIATE`**, read from
+   the database rather than supplied by the caller. Do not push it out to
+   callers: each would have to know that idleness is counted in plan turns, and
+   the one that forgot would write a row that can never be seen as idle. A
+   status change stamps too — a reopened directive would otherwise be instantly
+   "idle" by however many turns passed while it was closed.
+
+5. **Idle enforcement skips what cannot be worked (v2.12.0).** Two shapes,
+   both from the Autoshop field report, where the only way to silence the
+   block was re-stating the directive — which inflated `times_stated`, the
+   ledger's one importance signal:
+
+   - **`status = 'blocked'`** parks a directive that is waiting on the *user*
+     (material to deliver, a decision to make). The idle scan reads
+     `status='active'` rows only, so a parked directive accrues nothing;
+     `/cc-mem directive-edit <slug> --status active` un-parks it. Blocked is
+     not closed: `directive-close` and its evidence gate are untouched, and
+     `directive-edit --status` accepts only `active`/`blocked` so the edit
+     door cannot bypass that gate.
+   - **`kind = 'constraint'`** marks a standing PROHIBITION — "never commit
+     the token" — with no recordable positive action by construction. Its
+     success is that nothing happens; it is enforced by being injected, never
+     by being "worked", so `core.plan.blocking_reasons` skips the kind
+     entirely. The skip lives in `blocking_reasons` (the policy point), not
+     in the idle scan — one place, or the two drift.
+
+6. **An edit is not a statement.** `times_stated` is the importance signal
+   and `directive-list` sorts by it, so the ONLY path that may bump it is
+   `directive-add` (a genuine re-statement). `db.edit_directive` corrects
+   `demand`/`quote`/`kind`/`status` without touching the count or
+   `last_seen_at`, and **refuses to create** (an edit door that creates is a
+   second upsert with divergent defaults). Measured need: nine reference
+   repairs through `directive-add` inflated nine counts, and the most-EDITED
+   directives outranked the most-DEMANDED ones.
 
 Kill switch: `CC_MEMORY_PLAN_ENFORCE=0` (`core.plan.enforcement_enabled`).
 `/cc-mem plan-check` remains the way to request a guardian sweep explicitly; it
@@ -1006,6 +1069,32 @@ Stored directive text is escaped on the way in (`db.upsert_directive` →
 which makes it a higher-authority channel than PROGRESS.md — a directive whose
 `demand` could forge a `<system-reminder>` reached the model verbatim before
 both halves were in place.
+
+#### Directives reference plan steps by TITLE, never by number (v2.12.0)
+
+A directive outlives every plan; a step id is assigned by position and dies
+with the plan that assigned it. Text like "先做步骤 12" pins a long-lived row
+to a short-lived coordinate, and the R610 gate cannot help: it guarantees no
+*step* is lost across a replacement, and says nothing about text in another
+table that points at one. Measured in the Autoshop project (2026-08-25), two
+replans (23 → 12 → 14 steps) left **11 dead references** (step numbers that
+no longer exist) and **4 silently retargeted ones** — references that still
+resolve, read correctly, and point at the wrong work, which is strictly more
+dangerous than a dead one.
+
+The rule is lexical, so the machinery is advisory, not a gate:
+
+- **Write time** — `directive-add` and `directive-edit` warn when the text
+  matches an ordinal step reference (`core/plan.py:_STEP_REF_RE` — `步骤 N`,
+  `step #N`, bare `#N`), while the author can still switch to the title.
+- **Replacement time** — `/cc-mem plan-set --from-refiner` runs
+  `core.plan.stale_directive_step_refs` over every ACTIVE directive against
+  the outgoing and incoming step tables, and names each finding as `dead` or
+  `retargeted` (title carry judged at the carryover gate's own bar,
+  `_carried`). Advisory by design: the rot lives in the ledger, and refusing
+  the *plan* over it would hold the fix hostage. The repair path it prints is
+  `directive-edit` — the no-count-bump door, so nine repairs no longer
+  reorder the ledger.
 
 ### Subagent contracts
 
@@ -1061,7 +1150,7 @@ if no raw text is stored (`:815-817`).
 
 ### Sensitive-tool list
 
-`core.plan.is_sensitive_tool_call` (`core/plan.py:1231-1254`) flags these Bash
+`core.plan.is_sensitive_tool_call` (`core/plan.py:1284-1307`) flags these Bash
 patterns — case-insensitive substring match on the `command` input, `Bash` tool
 only — for an immediate guardian-nudge bump (+20 edits):
 

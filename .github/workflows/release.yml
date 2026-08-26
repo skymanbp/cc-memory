@@ -1,0 +1,152 @@
+name: release binaries
+
+# The two Windows executables used to be built and verified on the
+# maintainer's machine (scripts/build_exe.py by hand). This workflow moves
+# that onto CI: push a `v*` tag and the release — with both exes attached —
+# is built from exactly the tagged commit, after the same eleven gates that
+# guard every push.
+#
+# The v2.5.4 invariant "verify the exes by RUNNING them, not by reading the
+# PE header" is a step here, not a sentence: the installer performs a real
+# --cli install and --uninstall against a sandboxed HOME, and the dashboard
+# is launched once. Reading the header is what let an argument-handling
+# defect ship three times.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    # Manual runs build + verify + upload the artifact, but publish nothing:
+    # the release step is gated on an actual tag ref below.
+
+permissions:
+  contents: write   # gh release create
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false   # never cancel a half-published release
+
+jobs:
+  build-and-release:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: tag matches the canonical version
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          # core/version.py is THE version (CLAUDE.md); a tag that disagrees
+          # with the commit it points at would publish exes that report a
+          # different version than their release page.
+          $v = python -c "import sys; sys.path.insert(0, 'cc_memory'); from core.version import __version__; print(__version__)"
+          if ("v$v" -ne "${{ github.ref_name }}") {
+            throw "tag ${{ github.ref_name }} != core/version.py v$v"
+          }
+
+      - name: run every release gate
+        # Same command as gates.yml. Tag pushes do not trigger that workflow
+        # (it watches branches), so the release build re-runs the full set —
+        # a tag on an unguarded commit must not become a release.
+        run: python tests/run_gates.py
+
+      - name: build both executables
+        run: |
+          pip install pyinstaller
+          python scripts/build_exe.py
+
+      - name: run the installer exe against a sandboxed HOME
+        run: |
+          # Path.home() on Windows reads USERPROFILE, so pointing it (and
+          # HOME, for any POSIX-style probe) at a scratch directory makes the
+          # install land there and nowhere near the runner's real profile.
+          $sandbox = Join-Path $env:RUNNER_TEMP 'ccm-exe-sandbox'
+          New-Item -ItemType Directory -Force $sandbox | Out-Null
+          $env:USERPROFILE = $sandbox
+          $env:HOME = $sandbox
+
+          & dist\cc-memory-installer.exe --cli
+          if ($LASTEXITCODE -ne 0) { throw "installer --cli exited $LASTEXITCODE" }
+
+          # The standalone layout is FLAT (no cc_memory/ segment) and ships
+          # the five user-facing surfaces — assert the layout actually landed
+          # rather than trusting the exit code alone.
+          foreach ($rel in @('.claude\hooks\cc-memory\core\db.py',
+                             '.claude\hooks\cc-memory\cli\mem.py',
+                             '.claude\hooks\cc-memory\config.json',
+                             '.claude\settings.json',
+                             '.claude\commands\cc-mem.md',
+                             '.claude\agents\plan-refiner.md',
+                             '.claude\skills\ccm-load\SKILL.md')) {
+            if (-not (Test-Path (Join-Path $sandbox $rel))) {
+              throw "missing after install: $rel"
+            }
+          }
+
+          & dist\cc-memory-installer.exe --uninstall
+          if ($LASTEXITCODE -ne 0) { throw "installer --uninstall exited $LASTEXITCODE" }
+          if (Test-Path (Join-Path $sandbox '.claude\commands\cc-mem.md')) {
+            throw "surface survived uninstall"
+          }
+          # logs/ surviving uninstall is by design — deliberately not asserted.
+
+          & dist\cc-memory-installer.exe --no-such-flag
+          if ($LASTEXITCODE -ne 2) {
+            throw "unknown flag exited $LASTEXITCODE, expected refusal (2) - the --unistall regression"
+          }
+
+      - name: run the dashboard exe
+        timeout-minutes: 5
+        run: |
+          # --windowed app: a console `&` call does not wait, and an import
+          # crash surfaces as a modal dialog rather than stderr — so launch
+          # it, wait, and judge the exit code. argparse --help exits 0 before
+          # any Tk window is created; the step timeout bounds a hung dialog.
+          $p = Start-Process -FilePath 'dist\cc-memory-dashboard.exe' `
+                 -ArgumentList '--help' -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "dashboard --help exited $($p.ExitCode)" }
+
+      - name: upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: cc-memory-exes-${{ github.ref_name }}
+          path: dist/*.exe
+          if-no-files-found: error
+
+      - name: publish the GitHub release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # The release body is the CHANGELOG section for this version,
+          # verbatim — CHANGELOG.md is the single history, the release page
+          # quotes it. The extractor fails loud when the section is absent,
+          # so a tag the CHANGELOG does not know about cannot publish.
+          python scripts/release_notes.py "${{ github.ref_name }}" `
+            --out notes.md --title-out title.txt
+          if ($LASTEXITCODE -ne 0) { throw "release_notes.py exited $LASTEXITCODE" }
+          # Read the title back as UTF-8 explicitly: the em dash in it is
+          # exactly the character the console codepage would mangle.
+          $title = [IO.File]::ReadAllText('title.txt', [Text.Encoding]::UTF8).Trim()
+
+          # SHA256SUMS.txt in `sha256sum` format, as every release since
+          # v2.11.x has shipped, so a downloader can verify the exe they got
+          # is the exe CI built. Python writes the file itself: piping
+          # through Out-File -NoNewline would concatenate the two lines.
+          python -c "import hashlib,pathlib; d=pathlib.Path('dist'); (d/'SHA256SUMS.txt').write_text(''.join(f'{hashlib.sha256(p.read_bytes()).hexdigest()}  {p.name}\n' for p in sorted(d.glob('*.exe'))), encoding='ascii', newline='\n')"
+          if ($LASTEXITCODE -ne 0) { throw "SHA256SUMS generation exited $LASTEXITCODE" }
+          Get-Content dist/SHA256SUMS.txt
+
+          gh release create "${{ github.ref_name }}" `
+            'dist/cc-memory-installer.exe' 'dist/cc-memory-dashboard.exe' `
+            'dist/SHA256SUMS.txt' `
+            --title "$title" `
+            --notes-file notes.md `
+            --verify-tag
+          if ($LASTEXITCODE -ne 0) { throw "gh release create exited $LASTEXITCODE" }

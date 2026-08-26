@@ -135,10 +135,17 @@ cc-memory/
 │   ├── cli/                     ← mem.py, plan.py
 │   ├── mcp/                     ← server.py (MCP stdio)
 │   └── ui/                      ← installer, dashboard, web_viewer
-├── tests/                       ← smoke_test.py (canonical end-to-end) +
-│                                  test_plan_carryover.py + test_surfaces.py
-├── tools/i18n_check.py          ← doc-translation drift checker (dev/CI only)
-├── build_exe.py                 ← PyInstaller build
+├── .github/workflows/           ← gates.yml (every gate, on push/PR) +
+│                                  release.yml (tag → gates → exes → RUN
+│                                  them → GitHub Release, v2.12.0)
+├── tests/                       ← run_gates.py (THE gate runner) + the four
+│                                  suites: smoke_test, test_plan_carryover,
+│                                  test_surfaces, test_directive_enforcement
+├── tools/                       ← dev/CI checkers, never packaged: i18n_check,
+│                                  citation_check, doc_claims, doc_coverage,
+│                                  contracts, falsify_fixes
+├── scripts/                     ← build_exe.py (PyInstaller) +
+│                                  release_notes.py (CHANGELOG → release body)
 ├── pyproject.toml
 ├── README.md
 ├── README.zh.md                 ← drift-tracked translation (see §9)
@@ -210,9 +217,9 @@ would falsify the record.
 | Hook | Entry | Timeout | Job |
 |------|-------|---------|-----|
 | `PreCompact` (sync) | [`cc_memory/hooks/pre_compact.py`](../cc_memory/hooks/pre_compact.py) | 120s | Read a BOUNDED head+tail transcript window (`extractor.load_transcript_window`); LLM extract memories via Haiku; route through `memory_writer.upsert_batch`; FULL-REWRITE `memory/PROGRESS.md`; archive session. Writes a start marker so a killed run is detectable. |
-| `PreCompact` (async) | [`cc_memory/hooks/consolidate_async.py`](../cc_memory/hooks/consolidate_async.py) | 300s, `async: true` | Every-Nth-session LLM consolidation, moved OFF the blocking compaction path in v2.3.2 (interval marker + lock, budget-gated). |
+| `PreCompact` (async) | [`cc_memory/hooks/consolidate_async.py`](../cc_memory/hooks/consolidate_async.py) | 300s, `async: true` | LLM consolidation, moved OFF the blocking compaction path in v2.3.2 (interval marker + lock, budget-gated). Due every Nth session OR when the write backlog says so (v2.12.0); also spawnable standalone (`--cwd <root>`) by the Stop hook's backpressure probe. |
 | `SessionStart` | [`cc_memory/hooks/session_start.py`](../cc_memory/hooks/session_start.py) | 15s | Inject layered context (topics / critical / timeline / PROGRESS preview / footer); emit the FORCED `<system-reminder>` to Read `PROGRESS.md` + `MEMORY.md`; retroactive save of unsaved JSONLs. |
-| `Stop` | [`cc_memory/hooks/stop.py`](../cc_memory/hooks/stop.py) | 22s | Observer: extract from last turn's observations via Haiku; per-turn `patch_progress(files_touched, ...)`; every 5 turns run `idle.maybe_run_idle` (cleanup + MEMORY.md regen); when a plan is active, bump its turn counter and emit ONE advisory line — the plan-refiner nudge if the plan is still unrefined, else a guardian-check nudge once drift thresholds trip. |
+| `Stop` | [`cc_memory/hooks/stop.py`](../cc_memory/hooks/stop.py) | 22s | Observer: extract from last turn's observations via Haiku; per-turn `patch_progress(files_touched, ...)`; every 5 turns run `idle.maybe_run_idle` (cleanup + MEMORY.md regen); probe the consolidation backlog and spawn the detached async worker when it is due (v2.12.0); when a plan is LIVE, bump its turn counter and **enforce** — refuse the turn (`{"decision": "block"}`) over an unrefined plan, an undrift-checked plan, or an idle directive, with the escape budget CONTRACTS.md specifies (v2.11.0; the advisory nudge this row used to describe is gone). |
 | `PostToolUse` | [`cc_memory/hooks/post_tool_use.py`](../cc_memory/hooks/post_tool_use.py) | 8s | Live-plan integration FIRST, in every mode: `ExitPlanMode` → `plan_active.raw`, `TodoWrite` → mechanical step sync, `Edit`/`Write`/`MultiEdit`/`NotebookEdit` → +1 drift counter, sensitive Bash call → +20. THEN one row into `observations`, for OBSERVED tool calls only (mode allowlist / skip list — `core.modes.should_observe`). No LLM. Measured ~180-290 ms end to end, of which ~75-120 ms is interpreter start-up. |
 | `UserPromptSubmit` | [`cc_memory/hooks/user_prompt.py`](../cc_memory/hooks/user_prompt.py) | 8s | Auto-init `memory/` on first contact; track turn count; save prompt for the Stop observer; on turn 1, tag the session and seed `progress.current_request` (typing the trigger `resume_request` vs `user_prompt` from the bilingual resume-signal whitelist). |
 
@@ -226,7 +233,7 @@ Each hook's stdout has a specific role, and violating it is a user-visible bug:
 - `PreCompact` (sync) stdout → ONE status line (shows in the next session's
   compacted context).
 - `PreCompact` (async) / `PostToolUse` / `UserPromptSubmit` stdout → empty. The
-  async leg's stdout is not shown inline at all (`consolidate_async.py:31`).
+  async leg's stdout is not shown inline at all (`consolidate_async.py:37`).
 
 ### PreCompact: why two legs
 
@@ -239,16 +246,35 @@ the event:
   PROGRESS.md, ~1-5s; `pre_compact.py:5-20`).
 - The **async leg** runs `core.consolidate.run_consolidation` under a
   `BudgetGate` with `_BUDGET_TOTAL_S = 240.0` and `_BUDGET_SAFETY_S = 8.0`
-  (`consolidate_async.py:65`), so the last LLM call it starts finishes by
+  (`consolidate_async.py:70`), so the last LLM call it starts finishes by
   `total_s - safety_s` = 232s < the hook's own 300s timeout — the worker is
   never killed mid-write.
 - Cadence is an **interval marker + lock**, not a fragile
   `session_count % N` check: `memory/.last_consolidation.json` records the
   session count at the last successful run and
   `memory/.consolidation.lock` prevents overlapping workers (a lock older than
-  `_STALE_LOCK_S = 360.0`, `consolidate_async.py:69`, is reclaimed). This is
+  `_STALE_LOCK_S = 360.0`, `consolidate_async.py:74`, is reclaimed). This is
   race-immune against the concurrent sync leg — a ±1 drift in the count can
   cause neither a double-run nor a miss (`consolidate_async.py:19-28`).
+- **Backpressure is the third trigger (v2.12.0).** The sessions interval
+  assumes compactions happen; a project worked in short sessions never
+  compacts, and starved — measured on this repository, 349 rows written in
+  one month against a 17-day-old marker, with SessionStart injecting topic
+  summaries three minor versions stale.
+  `core.consolidate.consolidation_backlog` reads the marker's
+  `last_memory_id` row-id watermark and declares a run due at 50
+  unconsolidated rows, or 7 days with ≥ 10 new rows. The Stop hook probes it
+  every turn (one COUNT query, `stop.py:_maybe_kick_consolidation`) and
+  spawns the SAME async worker detached (`consolidate_async.py --cwd`); the
+  worker re-checks under the lock, so a racing spawn is a no-op, and a
+  `.consolidation.kick` cooldown (10 min) bounds respawn of a failing
+  worker. Marker I/O is shared with the manual CLI path
+  (`core.consolidate.read_consolidation_marker` /
+  `write_consolidation_marker`), which now stamps the marker too — and
+  `/cc-mem consolidate --deep` loops the semantic-dedup judge until dry
+  (`core.consolidate.deep_dedup`) to pay a backlog down in one sitting. Full
+  cadence contract:
+  [CONTRACTS.md § When consolidation actually runs](CONTRACTS.md#when-consolidation-actually-runs-v2120--backpressure).
 
 ### Timeouts are declared twice and must stay in lockstep
 
@@ -325,17 +351,17 @@ project-local at `<project>/memory/memory.db`, WAL mode:
 | `observations` | Raw PostToolUse events, cleaned up after extraction (`db.py:131`) |
 | `session_summaries` | 6-field structured summary per session (request / investigated / learned / completed / next_steps / notes) + files_read/files_modified (`db.py:144`) |
 | **`progress`** | NEW in v2.1 — single row per project. SOT for `memory/PROGRESS.md` (`db.py:188`). |
-| **`plan_active`** | NEW in v2.2 — single row per project. SOT for `memory/PLAN.md` (`db.py:210`). Carries `turns_total` since `v9_plan_turns_total`: a MONOTONIC turn count that nothing resets, distinct from `turns_since_last_guardian`, which every guardian check and plan replacement zeroes |
-| **`directives`** | NEW in v2.11.0 — the user-INTENT ledger. `times_stated` accumulates on ONE row per `slug`; a directive outlives every plan, which is why it is not plan steps. Carries `turns_at_touch` since `v9_directives_turns_at_touch` — the value of `turns_total` when it was last written, so idleness is subtraction between two monotonic numbers |
-| `_migrations` | Tracks applied migrations (`db.py:289`) |
+| **`plan_active`** | NEW in v2.2 — single row per project. SOT for `memory/PLAN.md` (`db.py:212`). Carries `turns_total` since `v9_plan_turns_total`: a MONOTONIC turn count that nothing resets, distinct from `turns_since_last_guardian`, which every guardian check and plan replacement zeroes |
+| **`directives`** | NEW in v2.11.0 — the user-INTENT ledger. `times_stated` accumulates on ONE row per `slug`; a directive outlives every plan, which is why it is not plan steps. Carries `turns_at_touch` since `v9_directives_turns_at_touch` — the value of `turns_total` when it was last written, so idleness is subtraction between two monotonic numbers. Since v2.12.0 `status` may also be `blocked` (parked on the user, idle-exempt) and `kind` may be `constraint` (a standing prohibition, idle-exempt) — vocabulary additions, no schema change; only `directive-add` may bump the count (`directive-edit` corrects fields without touching it) |
+| `_migrations` | Tracks applied migrations (`db.py:651`) |
 
 Twelve tables, matching `CLAUDE.md` § "Database schema (12 tables)".
 
 Plus `memories_fts` — an FTS5 virtual table over `memories` (`core/db.py:455-458`),
 kept in sync by three triggers (`core/db.py:459-478`, migration `v2_fts5` at
-`db.py:2742-2776`). It is created only when the local SQLite build has FTS5; otherwise
-`db.search_fts` (`core/db.py:2742-2776`) falls back to `LIKE ? ESCAPE '\'`
-(`core/db.py:2742-2776`). FTS5 is advertised in `.claude-plugin/plugin.json:4`
+`db.py:2906-2940`). It is created only when the local SQLite build has FTS5; otherwise
+`db.search_fts` (`core/db.py:2906-2940`) falls back to `LIKE ? ESCAPE '\'`
+(`core/db.py:2906-2940`). FTS5 is advertised in `.claude-plugin/plugin.json:4`
 and `:12`, and `/cc-mem status` reports which path is live (`cli/mem.py`,
 `cmd_status`).
 
@@ -343,11 +369,11 @@ The `supersedes_id` column on `memories` (migration `v3_supersedes`,
 `db.py:168`) makes the anti-patch chain explicit: when `upsert_smart` decides a
 new memory supersedes an old one, the new row links back to the old row's ID
 (and the old row is archived). Walking the chain via
-`db.get_supersede_chain(memory_id)` (`db.py:1414-1429`) shows the full update
-history. `content_hash` (migration `v2_content_hash`, `db.py:1414-1429`) is
+`db.get_supersede_chain(memory_id)` (`db.py:1447-1462`) shows the full update
+history. `content_hash` (migration `v2_content_hash`, `db.py:1447-1462`) is
 `sha256[:16]` of the normalized content, used for the cheap exact-duplicate
-check (`db.compute_content_hash` at `db.py:1969-1971`, `db.find_by_hash` at
-`db.py:1969-1971`).
+check (`db.compute_content_hash` at `db.py:2002-2004`, `db.find_by_hash` at
+`db.py:2002-2004`).
 
 Migrations are applied in order from the `_MIGRATIONS` list (`db.py:121-284`) and
 recorded in `_migrations`. Levels shipped so far: **v1** (topic column +
@@ -429,8 +455,8 @@ caller's responsibility, and there are exactly two shapes:
   PreCompact leg additionally touches it again after the rest of its state
   changes (`pre_compact.py:782`).
 - Single-shot callers call `regenerate_memory_index` explicitly:
-  `cli/mem.py:1099` and `:584`, `mcp/server.py:644`, `ui/dashboard.py:1664`,
-  `ui/web_viewer.py:325`, plus the `skills/ccm-load` inline script
+  `cli/mem.py:1125` and `:584`, `mcp/server.py:644`, `ui/dashboard.py:1664`,
+  `ui/web_viewer.py:1034`, plus the `skills/ccm-load` inline script
   (`skills/ccm-load/SKILL.md:308, 318`). `core/idle.py:96` and
   `hooks/consolidate_async.py:188` also refresh it after maintenance.
 
@@ -531,8 +557,8 @@ SessionStart:
 
 Call signatures above are the real ones: `write_progress_md(db, project_id,
 memory_dir)` (`core/progress.py:331-490`; call sites `pre_compact.py:751`,
-`stop.py:399`, `user_prompt.py:133`, `session_start.py:912`, `mcp/server.py:243`,
-`cli/mem.py:1189`). See
+`stop.py:473`, `user_prompt.py:133`, `session_start.py:912`, `mcp/server.py:243`,
+`cli/mem.py:1216`). See
 [docs/CONTRACTS.md](CONTRACTS.md#handoff-contract) for the PROGRESS.md
 schema.
 
@@ -601,11 +627,14 @@ normalises it to JSON, written back via `/cc-mem plan-set --from-refiner`;
 LLM); `Edit`/`Write`/`MultiEdit`/`NotebookEdit` bump
 `edits_since_last_guardian`, and sensitive Bash calls (`git push`, `rm -rf`,
 `DROP TABLE`, `npm publish`, `kubectl apply`, `terraform apply`, … —
-`core.plan.is_sensitive_tool_call`, `plan.py:1231-1254`) bump it by 20. The Stop hook
-emits the guardian advisory once `turns_since_last_guardian >= 8` OR
-`edits_since_last_guardian >= 12` (`core.plan.should_nudge_guardian`,
-`plan.py:1231-1247`), and rate-limits the refiner nudge to once every 5 turns per
-session. Hooks never spawn subagents themselves — they only nudge. Full spec:
+`core.plan.is_sensitive_tool_call`, `plan.py:1284-1307`) bump it by 20. Once
+`turns_since_last_guardian >= 8` OR `edits_since_last_guardian >= 12`
+(`core.plan.should_nudge_guardian`, `plan.py:1248-1264`), the Stop hook
+**refuses the turn** rather than advising (v2.11.0 — the rate-limited nudge
+this sentence used to describe is deleted; see
+[CONTRACTS.md](CONTRACTS.md#the-stop-hook-can-refuse-the-turn-v2110) for the
+escape budget). Hooks never spawn plan subagents themselves — the refusal
+tells the main Claude to. Full spec:
 [docs/CONTRACTS.md](CONTRACTS.md#plan-contract). Every branch above runs in
 every mode since v2.5 — see
 [the observation gate](#the-observation-gate-no-longer-shadows-the-plan-branches-fixed-in-v25)
@@ -646,7 +675,7 @@ does not retry, `core/auth.py:60-93`); it also carries the `oauth_expired`
 signal behind SessionStart's "[WARNING: OAuth expired — LLM extraction
 disabled]" footer (`session_start.py:594`). Hook callers use it to *supply*
 the credential passed into `call_llm`: `pre_compact.py:80 → :166`,
-`stop.py:85`, `session_start.py:594`, `core/consolidate.py:424, 549, 724`.
+`stop.py:85`, `session_start.py:594`, `core/consolidate.py:425, 549, 724`.
 
 Fall-through was added in v2.3.4 for a concrete failure: a dead env key (e.g.
 zero credit → HTTP 400) used to blackhole the healthy subscription token behind
@@ -732,8 +761,10 @@ Per-project state lives at `<project>/memory/`:
 ├── PLAN.md                      full-rewrite from `plan_active` row (v2.2)
 ├── .last_save.json              status from last PreCompact (incl. auto/manual trigger)
 ├── .last_inject.json            what SessionStart actually injected (v2.3)
-├── .last_consolidation.json     session count at last consolidation (v2.3.2)
+├── .last_consolidation.json     session count + row-id watermark at last
+│                                consolidation (v2.3.2; watermark v2.12.0)
 ├── .consolidation.lock          prevents overlapping async workers (v2.3.2)
+├── .consolidation.kick          backpressure spawn cooldown (v2.12.0)
 ├── .pre_compact_attempt.json    start marker; survives ⇒ last run was killed (v2.4.2)
 ├── .plan_raw.md                 last raw ExitPlanMode capture (v2.2)
 ├── .plan_history/               append-only archive of replaced/cleared plans (v2.4.0)
@@ -747,11 +778,14 @@ Per-project state lives at `<project>/memory/`:
 Writers, for traceability: `MEMORY.md` ← `memory_writer.regenerate_memory_index`
 (`memory_writer.py:261-370`); `PROGRESS.md` ← `core.progress.write_progress_md`
 (`progress.py:331-490, 366`); `PLAN.md` ← `core.plan.write_plan_md`
-(`plan.py:630-678`); `.plan_history/` ← `plan.py:630-678`; `.last_save.json` ←
+(`plan.py:683-731`); `.plan_history/` ← `plan.py:683-731`; `.last_save.json` ←
 `pre_compact.py:737, 771`; `.last_inject.json` ← `session_start.py:291-309`
 (tempfile + `os.replace`, genuinely atomic, unlike the plain write used for
-`.last_save.json`); `.last_consolidation.json` / `.consolidation.lock` ←
-`consolidate_async.py:112-128`; `.pre_compact_attempt.json` ←
+`.last_save.json`); `.last_consolidation.json` ←
+`core.consolidate.write_consolidation_marker` (one writer, async hook + CLI);
+`.consolidation.lock` ← `_acquire_lock` (`consolidate_async.py:121-155`);
+`.consolidation.kick` ← `stop.py:_maybe_kick_consolidation`;
+`.pre_compact_attempt.json` ←
 `pre_compact.py:284-311`. `sessions/` and `topics/` are created by whichever
 path touches the project first — `user_prompt.py:57-63` on auto-init, or
 `pre_compact.py:342-343`.

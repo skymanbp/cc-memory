@@ -12,3 +12,4 @@ sessions/
 .plan_raw.md
 .plan_history/
 *.tmp
+.consolidation.kick

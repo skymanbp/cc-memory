@@ -6,10 +6,10 @@
 
 **Persistent memory for Claude Code.**
 Your project's decisions, results, bugs and plans survive compaction, session
-boundaries, and closed terminals — and the next session is *forced* to read
-them before it does anything.
+boundaries, and closed terminals — the next session is *forced* to read them
+before it does anything, and what is stored is *reconciled*, never stacked.
 
-[![version](https://img.shields.io/badge/version-2.11.4-blue.svg)](CHANGELOG.md)
+[![version](https://img.shields.io/badge/version-2.12.0-blue.svg)](CHANGELOG.md)
 [![license](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![python](https://img.shields.io/badge/python-3.8%2B-blue.svg)](pyproject.toml)
 [![dependencies](https://img.shields.io/badge/runtime%20deps-0-brightgreen.svg)](#requirements)
@@ -22,42 +22,51 @@ them before it does anything.
 
 ## Table of contents
 
-- [The problem](#the-problem)
-- [How it works in 60 seconds](#how-it-works-in-60-seconds)
+- [What this is](#what-this-is)
+- [The problem it attacks](#the-problem-it-attacks)
+- [What it does — six capabilities](#what-it-does--six-capabilities)
+- [How it works](#how-it-works)
+- [Why this one is different](#why-this-one-is-different)
 - [Quick start](#quick-start)
-- [Feature index](#feature-index)
-  - [1 · Memory capture](#1--memory-capture)
-  - [2 · Memory quality — the anti-patch contract](#2--memory-quality--the-anti-patch-contract)
-  - [3 · Session handoff — PROGRESS.md](#3--session-handoff--progressmd)
-  - [4 · Plan and intent — PLAN.md and the directive ledger](#4--plan-and-intent--planmd-and-the-directive-ledger)
-  - [5 · Search and retrieval](#5--search-and-retrieval)
-  - [6 · Interfaces](#6--interfaces)
-  - [7 · Privacy and safety](#7--privacy-and-safety)
-  - [8 · Reliability engineering](#8--reliability-engineering)
+- [Seen in the field](#seen-in-the-field)
+- [Measured numbers](#measured-numbers)
 - [Reference](#reference)
-  - [`/cc-mem` — 32 subcommands](#cc-mem--32-subcommands)
+  - [`/cc-mem` — 34 subcommands](#cc-mem--34-subcommands)
   - [`cc-memory-plan` — the plan queue](#cc-memory-plan--the-plan-queue)
   - [MCP tools](#mcp-tools)
   - [Configuration](#configuration)
   - [Per-project files](#per-project-files)
   - [Database schema](#database-schema)
   - [Hook table](#hook-table)
+- [Design philosophy](#design-philosophy)
 - [Architecture](#architecture)
 - [Development](#development)
 - [Troubleshooting](#troubleshooting)
-- [What's new in v2.11.3](#whats-new-in-v2113)
+- [Roadmap and known limits](#roadmap-and-known-limits)
+- [What's new in v2.12.0](#whats-new-in-v2120)
 - [Documentation map](#documentation-map)
 - [License](#license)
 
 ---
 
-## The problem
+## What this is
 
-Claude Code **compacts** a conversation when the context window fills. Whatever
-was in the discarded turns is gone: the decision you made three hours ago, the
-benchmark number you measured, the bug you already fixed once, the constraint
-you stated and had to state again. Sessions that simply end — terminal closed,
-laptop shut — lose the same thing, silently.
+A Claude Code plugin — six hooks <!--ce:hooks-->, a CLI, an MCP server, a desktop dashboard
+and a web viewer over one project-local SQLite database — that captures
+structured memories at every conversation boundary, **reconciles** each new
+fact against what is already stored instead of appending, hands the next
+session a forced-read handoff document, keeps a live plan anchor with an
+**enforced** user-intent ledger, and consolidates the store in the background
+when the write backlog says it is due. Pure Python standard library, zero
+runtime dependencies, everything on your machine.
+
+## The problem it attacks
+
+Claude Code **compacts** a conversation when the context window fills.
+Whatever was in the discarded turns is gone: the decision you made three hours
+ago, the benchmark number you measured, the bug you already fixed once, the
+constraint you stated and had to state again. Sessions that simply end —
+terminal closed, laptop shut — lose the same thing, silently.
 
 The usual workarounds do not survive contact with a long project:
 
@@ -67,16 +76,69 @@ The usual workarounds do not survive contact with a long project:
 | Pasting context back in each session | Manual, lossy, and costs the tokens you were trying to save |
 | Bigger context windows | Delays the compaction; does not remove it |
 | Append-only memory files | The same fact gets restated every session and stacks up; the file becomes noise |
+| A memory store nobody is forced to read | Injection that the next session may ignore is a suggestion, and suggestions lose to deadlines |
 
-cc-memory attacks all four. It captures structured memories at every
-conversation boundary, **reconciles** each new fact against what is already
-stored instead of appending, and emits a `<system-reminder>` at session start
-that requires the next Claude to read the handoff document **before** it
-responds.
+The last two rows are the ones most memory tools stop at, and they are where
+this project spends most of its engineering: **writes reconcile** (merge /
+supersede / insert, chosen by similarity — never append-and-hope), and **reads
+are forced** (a `<system-reminder>` at session start that requires the next
+Claude to read the handoff before responding — and a Stop hook that can refuse
+to end a turn while plan state is stale).
 
----
+## What it does — six capabilities
 
-## How it works in 60 seconds
+**Capability 1 — capture.** Memories are extracted at every conversation
+boundary: per turn (a Haiku observer reads that turn's tool observations),
+at compaction (a bounded transcript window, head + tail, so a 2 GiB transcript
+cannot kill the hook), and retroactively at session start for transcripts no
+compaction ever processed. AI-judged `{category, content, importance, topic}`
+records, with a project-neutral regex fallback when no credential is
+available. English and Chinese are both first-class.
+
+**Capability 2 — reconcile-on-write (the anti-patch contract).** Every save
+path routes through one writer that decides **SKIP** (exact duplicate),
+**MERGE** (near-identical restatement, rewritten in place), **SUPERSEDE**
+(the fact changed — archive the old row, link the new one to it), or
+**INSERT** (genuinely new). Nothing is ever deleted; superseded history stays
+walkable. Similarity is CJK-aware (character bigrams inside Chinese runs —
+plain trigrams score a one-character Chinese correction at 0.45 and would file
+every correction as a new contradictory fact).
+
+**Capability 3 — forced handoff.** `memory/PROGRESS.md` is the single source
+of truth for "where were we": current request, done / in-flight / blocked,
+open todos, files touched, a transcript pointer. Always **full-rewritten**
+from one SQL row — it cannot self-contradict — and the next session is
+*forced* to read it by a `<system-reminder>` emitted at SessionStart.
+`/cc-mem inject-usage` tells you whether that actually happened.
+
+**Capability 4 — plan anchor + directive ledger, enforced.** `memory/PLAN.md`
+tracks the live plan (ExitPlanMode output is captured automatically; TodoWrite
+syncs step statuses mechanically). Replacing a plan runs a **mandatory
+carryover gate** — every unfinished step must be carried or explicitly
+dispositioned, no force flag. Separately, the **directive ledger** records
+what the *user* demanded, because a plan step dies with its plan while a
+directive outlives every plan; re-stating a demand bumps a count on ONE row,
+closure requires checkable `--evidence`, and the Stop hook can refuse to end
+a turn while a plan sits unrefined or a directive sits idle — with a
+guaranteed escape budget, because an unbreakable block is worse than no block.
+
+**Capability 5 — retrieval and injection.** FTS5 full-text search, topic
+summaries, a keyword vocabulary, and a layered SessionStart injection (topics
++ critical memories + recent timeline + PROGRESS preview) under per-layer
+budgets. `.last_inject.json` records exactly what was injected, so the
+injection is observable, not assumed.
+
+**Capability 6 — consolidation with backpressure (v2.12.0).** Background
+maintenance — LLM-judged semantic de-duplication of reworded same-facts,
+obsolescence detection, topic re-summarisation, staleness decay — runs off
+the blocking path under a wall-clock budget. It triggers on compaction
+cadence **or on write backlog** (50 unconsolidated rows, or 7 stale days with
+new rows), because the cadence-only trigger starved projects that never
+compact: this repository measured 349 memories accumulated in one month
+against a 17-day-old consolidation marker. `/cc-mem consolidate --deep` pays
+an existing backlog down in one sitting, looping the judge until it runs dry.
+
+## How it works
 
 ```
 ┌──────────────────────── your Claude Code session ────────────────────────┐
@@ -90,6 +152,7 @@ responds.
 │                                                                          │
 │  Stop            ──▶ Haiku reads this turn's observations and writes      │
 │                       memories · patches PROGRESS.md · enforces the plan  │
+│                       · spawns background consolidation on write backlog  │
 │                                                                          │
 │  PreCompact      ──▶ sync leg  : extract from a bounded transcript window │
 │                       → reconcile → FULL-REWRITE PROGRESS.md → archive    │
@@ -111,7 +174,44 @@ git-ignored by a `.gitignore` cc-memory writes itself, and never leaves your
 machine except for the extraction call to Anthropic (which you can scope with
 `<private>` tags, or switch off per-project entirely).
 
----
+## Why this one is different
+
+Where most memory plugins are a vector store plus a prompt, cc-memory is
+built as **a data-integrity system that happens to store memories**. The
+specifics, each of which cost a measured defect to learn:
+
+- **Writes reconcile at write time, in one transaction.** The whole decision
+  tree — hash check, similarity scan, branch write — runs under a single
+  `BEGIN IMMEDIATE`, so two concurrent savers of the same sentence
+  cannot both insert it. "Append now, dedup later" is the design this project
+  exists to reject; later never comes under deadline.
+- **Reads are forced, and enforcement is real.** The handoff reminder is not
+  a hint — and since v2.11.0 the Stop hook can refuse to close a turn over
+  stale plan state, after a real project measured a 51,237-character plan
+  sitting unrefined while every plan reader answered from its predecessor,
+  and a user demand stated six separate times reached zero implementation.
+  Every refusal carries a bounded escape budget and a kill switch
+  (`CC_MEMORY_PLAN_ENFORCE=0`): an advisory that never fires and a block that
+  never releases are both failure modes, and both have tests.
+- **Nothing is interpolated raw into anything Claude reads.** Stored content
+  is escaped on the write path and again on every render path, because a
+  memory row that can forge a `<system-reminder>` into your next session is a
+  permanent prompt injection. The privacy filter fails **closed** (a dangling
+  `<private>` tag drops the remainder rather than leaking it), and so does an
+  unreadable `config.json` (it excludes every project rather than guessing).
+- **The gates can go red, and that is checked.** Eleven release gates run on
+  every change — four test suites, four documentation gates, plus build
+  checks. A falsification register (`tools/falsify_fixes.py`) reverts each
+  registered fix on a temporary copy and asserts its gate actually FAILS
+  there: a check that cannot go red is a comment that costs CI time. 166
+  registered breakage cases as of v2.12.0, every one driven red individually
+  before being kept.
+- **Documentation is under the same gates as code.** Every `file.py:LINE`
+  citation in the docs is mechanically verified against the tree; every
+  counted claim ("all six hooks…" <!--ce:hooks-->) is bound to a set computed from the code;
+  the Chinese documentation is hash-bound to its English source and drift
+  fails the build; and a gate asks whether each public surface is documented
+  at all — in both languages.
 
 ## Quick start
 
@@ -150,129 +250,107 @@ a project creates `<project>/memory/` and its database. Verify with:
 ```
 
 To opt a directory out completely, list it in `excluded_projects` — see
-[Configuration](#configuration).
+[Configuration](#configuration). To find where everything lives:
+`/cc-mem paths`.
 
----
+## Seen in the field
 
-## Feature index
+Real output, not mockups. Below: the anti-patch writer refusing to stack, then
+a deep consolidation run converging — captured verbatim from a v2.12.0 demo
+project on 2026-08-26.
 
-### 1 · Memory capture
+**Write-time reconciliation.** The same fact restated is skipped; a changed
+value supersedes its predecessor and the history stays walkable:
 
-| Feature | What it does |
+```text
+$ cc-mem add decision "Use SQLite WAL mode for the memory store"
+[inserted] #1 sim=0.00
+
+$ cc-mem add decision "Use SQLite WAL mode for the memory store"     # verbatim restatement
+[skipped] #1 (hash_match) sim=1.00
+
+$ cc-mem add config "PreCompact hook timeout is 45 seconds"
+[inserted] #5 sim=0.00
+
+$ cc-mem add config "PreCompact hook timeout is 120 seconds"         # the fact CHANGED
+[superseded] #5 -> #6 sim=0.77
+
+$ cc-mem supersedes 6
+Supersede chain for #6 (2 versions, newest first):
+  v2  #6  [ACTIVE]    config   PreCompact hook timeout is 120 seconds
+  v1  #5  [archived]  config   PreCompact hook timeout is 45 seconds
+```
+
+**Deep consolidation.** Rewordings that score below the lexical thresholds
+(a paraphrase measured at sim 0.45 in the same demo) are exactly what the
+LLM judge exists for — `--deep` loops it until a round confirms nothing new:
+
+```text
+$ cc-mem consolidate --deep
+deep dedup round 1: 1 group(s) judged, 1 archived
+deep dedup round 2: 1 group(s) judged, 1 archived
+deep dedup round 3: 0 group(s) judged, 0 archived
+consolidation done: 2 active memories
+```
+
+Six writes, two surviving facts, zero data destroyed — every archived row is
+`is_active=0` and recoverable.
+
+**What a session sees at start** (the injection is real context, layered under
+a token budget, and logged to `.last_inject.json`):
+
+```text
+=== CC-MEMORY: Context Restored ===
+Project: cc-memory  |  2026-08-26 15:06
+### Knowledge Base (by topic)
+**[testing]** Testing infrastructure spans five core suites: …
+**[release]** The cc-memory project has completed release cycles through v2.11 …
+### Critical memories
+- #506 [release] v2.9.0 released with commit 0313339, tag v2.9.0 …
+### <system-reminder>
+You MUST Read memory/PROGRESS.md before responding …
+```
+
+**And the failures it caught in real projects** — the measurements that drove
+the last three releases, kept here because they are the honest pitch:
+
+| Incident (project, date) | What cc-memory's machinery did |
 |---|---|
-| **AI-judged extraction** | Haiku reads the conversation and returns structured `{category, content, importance}` records — not keyword scraping |
-| **Regex fallback** | A project-neutral pattern layer runs when no credential is available, so capture never depends on the network |
-| **Optional local fallback** | Ollama backend, **opt-in** via `ccl.enabled` (default `false`) |
-| **Two capture points** | `Stop` captures per turn from that turn's tool observations; `PreCompact` captures from the transcript before context is destroyed |
-| **Bounded transcript reads** | A head+tail window (40 records + 32 MiB) instead of the whole file — a 2.11 GiB transcript loads in 1.66 s instead of 88 s, so the hook is never killed mid-write |
-| **Newest-first summarisation** | The extraction budget fills from the most recent record backwards; filling from the oldest pinned every extraction to a session's opening hours |
-| **Seven categories** | `decision` · `result` · `config` · `bug` · `task` · `arch` · `note` |
-| **Five importance levels** | `1` noise → `5` critical / never forget |
-| **Three project modes** | `code` · `research` · `writing` — each with its own observed-tool set and injection priority (`/cc-mem mode`) |
-| **Language-agnostic content** | Extraction and resume-signal detection recognise English *and* Chinese by design; stored memories may be in any language |
+| A 51,237-char raw plan sat unrefined while PLAN.md, `plan-status` and the drift guardian all answered from the *previous* plan; a demand stated 6× reached zero implementation (`lore_disaster`, 2026-08-15) | Forced the v2.11.0 redesign: Stop-hook **enforcement** with an escape budget, and the directive ledger — intent that outlives plans |
+| Two plan renumberings left 11 dead "step #N" references in directive text and 4 that *silently pointed at the wrong step* (`Autoshop`, 2026-08-25) | v2.12.0: `plan-set` audits every active directive on replacement and names each reference `DEAD` or `SILENTLY RETARGETED`; the carryover gate itself had already refused two malformed replacements in the same session |
+| 349 memories accumulated in one month with consolidation last run 17 days earlier; injected topic summaries were three minor versions stale (this repository, 2026-08-26) | v2.12.0: the backpressure trigger — consolidation now runs when the *write backlog* says so, not only when compactions happen |
 
-### 2 · Memory quality — the anti-patch contract
+## Measured numbers
 
-The differentiator. Most memory tools append; appending is what turns a memory
-store into noise.
+Not a synthetic benchmark suite — these are the before/after measurements the
+fixes were justified with, reproduced from [CHANGELOG.md](CHANGELOG.md), each
+tagged with the release that measured it.
 
-| Feature | What it does |
-|---|---|
-| **Reconcile-on-write** | Every save path routes through one writer, which decides **MERGE** (overwrite a near-identical row in place), **SUPERSEDE** (archive the old, link the new via `supersedes_id`), or **INSERT** |
-| **Similarity substrate** | Trigram-Jaccard, with **character bigrams inside CJK runs** — plain trigrams collapse on Chinese, scoring a one-character correction at 0.4545 and filing every correction as a new contradictory fact |
-| **LLM-judged semantic de-dup** | The same fact *reworded* each session scores low on trigrams; a second pass nominates candidate groups by word-Jaccard and has Haiku confirm same-fact before merging |
-| **Obsolescence detection** | Names `{stale, current}` pairs with a temporal guard, so a historical action cannot obsolete a live fact |
-| **Walkable history** | `supersedes_id` forms a DAG (cycles refused, first lineage fact preserved with `COALESCE`); `/cc-mem supersedes <id>` walks it |
-| **Nothing is ever deleted** | Archival is `is_active=0`, always recoverable. `/cc-mem archive` is the supported way to retire a fact discovered to be **wrong** |
-| **Provenance preserved** | Tags are unioned with the surviving row's, never replaced, and capped |
+| What | Before | After | Where measured |
+|---|---|---|---|
+| Loading a 2.11 GiB transcript in the PreCompact hook | ~88 s (hook killed) | 1.66 s (full hook 14.33 s) | v2.4.2 |
+| Privacy filter on 16,000 unterminated `<private>` tags | 9,517.4 ms, tail **leaked** | 0.0 ms, tail dropped (fail-closed) | v2.5.0 |
+| One-character correction to a 10-char Chinese fact, similarity score | 0.45 → filed as a *new contradictory fact* | CJK bigrams → reconciled | v2.8.0 |
+| Same-fact scan on a 51-memory topic (cap was 50) | 0.95-similar row never compared → duplicate inserted | scanned, reconciled (cap 500, truncation logged) | v2.5.5 |
+| Two concurrent savers of one sentence | both inserted (2 rows, 1 hash) | one transaction → 1 row | v2.8.0 |
+| Session-recency query at 2,000 sessions | 557.68 ms (quadratic) | 4.31 ms (indexed) | v2.8.0 |
+| MEMORY.md 0-byte reads under concurrent writers | 4,867 of 16,071 samples | 0 (atomic tmp + `os.replace`) | v2.5.2 |
+| MCP stdio, non-ASCII payload round-trip on a GBK box | 1 of 7 | 7 of 7 (forced UTF-8) | v2.5.0 |
+| Web viewer under one idle TCP connection | wedged permanently | 200 in 0.02 s (threaded + deadlines) | v2.5.0 |
+| Stop hook worst case with stalled LLM legs (22 s budget) | 25.45 s (killed mid-write) | 15.99 s (absolute deadline) | v2.5.0 |
+| Consolidation on a no-compaction workflow | never ran (349 rows / 17 days) | due at 50 rows or 7 stale days | v2.12.0 |
+| Doc citations verified mechanically, first run | 163 of 594 stale | 0 stale, gated on every change | v2.5.2 |
 
-### 3 · Session handoff — PROGRESS.md
-
-| Feature | What it does |
-|---|---|
-| **Single source of truth** | `memory/PROGRESS.md` is always **full-rewritten** from one SQL row, never appended — it cannot go stale or self-contradict |
-| **Forced read** | `SessionStart` emits a `<system-reminder>` requiring the next Claude to read it *before* responding |
-| **Eleven user-facing fields** | current request · done · in-flight · blocked · open todos · plan · critical context · files touched · transcript pointer · updated-at · trigger type |
-| **Four writers, one contract** | `PreCompact` full-overwrites; `Stop` patches files-touched per turn; `UserPromptSubmit` seeds the request on turn 1; `SessionStart` fills **only still-empty** fields |
-| **Per-session annotation** | The row records which session is speaking and when it started |
-| **Killed-run visibility** | A start marker survives a timeout kill, so a compaction that died mid-write is provable rather than invisible |
-| **Injection observability** | `.last_inject.json` records exactly what was injected; `/cc-mem inject-show` dumps ground truth and `/cc-mem inject-usage` reports whether Claude actually read it |
-
-### 4 · Plan and intent — PLAN.md and the directive ledger
-
-Two different things, deliberately kept apart: a **plan step** is a unit of
-execution and dies when the plan is replaced; a **directive** is a unit of user
-intent and outlives every plan.
-
-| Feature | What it does |
-|---|---|
-| **Live plan anchor** | `memory/PLAN.md` is full-rewritten from the `plan_active` row; `ExitPlanMode` output is captured automatically |
-| **Two shipped subagents** | `plan-refiner` normalises a raw plan into structured JSON; `plan-guardian` does a read-only ≤150-word drift check |
-| **Mechanical step sync** | `TodoWrite` events sync step statuses by title similarity — no LLM, no drift |
-| **Drift counters** | Edits bump a counter; a sensitive Bash call (`git push`, `rm -rf`, deploys) bumps it by 20 |
-| **Mandatory carryover gate** | Replacing a plan requires every unfinished step to be auto-carried or explicitly dispositioned with a reason. **There is no force flag, by design** |
-| **Success-criteria advisory** | Criteria that vanish in a replacement are named — a gate that covers only `steps` says nothing about the rest |
-| **Append-only plan history** | Every outgoing plan is archived to `memory/.plan_history/` |
-| **Directive ledger** | `/cc-mem directive-add` records what the *user* demanded. Re-stating the same slug bumps `times_stated` on **one** row — repetition is an importance signal a plan cannot express |
-| **Evidence-gated closure** | `/cc-mem directive-close` **refuses without `--evidence`**: a commit, a `file:line`, or a gate name. A directive closed on an assertion is the failure the ledger exists to prevent |
-| **Stop enforcement** | The `Stop` hook can refuse to end a turn while a plan sits unrefined, a live plan is undrift-checked, or an active directive has gone idle — with a guaranteed escape budget and the kill switch `CC_MEMORY_PLAN_ENFORCE=0` |
-
-### 5 · Search and retrieval
-
-| Feature | What it does |
-|---|---|
-| **FTS5 full-text search** | `/cc-mem search "auth flow"`, with `LIKE ? ESCAPE` fallback and clamped limits |
-| **Topic summaries** | Memories roll up into topics, refreshed by consolidation |
-| **Keyword vocabulary** | Project vocabulary by frequency, grown across sessions |
-| **Layered injection** | `SessionStart` injects topics + critical memories + a recent timeline + a PROGRESS preview, under per-layer budgets |
-| **Auto-fresh index** | `memory/MEMORY.md` is regenerated after every batch write |
-| **Corruption scan** | `/cc-mem encoding-check` finds U+FFFD damage across the text tables; `--apply` quarantines, recoverably |
-
-### 6 · Interfaces
-
-| Interface | Entry point | What you get |
-|---|---|---|
-| **Slash command** | `/cc-mem <sub>` | 32 subcommands, path-agnostic, resolves `--project .` for you |
-| **Shell CLI** | `cc-memory` / `cli/mem.py` | The same 32 subcommands outside Claude Code |
-| **Plan queue CLI** | `cc-memory-plan` / `cli/plan.py` | 12 subcommands for a `draft → ready → executing → done` task queue |
-| **MCP server** | `cc_memory/mcp/server.py` | 8 tools over JSON-RPC 2.0 stdio, registered inline in the plugin manifest |
-| **Desktop dashboard** | `/cc-mem dashboard` | Tkinter GUI, 7 tabs: Memories · Plans · Sessions · Keywords · SQL Console · Stats · Progress/Plan |
-| **Web viewer** | `/cc-mem serve` | Loopback-only browser UI: browse, search, and add memories |
-| **Skills** | `/ccm-load`, `/save-memories` | One-shot activation + bootstrap; manual save through the anti-patch writer |
-| **Subagents** | `plan-refiner`, `plan-guardian` | Shipped in the plugin, discoverable under both install layouts |
-
-### 7 · Privacy and safety
-
-| Feature | What it does |
-|---|---|
-| **Project opt-out** | `excluded_projects` — a listed directory *and everything beneath it* gets no `memory/`, no database, no observations, no extraction, no injection. Enforced by every hook and by the MCP server, on the **raw** cwd, *before* the project-root anchor |
-| **Fails closed** | A `config.json` that exists but cannot be used excludes **every** project and logs why, rather than guessing "not excluded" and storing data irreversibly |
-| **`<private>` spans** | Text between `<private>` tags is stripped before both the Anthropic call and the database — linear-time, no cap, and a dangling open tag drops the remainder rather than leaking it |
-| **Authority-marker neutralisation** | Stored content is **escaped, never interpolated raw**, on the write path and on every render path — a memory cannot forge a `<system-reminder>` into your next session |
-| **Read-only SQL** | `/cc-mem sql` refuses every write statement, including the `PRAGMA name(value)` setter form |
-| **Loopback-only web viewer** | No CORS header, `Origin` and `Host` both enforced (DNS-rebinding), JSON content-type required on POST, bounded header *and* body phases, capped concurrency |
-| **MCP schema enforcement** | `tools/call` arguments are validated against the advertised `inputSchema` and refused with `-32602` rather than coerced |
-| **No telemetry** | Nothing is sent anywhere except the extraction/consolidation calls to Anthropic (or your local Ollama), using your existing Claude Code credential |
-
-### 8 · Reliability engineering
-
-| Feature | What it does |
-|---|---|
-| **Zero runtime dependencies** | Pure Python standard library. PyInstaller is build-time only |
-| **Atomic artifact writes** | One writer — tmp + `os.replace`, with a wall-clock retry budget. Contract: *replace completely, or raise; never truncate* |
-| **Project-root anchoring** | `cwd` follows the agent's `cd`; a resolver walks an ancestor chain (database → `CLAUDE_PROJECT_DIR` → project markers) so a stray database is never born in a subdirectory. Containers of projects and dependency trees are never candidates |
-| **One shared hook entry ladder** | stdin parse → opt-out → root anchor, implemented once; per-hook policies stay per-hook |
-| **Bounded LLM wall-clock** | Every LLM-calling hook passes an absolute deadline, not just a per-leg timeout, so it cannot overrun the host's hard hook timeout |
-| **Off the blocking path** | Consolidation runs as an `async` PreCompact leg under a budget gate, so it can never surface as `Hook cancelled` |
-| **Scoped to the project** | Every command that touches a table scopes it by `project_id` — one database file legitimately holds several projects |
-| **11 release gates** | Four doc gates, four test suites, `compileall`, a `pyproject` parse, and version-site agreement. See [Release gates](#release-gates) |
-| **A falsification register** | Every registered fix is reverted on a temporary copy to prove its gate goes **red**. A gate that cannot fail is a gate that is lying |
+Costs are measured too, not only wins: closing every DB connection per
+operation costs +340 % per op (+0.6 s on a 120 s compaction budget) and was
+kept anyway, because a leaked WAL handle is worse — the reasoning is in
+[CHANGELOG.md](CHANGELOG.md) under v2.5.2.
 
 ---
 
 ## Reference
 
-### `/cc-mem` — 32 subcommands
+### `/cc-mem` — 34 subcommands
 
 Inside Claude Code (path-agnostic — the wrapper resolves the plugin root):
 
@@ -280,6 +358,7 @@ Inside Claude Code (path-agnostic — the wrapper resolves the plugin root):
 # ── state and health ───────────────────────────────────────────────────────
 /cc-mem status                      Full health check (hooks, DB, API key, PROGRESS)
 /cc-mem stats                       Memory counts + supersede-chain count
+/cc-mem paths [--json]              Resolved DB / PROGRESS.md / PLAN.md / MEMORY.md paths
 /cc-mem schema                      Live SQLite schema (tables, indexes, migrations)
 /cc-mem mode [code|research|writing] Show or set the project mode
 /cc-mem summary                     Latest session summary
@@ -292,12 +371,13 @@ Inside Claude Code (path-agnostic — the wrapper resolves the plugin root):
 /cc-mem topics                      Topic summaries
 /cc-mem keywords                    Project vocabulary by frequency
 /cc-mem supersedes <id>             Walk a memory's supersede chain
-/cc-mem sql "<SELECT ...>"          Read-only query (writes refused)
+/cc-mem sql "<SELECT ...>" [--json|--full]   Read-only query (writes refused)
 
 # ── writing memory ─────────────────────────────────────────────────────────
 /cc-mem add <category> "<text>" [--importance N]   Anti-patch upsert
 /cc-mem archive <id>... [--supersedes ID]          Retire a WRONG fact (recoverable)
-/cc-mem consolidate                 Full LLM-backed consolidation
+/cc-mem consolidate [--deep]        Full LLM-backed consolidation; --deep loops
+                                    the dedup judge until it runs dry
 /cc-mem cleanup                     Lightweight no-LLM cleanup + MEMORY.md regen
 /cc-mem encoding-check [--apply]    U+FFFD corruption scan
 
@@ -311,20 +391,28 @@ Inside Claude Code (path-agnostic — the wrapper resolves the plugin root):
 /cc-mem plan-show                   Regenerate + print memory/PLAN.md
 /cc-mem plan-set --raw "<text>"     Capture a raw plan, mark needs_refine
 /cc-mem plan-set --raw-file FILE    Same, from a file
-/cc-mem plan-set --from-refiner     Store structured JSON from stdin
+/cc-mem plan-set --from-refiner     Store structured JSON from stdin (audits
+                                    directive step references on replacement)
 /cc-mem plan-check                  Reset drift counters + emit guardian hint
 /cc-mem plan-replan                 Re-arm needs_refine on the stored raw
 /cc-mem plan-clear --reason "<why>" Drop the active plan (reason required if unfinished)
 
 # ── directive ledger ───────────────────────────────────────────────────────
-/cc-mem directive-list [--status active|done|superseded|dropped|all]
+/cc-mem directive-list [--status active|blocked|done|superseded|dropped|all] [--json|--full]
 /cc-mem directive-add <slug> --demand "..." [--quote "..."] [--kind ...] [--times N]
+/cc-mem directive-edit <slug> [--demand ...] [--quote ...] [--kind ...] [--status active|blocked]
 /cc-mem directive-close <slug> --evidence "<commit|file:line|gate>"
 
 # ── interfaces ─────────────────────────────────────────────────────────────
 /cc-mem dashboard                   Launch the Tkinter GUI
 /cc-mem serve [--port N]            Launch the loopback web viewer
 ```
+
+Three output conventions worth knowing: `--full` lifts the 60-char table
+truncation; `--json` emits **pure-ASCII** JSON (`\uXXXX` escapes), which no
+capturing shell's decode codec can garble — use it whenever CJK text comes
+back as `�`; and `directive-edit` corrects a record **without** bumping the
+repetition count (`directive-add` is the only path that counts).
 
 Full per-subcommand semantics: [commands/cc-mem.md](commands/cc-mem.md).
 
@@ -410,8 +498,8 @@ something.
 
 | Key | Default | Meaning |
 |---|---|---|
-| `version` | `2.11.4` | Last-resort fallback for a flat install predating `core/version.py`, which is canonical |
-| `consolidation.auto_interval_sessions` | `5` | Sessions between async consolidation runs |
+| `version` | `2.12.0` | Last-resort fallback for a flat install predating `core/version.py`, which is canonical |
+| `consolidation.auto_interval_sessions` | `5` | Sessions between async consolidation runs (the backlog trigger is independent of this — its thresholds are module constants in `core/consolidate.py`) |
 | `ccl.enabled` | `false` | Local Ollama fallback — **opt-in** |
 | `ccl.ollama_url` | `http://localhost:11434` | Ollama endpoint |
 | `ccl.local_model` | `ccl-9b` | Local model name |
@@ -419,11 +507,12 @@ something.
 | `notes` | — | In-file documentation, including which module reads each value |
 
 Everything else is a module constant, documented in `notes.removed_keys`:
-writer thresholds in `llm/memory_writer.py`, injection budgets in
-`hooks/session_start.py`, the idle-reorg interval in `core/idle.py`, the
-per-mode observation skip-list in `core/modes.py`, the web viewer's default
-port in `ui/web_viewer.py`. MCP registration is the `mcpServers` block in
-`.claude-plugin/plugin.json`, not a config key.
+writer thresholds in `llm/memory_writer.py`, backlog thresholds in
+`core/consolidate.py`, injection budgets in `hooks/session_start.py`, the
+idle-reorg interval in `core/idle.py`, the per-mode observation skip-list in
+`core/modes.py`, the web viewer's default port in `ui/web_viewer.py`. MCP
+registration is the `mcpServers` block in `.claude-plugin/plugin.json`, not a
+config key.
 
 **Environment variables**
 
@@ -444,14 +533,20 @@ port in `ui/web_viewer.py`. MCP registration is the `mcpServers` block in
 ├── .gitignore                  written by cc-memory; migrates on existing installs
 ├── .last_save.json             status + trigger of the last PreCompact
 ├── .last_inject.json           what SessionStart injected (observability)
-├── .last_consolidation.json    interval marker for the async leg
+├── .last_consolidation.json    cadence marker + row-id watermark for the backlog trigger
 ├── .consolidation.lock         prevents overlapping async workers
+├── .consolidation.kick         backpressure spawn cooldown (v2.12.0)
 ├── .pre_compact_attempt.json   start marker; survives ⇒ the last run was killed
 ├── .plan_raw.md                last raw ExitPlanMode capture
 ├── .plan_history/              append-only archive of replaced / cleared plans
 ├── sessions/YYYY/MM/           per-session archives
 └── topics/                     reserved for per-topic exports
 ```
+
+Note: this `memory/` lives in **your project directory** — it is unrelated to
+`~/.claude/projects/<slug>/memory/`, which some Claude Code setups use for
+their own per-project notes. `/cc-mem paths` prints exactly which files this
+plugin reads and writes for the current project.
 
 ### Database schema
 
@@ -481,15 +576,47 @@ Six hook commands <!--ce:hooks--> across five Claude Code events, declared in
 |---|---|---|---|
 | `UserPromptSubmit` | `hooks/user_prompt.py` | 8 s | Auto-init `memory/`, count the turn, seed the request on turn 1 |
 | `PostToolUse` | `hooks/post_tool_use.py` | 8 s | Live plan anchor **in every mode**, then one observation row per observed tool |
-| `Stop` | `hooks/stop.py` | 22 s | Haiku observer, per-turn PROGRESS patch, idle reorg every 5 turns, plan enforcement |
+| `Stop` | `hooks/stop.py` | 22 s | Haiku observer, per-turn PROGRESS patch, idle reorg every 5 turns, backpressure probe, plan enforcement |
 | `PreCompact` (sync) | `hooks/pre_compact.py` | 120 s | Extract → reconcile → full-rewrite PROGRESS.md → archive |
-| `PreCompact` (async) | `hooks/consolidate_async.py` | 300 s | Budget-gated consolidation, off the blocking path |
+| `PreCompact` (async) | `hooks/consolidate_async.py` | 300 s | Budget-gated consolidation, off the blocking path; also the standalone backpressure worker |
 | `SessionStart` | `hooks/session_start.py` | 15 s | Inject layered context + the forced `<system-reminder>` |
 
 Hook contract, never violated: hooks never write to stderr (Claude Code renders
 stderr as error UI), never raise, and always exit 0.
 
 ---
+
+## Design philosophy
+
+The technical stack is deliberately boring: **pure Python standard library**
+(`sqlite3`, `json`, `pathlib`, `urllib`, `tkinter`, `http.server`), zero pip
+dependencies at runtime, PyInstaller only to build the optional Windows
+executables. A plugin that runs inside your editor's hook budget has no
+business shipping a dependency tree.
+
+The engineering culture is less boring, and it is the actual product:
+
+- **Measurements over assumptions.** Features and fixes enter this project
+  attached to a number: a defect reproduced, a latency measured, a blast
+  radius counted. When an assumption is kept (macOS support, say), the docs
+  say "unmeasured" rather than implying evidence.
+- **Fail closed, escape open.** Privacy filters, config parsing and ownership
+  checks fail toward *not leaking* and *not guessing*. Enforcement — the one
+  place where failing closed would trap the user — carries a bounded escape
+  budget and a kill switch instead.
+- **A check that cannot go red is not a check.** Every registered fix has a
+  falsification case that reverts it on a copy and proves the gate fails.
+  Several cases have caught the *checks* being vacuous rather than the fixes
+  being wrong; those were fixed by strengthening the check, never by deleting
+  the case.
+- **Prose that counts things is bound to the code that defines them.** "All
+  six hooks" <!--ce:hooks--> in these docs is machine-checked against the hook manifest;
+  enumerating a set by hand in prose is treated as a defect class, because
+  it rotted three separate times before the gate existed.
+- **History is append-only.** CHANGELOG entries are never rewritten to match
+  the present; memory rows are archived, never deleted; superseded facts stay
+  on a walkable chain. A system whose job is remembering should not itself
+  forget by overwriting.
 
 ## Architecture
 
@@ -499,7 +626,7 @@ Full detail in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
 
 - [Anti-patch contract](docs/CONTRACTS.md#anti-patch-contract) — how a write reconciles
 - [Handoff contract](docs/CONTRACTS.md#handoff-contract) — the PROGRESS.md spec
-- [Plan contract](docs/CONTRACTS.md#plan-contract) — PLAN.md, the carryover gate, the subagents
+- [Plan contract](docs/CONTRACTS.md#plan-contract) — PLAN.md, the carryover gate, the directive ledger, the subagents
 
 **Two install layouts, both supported.** A marketplace / dev checkout keeps the
 nested `<plugin-root>/cc_memory/…` shape. The standalone installer lays the
@@ -516,7 +643,8 @@ Any code or documentation that probes for an install must accept both.
 ```
 cc-memory/
 ├── .claude-plugin/          plugin.json (+ inline mcpServers) · marketplace.json
-├── .github/                 CI running every release gate · issue + PR templates
+├── .github/                 CI: gates.yml (every gate, on push) · release.yml
+│                            (tag → gates → exes → run them → Release) · templates
 ├── agents/                  plan-refiner.md · plan-guardian.md
 ├── commands/                cc-mem.md — the /cc-mem slash command
 ├── hooks/hooks.json         hook declarations (6 commands / 5 events)
@@ -530,9 +658,11 @@ cc-memory/
 │   ├── mcp/                 server.py
 │   └── ui/                  installer · dashboard · web_viewer
 ├── docs/                    ARCHITECTURE.md · CONTRACTS.md (+ .zh.md siblings)
-├── scripts/                 build_exe.py — PyInstaller build
+├── scripts/                 build_exe.py (PyInstaller) · release_notes.py
+│                            (CHANGELOG section → release body)
 ├── tests/                   4 suites + run_gates.py (one command, every gate)
-├── tools/                   citation_check · doc_claims · contracts · falsify_fixes · i18n_check
+├── tools/                   citation_check · doc_claims · doc_coverage · contracts ·
+│                            falsify_fixes · i18n_check
 ├── CLAUDE.md                project instructions for Claude Code
 ├── CHANGELOG.md · README.md · README.zh.md · LICENSE · pyproject.toml
 ```
@@ -584,6 +714,16 @@ python scripts/build_exe.py
 #   dist/cc-memory-dashboard.exe
 ```
 
+The executables on the [Releases](https://github.com/skymanbp/cc-memory/releases)
+page are **not** built on a maintainer's machine. `.github/workflows/release.yml`
+builds them on a `v*` tag push, after re-running every release gate on the
+tagged commit, and then **runs** them before publishing: the installer performs
+a real `--cli` install and `--uninstall` against a sandboxed home directory and
+must refuse an unknown flag; the dashboard is launched with `--help` and must
+exit cleanly. Only then does it create the GitHub Release, with both exes
+attached and the matching CHANGELOG section as the body. A tag that disagrees
+with `core/version.py`, or has no CHANGELOG entry, cannot publish.
+
 ### Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md). Security reports: [SECURITY.md](SECURITY.md).
@@ -597,61 +737,64 @@ See [CONTRIBUTING.md](CONTRIBUTING.md). Security reports: [SECURITY.md](SECURITY
 | Hooks never fire on Windows | `hooks/hooks.json` invokes `python3`, and the python.org installer ships no `python3.exe`. Tick "Add Python to PATH" + "py launcher", or shim `python3 → python` |
 | `/cc-mem` says the plugin is not found | Both install layouts must be probed. Run `/cc-mem status` — it inspects the layout and reports which files are missing |
 | Nothing is being extracted | No credential. `/cc-mem status` checks it. Log in to Claude Code, or set `ANTHROPIC_API_KEY` |
+| Where is the database, actually? | `/cc-mem paths` prints the resolved DB / PROGRESS.md / PLAN.md / MEMORY.md with exists/absent verdicts — do not hunt with a recursive glob; the first `*.db` it finds may belong to another tool |
+| CJK output shows as `�` | The *capturing shell* decoded UTF-8 with its own codepage (PowerShell 5.1 uses the console codepage). Use `--json` — pure-ASCII output that no capture codec can garble |
 | A `memory/` appeared in a subdirectory | A stray from before root anchoring. `/cc-mem status` lists every separate database below the project root with its memory count. A stray is **reported, never merged or deleted** — pin a genuinely nested project with a `.ccm-root` file |
 | The plugin went completely silent | A `config.json` that exists but cannot be parsed **fails closed** and excludes every project. `SessionStart` prints one line saying so; fix the JSON |
 | Claude cannot end a turn | Plan enforcement is blocking. Read the refusal — it names the condition and the fix. It always degrades to an advisory after its escape budget; `CC_MEMORY_PLAN_ENFORCE=0` switches it off |
+| A directive keeps blocking but it's waiting on *me* | `/cc-mem directive-edit <slug> --status blocked` parks it (idle enforcement skips it); `--status active` un-parks. A "never do X" rule should be `--kind constraint` — it is never idle-checked at all |
 | `Hook cancelled` on compaction | Fixed in v2.3.2 by moving consolidation to an `async` leg. If you still see it, file an issue with `memory/.last_save.json` |
 | A memory is simply wrong | `/cc-mem archive <id>` — reconciliation handles a *restatement*, `archive` handles a *repudiation* |
 
 ---
 
-## What's new in v2.11.3
+## Roadmap and known limits
 
-**The documentation caught up with the code.** v2.11.2 changed how directive
-idleness is measured — a schema change with a load-bearing rule attached — and
-the ten gates went green anyway, because they check citation line numbers,
-bound counts and translation hashes. **None of them asks whether a new design
-was written down.** The specification documents had zero mentions of it.
+Recorded rather than papered over — an unlisted limit is a limit someone else
+has to rediscover:
 
-- `docs/CONTRACTS.md` § Plan contract gains the rule as a fourth load-bearing
-  property: idleness is `turns_total - turns_at_touch`, and must never be
-  measured against `turns_since_last_guardian`, which every guardian check
-  resets.
-- `docs/ARCHITECTURE.md` § Database schema documents both v9 columns in the
-  same "carries X since migration Y" form the other rows already use.
-- `commands/cc-mem.md` says what "idle" counts for a user: turns since *that
-  directive* was last written — re-stating or closing it restarts the clock,
-  running `/cc-mem plan-check` does not.
-- Both Chinese siblings updated to match.
+- **macOS is unmeasured.** All eleven gates run on Windows and Linux (3.11,
+  3.13) in CI; macOS is expected to work (the same POSIX paths Linux
+  exercises) but has not been measured, and this document will not say it has.
+- **The step-reference audit is lexical.** It catches `步骤 N` / `step #N` /
+  `#N` shapes; a directive that references a step by a paraphrased number
+  ("the twelfth step") is not matched. The durable rule is to reference steps
+  by title — the audit exists for when the rule was broken anyway.
+- **Backlog thresholds are module constants** (50 rows / 7 days), not config
+  keys — deliberately, until real usage shows they need per-project tuning.
+  Raising a threshold means editing `core/consolidate.py` and knowing why.
+- **The Tkinter dashboard's shells have no executable coverage.** Their logic
+  cores were extracted into pure functions and tested headlessly (v2.10.1);
+  refactoring the remaining 2.9k-line GUI without tests was deliberately
+  deferred.
+- **Candidate future work:** surfacing `inject-usage` signals in the Stop
+  status line; a `directive-*` surface in the dashboard; richer `paths`-style
+  diagnostics for multi-database machines.
 
-Also corrected: this README claimed cross-platform support "by construction",
-which is not evidence. All release gates now run on Windows **and** Linux (3.11,
-3.13) in CI; macOS remains unmeasured and is now described that way.
+---
 
-## What's new in v2.11.2
+## What's new in v2.12.0
 
-**The three things v2.11.1 recorded as still open, closed — including the one
-it had papered over.**
+**Consolidation that actually runs, and a ledger you can maintain.** Driven by
+two measurements: this repository's own database (349 memories in one month
+against a 17-day-old consolidation marker) and a seven-finding field report
+from a real consuming project.
 
-- **Directive idleness now has a real baseline.** v2.11.1 measured it against
-  `turns_since_last_guardian`, and *that counter resets* — `/cc-mem plan-check`
-  and every plan replacement zero it. So a directive genuinely untouched for
-  thirty turns looked freshly attended to the moment anyone ran a guardian
-  check: the ledger forgiving exactly the neglect it exists to surface. Schema
-  **v9** adds a monotonic `turns_total` that nothing resets, and each directive
-  records the turn it was last touched at. Idleness became subtraction between
-  two numbers that only increase, which no reset can distort.
-- **Linux runs all ten gates.** It used to run the platform-independent subset
-  with a comment asserting the other two were Windows-specific — an assumption,
-  never a measurement, and it left the largest unknown in the project: whether
-  cc-memory works on Linux at all. The full suite now runs on Linux for 3.11
-  and 3.13.
-- **A stray `.pytest_cache/`** in a project that documents "no pytest" is gone.
-
-v2.11.1 itself closed six defects in the code path that can refuse your turn —
-an escape budget that could never release, a stored directive reaching Claude as
-a live authority marker, a refusal whose stdout was not JSON, and a cleared plan
-that enforced forever.
+- **Backpressure-triggered consolidation** — due at 50 unconsolidated rows or
+  7 stale days, probed by the Stop hook every turn, executed by the same
+  budget-gated background worker; plus `consolidate --deep`, which loops the
+  semantic-dedup judge until it runs dry. The manual path now stamps the same
+  cadence marker as the hook path, through one shared writer.
+- **`directive-edit`** — correct a directive without bumping its repetition
+  count (the count is the ledger's importance signal; repairs were inflating
+  it). `--status blocked` parks work that waits on the user; `--kind
+  constraint` marks prohibitions that are never idle-checked.
+- **Plan replacements audit directive step references** — every `step #N` in
+  active directive text is checked against the outgoing and incoming step
+  tables and reported as `DEAD` or `SILENTLY RETARGETED`. The documented rule:
+  reference steps by title, never by number.
+- **`paths`, `--json`, `--full`** — find your artifacts, read them
+  untruncated, and get output no capture codec can garble.
 
 Every earlier release is in **[CHANGELOG.md](CHANGELOG.md)**, which is the
 single history of this project — this README documents what the software *is*,
@@ -669,12 +812,9 @@ not what it used to be.
 - **Windows**: `python3` must resolve to a Python 3 interpreter (see
   [Troubleshooting](#troubleshooting))
 
-Developed Windows-first. **All ten release gates run on both Windows and Linux
-(Python 3.11 and 3.13) in CI** — that used to be a claim resting on "written to
-be portable", which is not evidence; Linux ran only a subset until v2.11.3, and
-the assumption that the other two suites were Windows-specific turned out to be
-wrong. macOS is not covered by CI: it is expected to work (the same POSIX paths
-Linux exercises) but has not been measured, and this document will not say it
+Developed Windows-first. **All eleven release gates run on both Windows and
+Linux (Python 3.11 and 3.13) in CI**; macOS is not covered by CI — it is
+expected to work but has not been measured, and this document will not say it
 has.
 
 ---

@@ -280,7 +280,7 @@ if not db_path.exists():
     gi = mem_dir / '.gitignore'
     _ign = ['# cc-memory: generated state, not content', 'memory.db', 'memory.db-wal',
             'memory.db-shm', 'sessions/', '.last_save.json', '.last_inject.json',
-            '.last_consolidation.json', '.consolidation.lock',
+            '.last_consolidation.json', '.consolidation.lock', '.consolidation.kick',
             '.pre_compact_attempt.json', '.plan_raw.md', '.plan_history/', '*.tmp']
     # errors='replace', mirroring core/progress.py's canonical read: a user
     # line appended from a GBK editor or a PowerShell redirect makes strict

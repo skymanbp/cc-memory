@@ -1315,7 +1315,8 @@ def _init_project(project_path, log_fn=print):
         "# cc-memory: generated state, not content",
         "memory.db", "memory.db-wal", "memory.db-shm", "sessions/",
         ".last_save.json", ".last_inject.json", ".last_consolidation.json",
-        ".consolidation.lock", ".pre_compact_attempt.json",
+        ".consolidation.lock", ".consolidation.kick",
+        ".pre_compact_attempt.json",
         ".plan_raw.md", ".plan_history/", "*.tmp",
     ]
     try:

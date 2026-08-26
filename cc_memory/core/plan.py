@@ -467,10 +467,27 @@ def blocking_reasons(plan_row: Optional[Dict],
                 out.append((
                     "plan-drift",
                     f"The live plan has not been drift-checked ({reason}).",
-                    "Run `/cc-mem plan-check`, or invoke @plan-guardian.",
+                    # ONE sequence, not an "or" (Autoshop field report 7a):
+                    # `plan-check` resets the counters AND prints the exact
+                    # guardian Task(...) call, then ends "Now invoke the
+                    # plan-guardian subagent" — so offering the two as
+                    # alternatives contradicted the command's own output.
+                    "Run `/cc-mem plan-check` (it resets these counters and "
+                    "prints the guardian invocation), then invoke the "
+                    "@plan-guardian subagent it names.",
                 ))
     for row in (directives or []):
         if row.get("status") != "active":
+            continue
+        # A `constraint` is a standing PROHIBITION — "never do X" — with no
+        # positive action that could ever be recorded against it (Autoshop
+        # field report 3: a token-secrecy rule accrued idle counts forever,
+        # and the only way to silence it was re-stating it, which inflated
+        # `times_stated`). Idleness is meaningless for a rule whose success
+        # is that nothing happens; it is enforced by being INJECTED, not by
+        # being worked. `blocked` status rows never reach here at all —
+        # the idle scan lists status='active' only.
+        if row.get("kind") == "constraint":
             continue
         if int(row.get("turns_idle") or 0) < stale_turns:
             continue
@@ -1339,3 +1356,77 @@ def unmatched_criteria(old_structured: Optional[Dict],
             candidates.append(extra)
     return [c for c in olds
             if _best_title_match(c, candidates) < _carryover_bar(c)]
+
+
+# ── directive step-number references (v2.12.0) ──────────────────────────────
+# The Autoshop field report's #1 finding: a directive whose `demand` says
+# "见步骤 12" is a LONG-LIVED row pinned to a SHORT-LIVED coordinate. The R610
+# gate guarantees no step is LOST across a replacement, but step ids are
+# assigned by position, so two replans (23→12→14 steps) left 11 dead
+# references and — worse — 4 that still resolved but to a DIFFERENT step:
+# text that reads correctly and executes the wrong work. The documented rule
+# is therefore "reference steps by TITLE, never by number"
+# (docs/CONTRACTS.md#plan-contract); the two functions below are the
+# machinery that notices when the rule was broken anyway.
+
+# Ordinal step references in free text: "步骤 12" / "步12" / "step #3" / "#7".
+# The bare-# alternative deliberately requires the digits to follow the mark
+# immediately, so issue numbers written "PR # 12" are not matched.
+_STEP_REF_RE = re.compile(r"(?:步骤?|step)\s*#?\s*(\d{1,3})|#(\d{1,3})",
+                          re.IGNORECASE)
+
+
+def directive_step_refs(text: str) -> List[int]:
+    """Step numbers referenced ordinally in a directive's free text."""
+    out = []
+    for m in _STEP_REF_RE.finditer(text or ""):
+        n = int(m.group(1) or m.group(2))
+        if n and n not in out:
+            out.append(n)
+    return out
+
+
+def stale_directive_step_refs(directives: Optional[List[Dict]],
+                              old_structured: Optional[Dict],
+                              new_structured: Optional[Dict]) -> List[Dict]:
+    """Directive step-number references broken by a plan replacement.
+
+    Compares each ordinal reference in an ACTIVE directive's demand/quote
+    against the outgoing and incoming step tables:
+
+      * `dead`       — the number no longer names any step in the new plan.
+      * `retargeted` — the number still resolves, but the step it names in
+        the new plan does not carry the step it named in the old plan
+        (judged by `_carried`, the carryover gate's own bar). This is the
+        dangerous shape: the text reads correctly and points at the wrong
+        work — Autoshop measured 4 of these against 11 dead ones.
+
+    A number absent from the OLD plan too is not reported: there is no
+    baseline to judge the author's intent against. Pure function, advisory
+    by design — refusing a plan replacement over text in a DIFFERENT table
+    would hold the plan hostage to the ledger; the caller's job is to make
+    "it rotted" visible, and the durable fix is title references.
+    """
+    findings = []
+    new_steps = {int(s["id"]): str(s.get("title") or "")
+                 for s in (new_structured or {}).get("steps", [])
+                 if isinstance(s, dict) and s.get("id") is not None}
+    old_steps = {int(s["id"]): str(s.get("title") or "")
+                 for s in (old_structured or {}).get("steps", [])
+                 if isinstance(s, dict) and s.get("id") is not None}
+    for row in (directives or []):
+        if row.get("status") != "active":
+            continue
+        text = f"{row.get('demand') or ''}\n{row.get('quote') or ''}"
+        for n in directive_step_refs(text):
+            if n not in new_steps:
+                findings.append({"slug": row.get("slug"), "ref": n,
+                                 "kind": "dead",
+                                 "old_title": old_steps.get(n, ""),
+                                 "new_title": ""})
+            elif n in old_steps and not _carried(old_steps[n], new_steps[n]):
+                findings.append({"slug": row.get("slug"), "ref": n,
+                                 "kind": "retargeted",
+                                 "old_title": old_steps[n],
+                                 "new_title": new_steps[n]})
+    return findings
