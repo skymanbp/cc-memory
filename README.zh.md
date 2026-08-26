@@ -1,4 +1,4 @@
-<!-- i18n-source: README.md | sha256: 35c83dcc92bb6abf | version: 2.12.0 | translated: 2026-08-26 -->
+<!-- i18n-source: README.md | sha256: 6f6ab9c983a2d118 | version: 2.12.1 | translated: 2026-08-26 -->
 > [English](README.md) · **简体中文**
 
 <div align="center">
@@ -10,7 +10,7 @@
 下一个会话在动手之前会被**强制**先读它们，而存下来的东西是**被调和过的**，
 绝不是堆叠出来的。
 
-[![version](https://img.shields.io/badge/version-2.12.0-blue.svg)](CHANGELOG.md)
+[![version](https://img.shields.io/badge/version-2.12.1-blue.svg)](CHANGELOG.md)
 [![license](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![python](https://img.shields.io/badge/python-3.8%2B-blue.svg)](pyproject.toml)
 [![dependencies](https://img.shields.io/badge/runtime%20deps-0-brightgreen.svg)](#运行要求)
@@ -459,7 +459,7 @@ LF 换行——**不需要任何 `PYTHONUTF8` / `PYTHONIOENCODING` 环境变量*
 
 | 键 | 默认值 | 含义 |
 |---|---|---|
-| `version` | `2.12.0` | 给早于 `core/version.py` 的扁平安装的最后兜底；`core/version.py` 才是权威 |
+| `version` | `2.12.1` | 给早于 `core/version.py` 的扁平安装的最后兜底；`core/version.py` 才是权威 |
 | `consolidation.auto_interval_sessions` | `5` | 两次异步整理之间相隔的会话数（积压触发器与它无关——那些阈值是 `core/consolidate.py` 里的模块常量） |
 | `ccl.enabled` | `false` | 本地 Ollama 兜底——**需显式开启** |
 | `ccl.ollama_url` | `http://localhost:11434` | Ollama 端点 |
@@ -729,6 +729,10 @@ Release，附上两个 exe，并以对应的 CHANGELOG 段落作为正文。与 
   按标题引用步骤，绝不按编号。
 - **`paths`、`--json`、`--full`**——找到你的产物、不截断地读它们、拿到任何捕获
   码页都糟蹋不了的输出。
+
+v2.12.1（同日）只是发布工程：第一个由 CI 构建的 release——它的首次运行死在
+exe 验证步骤，Linux 闸门通道又抓出一条只对 Windows 成立的测试假设；插件本身
+未变。
 
 更早的每个版本都在 **[CHANGELOG.md](CHANGELOG.md)** 里，那是本项目唯一的历史；
 这份 README 记录的是这个软件**是什么**，而不是它曾经是什么。

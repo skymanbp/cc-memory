@@ -9,7 +9,7 @@ Your project's decisions, results, bugs and plans survive compaction, session
 boundaries, and closed terminals — the next session is *forced* to read them
 before it does anything, and what is stored is *reconciled*, never stacked.
 
-[![version](https://img.shields.io/badge/version-2.12.0-blue.svg)](CHANGELOG.md)
+[![version](https://img.shields.io/badge/version-2.12.1-blue.svg)](CHANGELOG.md)
 [![license](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![python](https://img.shields.io/badge/python-3.8%2B-blue.svg)](pyproject.toml)
 [![dependencies](https://img.shields.io/badge/runtime%20deps-0-brightgreen.svg)](#requirements)
@@ -498,7 +498,7 @@ something.
 
 | Key | Default | Meaning |
 |---|---|---|
-| `version` | `2.12.0` | Last-resort fallback for a flat install predating `core/version.py`, which is canonical |
+| `version` | `2.12.1` | Last-resort fallback for a flat install predating `core/version.py`, which is canonical |
 | `consolidation.auto_interval_sessions` | `5` | Sessions between async consolidation runs (the backlog trigger is independent of this — its thresholds are module constants in `core/consolidate.py`) |
 | `ccl.enabled` | `false` | Local Ollama fallback — **opt-in** |
 | `ccl.ollama_url` | `http://localhost:11434` | Ollama endpoint |
@@ -795,6 +795,10 @@ from a real consuming project.
   reference steps by title, never by number.
 - **`paths`, `--json`, `--full`** — find your artifacts, read them
   untruncated, and get output no capture codec can garble.
+
+v2.12.1 (same day) is release engineering only — the first CI-built release,
+after its first run failed on the exe-verification step and the Linux gate
+lanes caught a Windows-only test assumption; the plugin is unchanged.
 
 Every earlier release is in **[CHANGELOG.md](CHANGELOG.md)**, which is the
 single history of this project — this README documents what the software *is*,

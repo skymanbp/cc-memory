@@ -1009,8 +1009,21 @@ def main():
         "marker must carry the row-id watermark"
     assert C.read_consolidation_marker(
         tmp_ca, str(tmp_ca))["last_session_count"] == 0
-    assert C.read_consolidation_marker(tmp_ca, str(tmp_ca).upper()) != {}, \
-        "marker path check must be case-insensitive (normcase)"
+    _ca_upper = str(tmp_ca).upper()
+    if os.path.normcase("A") == "a":
+        # Windows: the filesystem folds case and so does normcase, so a
+        # hook-written "d:\..." and a CLI-written "D:\..." are ONE project
+        # and must read the same marker (the v2.12.0 probe-invisibility fix).
+        assert C.read_consolidation_marker(tmp_ca, _ca_upper) != {}, \
+            "marker path check must be case-insensitive (normcase)"
+    else:
+        # POSIX: normcase is the identity and a different-case path IS a
+        # different directory, so the same read must say never-run. The
+        # unconditional Windows expectation above ran GREEN here and RED on
+        # both ubuntu lanes of the v2.12.0 gates run — exactly the class of
+        # assumption the Linux lanes were added to measure (v2.11.2).
+        assert C.read_consolidation_marker(tmp_ca, _ca_upper) == {}, \
+            "on a case-sensitive platform a different-case path is another project"
     assert C.read_consolidation_marker(tmp_ca, str(tmp_ca) + "-other") == {}, \
         "a marker for another path must read as never-run"
     print("[OK] v2.3.2 consolidate_async: importable + lock/interval logic; "

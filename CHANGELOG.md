@@ -7,6 +7,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [2.12.1] — 2026-08-26
+
+### Release engineering: the release workflow's first run, and what Linux caught
+
+v2.12.0 was tagged and its release workflow — the first ever — died on the
+step it exists for, so no v2.12.0 release page was created; the tag stays
+where it is (a moved tag is a rewritten history) and the same code ships as
+v2.12.1 with the two defects below fixed. Nothing in the plugin changed.
+
+### Fixed
+
+- **The exe-verification step failed on its deliberate failure.** The
+  workflow proves the installer refuses an unknown flag (the v2.5.3
+  `--unistall` regression: a typo used to perform an INSTALL and exit 0) by
+  invoking `--no-such-flag` and requiring exit 2. On the runner the step
+  ended with exit 1 **immediately after the refusal's usage text, with no
+  error record in the log and the explicit exit-code check never reached**.
+  The source exits 2 (`python cc_memory/ui/installer.py --no-such-flag`),
+  and the built exe exits 2 — measured locally through
+  `Start-Process -Wait -PassThru` after a green `--cli` install /
+  `--uninstall` round trip in a sandboxed `USERPROFILE`. Two mechanisms on
+  the `&`-call path can turn an expected non-zero exit into a step failure
+  without a `throw` of ours: PowerShell 7.4+ defaults
+  `$PSNativeCommandUseErrorActionPreference` to `$true`, and GitHub
+  prepends `$ErrorActionPreference = 'Stop'` to every pwsh step, so a
+  non-zero native exit is a terminating error before the next line runs;
+  and the runner appends `exit $LASTEXITCODE`, so a non-zero code left by
+  the LAST native command becomes the step's. The refusal probe now runs
+  through `Start-Process` and judges `.ExitCode` (immune to both), the
+  steps that judge exit codes explicitly switch the automatic throw off,
+  and the fix was verified by a `workflow_dispatch` run before this tag was
+  cut — the shape v2.5.4 prescribes for exes: run it, do not reason about
+  the header.
+- **A Windows-only expectation in the smoke suite.** The v2.12.0 marker
+  test asserted that reading the consolidation marker for an UPPERCASED
+  project path still finds it — true on Windows, where `os.path.normcase`
+  folds case and the filesystem does too, and false on POSIX, where
+  `normcase` is the identity and a different-case path is a different
+  directory. Both ubuntu lanes of the v2.12.0 gates run went RED on it
+  (Windows green). The assertion is now platform-aware and asserts the
+  POSIX-correct answer (`{}` — never run) on a case-sensitive platform,
+  rather than skipping there. This is precisely the class of assumption the
+  Linux lanes were added to measure (v2.11.2): the assumption was mine, and
+  the lane caught it on its first opportunity.
+
+### Changed
+
+- `.github/workflows/release.yml` also asserts the installed flat layout
+  and the five surfaces after `--cli`, the surface removal after
+  `--uninstall`, and ships `SHA256SUMS.txt` beside the two exes as every
+  release since v2.11.x has.
+- The release title is derived from the CHANGELOG section's `###` headline
+  by `scripts/release_notes.py --title-out`, so CI-published releases sit in
+  the Releases list in the same shape as the hand-published ones.
+
+---
+
 ## [2.12.0] — 2026-08-26
 
 ### The field report release: consolidation that actually runs, and a ledger you can maintain

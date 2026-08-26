@@ -63,6 +63,15 @@ jobs:
 
       - name: run the installer exe against a sandboxed HOME
         run: |
+          # GitHub prepends `$ErrorActionPreference = 'Stop'` to every pwsh
+          # step, and PowerShell 7.4+ defaults
+          # $PSNativeCommandUseErrorActionPreference to $true — together they
+          # turn ANY non-zero native exit into a terminating error before the
+          # `if ($LASTEXITCODE …)` line runs. The v2.12.0 tag run died on the
+          # deliberate unknown-flag refusal (exit 2) this way. Exit codes are
+          # judged explicitly below, so the automatic throw is switched off.
+          $PSNativeCommandUseErrorActionPreference = $false
+
           # Path.home() on Windows reads USERPROFILE, so pointing it (and
           # HOME, for any POSIX-style probe) at a scratch directory makes the
           # install land there and nowhere near the runner's real profile.
@@ -96,9 +105,19 @@ jobs:
           }
           # logs/ surviving uninstall is by design — deliberately not asserted.
 
-          & dist\cc-memory-installer.exe --no-such-flag
-          if ($LASTEXITCODE -ne 2) {
-            throw "unknown flag exited $LASTEXITCODE, expected refusal (2) - the --unistall regression"
+          # The one call that is SUPPOSED to fail. It runs through
+          # Start-Process rather than `&` so its non-zero exit neither trips
+          # pwsh's native-command error handling nor lingers in $LASTEXITCODE
+          # for the runner's trailing `exit $LASTEXITCODE` to pick up: the
+          # v2.12.0 tag run ended this step with exit 1 right after the
+          # refusal's usage text, with no error record in the log and the
+          # explicit check below never reached.
+          $refusal = Start-Process -FilePath 'dist\cc-memory-installer.exe' `
+                       -ArgumentList '--no-such-flag' -Wait -PassThru -NoNewWindow `
+                       -RedirectStandardOutput refusal.txt
+          Get-Content refusal.txt
+          if ($refusal.ExitCode -ne 2) {
+            throw "unknown flag exited $($refusal.ExitCode), expected refusal (2) - the --unistall regression"
           }
 
       - name: run the dashboard exe
@@ -124,6 +143,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          # Same reason as the installer step: exit codes are judged
+          # explicitly, so pwsh's automatic native-command throw is off.
+          $PSNativeCommandUseErrorActionPreference = $false
+
           # The release body is the CHANGELOG section for this version,
           # verbatim — CHANGELOG.md is the single history, the release page
           # quotes it. The extractor fails loud when the section is absent,

@@ -2,7 +2,7 @@
 
 ## Project: cc-memory
 
-**Claude Code persistent memory plugin (v2.12.0)** — anti-patch reconcile-on-write
+**Claude Code persistent memory plugin (v2.12.1)** — anti-patch reconcile-on-write
 + LLM-judged semantic de-duplication with **backpressure-triggered
 consolidation**, forced PROGRESS.md handoff with per-session annotation, live
 PLAN.md anchor with plan-refiner / plan-guardian subagents + mandatory
@@ -14,6 +14,35 @@ injection observability, FTS5 search, AI-judged extraction with Haiku
 - **Version**: 2.12.0
 - **License**: MIT
 - **Platform**: Windows-primary, cross-platform compatible (Tkinter required for GUI)
+
+## What changed in v2.12.1 (over v2.12.0)
+
+**Release engineering only; the plugin is byte-identical to v2.12.0.** The
+first run of `.github/workflows/release.yml` on the v2.12.0 tag failed at
+the exe-verification step, and the Linux gate lanes caught a Windows-only
+assumption in the smoke suite. v2.12.0's tag stays where it is — a moved
+tag is a rewritten history — and the fixed workflow ships the same code as
+v2.12.1. Two rules a future change must not break:
+
+1. **A CI step that expects a NON-ZERO native exit must not run it through
+   `&`.** GitHub prepends `$ErrorActionPreference = 'Stop'` to every pwsh
+   step, PowerShell 7.4+ defaults `$PSNativeCommandUseErrorActionPreference`
+   to `$true`, and the runner appends `exit $LASTEXITCODE` — any of which
+   ends the step before an explicit `if ($LASTEXITCODE …)` can judge the
+   code. The unknown-flag refusal probe uses `Start-Process -Wait -PassThru`
+   and reads `.ExitCode`; the steps that judge exit codes switch the
+   automatic throw off. Measured: the v2.12.0 run ended with exit 1 right
+   after the refusal's usage text with NO error record, while the exe's true
+   exit code is 2 (`Start-Process`, locally, after a green sandboxed
+   `--cli` / `--uninstall` round trip).
+
+2. **A platform-dependent expectation is asserted per platform, never
+   skipped.** `os.path.normcase` folds case on Windows and is the identity
+   on POSIX, so "a different-case path reads the same marker" is TRUE on
+   Windows and FALSE on Linux — the smoke test now asserts each platform's
+   correct answer. Both ubuntu lanes went RED on the v2.12.0 gates run; the
+   Windows lane was green. That is the Linux lanes doing exactly what
+   v2.11.2 added them for.
 
 ## What changed in v2.12.0 (over v2.11.4)
 
