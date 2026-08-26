@@ -369,11 +369,11 @@ The `supersedes_id` column on `memories` (migration `v3_supersedes`,
 `db.py:168`) makes the anti-patch chain explicit: when `upsert_smart` decides a
 new memory supersedes an old one, the new row links back to the old row's ID
 (and the old row is archived). Walking the chain via
-`db.get_supersede_chain(memory_id)` (`db.py:1447-1462`) shows the full update
-history. `content_hash` (migration `v2_content_hash`, `db.py:1447-1462`) is
+`db.get_supersede_chain(memory_id)` (`db.py:1468-1483`) shows the full update
+history. `content_hash` (migration `v2_content_hash`, `db.py:1468-1483`) is
 `sha256[:16]` of the normalized content, used for the cheap exact-duplicate
-check (`db.compute_content_hash` at `db.py:2002-2004`, `db.find_by_hash` at
-`db.py:2002-2004`).
+check (`db.compute_content_hash` at `db.py:2023-2025`, `db.find_by_hash` at
+`db.py:2023-2025`).
 
 Migrations are applied in order from the `_MIGRATIONS` list (`db.py:121-284`) and
 recorded in `_migrations`. Levels shipped so far: **v1** (topic column +
@@ -817,7 +817,7 @@ inside another one — `Claude-Code-Local/companion` alone holds 3725 memories
 and carries its own `.git`. A stray sub-database and a deliberate nested
 sub-project are **byte-for-byte indistinguishable on disk**: both have
 `memory/memory.db` whose `projects` row names their own directory, because
-`upsert_project` (`core/db.py:993-1025`) records whatever cwd it was handed.
+`upsert_project` (`core/db.py:1041-1073`) records whatever cwd it was handed.
 Outermost-wins resolves that ambiguity unconditionally in the direction that
 destroys data, so the first post-upgrade session in `companion` would have
 moved 3725 memories out of reach, silently.

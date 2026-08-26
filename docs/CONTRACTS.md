@@ -180,7 +180,7 @@ bypassing `upsert_smart`:
 2. **Patch updates without history.** If a fact genuinely changes ("we
    switched from lr=3e-4 to lr=1e-4 because…"), the supersede path
    preserves the old fact as `is_active=0` linked via `supersedes_id`.
-   `db.get_supersede_chain(id)` (`core/db.py:1447-1462`) walks the history. No
+   `db.get_supersede_chain(id)` (`core/db.py:1468-1483`) walks the history. No
    "git blame for memories" hack needed.
 
 3. **MEMORY.md staleness.** Auto-regeneration after every batch write
@@ -314,7 +314,7 @@ predicate and one marker behind all of them:
   exposed for migration / bulk-load, but not for everyday writes —
   `core/db.py:1144-1159`.)
 - Don't roll your own `"SELECT content FROM memories ..."` dedup. That's
-  what `db.find_by_hash` (`core/db.py:2015-2023`) and the writer's `_find_similar`
+  what `db.find_by_hash` (`core/db.py:2036-2044`) and the writer's `_find_similar`
   (`llm/memory_writer.py:179`) are for. (There is no `db.find_similar`; the
   matcher lives in the writer, private by design.)
 - Don't "patch" MEMORY.md by hand or expect another path to refresh it. Call

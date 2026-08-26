@@ -17,12 +17,12 @@ injection observability, FTS5 search, AI-judged extraction with Haiku
 
 ## What changed in v2.12.1 (over v2.12.0)
 
-**Release engineering only; the plugin is byte-identical to v2.12.0.** The
-first run of `.github/workflows/release.yml` on the v2.12.0 tag failed at
-the exe-verification step, and the Linux gate lanes caught a Windows-only
-assumption in the smoke suite. v2.12.0's tag stays where it is — a moved
-tag is a rewritten history — and the fixed workflow ships the same code as
-v2.12.1. Two rules a future change must not break:
+**The release workflow's first run, and what the Linux lanes caught — twice.**
+The first run of `.github/workflows/release.yml` on the v2.12.0 tag failed
+at the exe-verification step; the Linux gate lanes caught a Windows-only
+assumption in the smoke suite, and once that was fixed, a plugin bug that
+had shipped since v2.8.0. v2.12.0's tag stays where it is — a moved tag is
+a rewritten history. Three rules a future change must not break:
 
 1. **A CI step that expects a NON-ZERO native exit must not run it through
    `&`.** GitHub prepends `$ErrorActionPreference = 'Stop'` to every pwsh
@@ -43,6 +43,17 @@ v2.12.1. Two rules a future change must not break:
    correct answer. Both ubuntu lanes went RED on the v2.12.0 gates run; the
    Windows lane was green. That is the Linux lanes doing exactly what
    v2.11.2 added them for.
+
+3. **`core.db._readonly_uri` is tested for all THREE path shapes on EVERY
+   platform.** `readonly_connect` gave a POSIX absolute path the Windows
+   drive-path prefix, producing `file://tmp/...` — SQLite reads `tmp` as a
+   URI authority — so `/cc-mem sql` and the dashboard console had never
+   worked on Linux or macOS (v2.8.0 through v2.12.0; the register-E2 note
+   said "verified on the primary platform", which was the defect stated as
+   a credential). The builder is a pure function precisely so the smoke
+   suite can assert the POSIX, drive and UNC forms as literals everywhere;
+   a shape tested only on the platform that has it is how this shipped for
+   four minor versions. Gate: `falsify --case r12posixuri`.
 
 ## What changed in v2.12.0 (over v2.11.4)
 

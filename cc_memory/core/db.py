@@ -409,6 +409,25 @@ _MIGRATIONS = [
 CATEGORIES = ("decision", "result", "config", "bug", "task", "arch", "note")
 
 
+def _readonly_uri(posix_path):
+    """`file:` URI with `?mode=ro` for a RESOLVED path in as_posix() form.
+
+    Pure, so every platform can test every shape (a test that only runs on
+    the platform whose shape it checks is how the POSIX form shipped broken
+    from v2.8.0 through v2.12.0):
+        `/tmp/a b/x.db`      -> `file:/tmp/a%20b/x.db?mode=ro`   (POSIX)
+        `D:/a/x.db`          -> `file:/D%3A/a/x.db?mode=ro`      (drive)
+        `//srv/share/x.db`   -> `file://srv/share/x.db?mode=ro`  (UNC, authority)
+    The rule is simply "add the slash only when the path does not start with
+    one": a POSIX path and a UNC path both already carry theirs, and adding a
+    second to a POSIX path is exactly what turned its first segment into an
+    authority.
+    """
+    import urllib.parse
+    prefix = "file:" if posix_path.startswith("/") else "file:/"
+    return prefix + urllib.parse.quote(posix_path) + "?mode=ro"
+
+
 def readonly_connect(db_path):
     """An ENGINE-enforced read-only connection (register E2).
 
@@ -421,22 +440,24 @@ def readonly_connect(db_path):
     with "attempt to write a readonly database". The authorizer closes the
     one road out of ro — ATTACHing a second, writable database.
 
-    URI form verified on the primary platform: drive colon and spaces
-    percent-encode cleanly, and all of `file:/C%3A/...`, `file:///C%3A/...`
-    accept `?mode=ro`. A UNC path takes the AUTHORITY form the SQLite URI
-    documentation defines — `file://server/share/...` maps back to
-    `\\\\server\\share\\...` on Windows (register r6-C7: prefixing the extra
-    slash turned it into the local path `/server/share/...`, which cannot
-    exist, so read-only consoles failed outright on mapped-share projects).
-    query_only was evaluated as an alternative and REJECTED: it is a pragma
-    a later statement can switch back off, and it allowed
-    `PRAGMA journal_mode=DELETE` — a file write — where mode=ro refuses at
-    the engine.
+    The URI is built by `_readonly_uri`, which has to get THREE path shapes
+    right and got only the two Windows ones right until v2.12.1: drive paths
+    (`file:/D%3A/...`, verified: colon and spaces percent-encode cleanly and
+    `?mode=ro` is accepted) and UNC paths, which take the AUTHORITY form the
+    SQLite URI documentation defines — `file://server/share/...` maps back to
+    `\\\\server\\share\\...` (register r6-C7: prefixing the extra slash turned
+    it into the local path `/server/share/...`, which cannot exist, so
+    read-only consoles failed outright on mapped-share projects). A POSIX
+    absolute path was given the drive-path prefix, producing
+    `file://tmp/x/memory.db` — SQLite reads `tmp` as an authority and raises
+    `invalid uri authority`, so `/cc-mem sql` and the dashboard console never
+    worked on Linux or macOS. Measured on the Linux gate lanes the first time
+    a smoke test drove `sql` as a subprocess (v2.12.1). query_only was
+    evaluated as an alternative and REJECTED: it is a pragma a later
+    statement can switch back off, and it allowed `PRAGMA journal_mode=DELETE`
+    — a file write — where mode=ro refuses at the engine.
     """
-    import urllib.parse
-    p = Path(db_path).resolve().as_posix()
-    prefix = "file:" if p.startswith("//") else "file:/"
-    conn = sqlite3.connect(prefix + urllib.parse.quote(p) + "?mode=ro",
+    conn = sqlite3.connect(_readonly_uri(Path(db_path).resolve().as_posix()),
                            uri=True)
     conn.row_factory = sqlite3.Row
 

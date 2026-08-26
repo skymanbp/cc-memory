@@ -1908,6 +1908,16 @@ def _break_r12backlogrows(root):
            "    if False:  # BREAKAGE: rows never trigger")
 
 
+@case("r12posixuri", ["tests/smoke_test.py"],
+      "restore the drive-path prefix for POSIX paths -> file://tmp/... reads "
+      "'tmp' as a URI authority and `sql` fails on Linux/macOS")
+def _break_r12posixuri(root):
+    _patch(root, f"{PKG}/core/db.py",
+           '    prefix = "file:" if posix_path.startswith("/") else "file:/"',
+           '    prefix = "file:" if posix_path.startswith("//") else "file:/"'
+           '  # BREAKAGE: v2.8.0-v2.12.0 rule')
+
+
 @case("r12stepref", ["tests/test_directive_enforcement.py"],
       "blind the retargeted-reference branch -> a reference that reads right and points wrong passes silently")
 def _break_r12stepref(root):

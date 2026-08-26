@@ -1,4 +1,4 @@
-<!-- i18n-source: ARCHITECTURE.md | sha256: dcb3a5a10972a6ac | version: 2.12.0 | translated: 2026-08-26 -->
+<!-- i18n-source: ARCHITECTURE.md | sha256: da8eb2159b670e96 | version: 2.12.1 | translated: 2026-08-26 -->
 > [English](ARCHITECTURE.md) · **简体中文**
 
 # cc-memory — 架构
@@ -330,11 +330,11 @@ SQLite 表（定义在 [`cc_memory/core/db.py`](../cc_memory/core/db.py)），�
 
 `memories` 上的 `supersedes_id` 列（迁移 `v3_supersedes`，`db.py:168`）把反补丁的
 取代链显式化：当 `upsert_smart` 判定一条新记忆取代了一条旧记忆时，新行会回链到旧行
-的 ID（旧行被归档）。通过 `db.get_supersede_chain(memory_id)`（`db.py:1447-1462`）走一遍
-链条，就能看到完整的更新历史。`content_hash`（迁移 `v2_content_hash`，`db.py:1447-1462`）
+的 ID（旧行被归档）。通过 `db.get_supersede_chain(memory_id)`（`db.py:1468-1483`）走一遍
+链条，就能看到完整的更新历史。`content_hash`（迁移 `v2_content_hash`，`db.py:1468-1483`）
 是归一化内容的 `sha256[:16]`，用于廉价的精确重复检查
-（`db.compute_content_hash` 在 `db.py:2002-2004`，`db.find_by_hash` 在
-`db.py:2002-2004`）。
+（`db.compute_content_hash` 在 `db.py:2023-2025`，`db.find_by_hash` 在
+`db.py:2023-2025`）。
 
 迁移按 `_MIGRATIONS` 列表（`db.py:121-284`）的顺序应用，并记录在 `_migrations` 中。目前
 已交付的层级：**v1**（topic 列 + 索引）、**v2**（content_hash、observations、
@@ -731,7 +731,7 @@ agent 自己的 `cd` 走：一个在仓库根启动、却在 `cli/` 里跑过一
 共 **20** 个，其中 **4** 个是**合法地嵌套**在另一个项目里的——单是
 `Claude-Code-Local/companion` 就有 3725 条记忆，并且自带 `.git`。野生子库与刻意嵌套的
 子项目在磁盘上**逐字节不可区分**：两者都有 `memory/memory.db`，其 `projects` 行都写着
-自己那个目录，因为 `upsert_project`（`core/db.py:993-1025`）记录的就是别人递给它的 cwd。
+自己那个目录，因为 `upsert_project`（`core/db.py:1041-1073`）记录的就是别人递给它的 cwd。
 "最外端胜"会把这种歧义无条件地朝毁数据的方向解决——升级后第一次在 `companion` 里开会话，
 3725 条记忆就会悄无声息地失联。
 

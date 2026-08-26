@@ -9,14 +9,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [2.12.1] — 2026-08-26
 
-### Release engineering: the release workflow's first run, and what Linux caught
+### The release workflow's first run, and what the Linux lanes caught — twice
 
 v2.12.0 was tagged and its release workflow — the first ever — died on the
 step it exists for, so no v2.12.0 release page was created; the tag stays
-where it is (a moved tag is a rewritten history) and the same code ships as
-v2.12.1 with the two defects below fixed. Nothing in the plugin changed.
+where it is (a moved tag is a rewritten history) and v2.12.1 ships with the
+three defects below fixed. Two are release engineering; one is a plugin
+bug that had been shipping since v2.8.0, found by the same Linux gate
+lanes on their second pass.
 
 ### Fixed
+
+- **`/cc-mem sql` and the dashboard SQL console never worked on Linux or
+  macOS.** `core.db.readonly_connect` built its `file:` URI with the
+  Windows drive-path prefix for every non-UNC path, so a POSIX absolute path
+  became `file://tmp/<project>/memory/memory.db` — SQLite reads `tmp` as a
+  URI **authority** and raises `invalid uri authority: tmp` before a single
+  row is read. The v2.8.0 register-E2 note said "URI form verified on the
+  primary platform", and that was the whole problem: nothing had ever run
+  `sql` on the other one. The first smoke test to drive `sql` as a
+  subprocess (v2.12.0's `--json` wire-format check) hit it on both ubuntu
+  lanes once the normcase assertion above stopped masking it; reproduced
+  under WSL Ubuntu, fixed, re-verified there (`--json` one ASCII document,
+  `--full` untruncated, a CTE-DML still refused by `mode=ro`). The URI
+  builder is now the pure `core.db._readonly_uri`, and the smoke suite
+  asserts all THREE path shapes as literals on every platform — the POSIX
+  shape, the drive shape and the UNC authority form — so no shape is ever
+  again tested only where it happens to exist. Falsification case
+  `r12posixuri`.
 
 - **The exe-verification step failed on its deliberate failure.** The
   workflow proves the installer refuses an unknown flag (the v2.5.3

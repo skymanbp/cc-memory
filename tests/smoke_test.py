@@ -4952,12 +4952,27 @@ def main():
     _r12_db.insert_memory(_r12_pid, None, "note",
                           "中文记忆内容编码测试，用于线格式验证",
                           importance=3, topic="中文主题")
+    # The read-only URI builder, all three path shapes on EVERY platform.
+    # This subprocess drive was the first time `sql` ran on the Linux lanes,
+    # and it raised `invalid uri authority: tmp` there: the POSIX absolute
+    # path got the drive-path prefix, `file:/` + `/tmp/...`, so SQLite read
+    # `tmp` as an authority. A test that exercises a shape only on the
+    # platform that has it is how that shipped for four minor versions —
+    # hence a PURE function checked with literals here (v2.12.1).
+    from core.db import _readonly_uri as _r12_uri
+    assert _r12_uri("/tmp/a b/x.db") == "file:/tmp/a%20b/x.db?mode=ro", \
+        "POSIX absolute path must NOT gain a second slash (authority)"
+    assert _r12_uri("D:/a/x.db") == "file:/D%3A/a/x.db?mode=ro", \
+        "Windows drive path takes the file:/ prefix"
+    assert _r12_uri("//srv/share/x.db") == "file://srv/share/x.db?mode=ro", \
+        "UNC path keeps the authority form (register r6-C7)"
     _r12_sq = _r12_run(_r12_root, "sql",
                        "SELECT topic FROM memories WHERE topic LIKE '%主题%'",
                        "--json")
     _r12_body = _r12_sq.stdout.strip()
-    assert _r12_body.startswith("["), \
-        f"--json stdout must be one JSON document, got: {_r12_body[:80]}"
+    assert _r12_sq.returncode == 0 and _r12_body.startswith("["), (
+        f"--json stdout must be one JSON document; rc={_r12_sq.returncode}, "
+        f"stdout={_r12_body[:80]!r}, stderr={_r12_sq.stderr[-300:]!r}")
     assert _r12_json.loads(_r12_body)[0]["topic"] == "中文主题"
     assert "\\u" in _r12_body and _r12_body.isascii(), \
         "sql --json must escape non-ASCII so no capture codec can garble it"

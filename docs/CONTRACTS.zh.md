@@ -1,4 +1,4 @@
-<!-- i18n-source: CONTRACTS.md | sha256: 9881e8e6d833c48d | version: 2.12.0 | translated: 2026-08-26 -->
+<!-- i18n-source: CONTRACTS.md | sha256: 704d81edc3913be4 | version: 2.12.1 | translated: 2026-08-26 -->
 > [English](CONTRACTS.md) · **简体中文**
 
 # cc-memory — 契约（Contracts）
@@ -162,7 +162,7 @@ v2.0 有四条互相独立的保存路径（`pre_compact`、`stop` 观察者、`
 
 2. **没有历史的补丁式更新。** 如果一个事实真的发生了变化（“我们把 lr=3e-4 换成了
    lr=1e-4，因为……”），取代路径会把旧事实以 `is_active=0` 保留下来，并通过
-   `supersedes_id` 链接。`db.get_supersede_chain(id)`（`core/db.py:1447-1462`）可以走一遍
+   `supersedes_id` 链接。`db.get_supersede_chain(id)`（`core/db.py:1468-1483`）可以走一遍
    历史。不需要什么“记忆版 git blame”的黑魔法。
 
 3. **MEMORY.md 过期。** 每次批量写入之后自动重新生成，避免了 v2.0 中观察到的“过期
@@ -268,9 +268,9 @@ v2.0 有四条互相独立的保存路径（`pre_compact`、`stop` 观察者、`
 ### 不应该做什么
 
 - 不要在任何保存路径里直接调用 `db.insert_memory`。（它仍然暴露出来用于迁移 / 批量
-  装载，但不用于日常写入——`core/db.py:1177-1192`。）
+  装载，但不用于日常写入——`core/db.py:1198-1213`。）
 - 不要自己撸一套 `"SELECT content FROM memories ..."` 去重。那正是
-  `db.find_by_hash`（`core/db.py:2015-2023`）和写入器的 `_find_similar`
+  `db.find_by_hash`（`core/db.py:2036-2044`）和写入器的 `_find_similar`
   （`llm/memory_writer.py:179`）的职责。（并不存在 `db.find_similar`；匹配器就住在
   写入器里，按设计是私有的。）
 - 不要手工“打补丁”改 MEMORY.md，也不要指望别的路径去刷新它。任何非平凡的状态变更
