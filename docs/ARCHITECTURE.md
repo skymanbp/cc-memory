@@ -218,7 +218,7 @@ would falsify the record.
 |------|-------|---------|-----|
 | `PreCompact` (sync) | [`cc_memory/hooks/pre_compact.py`](../cc_memory/hooks/pre_compact.py) | 120s | Read a BOUNDED head+tail transcript window (`extractor.load_transcript_window`); LLM extract memories via Haiku; route through `memory_writer.upsert_batch`; FULL-REWRITE `memory/PROGRESS.md`; archive session. Writes a start marker so a killed run is detectable. |
 | `PreCompact` (async) | [`cc_memory/hooks/consolidate_async.py`](../cc_memory/hooks/consolidate_async.py) | 300s, `async: true` | LLM consolidation, moved OFF the blocking compaction path in v2.3.2 (interval marker + lock, budget-gated). Due every Nth session OR when the write backlog says so (v2.12.0); also spawnable standalone (`--cwd <root>`) by the Stop hook's backpressure probe. |
-| `SessionStart` | [`cc_memory/hooks/session_start.py`](../cc_memory/hooks/session_start.py) | 15s | Inject layered context (topics / critical / timeline / PROGRESS preview / footer); emit the FORCED `<system-reminder>` to Read `PROGRESS.md` + `MEMORY.md`; retroactive save of unsaved JSONLs. |
+| `SessionStart` | [`cc_memory/hooks/session_start.py`](../cc_memory/hooks/session_start.py) | 15s | Inject layered context (standing directives / topics / critical / timeline / PROGRESS preview / footer — the directive ledger is the first layer since v2.12.2; before that nothing injected it); emit the FORCED `<system-reminder>` to Read `PROGRESS.md` + `MEMORY.md`; retroactive save of unsaved JSONLs. |
 | `Stop` | [`cc_memory/hooks/stop.py`](../cc_memory/hooks/stop.py) | 22s | Observer: extract from last turn's observations via Haiku; per-turn `patch_progress(files_touched, ...)`; every 5 turns run `idle.maybe_run_idle` (cleanup + MEMORY.md regen); probe the consolidation backlog and spawn the detached async worker when it is due (v2.12.0); when a plan is LIVE, bump its turn counter and **enforce** — refuse the turn (`{"decision": "block"}`) over an unrefined plan, an undrift-checked plan, or an idle directive, with the escape budget CONTRACTS.md specifies (v2.11.0; the advisory nudge this row used to describe is gone). |
 | `PostToolUse` | [`cc_memory/hooks/post_tool_use.py`](../cc_memory/hooks/post_tool_use.py) | 8s | Live-plan integration FIRST, in every mode: `ExitPlanMode` → `plan_active.raw`, `TodoWrite` → mechanical step sync, `Edit`/`Write`/`MultiEdit`/`NotebookEdit` → +1 drift counter, sensitive Bash call → +20. THEN one row into `observations`, for OBSERVED tool calls only (mode allowlist / skip list — `core.modes.should_observe`). No LLM. Measured ~180-290 ms end to end, of which ~75-120 ms is interpreter start-up. |
 | `UserPromptSubmit` | [`cc_memory/hooks/user_prompt.py`](../cc_memory/hooks/user_prompt.py) | 8s | Auto-init `memory/` on first contact; track turn count; save prompt for the Stop observer; on turn 1, tag the session and seed `progress.current_request` (typing the trigger `resume_request` vs `user_prompt` from the bilingual resume-signal whitelist). |
@@ -541,9 +541,9 @@ UserPromptSubmit (turn 1 only):
   write_progress_md(db, project_id, memory_dir)
 
 SessionStart:
-  inject context blob (topics 30% + critical 15% + timeline 20% +
-                       PROGRESS preview 25% + footer 10% of a ~16000-char
-                       budget — session_start.py:48-56)
+  inject context blob (standing directives 10% + topics 25% + critical 15% +
+                       timeline 15% + PROGRESS preview 25% + footer 10% of a
+                       ~16000-char budget — session_start.py:48-56)
   footer may carry: killed-PreCompact warning (surviving .pre_compact_attempt.json,
                     after a 10-minute grace window), OAuth/api-key warnings, counts
   emit: <system-reminder>
@@ -601,10 +601,10 @@ Three changes close it:
 2. The fuzzy fallback is **deleted**. A miss returns `None`. Callers must treat
    that as "no transcript", never as licence to guess.
 3. Ownership is checked positively. `_transcript_belongs_to`
-   (`session_start.py:673-690`) reads the `cwd` the transcript's own records carry
+   (`session_start.py:739-756`) reads the `cwd` the transcript's own records carry
    and is **fail-closed** — no `cwd`, no ingest — and gates `retroactive_save`
    after the bounded window load. The tier-3 mine uses the deliberately weaker
-   `_transcript_is_foreign` (`session_start.py:693-720`): absent `cwd` is allowed,
+   `_transcript_is_foreign` (`session_start.py:759-786`): absent `cwd` is allowed,
    a *different* `cwd` is refused. The two differ on purpose — retroactive save
    persists LLM-extracted memories forever and should demand proof, while
    tier-3 must still work for the cwd-less transcript shape
@@ -627,9 +627,9 @@ normalises it to JSON, written back via `/cc-mem plan-set --from-refiner`;
 LLM); `Edit`/`Write`/`MultiEdit`/`NotebookEdit` bump
 `edits_since_last_guardian`, and sensitive Bash calls (`git push`, `rm -rf`,
 `DROP TABLE`, `npm publish`, `kubectl apply`, `terraform apply`, … —
-`core.plan.is_sensitive_tool_call`, `plan.py:1284-1307`) bump it by 20. Once
+`core.plan.is_sensitive_tool_call`, `plan.py:1335-1358`) bump it by 20. Once
 `turns_since_last_guardian >= 8` OR `edits_since_last_guardian >= 12`
-(`core.plan.should_nudge_guardian`, `plan.py:1248-1264`), the Stop hook
+(`core.plan.should_nudge_guardian`, `plan.py:1299-1315`), the Stop hook
 **refuses the turn** rather than advising (v2.11.0 — the rate-limited nudge
 this sentence used to describe is deleted; see
 [CONTRACTS.md](CONTRACTS.md#the-stop-hook-can-refuse-the-turn-v2110) for the
@@ -673,9 +673,9 @@ while the same token via Bearer + beta gets HTTP 200 (`core/auth.py:14-15`).
 `get_api_key()` is the single-credential back-compat view of that same list (it
 does not retry, `core/auth.py:60-93`); it also carries the `oauth_expired`
 signal behind SessionStart's "[WARNING: OAuth expired — LLM extraction
-disabled]" footer (`session_start.py:594`). Hook callers use it to *supply*
+disabled]" footer (`session_start.py:658`). Hook callers use it to *supply*
 the credential passed into `call_llm`: `pre_compact.py:80 → :166`,
-`stop.py:85`, `session_start.py:594`, `core/consolidate.py:425, 549, 724`.
+`stop.py:85`, `session_start.py:658`, `core/consolidate.py:425, 549, 724`.
 
 Fall-through was added in v2.3.4 for a concrete failure: a dead env key (e.g.
 zero credit → HTTP 400) used to blackhole the healthy subscription token behind
@@ -778,7 +778,7 @@ Per-project state lives at `<project>/memory/`:
 Writers, for traceability: `MEMORY.md` ← `memory_writer.regenerate_memory_index`
 (`memory_writer.py:261-370`); `PROGRESS.md` ← `core.progress.write_progress_md`
 (`progress.py:331-490, 366`); `PLAN.md` ← `core.plan.write_plan_md`
-(`plan.py:683-731`); `.plan_history/` ← `plan.py:683-731`; `.last_save.json` ←
+(`plan.py:733-782`); `.plan_history/` ← `plan.py:733-782`; `.last_save.json` ←
 `pre_compact.py:737, 771`; `.last_inject.json` ← `session_start.py:291-309`
 (tempfile + `os.replace`, genuinely atomic, unlike the plain write used for
 `.last_save.json`); `.last_consolidation.json` ←
@@ -850,7 +850,7 @@ levels (`_chain`, `core/roots.py:267-295`). First hit wins:
    `CodeEraser/cli` has no database while `CodeEraser` does. It needs no VCS
    and no manifest, which matters for projects that are not repositories.
 2. `CLAUDE_PROJECT_DIR`, when it names a directory in the chain (`_from_env`,
-   `core/roots.py:509-527`). Ranked *below* the database rungs deliberately:
+   `core/roots.py:541-559`). Ranked *below* the database rungs deliberately:
    it records where Claude Code was launched, which is not authority to orphan
    a database. Containment is likewise the point — a value left over from
    another project must not redirect this one.
@@ -878,7 +878,10 @@ the same; and neither had any notion of a dependency tree. `_candidates`
   merely own a database counts only when this directory owns none itself — a
   project whose own database sits alongside nested ones is a real, observed
   layout. A directory that is itself a VCS root is never a container, or a
-  repository with two submodules would stop being resolvable.
+  repository with two submodules would stop being resolvable. The read is
+  bounded (`_CONTAINER_SCAN_CAP`, v2.12.2): proving the negative used to
+  visit every subdirectory of every ancestor on every hook and MCP call,
+  which under a 6,366-subdirectory `%TEMP%` cost 3.5-4.4 s per call.
 - **Dependency trees are removed** (`_DEPENDENCY_DIRS`). Reading a file under
   `node_modules/`, `vendor/` or `site-packages/` anchors on the project that
   *depends* on the package. v2.6.0 anchored on the package — it has a

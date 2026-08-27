@@ -9,7 +9,7 @@ Your project's decisions, results, bugs and plans survive compaction, session
 boundaries, and closed terminals — the next session is *forced* to read them
 before it does anything, and what is stored is *reconciled*, never stacked.
 
-[![version](https://img.shields.io/badge/version-2.12.1-blue.svg)](CHANGELOG.md)
+[![version](https://img.shields.io/badge/version-2.12.2-blue.svg)](CHANGELOG.md)
 [![license](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![python](https://img.shields.io/badge/python-3.8%2B-blue.svg)](pyproject.toml)
 [![dependencies](https://img.shields.io/badge/runtime%20deps-0-brightgreen.svg)](#requirements)
@@ -24,6 +24,7 @@ before it does anything, and what is stored is *reconciled*, never stacked.
 
 - [What this is](#what-this-is)
 - [The problem it attacks](#the-problem-it-attacks)
+- [Before and after](#before-and-after)
 - [What it does — six capabilities](#what-it-does--six-capabilities)
 - [How it works](#how-it-works)
 - [Why this one is different](#why-this-one-is-different)
@@ -84,6 +85,171 @@ supersede / insert, chosen by similarity — never append-and-hope), and **reads
 are forced** (a `<system-reminder>` at session start that requires the next
 Claude to read the handoff before responding — and a Stop hook that can refuse
 to end a turn while plan state is stale).
+
+## Before and after
+
+Same tiny project, same model (`claude-opus-5[1m]`, Claude Code 2.1.243), same
+prompt, same day (2026-08-26). One difference: the plugin. Every other plugin
+was switched off on both sides so nothing else could help or hurt. The
+sessions were real `claude -p` runs driven by [`demo/run_demo.py`](demo/run_demo.py);
+the raw `stream-json` of every session and every artifact quoted below is in
+[`demo/captures/`](demo/captures/), and the quotes are verbatim — mechanically
+so: each one sits between `verbatim` markers naming its capture, and
+`tools/citation_check.py` fails the release gates if any quoted segment is not
+in that file.
+
+### 1. "What were we doing last time, and what's next?"
+
+Session A (plugin on) migrated the fixture's storage from a JSON file to
+SQLite under three constraints — keep `export_json()` because a reporting
+script depends on it, don't touch `cli.py`, fix the bug where `add()` accepted
+a negative amount — and ran the tests. Eleven turns. Then a **fresh session**
+asked the question above, twice, at the same path.
+
+| | Without cc-memory | With cc-memory |
+|---|---|---|
+| What it had | An empty directory listing and file mtimes | 4 injected memories, a forced read of `PROGRESS.md`, the retro-saved transcript pointer |
+| The decisions (why `export_json()` stayed, why `cli.py` was off-limits) | Unknown — not recoverable from the filesystem | Stated back, with the scope rule flagged before proposing to touch `cli.py` |
+| The bug fix | Missed: "found no functional defect" — it did not know a fix was the point | Named: "fixed `add()` to reject negative amounts" |
+| How it got there | 7 `Bash` calls of forensics: `ls`, `cat`, mtimes, re-running tests, an ad-hoc migration probe | Read the handoff, then *verified it against the tree* and corrected two carried memories |
+| Turns · wall-clock | 8 · 114 s | 9 · 85 s |
+
+**Without** ([full transcript](demo/captures/handoff/B.without-ccm.txt)):
+
+<!-- verbatim: demo/captures/handoff/B.without-ccm.txt -->
+
+> I have no record of last time — the project's memory directory is empty (no
+> `MEMORY.md`, no memory files), so nothing was ever saved. What follows is
+> reconstructed from the filesystem, not recall.
+>
+> […] Same paragraph's claim about a "known bug in `store.py`" is also stale —
+> I read the current `store.py` and found no functional defect, and the tests
+> are green. Worth confirming whether that bug *was* what the rewrite removed,
+> or whether it's still meant to be lurking somewhere.
+>
+> […] say the word if you'd like me to begin keeping project memory here, so
+> next session this isn't a forensics exercise.
+
+<!-- /verbatim -->
+
+**With** ([full transcript](demo/captures/handoff/B.with-ccm.txt) — the
+SessionStart injection it opens with is in there too):
+
+<!-- verbatim: demo/captures/handoff/B.with-ccm.txt -->
+
+> Read PROGRESS.md — prior progress: last session migrated `tally/store.py`
+> from a JSON file to SQLite while keeping the `Store` public interface and
+> `export_json()` byte-compatible, fixed `add()` to reject negative amounts,
+> and left `cli.py` untouched; all 3 tests pass.
+>
+> […] Fixing it means touching `cli.py`, which was explicitly out of scope
+> last session — your call whether that scope still holds.
+>
+> […] Two corrections to the carried-over memory, since current state is
+> authoritative: memory #9 claims the DB lives at `store.db_path` defaulting
+> to the current directory — there is no `db_path` attribute; it's
+> `self.path`, defaulting to `"tally.json"`.
+
+<!-- /verbatim -->
+
+Two things worth reading in the honest direction. The last paragraph is a
+carried memory being **wrong** — the observer that extracted it hallucinated
+an attribute name — and the next session catching it, because the injection
+is presented as context to verify, not as truth. And the without-side Claude
+looked in Claude Code's own per-project memory directory first and found it
+empty, so the built-in auto-memory contributed nothing to either column: the
+plugin is the only variable.
+
+### 2. "Do it — and also drop the thing the plan protects"
+
+A fresh copy of the fixture, a four-step plan seeded through
+`/cc-mem plan-set --from-refiner` with `export_json() still writes the same
+JSON array` as a success criterion ([seed](demo/captures/guardian/seed.plan.json)),
+and this prompt: *do the SQLite migration, delete `legacy/` entirely, and drop
+`export_json()` — we won't need JSON any more.*
+
+| | Without cc-memory | With cc-memory |
+|---|---|---|
+| `export_json()` | Removed, as asked — one line of warning, then "That script is now broken" | Kept, with the reason: the plan's success criterion and the README both call it a contract with a consumer outside the repo; asked for a ruling instead |
+| `rm -rf legacy/` | Done; "it's recoverable from git history" — **the fixture has no git repository** | Done after noticing there is no git and stashing a copy first |
+| End of turn | Turn ends. Nothing checked anything | The Stop hook **refused the turn** (40 edits since the last drift check, threshold 12); the guardian ran and caught a README line that had quietly written off plan step 3 |
+| Turns · wall-clock | 8 · 99 s | 20 · 321 s |
+
+**With** — the refusal, verbatim as the model received it
+([full transcript](demo/captures/guardian/C.with-ccm.txt)):
+
+<!-- verbatim: demo/captures/guardian/C.with-ccm.txt -->
+
+```text
+Stop hook feedback:
+cc-memory · plan enforcement — this turn cannot close yet.
+
+  [plan-drift]
+    what : The live plan has not been drift-checked (edit_threshold (40 >= 12)).
+    fix  : Run `/cc-mem plan-check` (it resets these counters and prints the
+           guardian invocation), then invoke the @plan-guardian subagent it names.
+
+  (2 more refusal(s) before this degrades to an advisory so you can never be
+   trapped; switch off entirely with CC_MEMORY_PLAN_ENFORCE=0)
+```
+
+<!-- /verbatim -->
+
+…and the guardian's report, which the model then acted on:
+
+<!-- verbatim: demo/captures/guardian/C.with-ccm.txt -->
+
+```text
+ACTIVE STEP: #1 "Replace the JSON store in tally/store.py with a SQLite backend"
+ALIGNMENT: on-track
+EVIDENCE:
+  - Steps 1/2/4 verified done: tally/store.py:9-49 uses sqlite3 with
+    add/entries/total/export_json intact; cli.py:12 defaults to tally.db;
+    4/4 tests pass (incl. tests/test_store.py:29 sqlite assertion).
+  - All three PLAN success criteria hold — export_json() retained despite the
+    user's "drop it" ask; correctly escalated instead of silently breaking the
+    reporting-script contract (PLAN.md:27).
+  - legacy/ removal confirmed (dir absent); no repo file imported it, so no
+    plan impact.
+DRIFT:
+  - Step #3 (migrate command) not done, and README.md:20 now asserts "There is
+    no import path for a pre-existing tally.json" — codifying its absence in
+    docs without a plan decision.
+NEXT ACTION:
+  - Get the user's export_json() ruling, then explicitly keep-or-drop step #3
+    via /cc-mem plan-replan rather than leaving README contradicting PLAN.
+```
+
+<!-- /verbatim -->
+
+**Without** ([full transcript](demo/captures/guardian/C.without-ccm.txt)):
+
+<!-- verbatim: demo/captures/guardian/C.without-ccm.txt -->
+
+> **Deletions** — `legacy/` removed entirely; `export_json()` removed.
+>
+> […] The `export_json()` consumer. `README.md:17` called it "a contract, not
+> a convenience" for a reporting script outside this repo. That script is now
+> broken — it needs to query `tally.db`.
+>
+> […] It's deleted, so for the record: it was a CSV importer that called
+> `Store.add()` per row. That path still works against the SQLite store if
+> it's ever wanted back — it's recoverable from git history.
+
+<!-- /verbatim -->
+
+Three honest footnotes. Enforcement is not free: 20 turns and 321 s against
+8 and 99 s, most of it the guardian's own verification. The plan, not the
+plugin's directive ledger, is what carried the `export_json()` contract into
+this session — a `keep-json-export` constraint directive was seeded too, and
+**it never reached the model**: at v2.12.1 nothing in the SessionStart
+injection or in `PLAN.md` rendered the ledger, and this demo was the first
+thing to measure that. v2.12.2 fixed it — the ledger is now the first
+injection layer and a `PLAN.md` section (see [CHANGELOG.md](CHANGELOG.md));
+the captures above are the v2.12.1 run and are kept exactly as they were.
+And the same plan-seeded criterion is available to any tool that writes a
+`PLAN.md`; what cc-memory adds on top is that the turn *could not end* until
+the drift was checked.
 
 ## What it does — six capabilities
 
@@ -498,7 +664,7 @@ something.
 
 | Key | Default | Meaning |
 |---|---|---|
-| `version` | `2.12.1` | Last-resort fallback for a flat install predating `core/version.py`, which is canonical |
+| `version` | `2.12.2` | Last-resort fallback for a flat install predating `core/version.py`, which is canonical |
 | `consolidation.auto_interval_sessions` | `5` | Sessions between async consolidation runs (the backlog trigger is independent of this — its thresholds are module constants in `core/consolidate.py`) |
 | `ccl.enabled` | `false` | Local Ollama fallback — **opt-in** |
 | `ccl.ollama_url` | `http://localhost:11434` | Ollama endpoint |
@@ -802,6 +968,11 @@ Windows-only test assumption and, behind it, a real one: `/cc-mem sql` and
 the dashboard's SQL console had never worked on Linux or macOS (a malformed
 read-only URI since v2.8.0). Fixed, and now tested for every path shape on
 every platform.
+
+v2.12.2 (same day) adds the [Before and after](#before-and-after) section
+and fixes what its own captures found: the directive ledger had never been
+put in front of the model. It is now the first SessionStart injection layer
+and a `## Standing directives` section of `PLAN.md`.
 
 Every earlier release is in **[CHANGELOG.md](CHANGELOG.md)**, which is the
 single history of this project — this README documents what the software *is*,

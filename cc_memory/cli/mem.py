@@ -2023,6 +2023,10 @@ def cmd_inject_show(args):
           f"(critical={len(data.get('critical_ids', []))}, "
           f"timeline={len(data.get('timeline_ids', []))})")
     print(f"  topics            : {', '.join(data.get('topic_names', [])) or '(none)'}")
+    # v2.12.2: the ledger is a layer of the injection now; before, it never
+    # reached the model at all, and nothing here could have told you so.
+    print(f"  directives        : {data.get('n_injected_directives', 0)} "
+          f"({', '.join(data.get('directive_slugs', [])) or 'none'})")
     print(f"  PROGRESS.md preview: {'yes' if data.get('progress_preview_included') else 'no'}")
     print(f"  size              : {data.get('total_chars', 0)} chars "
           f"(~{data.get('est_tokens', 0)} tokens)")

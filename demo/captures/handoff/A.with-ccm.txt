@@ -1,0 +1,55 @@
+# with cc-memory
+
+**user:** 
+
+_model: `claude-opus-5[1m]` - cwd: `tally` - permission mode: `bypassPermissions`_
+
+I'll start by looking at the project structure.
+
+- `Bash` - find . -type f -not -path './.git/*' | head -50 && echo "--- TREE END ---"
+I'll read the core files.
+
+- `Bash` - echo "=== tally/store.py ==="; cat -n tally/store.py; echo; echo "=== tally/__init__.py ==="; cat -n tally/__init__.py
+- `Bash` - echo "=== tally/cli.py ==="; cat -n tally/cli.py; echo; echo "=== tests/test_store.py ==="; cat -n tests/test_store.py
+- `Bash` - echo "=== README.md ==="; cat -n README.md; echo; echo "=== legacy/old_import.py ==="; cat -n legacy/old_import.py
+- `Bash` - grep -rn "store\|Store\|tally.json\|export_json" --include=*.py --include=*.md . | grep -v "^./tally/store.py" | head -40
+Now I have the full contract. Writing the new store:
+
+- `Bash` - cat > tally/store.py <<'PY' """SQLite-backed storage for tally entries. The on-disk format is a SQLite database. The public interface (`add`, `entries`, `total...
+Now running the tests:
+
+- `Bash` - python -m unittest discover -s tests 2>&1; echo "EXIT=$?"
+3 passed (the ResourceWarning is a pre-existing unclosed handle in the test file itself, not from my code). Now verifying the behaviors the suite doesn't cover:
+
+- `Bash` - cd "$(mktemp -d)" && export PYTHONPATH="C:/Users/skyma/AppData/Local/Temp/ccm-demo-rcesu8rc/tally" python - <<'PY' from tally.store import Store import pathlib...
+- `Bash` - cd "$(mktemp -d)" && export PYTHONPATH="C:/Users/skyma/AppData/Local/Temp/ccm-demo-rcesu8rc/tally" # legacy JSON file written by the OLD store, then opened by ...
+All behaviors check out. Final end-to-end check through the untouched CLI:
+
+- `Bash` - cd "$(mktemp -d)" && export PYTHONPATH="C:/Users/skyma/AppData/Local/Temp/ccm-demo-rcesu8rc/tally" python -m tally.cli add 12.50 "coffee" python -m tally.cli a...
+Done — `python -m unittest discover -s tests` passes (3 tests, exit 0). The lone `ResourceWarning` comes from `tests/test_store.py:28` leaving a file handle open; it predates my change and is outside the scope you set.
+
+Only `tally/store.py` changed. `cli.py` untouched, and `add`/`entries`/`total`/`export_json` keep their exact signatures and return shapes.
+
+## Decisions I made
+
+**Entry dicts stay two keys.** `tests/test_store.py:29` asserts exact equality against `[{"amount": 1.0, "note": "one"}]`, so the SQLite `id` column is an internal rowid that never surfaces in `entries()`, `add()`'s return, or the export. Insertion order is preserved via `ORDER BY id` — the JSON store's implicit list order was a real part of the contract (`cli list` numbers entries with it).
+
+**No `close()` method, so connections are per-operation** (`store.py:67`). Adding `close()` would have extended the public interface you told me to freeze, and a long-lived handle would keep a lock on the DB file on Windows. Each call opens and closes a connection — a few hundred microseconds, irrelevant at this scale.
+
+**Dropped the in-memory `_entries` cache.** The old store read the file once at construction, so two live `Store` objects on the same path silently diverged. Every read now hits SQLite, which makes `Store(path).add(...)` followed by `Store(path).total()` correct by construction rather than by luck.
+
+**`total()` still sums in Python, not SQL.** `round(sum(...), 2)` over the rows gives float-for-float identical results to the old implementation; `SUM()` in SQLite would have been a silent numeric change for no benefit.
+
+**Legacy JSON files migrate instead of crashing.** Pointing the new store at a file the old one wrote would otherwise raise `sqlite3.DatabaseError: file is not a database`. `_read_legacy_json()` (`store.py:76`) sniffs the SQLite magic bytes, and on a JSON file imports the entries and **renames** the original to `tally.json.legacy.json` rather than deleting it — verified above: 2 entries migrated, total 15.5, backup intact. Empty files are treated as fresh DBs.
+
+**`add()` validates before writing** (`store.py:42`): `float(amount)` first, then reject `< 0`. Zero is still accepted — you specified negative. Bad types still raise `TypeError` from `float()` exactly as before.
+
+## Two things to flag
+
+1. **The database file is still named `tally.json`.** `cli.py:12` hardcodes that as the `--file` default and you asked me not to touch it, so the default path now holds a SQLite DB with a `.json` extension. Harmless to SQLite, confusing to humans. One line in `cli.py` fixes it — say the word.
+2. **A negative amount now exits with a raw traceback** through the CLI (`EXIT=1`), because `cli.py` doesn't catch `ValueError`. The bug is fixed at the layer you asked for, but the user-facing message is a stack trace rather than `error: amount must not be negative`. Also a `cli.py` change.
+
+Separately, `README.md:15` ("Storage is a JSON file") is now stale, and `legacy/old_import.py:4` says "revisit when storage changes" — it still works unmodified, since it only uses `Store()` and `add()`.
+
+
+_result: success - turns=11 - 193s_

@@ -43,8 +43,13 @@ def _copy_repo():
     dst = box / "cc-memory"
     shutil.copytree(
         REPO, dst,
+        # `.ce` is cc-enforcer's index (untracked, git-ignored) and its
+        # daemon holds `index.db-shm` locked — copying it raised WinError 33
+        # and took `--anchors` down with it. A live SQLite side file is never
+        # part of the tree under test, whichever tool owns it.
         ignore=shutil.ignore_patterns("__pycache__", "*.pyc", ".git",
-                                      "dist", "build", "memory"))
+                                      "dist", "build", "memory",
+                                      ".ce", "*.db-shm", "*.db-wal"))
     return box, dst
 
 
@@ -1777,8 +1782,8 @@ def _break_r11blockmarker(root):
     # authority channel than PROGRESS.md. render_block_reason was the only
     # renderer in core/plan.py that did not neutralize.
     _patch(root, f"{PKG}/core/plan.py",
-           '    return neutralize_document("\\n".join(lines))\n\n\ndef render_pending_plan_md',
-           '    return "\\n".join(lines)  # BREAKAGE\n\n\ndef render_pending_plan_md')
+           '    return neutralize_document("\\n".join(lines))\n\n\ndef _render_directives_section',
+           '    return "\\n".join(lines)  # BREAKAGE\n\n\ndef _render_directives_section')
 
 
 @case("r11idle", ["tests/test_directive_enforcement.py"],
@@ -1916,6 +1921,53 @@ def _break_r12posixuri(root):
            '    prefix = "file:" if posix_path.startswith("/") else "file:/"',
            '    prefix = "file:" if posix_path.startswith("//") else "file:/"'
            '  # BREAKAGE: v2.8.0-v2.12.0 rule')
+
+
+@case("r12directiveinject", ["tests/test_directive_enforcement.py"],
+      "drop the directives layer from the SessionStart injection -> the ledger "
+      "never reaches the model again (the v2.12.1 state the README demo measured)")
+def _break_r12directiveinject(root):
+    _patch(root, f"{PKG}/hooks/session_start.py",
+           "    if directives_text:\n        parts.append(directives_text)",
+           "    if False:  # BREAKAGE: the ledger never reaches the model\n"
+           "        parts.append(directives_text)")
+
+
+@case("r12directiveplan", ["tests/test_directive_enforcement.py"],
+      "stop passing the ledger to the PLAN.md renderer -> the guardian reads a "
+      "PLAN.md with no standing directives")
+def _break_r12directiveplan(root):
+    _patch(root, f"{PKG}/core/plan.py",
+           "                          directives=_active_directives(db, project_id))",
+           "                          directives=None)  # BREAKAGE: ledger dropped")
+
+
+@case("r12verbatim", ["tools/citation_check.py"],
+      "re-apply the edit `--fix` made inside the quoted guardian report "
+      "(cli.py:12 -> cli.py:33) -> the verbatim region no longer matches its capture")
+def _break_r12verbatim(root):
+    _patch(root, "README.md",
+           "cli.py:12 defaults to tally.db",
+           "cli.py:33 defaults to tally.db")
+
+
+@case("r12verbatimskip", ["tools/citation_check.py"],
+      "drop a line from a quoted report with no [...] elision -> the segment "
+      "spanning the gap is not in the capture")
+def _break_r12verbatimskip(root):
+    _patch(root, "README.md",
+           "  - legacy/ removal confirmed (dir absent); no repo file imported it, so no\n"
+           "    plan impact.\n",
+           "")
+
+
+@case("r12scancap", ["tests/test_surfaces.py"],
+      "remove the _is_container scan cap -> proving 'not a container' reads every "
+      "subdirectory of every ancestor again (3.5-4.4 s per call under a 6,366-entry %TEMP%)")
+def _break_r12scancap(root):
+    _patch(root, f"{PKG}/core/roots.py",
+           "                if examined > _CONTAINER_SCAN_CAP:\n",
+           "                if False:  # BREAKAGE: unbounded scan\n")
 
 
 @case("r12stepref", ["tests/test_directive_enforcement.py"],

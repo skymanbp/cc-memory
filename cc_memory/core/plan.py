@@ -530,8 +530,50 @@ def render_block_reason(reasons: list, attempt: int) -> str:
     return neutralize_document("\n".join(lines))
 
 
+def _render_directives_section(directives: Optional[List[Dict]]) -> List[str]:
+    """`## Standing directives` lines for PLAN.md, or [] when there are none.
+
+    The ledger is rendered into PLAN.md because the plan-guardian reads
+    PLAN.md and nothing else of the plugin's: a drift check that cannot see
+    the user's standing demands cannot flag work that violates one. Through
+    v2.12.1 no renderer carried the ledger — README § Before and after
+    measured a seeded `constraint` reaching the model zero times. Constraints
+    first, then most-repeated first; every slot neutralised like every other
+    model-reachable field in this file.
+    """
+    rows = [r for r in (directives or []) if isinstance(r, dict)]
+    if not rows:
+        return []
+    rows = sorted(rows, key=lambda r: 0 if r.get("kind") == "constraint" else 1)
+    out = ["## Standing directives (user intent — outlives this plan)", ""]
+    for r in rows:
+        line = (f"- **{neutralize_inline(str(r.get('slug') or ''))}** "
+                f"({neutralize_inline(str(r.get('kind') or 'standing'))}, "
+                f"stated ×{int(r.get('times_stated') or 1)}): "
+                f"{neutralize_inline(str(r.get('demand') or ''))}")
+        q = neutralize_inline(str(r.get("quote") or ""))
+        if q:
+            line += f' — "{q}"'
+        out.append(line)
+    out.append("")
+    return out
+
+
+def _active_directives(db, project_id: int) -> List[Dict]:
+    """Active ledger rows for the PLAN.md renderers. Never raises: three of
+    write_plan_md's call sites sit on hook paths, and a projection must
+    degrade to "no ledger section", never abort the write carrying the plan."""
+    try:
+        return db.list_directives(project_id, status="active")
+    except Exception:
+        # why: the ledger is a v8 table; a read failure costs the section,
+        # not PLAN.md — the same asymmetry write_plan_md documents below
+        return []
+
+
 def render_pending_plan_md(raw: str, superseded: Optional[Dict] = None,
-                           meta: Optional[Dict] = None) -> str:
+                           meta: Optional[Dict] = None,
+                           directives: Optional[List[Dict]] = None) -> str:
     """PLAN.md body for a raw plan that has not been refined yet.
 
     The raw text IS the current plan, so it is rendered verbatim; any older
@@ -587,6 +629,7 @@ def render_pending_plan_md(raw: str, superseded: Optional[Dict] = None,
             "Full copies of replaced plans live in `memory/.plan_history/`.",
             "",
         ]
+    lines += _render_directives_section(directives)
     # Assembled sweep: the raw plan and the superseded goal are separate,
     # separately-escaped slots, and the join between them is where a split
     # marker reassembles. See core.privacy.neutralize_document.
@@ -594,7 +637,8 @@ def render_pending_plan_md(raw: str, superseded: Optional[Dict] = None,
 
 
 def render_plan_md(structured: Dict, active_step_id: int = 0,
-                   meta: Optional[Dict] = None) -> str:
+                   meta: Optional[Dict] = None,
+                   directives: Optional[List[Dict]] = None) -> str:
     """Generate PLAN.md content from a structured plan + optional metadata.
 
     `meta` carries the rest of the `plan_active` row: `raw`, `needs_refine`,
@@ -610,13 +654,17 @@ def render_plan_md(structured: Dict, active_step_id: int = 0,
             "needs_refine": meta.get("needs_refine"),
             "last_refined_at": meta.get("last_refined_at")}):
         return render_pending_plan_md(meta.get("raw", ""),
-                                      superseded=structured, meta=meta)
+                                      superseded=structured, meta=meta,
+                                      directives=directives)
     if not is_valid_structured(structured):
-        return (
-            "# PLAN\n\n"
-            "*(No active plan. Enter Claude's plan mode or use "
-            "`/cc-mem plan-set` to create one.)*\n"
-        )
+        # The ledger outlives the plan, so a project with NO plan still
+        # renders its standing directives here. With none, this is
+        # byte-identical to the pre-v2.12.2 text.
+        return neutralize_document("\n".join(
+            ["# PLAN", "",
+             "*(No active plan. Enter Claude's plan mode or use "
+             "`/cc-mem plan-set` to create one.)*", ""]
+            + _render_directives_section(directives)))
     # Every slot below is neutralised, because none of this text is the
     # plugin's own: `structured` comes from the plan-refiner subagent acting on
     # ExitPlanMode output, so any content the model read can reach it. Measured
@@ -655,6 +703,8 @@ def render_plan_md(structured: Dict, active_step_id: int = 0,
     ctx = (structured.get("context") or "").strip()
     if ctx:
         lines += ["## Context", "", neutralize_block(ctx), ""]
+
+    lines += _render_directives_section(directives)
 
     lines += [
         "## Status",
@@ -709,7 +759,8 @@ def write_plan_md(db, project_id: int, memory_dir: Path) -> Path:
         "edits_since_last_guardian": row.get("edits_since_last_guardian"),
         "turns_since_last_guardian": row.get("turns_since_last_guardian"),
     }
-    text = render_plan_md(structured, active_step_id=active_step_id, meta=meta)
+    text = render_plan_md(structured, active_step_id=active_step_id, meta=meta,
+                          directives=_active_directives(db, project_id))
     out = memory_dir / "PLAN.md"
     try:
         # Inside the try, not above it: the docstring promises this never

@@ -122,6 +122,18 @@ _MARKER_MAX_RISE = 6
 # of projects, not a project. `D:\Projects` on the reporting machine has 27.
 _CONTAINER_CHILDREN = 2
 
+# How many SUBDIRECTORIES `_is_container` examines before it stops looking.
+# A positive verdict is cheap (the second project-shaped child ends the scan),
+# but proving the NEGATIVE meant reading every child — and every hook and
+# every MCP call resolves its root through every ancestor. Measured on the
+# reporting machine: `%TEMP%`, where every test sandbox lives, held 6,366
+# subdirectories, so ONE no-database MCP call cost 25,520 stat calls and
+# 3.5-4.4 s, and the stdio suite's eight calls answered five inside its 25 s
+# window. CI's clean runners never saw it. A real projects folder shows its
+# second project-shaped child long before this many entries; a directory
+# that has not is judged not a container.
+_CONTAINER_SCAN_CAP = 256
+
 # Directories whose CONTENTS are somebody else's code. A cwd inside one of
 # these belongs to the project that depends on the package, never to the
 # package — and a database planted in here is invisible to every reporting
@@ -389,12 +401,14 @@ def _is_container(directory):
         nested ones is a legitimate, observed layout, not a container.
 
     Reads the directory once and counts both; an unreadable directory is not
-    a container.
+    a container. The read is BOUNDED by `_CONTAINER_SCAN_CAP` subdirectories
+    (v2.12.2): past the cap the verdict falls through to what was seen.
     """
     if _is_vcs_root(directory) or _exists(directory / PIN_MARKER):
         return False
     vcs_children = 0
     db_children = 0
+    examined = 0
     try:
         with os.scandir(directory) as entries:
             for entry in entries:
@@ -405,6 +419,11 @@ def _is_container(directory):
                     # why: a race or a broken junction on one entry must not
                     # decide the verdict for the whole directory
                     continue
+                examined += 1
+                if examined > _CONTAINER_SCAN_CAP:
+                    # Bounded, not exhaustive — see _CONTAINER_SCAN_CAP. The
+                    # database verdict below still counts what was seen.
+                    break
                 child = Path(entry.path)
                 if _is_vcs_root(child):
                     vcs_children += 1

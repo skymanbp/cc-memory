@@ -1,0 +1,5 @@
+1 active directive(s), most-repeated first:
+
+  [ ] keep-json-export  ×1  (constraint)
+        export_json() is kept and covered by a test
+        原话: The reporting script reads the JSON export. export_json() stays, whatever we do to storage.

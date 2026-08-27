@@ -1059,12 +1059,20 @@ def main():
     # learn to ignore. `python tools/citation_check.py --fix` repairs the rest.
     import citation_check
     _cit = citation_check.classify(_REPO)
-    _rot = [r for r in _cit if r.verdict in ("STALE", "MISSING")]
+    # v2.12.2: QUOTE is a verbatim region (README § Before and after) whose
+    # text is not in the capture it names. `--fix` cannot repair one — it is
+    # what mangled the first quote — so the message says so.
+    _rot = [r for r in _cit if r.verdict in ("STALE", "MISSING", "QUOTE")]
     assert not _rot, (
-        f"{len(_rot)} doc citation(s) no longer cover their symbol — run "
-        f"`python tools/citation_check.py --fix`:\n  "
+        f"{len(_rot)} doc citation(s) no longer cover their symbol or quote "
+        f"their source — run `python tools/citation_check.py --fix` for the "
+        f"citations; a QUOTE must be restored from its capture by hand:\n  "
         + "\n  ".join(f"{r.doc}:{r.docline} -> {r.cited}:{r.start} ({r.detail})"
                       for r in _rot[:8]))
+    _cit_verb = [r for r in _cit if r.verdict == "VERBATIM"]
+    assert len(_cit_verb) >= 10, (
+        f"only {len(_cit_verb)} verified verbatim region(s); README.md and "
+        f"README.zh.md each fence five quotes from demo/captures/")
     # v2.5.3: EVERY citation is checked. One that names no resolvable symbol is
     # still bounds-checked (in-file, non-blank), which is how 23 citations
     # pointing past EOF or at blank lines were found. "Unchecked" is not an

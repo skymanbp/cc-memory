@@ -1,4 +1,4 @@
-<!-- i18n-source: ARCHITECTURE.md | sha256: da8eb2159b670e96 | version: 2.12.1 | translated: 2026-08-26 -->
+<!-- i18n-source: ARCHITECTURE.md | sha256: 7bacb96d8ad14285 | version: 2.12.2 | translated: 2026-08-26 -->
 > [English](ARCHITECTURE.md) · **简体中文**
 
 # cc-memory — 架构
@@ -196,7 +196,7 @@ v2.4.3 把原本 5 份的 `docs/` 目录合并为 2 份。全部 79 处仓库内
 |------|-------|---------|-----|
 | `PreCompact`（同步） | [`cc_memory/hooks/pre_compact.py`](../cc_memory/hooks/pre_compact.py) | 120s | 读取**有界**的 head+tail transcript 窗口（`extractor.load_transcript_window`）；经 Haiku 用 LLM 抽取记忆；经 `memory_writer.upsert_batch` 路由；**整篇重写** `memory/PROGRESS.md`；归档会话。写入一个起始标记，使被杀死的运行可被检测。 |
 | `PreCompact`（异步） | [`cc_memory/hooks/consolidate_async.py`](../cc_memory/hooks/consolidate_async.py) | 300s，`async: true` | LLM 整理，在 v2.3.2 中被移出阻塞式压缩路径（间隔标记 + 锁，受预算门约束）。每 N 次会话到期，**或**写入积压判定到期（v2.12.0）；也可由 Stop 钩子的背压探针以独立进程方式拉起（`--cwd <root>`）。 |
-| `SessionStart` | [`cc_memory/hooks/session_start.py`](../cc_memory/hooks/session_start.py) | 15s | 注入分层上下文（主题 / 关键项 / 时间线 / PROGRESS 预览 / 页脚）；发出强制的 `<system-reminder>`，要求 Read `PROGRESS.md` + `MEMORY.md`；追溯保存未保存的 JSONL。 |
+| `SessionStart` | [`cc_memory/hooks/session_start.py`](../cc_memory/hooks/session_start.py) | 15s | 注入分层上下文（长期指令 / 主题 / 关键项 / 时间线 / PROGRESS 预览 / 页脚——指令账本自 v2.12.2 起是第一层；在此之前没有任何东西注入它）；发出强制的 `<system-reminder>`，要求 Read `PROGRESS.md` + `MEMORY.md`；追溯保存未保存的 JSONL。 |
 | `Stop` | [`cc_memory/hooks/stop.py`](../cc_memory/hooks/stop.py) | 22s | 观察者：经 Haiku 从上一回合的 observations 抽取；每回合 `patch_progress(files_touched, ...)`；每 5 个回合运行 `idle.maybe_run_idle`（清理 + 重新生成 MEMORY.md）；探测整理积压，到期时拉起独立的异步工作者（v2.12.0）；当计划**在活**时，累加其回合计数器并**强制执行**——对未精炼的计划、未做漂移检查的计划或闲置的指令**拒绝收官**（`{"decision": "block"}`），逃生预算见 CONTRACTS.md（v2.11.0；本行从前描述的建议行已不存在）。 |
 | `PostToolUse` | [`cc_memory/hooks/post_tool_use.py`](../cc_memory/hooks/post_tool_use.py) | 8s | **先**做实时计划集成，且所有模式一视同仁：`ExitPlanMode` → `plan_active.raw`，`TodoWrite` → 机械式步骤同步，`Edit`/`Write`/`MultiEdit`/`NotebookEdit` → 漂移计数器 +1，敏感 Bash 调用 → +20。**然后**才为被观测的工具调用向 `observations` 插入一行（模式白名单 / 跳过列表——`core.modes.should_observe`）。不调用 LLM。端到端实测约 180-290 ms，其中约 75-120 ms 是解释器启动。 |
 | `UserPromptSubmit` | [`cc_memory/hooks/user_prompt.py`](../cc_memory/hooks/user_prompt.py) | 8s | 首次接触时自动初始化 `memory/`；跟踪回合数；为 Stop 观察者保存提示；在第 1 回合给会话打标签并为 `progress.current_request` 播种（依据双语恢复信号白名单，把触发类型判定为 `resume_request` 还是 `user_prompt`）。 |
@@ -489,7 +489,7 @@ UserPromptSubmit（仅第 1 回合）：
   write_progress_md(db, project_id, memory_dir)
 
 SessionStart：
-  注入上下文块（主题 30% + 关键项 15% + 时间线 20% +
+  注入上下文块（长期指令 10% + 主题 25% + 关键项 15% + 时间线 15% +
                  PROGRESS 预览 25% + 页脚 10%，总预算约 16000 字符
                  —— session_start.py:48-56）
   页脚可能携带：PreCompact 被杀警告（残留的 .pre_compact_attempt.json，
@@ -542,10 +542,10 @@ slug 约定是：把 `[A-Za-z0-9]` 之外的**每一个**字符替换成 `-`。c
    —— 后者此前逐字复制了旧解析器，连模糊分支一起。
 2. 模糊兜底被**删除**。未命中返回 `None`。调用方必须把它当作「没有 transcript」，
    绝不能当成可以猜的许可。
-3. 归属改为正向校验。`_transcript_belongs_to`（`session_start.py:673-690`）读取
+3. 归属改为正向校验。`_transcript_belongs_to`（`session_start.py:739-756`）读取
    transcript 自身记录携带的 `cwd`，并且是**失败闭合**的 —— 没有 `cwd` 就不摄取 ——
    它在有界窗口加载之后为 `retroactive_save` 把关。第 3 级挖掘则使用故意更弱的
-   `_transcript_is_foreign`（`session_start.py:693-720`）：缺失 `cwd` 放行，`cwd`
+   `_transcript_is_foreign`（`session_start.py:759-786`）：缺失 `cwd` 放行，`cwd`
    **不同**才拒绝。两者的差异是刻意的 —— 追溯保存会把 LLM 抽取的记忆永久落库，
    理应要求证明；而第 3 级还必须对 `tests/smoke_test.py:266-278` 构造的那种没有
    `cwd` 的 transcript 形态继续可用。
@@ -565,9 +565,9 @@ transcript 得到 0 条腿、0 条记忆。第 3 级从
 机械地同步步骤状态（不调用 LLM）；`Edit`/`Write`/`MultiEdit`/`NotebookEdit` 会累加
 `edits_since_last_guardian`，而敏感的 Bash 调用（`git push`、`rm -rf`、
 `DROP TABLE`、`npm publish`、`kubectl apply`、`terraform apply`……见
-`core.plan.is_sensitive_tool_call`，`plan.py:1284-1307`）一次加 20。一旦
+`core.plan.is_sensitive_tool_call`，`plan.py:1335-1358`）一次加 20。一旦
 `turns_since_last_guardian >= 8` 或 `edits_since_last_guardian >= 12`
-（`core.plan.should_nudge_guardian`，`plan.py:1248-1264`），Stop 钩子就**拒绝
+（`core.plan.should_nudge_guardian`，`plan.py:1299-1315`），Stop 钩子就**拒绝
 收官**而不是给建议（v2.11.0——这句话从前描述的那个限速提示已被删除；逃生预算见
 [CONTRACTS.md](CONTRACTS.md#the-stop-hook-can-refuse-the-turn-v2110)）。钩子自己
 绝不派生计划子代理——由拒绝理由指示主 Claude 去调用。
@@ -576,7 +576,7 @@ transcript 得到 0 条腿、0 条记忆。第 3 级从
 [observation 闸门](#observation-闸门不再遮蔽计划分支v25-已修)。
 
 尚未精炼的原始计划也不再是隐形的：`core.plan.raw_pending_refinement`
-（`plan.py:683-731`）是共享判据，`write_plan_md` 与 `/cc-mem plan-status` 都会以一条
+（`plan.py:733-782`）是共享判据，`write_plan_md` 与 `/cc-mem plan-status` 都会以一条
 PENDING REFINEMENT 横幅加逐字原文开头，并把更旧的结构化计划明确标注为已被取代。
 那段逐字块的围栏宽度会超过原始文本里最长的一串反引号，因为计划模式的输出里经常
 带有代码围栏。
@@ -605,8 +605,8 @@ BudgetGate 来说仍是已知量。候选顺序与传输格式（`core/auth.py:2
 `get_api_key()` 是同一份候选列表的单凭据向后兼容视图（它不重试，
 `core/auth.py:60-93`）；它同时承载 `oauth_expired` 信号，支撑 SessionStart 的
 “[WARNING: OAuth expired — LLM extraction disabled]” 页脚
-（`session_start.py:594`）。钩子调用方用它来*提供*传给 `call_llm` 的凭据：
-`pre_compact.py:80 → :166`、`stop.py:85`、`session_start.py:594`、
+（`session_start.py:658`）。钩子调用方用它来*提供*传给 `call_llm` 的凭据：
+`pre_compact.py:80 → :166`、`stop.py:85`、`session_start.py:658`、
 `core/consolidate.py:425, 549, 724`。
 
 逐级回退是 v2.3.4 为一个具体故障加入的：一个失效的环境变量密钥（例如额度为零 →
@@ -701,7 +701,7 @@ v2.4.2 才成立：`_extract_via_llm` 的 `except` 元组此前不包含 `Runtim
 写入方，便于溯源：`MEMORY.md` ← `memory_writer.regenerate_memory_index`
 （`memory_writer.py:261-370`）；`PROGRESS.md` ← `core.progress.write_progress_md`
 （`progress.py:331-490, 366`）；`PLAN.md` ← `core.plan.write_plan_md`
-（`plan.py:683-731`）；`.plan_history/` ← `plan.py:683-731`；`.last_save.json` ←
+（`plan.py:733-782`）；`.plan_history/` ← `plan.py:733-782`；`.last_save.json` ←
 `pre_compact.py:737, 771`；`.last_inject.json` ← `session_start.py:291-309`
 （临时文件 + `os.replace`，是真正原子的，不同于 `.last_save.json` 用的普通写）；
 `.last_consolidation.json` ← `core.consolidate.write_consolidation_marker`
@@ -755,7 +755,7 @@ agent 自己的 `cd` 走：一个在仓库根启动、却在 `cli/` 里跑过一
    这一档修复了所报告的 bug，因为 `CodeEraser/cli` 没有数据库而 `CodeEraser` 有。它不
    需要任何版本控制系统、不需要任何清单文件——对根本不是仓库的项目，这一点是决定性的。
 2. `CLAUDE_PROJECT_DIR`，当它指向链中某个目录时（`_from_env`，
-   `core/roots.py:509-527`）。刻意排在数据库两档**之后**：它记录的是 Claude Code 在
+   `core/roots.py:541-559`）。刻意排在数据库两档**之后**：它记录的是 Claude Code 在
    哪里启动，而这并不构成弃养一个数据库的授权。同样地，"必须在链内"也是要点——别的项目
    残留的值不得改道本项目。
 3. 项目标记——`.git`、`.hg`、`.svn`、`.ccm-root` 以及常见清单文件（`_MARKERS`）——
@@ -774,7 +774,10 @@ agent 自己的 `cd` 走：一个在仓库根启动、却在 `cli/` 里跑过一
 - **移除项目容器目录**（`_is_container`）。两个不对称触发器：有两个及以上子目录是版本库根
   ——永远是决定性的（上报机器的项目文件夹有 27 个）；而"有两个及以上子目录只是拥有数据库"
   ——仅当该目录自己不拥有数据库时才算数，因为"自己的库与嵌套的库并存"是真实存在的合法布局。
-  自己就是版本库根的目录永远不是容器，否则带两个 submodule 的仓库将无法被解析。
+  自己就是版本库根的目录永远不是容器，否则带两个 submodule 的仓库将无法被解析。这次读取
+  是有上限的（`_CONTAINER_SCAN_CAP`，v2.12.2）：证明"不是容器"过去要在每次钩子和 MCP
+  调用里遍历每个祖先目录的每个子目录，在一个有 6,366 个子目录的 `%TEMP%` 下每次调用要
+  花 3.5-4.4 s。
 - **移除依赖树**（`_DEPENDENCY_DIRS`）。读 `node_modules/`、`vendor/` 或 `site-packages/`
   下的文件，应锚定在**依赖**这个包的项目上。v2.6.0 锚在了包自身——它有 `package.json`，
   标记档就接受了——并把数据库种在依赖树里，而报告器恰恰不看那里。是过滤而非截断：走行必须

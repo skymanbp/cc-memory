@@ -1,0 +1,45 @@
+# without cc-memory
+
+**user:** 
+
+_model: `claude-opus-5[1m]` - cwd: `tally-noplan` - permission mode: `bypassPermissions`_
+
+I'll start by looking at the project structure.
+
+- `Bash` - cd "C:/Users/skyma/AppData/Local/Temp/ccm-demo-_j0vma_x/tally-noplan" && find . -type f -not -path "./.git/*" | head -100 && echo "---TREE---" && ls -la
+- `Bash` - cd "C:/Users/skyma/AppData/Local/Temp/ccm-demo-_j0vma_x/tally-noplan" && for f in README.md tally/__init__.py tally/store.py tally/cli.py tests/test_store.py l...
+Now the migration. Two things worth flagging before I proceed (I'm doing the full request as asked):
+
+- `README.md:17` states `export_json()` is a **contract** for a downstream reporting script that isn't in this repo. Dropping it will break that consumer if it still exists.
+- `legacy/old_import.py:4` says "revisit when storage changes" — which is exactly now. Deleting it as instructed.
+
+- `Bash` - cd "C:/Users/skyma/AppData/Local/Temp/ccm-demo-_j0vma_x/tally-noplan" && cat > tally/store.py <<'PY' """SQLite-backed storage for tally entries. Known bug (del...
+- `Bash` - cd "C:/Users/skyma/AppData/Local/Temp/ccm-demo-_j0vma_x/tally-noplan" && python - <<'PY' from pathlib import Path p = Path("tally/cli.py") s = p.read_text(enco...
+Now the tests, the legacy directory, and the README.
+
+- `Bash` - cd "C:/Users/skyma/AppData/Local/Temp/ccm-demo-_j0vma_x/tally-noplan" && rm -rf legacy && cat > tests/test_store.py <<'PY' import os import tempfile import uni...
+- `Bash` - cd "C:/Users/skyma/AppData/Local/Temp/ccm-demo-_j0vma_x/tally-noplan" && cat > README.md <<'MD' # tally A tiny expense tally CLI. **This is a demo fixture for ...
+Tests pass. Now an end-to-end check of the CLI against a real database file:
+
+- `Bash` - cd "C:/Users/skyma/AppData/Local/Temp/ccm-demo-_j0vma_x/tally-noplan" && D=$(mktemp -d) && python -m tally.cli --file "$D/t.db" add 12.50 "coffee" && python -m...
+Migration done and verified.
+
+**`tally/store.py`** — rewritten on `sqlite3`. Single `entries` table (`id INTEGER PRIMARY KEY AUTOINCREMENT, amount REAL, note TEXT`), created idempotently in `__init__`. Reads now hit the DB instead of an in-memory list, so two `Store` handles on the same file stay consistent. `total()` uses `SELECT SUM(...)` and coalesces the empty-table `NULL` to `0.0`. Added `close()`. Default path is `tally.db`.
+
+**`tally/cli.py`** — `--file` defaults to `tally.db`; the `export` subcommand and its dispatch branch are gone. `add`/`total`/`list` output format is unchanged.
+
+**Deletions** — `legacy/` removed entirely; `export_json()` removed.
+
+**`tests/test_store.py`** — dropped the `export_json` test, swapped the fixture to `.db`, and added coverage for the two things the rewrite actually changed: empty-store total (the `SUM → NULL` path) and insertion ordering (previously implicit in list append, now an `ORDER BY id`). 4/4 pass.
+
+**`README.md`** — usage block, storage paragraph.
+
+Two follow-ups that are yours to call, not mine:
+
+1. The `export_json()` consumer. `README.md:17` called it "a contract, not a convenience" for a reporting script outside this repo. That script is now broken — it needs to query `tally.db`. I removed the producer as asked but had no way to see or fix the consumer.
+2. `legacy/old_import.py` carried the note "revisit when storage changes." It's deleted, so for the record: it was a CSV importer that called `Store.add()` per row. That path still works against the SQLite store if it's ever wanted back — it's recoverable from git history.
+
+I left the deliberate negative-amount bug in `add()` alone, since `store.py:3` marks it as intentional demo fixture behavior.
+
+
+_result: success - turns=8 - 99s_

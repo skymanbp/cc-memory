@@ -1,0 +1,255 @@
+# with cc-memory
+
+**hook `SessionStart:startup` -> context injected:**
+```text
+[cc-memory] Session start — loading memory for 'tally-plan'...
+=== CC-MEMORY: Context Restored ===
+Project: tally-plan  |  2026-08-26 22:37
+
+[0 sessions, 0 memories, 0 topics, 0 observations]
+
+=== END CC-MEMORY ===
+
+[cc-memory OK] Injected 0 memories (0 topics, ~38 tokens) · see `/cc-mem inject-show`
+```
+
+_model: `claude-opus-5[1m]` - cwd: `tally-plan` - permission mode: `bypassPermissions`_
+
+I'll start by looking at what's actually in this project before changing anything.
+
+- `Bash` - find "C:/Users/skyma/AppData/Local/Temp/ccm-demo-_j0vma_x/tally-plan" -type f -not -path "*/.git/*" | head -100
+- `Bash` - cd "C:/Users/skyma/AppData/Local/Temp/ccm-demo-_j0vma_x/tally-plan" && for f in README.md tally/__init__.py tally/store.py tally/cli.py tests/test_store.py leg...
+- `Bash` - cd "C:/Users/skyma/AppData/Local/Temp/ccm-demo-_j0vma_x/tally-plan" && echo "===== PLAN.md ====="; cat memory/PLAN.md; echo; echo "===== PROGRESS.md ====="; ca...
+- `Bash` - cd "C:/Users/skyma/AppData/Local/Temp/ccm-demo-_j0vma_x/tally-plan" && echo "--- refs to legacy ---"; grep -rn "legacy\|old_import" --include="*.py" --include=...
+- `ToolSearch` - {"query": "select:AskUserQuestion", "max_results": 3}
+AskUserQuestion isn't available in this session, so I'll flag the one judgment call in prose. Confirmed first: nothing in the repo imports `legacy/old_import.py`.
+
+Since this isn't a git repo, the `legacy/` delete is unrecoverable — I'll stash a copy in the scratchpad before removing it.
+
+- `Bash` - cd "C:/Users/skyma/AppData/Local/Temp/ccm-demo-_j0vma_x/tally-plan" && SP="C:/Users/skyma/AppData/Local/Temp/claude/C--Users-skyma-AppData-Local-Temp-ccm-demo-...
+- `Bash` - cd "C:/Users/skyma/AppData/Local/Temp/ccm-demo-_j0vma_x/tally-plan" && cat > tally/store.py <<'PY' """SQLite-backed storage for tally entries. Known bug (delib...
+- `Bash` - cd "C:/Users/skyma/AppData/Local/Temp/ccm-demo-_j0vma_x/tally-plan" && sed -i 's|parser.add_argument("--file", default="tally.json", help="storage file")|parse...
+- `Bash` - cd "C:/Users/skyma/AppData/Local/Temp/ccm-demo-_j0vma_x/tally-plan" && sed -i 's|self.path = os.path.join(self.dir, "tally.json")|self.path = os.path.join(self...
+- `Bash` - cd "C:/Users/skyma/AppData/Local/Temp/ccm-demo-_j0vma_x/tally-plan" && python - <<'PY' from pathlib import Path p = Path("tests/test_store.py") src = p.read_te...
+Now the README, then I'll run the suite and smoke-test the CLI.
+
+- `Bash` - cd "C:/Users/skyma/AppData/Local/Temp/ccm-demo-_j0vma_x/tally-plan" && python - <<'PY' from pathlib import Path p = Path("README.md") src = p.read_text(encodin...
+- `Bash` - cd "C:/Users/skyma/AppData/Local/Temp/ccm-demo-_j0vma_x/tally-plan" && python -m unittest discover -s tests -v 2>&1
+All 4 tests pass. Now an end-to-end CLI smoke test in a clean directory:
+
+- `Bash` - SP="C:/Users/skyma/AppData/Local/Temp/claude/C--Users-skyma-AppData-Local-Temp-ccm-demo--j0vma-x-tally-plan/a7a26538-7d36-492b-81c8-4aae9c3e057a/scratchpad/smo...
+Migration is done and verified. Three of your four items are complete; I held back on one.
+
+**Done:**
+- `tally/store.py` — SQLite backend, table `entries(id, amount, note)`. Public interface unchanged (`add`/`entries`/`total`), so nothing downstream of the class had to move.
+- `tally/cli.py:12` — `--file` now defaults to `tally.db` (was `tally.json`).
+- `legacy/` — deleted. Nothing in the repo imported it. Since this isn't a git repo, I copied it to the scratchpad first (`scratchpad/deleted-legacy/old_import.py`) so it's recoverable; say the word and I'll drop that too.
+- `tests/test_store.py` — repointed at `.db`, plus a new `test_rows_land_in_sqlite` that reads the file back through raw `sqlite3` to prove the rows actually land in the DB rather than just round-tripping the API.
+- `README.md` — storage section rewritten for SQLite.
+
+Verified: 4/4 tests pass, and `add`/`total`/`list`/`export` all work end to end against a fresh `tally.db` (confirmed SQLite by file magic).
+
+**What I didn't do: drop `export_json()`.** It's the one item where the repo contradicts the request, in two places:
+- `README.md:16-17` (original): "The downstream reporting script (not included here) reads the JSON export, so `Store.export_json()` is a contract, not a convenience."
+- `memory/PLAN.md` lists "export_json() still writes the same JSON array" as a success criterion.
+
+That consumer is outside this repo, so I can't check whether it's still live — and removing the method plus the `export` subcommand would break it silently, with no git history to recover from. The asymmetry is lopsided: keeping it costs six lines of dead code, removing it wrongly costs a broken reporting pipeline you'd find out about later. It's rewritten to serialise out of SQLite, so it works correctly either way.
+
+Confirm the reporting script is retired and I'll delete the method, the `export` subcommand, and its test in one pass.
+
+One related gap: plan step 3 (a `migrate` command that imports an existing `tally.json`) is outside what you asked for, so I left it. That means anyone with existing `tally.json` data starts from an empty `tally.db` — I noted this in the README. If `export_json()` also goes, that data has no path in or out at all. Want me to add the migrate command?
+
+**user:** Stop hook feedback:
+cc-memory · plan enforcement — this turn cannot close yet.
+
+  [plan-drift]
+    what : The live plan has not been drift-checked (edit_threshold (40 >= 12)).
+    fix  : Run `/cc-mem plan-check` (it resets these counters and prints the guardian invocation), then invoke the @plan-guardian subagent it names.
+
+  (2 more refusal(s) before this degrades to an advisory so you can never be trapped; switch off entirely with CC_MEMORY_PLAN_ENFORCE=0)
+
+The stop hook is blocking on a plan drift check. Running it.
+
+- `Skill` - {"skill": "cc-memory:cc-mem", "args": "plan-check"}
+**user:** ## /cc-mem — cc-memory CLI front-end
+
+Run cc-memory CLI commands against the current project. The wrapper resolves
+`--project .` for you.
+
+### Subcommands
+
+Every subcommand `cc_memory/cli/mem.py` defines is listed here, and
+`tests/smoke_test.py` fails if one is missing — an undocumented subcommand is
+one nobody uses, and `sql`'s read-only guard is a security fix that only helps
+someone who knows the command exists.
+
+| Subcommand | Effect |
+|------------|--------|
+| `stats` | Database statistics + supersede-chain count |
+| `status` | Full health check (hooks, DB, API key, PROGRESS state) |
+| `search <q>` | FTS5 search across memories |
+| `list [category]` | List memories (filter by `decision`/`result`/`bug`/...) |
+| `add <category> "<text>"` | Add one memory through the anti-patch writer |
+| `topics` | Show topic summaries |
+| `keywords` | Top project vocabulary by frequency |
+| `sessions` | Compaction history with archive paths |
+| `observations` | Raw PostToolUse rows still awaiting extraction |
+| `schema` | Print the live SQLite schema (tables, indexes, migrations) |
+| `paths [--json]` | Print the resolved project artifact paths — database, `PROGRESS.md`, `PLAN.md`, `MEMORY.md` — each with an exists/absent verdict. Read-only: an absent artifact is an answer, not an error. Exists because `status` reports counts with no locations, and hunting for the DB with an rglob found another project's file first |
+| `sql "<SELECT ...>" [--json\|--full]` | Run a **read-only** query. Write statements are refused — only plain `SELECT`, `WITH … SELECT`, `EXPLAIN` and read-only `PRAGMA` run, and the `PRAGMA name(value)` setter form is refused too (an `=`-only test used to let it through). The default table truncates cells at 60 chars; `--full` prints untruncated `column: value` blocks, and `--json` emits pure-ASCII JSON (`\uXXXX` escapes), which no capturing shell's decode codec can garble — use it whenever CJK text comes back as `�` |
+| `progress` | Force-regenerate `memory/PROGRESS.md` from DB and print it |
+| `supersedes <id>` | Walk the supersede chain for a memory ID (anti-patch history) |
+| `archive <id>... [--supersedes ID]` | Retire memories found to be WRONG: `is_active=0`, recoverable, never `DELETE`. The supported exit from "this stored fact is false" — `sql` is read-only and `add` reconciles only when the new text scores similar enough to the old. `--supersedes` records which memory replaced them, keeping the chain walkable. Refuses ids from another project (`memories.id` is global to the DB file) |
+| `consolidate [--deep] [--no-llm]` | Run the full LLM-backed consolidation pipeline, then stamp the cadence marker (so the Stop hook's backpressure probe doesn't re-run what you just ran). `--deep` first loops the semantic-dedup judge until a round confirms nothing new — the way to pay a months-old backlog down in one sitting; already-refused groups are never re-judged within the run |
+| `cleanup` | Lightweight no-LLM cleanup + MEMORY.md regen |
+| `summary` | Latest session summary (request/done/next_steps) |
+| `mode [name]` | Show/set project mode (code/research/writing) |
+| `serve [--port N]` | Launch the browser-based web viewer (stdlib http.server) |
+| `dashboard` | Launch the Tkinter GUI dashboard for this project |
+| `plan-status` | Live-plan counters + freshness summary (no LLM) |
+| `plan-show` | Regenerate + print `memory/PLAN.md` |
+| `plan-set --raw '<text>'` | Capture a raw plan, mark `needs_refine=1` |
+| `plan-set --raw-file FILE` | Same, but read raw from a file |
+| `plan-set --from-refiner` | Read structured JSON from stdin (refiner output) |
+| `plan-check` | Reset guardian counters + emit plan-guardian invocation hint |
+| `plan-replan` | Re-arm `needs_refine` on the current raw |
+| `plan-clear` | Drop the active plan + delete PLAN.md. Archived to `memory/.plan_history/` first; **`--reason "<why>"` is required when unfinished steps exist** (refuses and exits 1 otherwise — v2.4.0 carryover gate) |
+| `directive-list [--status active\|blocked\|done\|superseded\|dropped\|all] [--json\|--full]` | Standing user directives, **most-repeated first**. A directive is a unit of user INTENT and outlives every plan; a plan step is a unit of execution and dies with its plan. Default filter is `active`; `blocked` rows show as `[b]`. `--full` lifts the per-field truncation, `--json` emits full rows as pure-ASCII JSON |
+| `directive-add <slug> [--quote "..."] [--demand "..."] [--kind standing\|feature\|process\|oneoff\|constraint] [--times N]` | Record a directive. **Re-adding the same slug bumps `times_stated` on the ONE row** rather than creating a second — repetition is the importance signal a plan cannot express. `--times` sets the count outright, for backfilling from a transcript audit. **Reference plan steps by TITLE, never by number** — step ids are re-assigned on every replacement, and the command warns when the text contains `step #N` / `步骤 N` |
+| `directive-edit <slug> [--demand ...] [--quote ...] [--kind ...] [--status active\|blocked]` | Correct a directive's record **without bumping its count** — an edit is maintenance, not a re-statement, and `directive-list` sorts by the count. Never creates (exits 1 on an unknown slug). `--status blocked` parks a directive that is waiting on the *user* — idle enforcement skips it — and `--status active` un-parks it; closure stays with `directive-close`, whose evidence gate this door must not bypass |
+| `directive-close <slug> --evidence "<checkable>" [--status done\|superseded\|dropped]` | Close a directive. **`--evidence` is mandatory** and refuses an empty value (exits 1): a commit sha, `file:line`, or a gate name. A directive closed on an assertion is the exact failure the ledger exists to prevent |
+| `inject-show` | Show exactly what the last SessionStart injected (ground truth) |
+| `inject-usage` | Deterministic signals: did Claude actually Read PROGRESS.md/MEMORY.md |
+| `encoding-check [--apply]` | Scan for U+FFFD corruption (read-only; `--apply` quarantines) |
+
+> **Directive ledger + Stop enforcement (v2.11).** The `directive-*` commands
+> back a ledger that is deliberately **not** plan steps: a plan step dies when
+> the plan is replaced, a directive outlives every plan. The Stop hook reads
+> both and can **refuse to end a turn** (`{"decision": "block"}`) while a plan
+> sits unrefined, a live plan has gone undrift-checked, or an active directive
+> has been idle past its threshold. The refusal always escapes: after
+> `_BLOCK_MAX_CONSECUTIVE` refusals of the *same* condition set it degrades to
+> a loud advisory, and the counter is keyed by a digest of the condition keys,
+> so fixing one problem never spends the next one's budget. Kill switch:
+> `CC_MEMORY_PLAN_ENFORCE=0`. A project with no `plan_active` row is never
+> enforced, so opting in is what turns it on.
+>
+> **What "idle" counts (v2.11.2).** Turns since *that directive* was last
+> written, not since the project was last drift-checked: `turns_total`
+> (monotonic, reset by nothing) minus the directive's own `turns_at_touch`.
+> Re-stating a directive, editing it, or changing its status restarts its
+> clock — those are attention. Running `/cc-mem plan-check` does **not**: it
+> resets the drift counter, and if idleness were measured against that, a
+> guardian check would forgive a directive nobody had touched in thirty turns.
+>
+> **Two shapes idle enforcement deliberately skips (v2.12.0).** A directive
+> with `--status blocked` is waiting on the *user* (material to deliver, a
+> decision to make) — the assistant cannot progress it, so counting its idle
+> turns only manufactured re-statements to silence the block, inflating the
+> count. And a `--kind constraint` is a standing prohibition ("never commit
+> the token") with no recordable positive action by construction: its success
+> is that nothing happens, so it is enforced by being injected, never by
+> being "worked".
+
+> **Memory quality (v2.3).** `consolidate` now also runs LLM-judged **semantic
+> de-duplication** (same fact reworded across sessions → merged, recoverable via
+> `is_active=0` + `supersedes_id`) and **obsolescence detection** (a newer fact
+> that directly contradicts an older one archives the stale one; a temporal
+> guard + anti-event prompt prevent historical actions from wrongly obsoleting
+> live facts). A reference-aware staleness net only archives very old +
+> low-importance + never-injected rows. All archival is recoverable.
+
+### How to invoke
+
+Resolve the CLI path against the plugin root (works for both marketplace
+and standalone-exe installs), then run the subcommand:
+
+```bash
+# Resolve plugin root. TWO layouts exist and both must be probed:
+#   nested — marketplace / dev checkout:  <root>/cc_memory/cli/mem.py
+#   flat   — standalone installer output: <root>/cli/mem.py
+# (ui/installer.py copies each subpackage to TARGET_DIR/<subdir>/ directly,
+#  so a standalone install has NO cc_memory/ segment.)
+CCMEM=""
+for R in "D:/Projects/cc-memory/" "$HOME/.claude/hooks/cc-memory"; do
+    [ -n "$R" ] || continue
+    if   [ -f "$R/cc_memory/cli/mem.py" ]; then CCMEM="$R/cc_memory/cli/mem.py"; break
+    elif [ -f "$R/cli/mem.py" ];           then CCMEM="$R/cli/mem.py";           break
+    fi
+done
+if [ -z "$CCMEM" ]; then
+    echo "cc-memory plugin not found"; exit 1
+fi
+python3 "$CCMEM" --project . plan-check
+```
+
+Then summarize the output to the user. For `progress` and `stats`, give a 1-2
+sentence highlight (what's happening, what's stuck). For `supersedes`, show the
+chain length and any active head. For `dashboard`/`serve`, just confirm the
+launch and stop — the GUI/web viewer lives in its own window/browser tab.
+
+### Anti-patch reminder
+
+When adding a memory via `/cc-mem add <category> "<content>"`, the CLI routes
+through `llm.memory_writer.upsert_smart` automatically — so it will merge or
+supersede if a similar memory exists rather than stacking. See
+`docs/CONTRACTS.md#anti-patch-contract` for the contract.
+
+Reconciliation is similarity-driven, so it handles a **restatement** of a fact,
+not a **repudiation** of one. When a stored memory is simply wrong and no new
+wording is close enough to supersede it, `archive` is the supported exit —
+using it is not a failure of the anti-patch contract, it is the other half.
+
+
+- `Bash` - cd "C:/Users/skyma/AppData/Local/Temp/ccm-demo-_j0vma_x/tally-plan" && CCMEM=""; for R in "D:/Projects/cc-memory/" "$HOME/.claude/hooks/cc-memory"; do [ -n "$R...
+- `Agent` - Read memory/PLAN.md and memory/PROGRESS.md in C:\Users\skyma\AppData\Local\Temp\ccm-demo-_j0vma_x\tally-plan, compare against the work just done this session, ...
+**user:** Read memory/PLAN.md and memory/PROGRESS.md in C:\Users\skyma\AppData\Local\Temp\ccm-demo-_j0vma_x\tally-plan, compare against the work just done this session, and report: (a) current step alignment, (b) any drift, (c) recommended next action. ≤150 words.
+
+Work completed this session (for your comparison):
+- tally/store.py rewritten: JSON file backend -> SQLite (table `entries(id, amount, note)`). Public interface (add/entries/total) unchanged. export_json() RETAINED, now serialising rows out of SQLite.
+- tally/cli.py: `--file` default changed tally.json -> tally.db. All subcommands (add/total/list/export) unchanged and working.
+- legacy/ directory deleted entirely at user request (backed up to session scratchpad first; repo is not under git). Nothing in the repo imported it.
+- tests/test_store.py: repointed to .db, added test_rows_land_in_sqlite. Suite: 4/4 passing.
+- README.md: storage section updated to describe SQLite.
+
+Note the user ALSO asked to drop export_json() entirely ("we won't need JSON any more"), which contradicts the PLAN's success criterion and README's stated contract with an out-of-repo reporting script. I did NOT remove it; I flagged the conflict to the user and am awaiting their decision. Plan step 3 (migrate command importing an existing tally.json) was outside the user's stated ask and is NOT done.
+
+- `Read` - C:\Users\skyma\AppData\Local\Temp\ccm-demo-_j0vma_x\tally-plan\memory\PLAN.md
+- `Read` - C:\Users\skyma\AppData\Local\Temp\ccm-demo-_j0vma_x\tally-plan\memory\PROGRESS.md
+- `Bash` - cd "C:/Users/skyma/AppData/Local/Temp/ccm-demo-_j0vma_x/tally-plan" && ls -la && echo "--- legacy? ---" && ls legacy 2>&1 | head -3
+- `Grep` - {"pattern": "export_json|sqlite3|tally\\.(json|db)|def (add|entries|total)|migrate", "path": "C:\\Users\\skyma\\AppData\
+- `Bash` - cd "C:/Users/skyma/AppData/Local/Temp/ccm-demo-_j0vma_x/tally-plan" && python -m unittest discover -s tests 2>&1 | tail -5 && echo "=== README 12-22 ===" && se...
+**subagent report:**
+```text
+ACTIVE STEP: #1 "Replace the JSON store in tally/store.py with a SQLite backend"
+ALIGNMENT: on-track
+EVIDENCE:
+  - Steps 1/2/4 verified done: tally/store.py:9-49 uses sqlite3 with add/entries/total/export_json intact; cli.py:12 defaults to tally.db; 4/4 tests pass (incl. tests/test_store.py:29 sqlite assertion).
+  - All three PLAN success criteria hold — export_json() retained despite the user's "drop it" ask; correctly escalated instead of silently breaking the reporting-script contract (PLAN.md:27).
+  - legacy/ removal confirmed (dir absent); no repo file imported it, so no plan impact.
+DRIFT:
+  - Step #3 (migrate command) not done, and README.md:20 now asserts "There is no import path for a pre-existing tally.json" — codifying its absence in docs without a plan decision.
+NEXT ACTION:
+  - Get the user's export_json() ruling, then explicitly keep-or-drop step #3 via /cc-mem plan-replan rather than leaving README contradicting PLAN.
+agentId: a85b2ce0742eb2738 (use SendMessage with to: 'a85b2ce0742eb2738', summary: '<5-10 word recap>' to continue this agent)
+<usage>subagent_tokens: 15068
+tool_uses: 5
+duration_ms: 33338</usage>
+```
+
+Guardian came back on-track, with one fair catch: my README line codified the absence of the migrate command (plan step 3) as settled doc. Softening it so it states current status without pre-empting that step:
+
+- `Bash` - cd "C:/Users/skyma/AppData/Local/Temp/ccm-demo-_j0vma_x/tally-plan" && python - <<'PY' from pathlib import Path p = Path("README.md") src = p.read_text(encodin...
+Drift check cleared. Guardian verdict: **on-track**, plan steps 1, 2 and 4 verified done, all three PLAN success criteria holding.
+
+It flagged one thing I'd gotten wrong in the docs — my README line declared "there is no import path for a pre-existing `tally.json`", which quietly wrote off plan step 3 (the `migrate` command) as a non-goal rather than as outstanding work. Fixed: it now says the migrate command is still outstanding. Tests still 4/4.
+
+The migration itself is unchanged from my last message and verified working. Two things still need your call:
+
+1. **`export_json()`** — retained, contradicting your "drop it" instruction, because `README.md:16-17` and the PLAN success criterion both record it as a contract with an out-of-repo reporting script I can't inspect. Confirm that script is retired and it goes in one pass.
+2. **Plan step 3, the `migrate` command** — outside your stated ask, so not built. The guardian's recommendation is to explicitly keep-or-drop it via `/cc-mem plan-replan` rather than leave the plan and README disagreeing.
+
+Both are one short turn of work each once you decide.
+
+
+_result: success - turns=20 - 321s_

@@ -1,0 +1,5 @@
+Goal: Move tally's storage from the JSON file to SQLite without breaking the CLI or the JSON export contract
+Progress: 0/4 steps done · active step #1
+Refined: 2026-08-26T22:37:20 by demo seed (hand-written in the refiner's schema)
+Last guardian check: 2026-08-26T22:41:41
+Counters since last check: 1 turns, 0 edits

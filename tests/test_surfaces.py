@@ -2108,6 +2108,30 @@ def _roots_contracts(project_root):
     assert not _is_container(box / "repo2"), \
         "a repository with two repo children is still one project"
 
+    # v2.12.2: the NEGATIVE verdict is bounded. Proving "not a container"
+    # used to read EVERY subdirectory of every ancestor on every hook and MCP
+    # call; under a 6,366-subdirectory %TEMP% (where this suite's sandboxes
+    # live) one no-DB MCP call cost 25,520 stats and 3.5-4.4 s, and §1h
+    # answered 5 of its 8 calls inside the 25 s window. Counted by probe, not
+    # by clock — a timing assertion is the flake this one replaces.
+    import core.roots as roots_mod
+    from core.roots import _CONTAINER_SCAN_CAP
+    wide = box / "wide"
+    n_wide = _CONTAINER_SCAN_CAP + 200
+    for i in range(n_wide):
+        (wide / f"d{i:04d}").mkdir(parents=True, exist_ok=True)
+    probed = []
+    orig_vcs = roots_mod._is_vcs_root
+    roots_mod._is_vcs_root = lambda d: (probed.append(d), orig_vcs(d))[1]
+    try:
+        verdict = _is_container(wide)
+    finally:
+        roots_mod._is_vcs_root = orig_vcs
+    n_children = len(probed) - 1        # the first probe is `wide` itself
+    assert verdict is False and n_children <= _CONTAINER_SCAN_CAP, (
+        f"_is_container read {n_children} of {n_wide} subdirectories "
+        f"(cap {_CONTAINER_SCAN_CAP}) and said {verdict}")
+
 
 def _roots_hooks_from_subdir(project_root):
     """(b) all six hooks, run from a subdirectory of a seeded project."""

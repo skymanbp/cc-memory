@@ -22,10 +22,31 @@ A citation whose sentence names no resolvable symbol is reported as SKIP, not
 as a failure: this tool is a gate against ROT, and inventing a verdict for a
 citation it cannot anchor would make it one more thing to distrust.
 
+## Verbatim regions
+
+A document may quote captured EVIDENCE — a transcript, a hook's refusal, a
+subagent's report — that itself contains ``file:line`` text. Those are not
+citations into this tree, and they must never be "repaired" into something
+the capture did not say: on its first run over README § Before and after,
+``--fix`` rewrote ``cli.py:12`` to ``cli.py:33`` inside a quoted guardian
+report, which is the one edit a verbatim quote cannot survive. Fence such a
+block with
+
+  <!-- verbatim: demo/captures/guardian/C.with-ccm.txt -->
+  ...
+  <!-- /verbatim -->
+
+and two things happen: nothing inside is scanned for citations, and every
+segment of it (split on ``[…]`` elisions; blockquote ``>`` prefixes and code
+fences stripped; whitespace collapsed) must occur in the named file, or the
+region is reported as QUOTE and the gate fails. "The quotes are verbatim" is
+then a measurement, not a promise.
+
 ## Exit codes
 
-  0  no STALE citations (OK / SKIP only)
-  1  at least one STALE citation, or a citation whose file does not exist
+  0  no STALE citations (OK / SKIP only) and every verbatim region verified
+  1  at least one STALE citation, a citation whose file does not exist, or a
+     verbatim region its source does not contain
 
 ## Modes
 
@@ -65,7 +86,11 @@ TRACKED = ["README.md", "README.zh.md", "CLAUDE.md", "CHANGELOG.md",
            "docs/CONTRACTS.md", "docs/CONTRACTS.zh.md",
            "commands/cc-mem.md",
            "agents/plan-refiner.md", "agents/plan-guardian.md",
-           "skills/ccm-load/SKILL.md", "skills/save-memories/SKILL.md"]
+           "skills/ccm-load/SKILL.md", "skills/save-memories/SKILL.md",
+           # the before/after demo (README § Before and after): its provenance
+           # doc and the fixture's own README. The captured transcripts under
+           # demo/captures/ are .txt on purpose — quoted evidence, not docs.
+           "demo/README.md", "demo/tally/README.md"]
 
 # `cc_memory/core/db.py:1349`, `db.py:188-201`, `tests/smoke_test.py:266-278`,
 # `hooks/hooks.json:9`, `skills/ccm-load/SKILL.md:137`, `plugin.json:4`.
@@ -89,6 +114,93 @@ SYMBOL_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*")
 # Sentence-ish window around a citation: docs mix prose, tables and bullets, so
 # split on the separators that actually end a thought in this repo's style.
 SENTENCE_SPLIT_RE = re.compile(r"(?<=[.;])\s+|\s+\|\s+|\s+—\s+|\s+--\s+")
+
+# A verbatim region: quoted evidence, verified AGAINST its source instead of
+# scanned for citations. See the module docstring. The grammar is deliberately
+# not `<!--ce:...-->` — that prefix belongs to tools/doc_claims.py.
+VERBATIM_OPEN_RE = re.compile(r"<!--\s*verbatim:\s*(?P<src>\S+)\s*-->")
+VERBATIM_CLOSE_RE = re.compile(r"<!--\s*/verbatim\s*-->")
+_ELISION_RE = re.compile(r"\[(?:…|\.\.\.)\]")
+_QUOTE_PREFIX_RE = re.compile(r"^\s*>\s?")
+_FENCE_RE = re.compile(r"^\s*```")
+_INLINE_CODE_RE = re.compile(r"`[^`\n]*`")
+
+
+def _collapse(text: str) -> str:
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _verbatim_regions(doc_lines):
+    """Split one document into (skip-set, regions).
+
+    Returns the 1-based line numbers no citation scan may touch, and a list
+    of ``(open_line, source, body_lines, closed)`` regions. Both marker lines
+    are in the skip-set too: the opening marker names a path that could
+    itself look like a citation.
+    """
+    skip, regions = set(), []
+    current = None
+    for n, line in enumerate(doc_lines, 1):
+        # A marker quoted in inline code is a DESCRIPTION of the grammar, not
+        # a region: CLAUDE.md and CHANGELOG.md both show
+        # `<!-- verbatim: <capture> -->` in backticks, and the first run
+        # opened a region at each of them (one swallowed 1,470 lines of
+        # CLAUDE.md up to the next description; the other never closed).
+        bare = _INLINE_CODE_RE.sub("", line)
+        if current is None:
+            m = VERBATIM_OPEN_RE.search(bare)
+            if m:
+                current = [n, m.group("src"), [], False]
+                skip.add(n)
+            continue
+        skip.add(n)
+        if VERBATIM_CLOSE_RE.search(bare):
+            current[3] = True
+            regions.append(tuple(current))
+            current = None
+        else:
+            current[2].append(line)
+    if current is not None:
+        regions.append(tuple(current))
+    return skip, regions
+
+
+def _verbatim_results(root: Path, rel: str, regions):
+    """One Result per region: VERBATIM when every segment is in the source,
+    QUOTE (a failure) otherwise. A QUOTE names the first 70 characters of the
+    segment that was not found, so the drift is locatable without a diff."""
+    out = []
+    for open_line, src, body, closed in regions:
+        if not closed:
+            out.append(Result(rel, open_line, src, 0, 0, "QUOTE",
+                              detail="verbatim region never closed"))
+            continue
+        target = root / src
+        if not target.is_file():
+            out.append(Result(rel, open_line, src, 0, 0, "QUOTE",
+                              detail="source file does not exist"))
+            continue
+        haystack = _collapse(target.read_text(encoding="utf-8",
+                                              errors="replace"))
+        text = " ".join(_QUOTE_PREFIX_RE.sub("", ln) for ln in body
+                        if not _FENCE_RE.match(ln))
+        segments = [s for s in (_collapse(x) for x in _ELISION_RE.split(text))
+                    if s]
+        if not segments:
+            out.append(Result(rel, open_line, src, 0, 0, "QUOTE",
+                              detail="empty verbatim region"))
+            continue
+        missing = [s for s in segments if s not in haystack]
+        if missing:
+            out.append(Result(rel, open_line, src, 0, 0, "QUOTE",
+                              detail='not in source: "%s%s"'
+                              % (missing[0][:70],
+                                 "…" if len(missing[0]) > 70 else "")))
+        else:
+            out.append(Result(rel, open_line, src, 0, 0, "VERBATIM",
+                              detail="%d segment(s) found in source"
+                              % len(segments)))
+    return out
 
 
 def _is_constant_name(name: str) -> bool:
@@ -265,7 +377,14 @@ def classify(root: Path):
         if not doc.is_file():
             continue
         doc_lines = doc.read_text(encoding="utf-8").splitlines()
+        skip, regions = _verbatim_regions(doc_lines)
+        results.extend(_verbatim_results(root, rel, regions))
         for n, line in enumerate(doc_lines, 1):
+            if n in skip:
+                # Quoted evidence: verified against its source above, and
+                # never scanned — a `file:line` inside a transcript is what
+                # the capture said, not a claim about this tree.
+                continue
             for m in CITATION_RE.finditer(line):
                 cited = m.group("path")
                 start = int(m.group("start"))
@@ -501,24 +620,34 @@ def main():
     for r in results:
         counts[r.verdict] = counts.get(r.verdict, 0) + 1
     for r in results:
-        if r.verdict in ("STALE", "MISSING") or args.list:
+        if r.verdict in ("STALE", "MISSING", "QUOTE") or args.list:
             tag = {"OK": "[OK]   ", "SKIP": "[SKIP] ", "BOUNDS": "[BNDS] ",
-                   "STALE": "[STALE]", "MISSING": "[FAIL] "}[r.verdict]
+                   "STALE": "[STALE]", "MISSING": "[FAIL] ",
+                   "VERBATIM": "[VERB] ", "QUOTE": "[QUOTE]"}[r.verdict]
+            if r.verdict in ("VERBATIM", "QUOTE"):
+                # A region, not a citation: no line span to print.
+                print(f"{tag} {r.doc}:{r.docline}  ->  {r.cited}"
+                      + (f"   {r.detail}" if r.detail else ""))
+                continue
             span = r.start if r.start == r.end else f"{r.start}-{r.end}"
             print(f"{tag} {r.doc}:{r.docline}  ->  {r.cited}:{span}"
                   + (f"   {r.detail}" if r.detail else ""))
 
-    total = len(results)
+    n_regions = counts.get("VERBATIM", 0) + counts.get("QUOTE", 0)
+    total = len(results) - n_regions
     print(f"\nSummary: {total} citations — "
           + ", ".join(f"{counts.get(k, 0)} {k.lower()}"
-                      for k in ("OK", "BOUNDS", "SKIP", "STALE", "MISSING")))
+                      for k in ("OK", "BOUNDS", "SKIP", "STALE", "MISSING"))
+          + f"; {n_regions} verbatim region(s) — "
+          f"{counts.get('VERBATIM', 0)} verified, {counts.get('QUOTE', 0)} quote")
     print(f"         checked: {total - counts.get('SKIP', 0)} of {total} "
           f"({counts.get('OK', 0)} symbol-anchored, "
           f"{counts.get('BOUNDS', 0)} bounds-only)")
-    bad = counts.get("STALE", 0) + counts.get("MISSING", 0)
+    bad = (counts.get("STALE", 0) + counts.get("MISSING", 0)
+           + counts.get("QUOTE", 0))
     print("Result: " + ("OK (no rot detectable)" if not bad
                         else f"FAIL ({bad} citation(s) do not cover their "
-                             f"symbol's definition)"))
+                             f"symbol's definition or quote their source)"))
     return 1 if bad else 0
 
 

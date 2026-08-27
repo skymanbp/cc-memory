@@ -1,0 +1,50 @@
+# without cc-memory
+
+**user:** 
+
+_model: `claude-opus-5[1m]` - cwd: `tally` - permission mode: `bypassPermissions`_
+
+I'll check my memory for this project and look at the current state of the working directory.
+
+- `Bash` - ls -la "C:/Users/skyma/.claude/projects/C--Users-skyma-AppData-Local-Temp-ccm-demo-rcesu8rc-tally/memory/" 2>&1 | head -50
+- `Bash` - ls -la "C:/Users/skyma/AppData/Local/Temp/ccm-demo-rcesu8rc/tally" 2>&1 | head -50
+The memory directory is empty. Let me look at the project itself for any record of prior state.
+
+- `Bash` - cd "C:/Users/skyma/AppData/Local/Temp/ccm-demo-rcesu8rc/tally" && cat README.md && echo "=== TREE ===" && find . -type f | head -60
+- `Bash` - cd "C:/Users/skyma/AppData/Local/Temp/ccm-demo-rcesu8rc/tally" && for f in tally/__init__.py tally/store.py tally/cli.py tests/test_store.py legacy/old_import....
+- `Bash` - cd "C:/Users/skyma/AppData/Local/Temp/ccm-demo-rcesu8rc/tally" && ls -la --time-style=full-iso tally tests legacy && echo "=== any tally.json? ===" && ls -la t...
+- `Bash` - cd "C:/Users/skyma/AppData/Local/Temp/ccm-demo-rcesu8rc/tally" && python -m unittest discover -s tests -v 2>&1 | tail -20
+- `Bash` - cd "C:/Users/skyma/AppData/Local/Temp/ccm-demo-rcesu8rc/tally" && python - <<'PY' # does the pre-SQLite JSON file actually migrate? import json, os, tempfile, ...
+I have no record of last time — the project's memory directory is empty (no `MEMORY.md`, no memory files), so nothing was ever saved. What follows is reconstructed from the filesystem, not recall.
+
+## What happened last session (from mtimes + file contents)
+
+Every file was dropped at `22:30:47–49` on 2026-08-26 except one:
+
+| file | modified | state |
+|---|---|---|
+| `tally/store.py` | **22:39:44** | rewritten |
+| `tally/cli.py`, `tally/__init__.py`, `tests/test_store.py`, `legacy/old_import.py`, `README.md` | 22:30:4x | untouched |
+| `tests/__pycache__` | 22:39:51 | tests run right after the rewrite |
+
+The work was **migrating `Store` from a JSON file to SQLite** (`tally/store.py:1-10`), keeping the `add`/`entries`/`total`/`export_json` interface intact and adding a one-shot migration that consumes a pre-SQLite JSON file and moves it aside as `<name>.legacy.json` (`store.py:78-95`).
+
+I verified the current state rather than assuming it:
+- `python -m unittest discover -s tests -v` → **3 tests, OK**
+- Manual migration smoke test: a legacy JSON file with one entry migrates, totals correctly, leaves `tally.json.legacy.json` beside it, and survives reopen.
+
+So the rewrite landed and works.
+
+## What's next — loose ends the rewrite left behind
+
+1. **`README.md:16` is now false.** It still says "Storage is a JSON file (`tally.json` in the working directory)." It's a SQLite DB. Same paragraph's claim about a "known bug in `store.py`" is also stale — I read the current `store.py` and found no functional defect, and the tests are green. Worth confirming whether that bug *was* what the rewrite removed, or whether it's still meant to be lurking somewhere.
+2. **The default filename is a lie.** `cli.py:13` still defaults `--file` to `tally.json`, so a SQLite database gets a `.json` extension.
+3. **The migration path has zero test coverage.** `_read_legacy_json` (`store.py:78-95`) is the newest and trickiest code — magic-byte sniffing, backup-name rotation via a `while backup.exists()` loop — and no test touches it. I exercised the happy path by hand; the rotation loop and the "empty file" and "not-JSON-either" branches are unexercised.
+4. **`legacy/old_import.py:3-5`** literally says "revisit when storage changes." Storage changed.
+
+My recommendation: take #3 first (a real regression risk on genuinely untested new logic), then #1 and #2 together as one docs-and-naming cleanup. #4 is a decision about whether that importer should exist at all, not a fix.
+
+Want me to start on the migration tests? And say the word if you'd like me to begin keeping project memory here, so next session this isn't a forensics exercise.
+
+
+_result: success - turns=8 - 114s_

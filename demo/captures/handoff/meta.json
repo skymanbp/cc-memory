@@ -1,0 +1,21 @@
+{
+  "scenario": "handoff",
+  "captured_at": "2026-08-26T22:44:33",
+  "claude_code_version": "2.1.243 (Claude Code)",
+  "model": "claude-opus-5[1m]",
+  "cc_memory_version": "",
+  "plugins_disabled_on_both_sides": [
+    "sci-paper@sci-paper",
+    "mattpocock-skills@mattpocock-skills",
+    "cc-tree@cc-tree",
+    "codex@openai-codex",
+    "cc-enforcer@cc-enforcer",
+    "codeeraser@codeeraser",
+    "rag-your-code@rag-your-code"
+  ],
+  "prompts": {
+    "A": "Switch tally's storage from the JSON file to SQLite: change tally/store.py only, keep the Store public interface and export_json() exactly as they are (the reporting script depends on the JSON export), and do not touch cli.py. Also fix a known bug: add() silently accepts a negative amount - it must raise ValueError. Run `python -m unittest discover -s tests` when done, and tell me what you decided along the way.",
+    "B": "What were we doing last time, and what's next?"
+  },
+  "design": "B runs twice at the SAME path; the only difference is the plugin being enabled and its memory/ directory being present."
+}

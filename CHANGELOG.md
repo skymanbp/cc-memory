@@ -7,6 +7,109 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [2.12.2] — 2026-08-26
+
+### The before/after demo, and the directive that never reached the model
+
+Prompted by one README question — *is there a before/after?* — this release
+adds one built from real sessions, and fixes the defect those sessions
+exposed on their first run.
+
+### Added
+
+- **README § Before and after** (both languages). Two side-by-side
+  comparisons on one fixture project, same model (`claude-opus-5[1m]`,
+  Claude Code 2.1.243), same prompt, every other plugin switched off on both
+  sides: (1) a fresh session asked *"What were we doing last time, and what's
+  next?"* with and without the plugin at the SAME path — without, Claude
+  reconstructed from file mtimes, missed that the bug fix had been the
+  point, and asked to "begin keeping project memory here, so next session
+  this isn't a forensics exercise"; with, it opened with the handoff,
+  verified it against the tree and corrected a carried memory that was wrong.
+  (2) A seeded four-step plan, then a prompt asking for the migration AND to
+  delete `legacy/` AND to drop the `export_json()` the plan protects —
+  without, everything was done as asked and the deleted directory was called
+  "recoverable from git history" in a fixture that has no git; with, the
+  contract was kept and escalated, the Stop hook refused the turn at 40
+  edits, and the guardian caught a README line that had written off plan
+  step 3. Quotes are verbatim; turn counts and wall-clock come from the
+  stream's `result` event; costs sit next to wins (20 turns / 321 s against
+  8 / 99 s on the guardian side).
+- **`demo/`** — the fixture (`demo/tally/`, a tiny expense-tally CLI with a
+  deliberate bug and a `legacy/` folder), the protocol as code
+  (`demo/run_demo.py`: fixtures copied to a temp directory, plugins disabled
+  per side via `--settings`, `stream-json --verbose` captured, transcripts
+  rendered to `.txt` so they stay out of the markdown gates) and
+  `demo/captures/` with every raw stream, rendered transcript and plugin
+  artifact at capture time. `demo/README.md` and `demo/tally/README.md`
+  joined `tools/citation_check.py:TRACKED`. The renderer prints a
+  subagent's report in full (the guardian's verdict is part of the dialogue)
+  and `--render-only` rebuilds every `.txt` from its stream without running
+  a session.
+- **Verbatim regions in `tools/citation_check.py`.** "The quotes are
+  verbatim" became a measurement: a quote fenced with
+  `<!-- verbatim: <capture> -->` … `<!-- /verbatim -->` is never scanned for
+  citations, and every segment of it (split on `[…]` elisions, blockquote
+  and fence syntax stripped, whitespace collapsed) must occur in the named
+  capture or the gate reports `QUOTE` and fails — `smoke_test.py` counts
+  QUOTE as rot and asserts the ten README regions verify. The gate exists
+  because the checker's own `--fix` "repaired" the guardian report's
+  `cli.py` line 12 into line 33 and its `tests/test_store.py` line 29 into
+  line 27 INSIDE the quote on its first run over the new section, and
+  flagged the report's `README.md` line 20 — a line of the FIXTURE's README
+  — as a stale citation into this repository. (A marker quoted in inline
+  code is a description, not a region: the first run over CLAUDE.md opened
+  one at the backticked example and swallowed 1,470 lines.) Falsification
+  cases `r12verbatim` (the same mangling re-applied) and `r12verbatimskip`
+  (a line dropped with no elision), both driven RED.
+
+### Fixed
+
+- **The directive ledger never reached the model.** The guardian scenario
+  seeded a `keep-json-export` directive of kind `constraint` — the kind the
+  docs described as "enforced by being injected, never by being worked" —
+  and it appeared **zero** times in the session's stream. The mechanism did
+  not exist: `db.list_directives` had two callers, the CLI and the Stop
+  hook's idle scan, and `hooks/session_start.py` and `core/progress.py`
+  contained the word "directive" zero times. Two renderers carry it now.
+  `session_start._build_directives_layer` is the FIRST layer of the
+  injection (constraints first, then most-repeated first; one
+  `neutralize_inline` line per row; an over-budget row is skipped, never
+  the layer), with a 0.10 budget share taken from topics (0.30 → 0.25) and
+  timeline (0.20 → 0.15). `plan._render_directives_section` writes a
+  `## Standing directives` section into PLAN.md — the file the guardian
+  reads — including when there is no plan, because the ledger outlives the
+  plan; with no directives the no-plan text is byte-identical to before.
+  The inject manifest records `directive_slugs`, `/cc-mem inject-show`
+  prints them, and the SessionStart status line counts them. Gate:
+  `tests/test_directive_enforcement.py` §7 (14 checks, including a forged
+  `<system-reminder>` in a directive neutralised on both renders and a
+  5,000-char demand costing its own row rather than the layer);
+  falsification cases `r12directiveinject` and `r12directiveplan`, each
+  driven RED. The README's captured run is the v2.12.1 behaviour and is
+  kept as it was; the footnote there says so.
+- **Root resolution read every subdirectory of every ancestor.**
+  `core.roots._is_container` proves a directory is NOT a container only by
+  reading all of its children (about seven stats each), and every hook and
+  every MCP call resolves its root through every ancestor of the cwd.
+  Measured while this release's gates were red locally and green on CI:
+  `%TEMP%` — where every test sandbox lives — held 6,366 subdirectories
+  (51,939 entries), so ONE no-database MCP call cost 25,520 stat calls and
+  3.5-4.4 s (7.2 s cold), and `tests/test_surfaces.py` §1h answered 5 of
+  its 8 calls inside the 25 s window. CI's clean runners never see it,
+  which is how it stayed invisible since v2.6.0 introduced the container
+  rung. `_CONTAINER_SCAN_CAP = 256` bounds the read; past it the verdict
+  falls through to what was seen. After: 0.27-0.32 s per call, all eight
+  replies in 3.64 s including interpreter start. Gate: §7 counts the probes
+  (a timing assertion is the flake this replaces); `falsify --case
+  r12scancap`, driven RED.
+
+### Changed
+
+- `docs/CONTRACTS.md` § Plan contract item 5 and `docs/ARCHITECTURE.md`'s
+  SessionStart row + injection diagram now state the mechanism; the
+  Chinese siblings follow.
+
 ## [2.12.1] — 2026-08-26
 
 ### The release workflow's first run, and what the Linux lanes caught — twice

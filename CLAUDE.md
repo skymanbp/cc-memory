@@ -2,7 +2,7 @@
 
 ## Project: cc-memory
 
-**Claude Code persistent memory plugin (v2.12.1)** — anti-patch reconcile-on-write
+**Claude Code persistent memory plugin (v2.12.2)** — anti-patch reconcile-on-write
 + LLM-judged semantic de-duplication with **backpressure-triggered
 consolidation**, forced PROGRESS.md handoff with per-session annotation, live
 PLAN.md anchor with plan-refiner / plan-guardian subagents + mandatory
@@ -11,9 +11,68 @@ injection observability, FTS5 search, AI-judged extraction with Haiku
 (optional local Ollama fallback).
 
 - **Language**: Python 3.8+ (pure stdlib, zero pip dependencies at runtime)
-- **Version**: 2.12.0
+- **Version**: 2.12.2
 - **License**: MIT
 - **Platform**: Windows-primary, cross-platform compatible (Tkinter required for GUI)
+
+## What changed in v2.12.2 (over v2.12.1)
+
+**A before/after demo, and the directive that never reached the model.**
+README gained § *Before and after*: real `claude -p` sessions on the fixture
+project `demo/tally/`, same model and prompt on both sides, every other
+plugin switched off, captured by `demo/run_demo.py` into `demo/captures/`.
+The guardian scenario seeded a `constraint` directive and measured it
+reaching the session **zero times**: the docs said a constraint "is enforced
+by being injected", and nothing injected it — `list_directives` had exactly
+two callers, the CLI and the Stop hook's idle scan; `session_start.py` and
+`core/progress.py` contained the word "directive" zero times. Four rules a
+future change must not break:
+
+1. **The ledger is the FIRST layer of the SessionStart injection and a
+   section of PLAN.md.** `session_start._build_directives_layer` renders
+   active rows constraints-first, then most-repeated-first, one neutralised
+   line per row, skipping an over-budget row rather than the layer
+   (`_LAYER_SKIP_NOTE`); `plan._render_directives_section` renders the same
+   rows into PLAN.md — **also when there is no plan**, because the ledger
+   outlives the plan and the guardian reads PLAN.md and nothing else of the
+   plugin's. `_LAYER_BUDGETS["directives"] = 0.10`, taken from topics
+   (0.30 → 0.25) and timeline (0.20 → 0.15); the shares still sum to 1.0. The
+   inject manifest records `directive_slugs`, so `/cc-mem inject-show` can
+   say which ones reached the model. Gate: `tests/test_directive_enforcement.py`
+   §7; `falsify --case r12directiveinject` / `r12directiveplan`.
+
+2. **The demo is evidence, not a mockup, and it stays reproducible.**
+   `demo/run_demo.py` is the protocol as code: fixtures copied to a temp
+   directory, plugins disabled per side through `--settings` (never
+   `--bare`, which also drops CLAUDE.md discovery and OAuth), stream-json
+   captured, transcripts rendered to `.txt` on purpose — every tracked
+   markdown file runs through the citation/claims gates, and a transcript is
+   quoted evidence, not a document. Re-runs differ; the committed captures
+   are the ones the README text was written against, and a README quote
+   must be copied from them, never paraphrased — and that is GATED, not
+   promised: each quote sits in a `<!-- verbatim: <capture> -->` region that
+   `tools/citation_check.py` verifies against the capture and never scans
+   for citations, because its own `--fix` rewrote the quoted guardian
+   report's `cli.py` line 12 into line 33 on its first run (§ Tests). The
+   renderer prints a subagent's report in full and `--render-only` rebuilds
+   every `.txt` from its stream. `demo/README.md` and `demo/tally/README.md`
+   are in `tools/citation_check.py:TRACKED`.
+
+3. **A documented mechanism needs a gate that measures the mechanism.**
+   "Enforced by being injected" passed all eleven gates for two releases
+   because no gate asked whether an injection *contains* a thing — the same
+   class as v2.11.3's lesson from the other direction (there the design was
+   undocumented; here the documentation had no design). §7 asks now.
+
+4. **`_is_container`'s NEGATIVE verdict is bounded.** Proving "not a
+   container" read every subdirectory of every ancestor, on every hook and
+   every MCP call; `%TEMP%` on the reporting machine holds 6,366
+   subdirectories, so one no-database MCP call cost 3.5-4.4 s and the stdio
+   suite answered 5 of its 8 calls inside its window — red locally, green on
+   CI's clean runners, since v2.6.0. `core.roots._CONTAINER_SCAN_CAP = 256`
+   (0.27-0.32 s after); `tests/test_surfaces.py` §7 counts the probes rather
+   than timing them; `falsify --case r12scancap`. A gate that only runs on
+   clean machines measures clean machines.
 
 ## What changed in v2.12.1 (over v2.12.0)
 
@@ -1064,7 +1123,7 @@ blocking sync leg + a background `async` leg.
 |------|-------|---------|---------|
 | `PreCompact` (sync) | `cc_memory/hooks/pre_compact.py` | 120s | LLM extract → memory_writer.upsert_batch → FULL-REWRITE PROGRESS.md → archive (fast, ~1-5s) |
 | `PreCompact` (async) | `cc_memory/hooks/consolidate_async.py` | 300s, `async:true` | Background consolidation every N sessions OR on write backlog (interval marker + lock, budget-gated) — off the blocking path; also spawnable standalone (`--cwd`) by the Stop probe |
-| `SessionStart` | `cc_memory/hooks/session_start.py` | 15s | Inject layered context + FORCED `<system-reminder>` to Read PROGRESS.md |
+| `SessionStart` | `cc_memory/hooks/session_start.py` | 15s | Inject layered context (the directive ledger FIRST, v2.12.2) + FORCED `<system-reminder>` to Read PROGRESS.md |
 | `Stop` | `cc_memory/hooks/stop.py` | 22s | Observer (Haiku) + per-turn PROGRESS.md patch + idle reorg every 5 turns + consolidation backpressure probe (v2.12.0) + plan enforcement |
 | `PostToolUse` | `cc_memory/hooks/post_tool_use.py` | 8s | Live plan anchor in EVERY mode (ExitPlanMode capture / TodoWrite step sync / drift counters), THEN an observation row for observed tools only (no LLM) |
 | `UserPromptSubmit` | `cc_memory/hooks/user_prompt.py` | 8s | Auto-init memory/ + turn count + seed `progress.current_request` on turn 1 |
@@ -1475,6 +1534,21 @@ as definitions). It runs inside `smoke_test.py`, so rot turns the suite red.
 `python tools/citation_check.py --fix` repairs what it can; `--list` shows every
 verdict. First run measured **163 of 594 citations stale** — the cost of three
 releases with no gate.
+
+**Quoted evidence is the one thing `--fix` must never touch (v2.12.2).** A
+README quote of a captured transcript can itself contain `file:line` text —
+the guardian's report cites the FIXTURE's files — and the checker read those
+as citations into this tree: it flagged the report's `README.md` line 20 as
+stale (that line is blank in THIS repository's README) and `--fix` rewrote
+the report's `cli.py` line 12 into line 33 inside a block the README calls
+verbatim. Fence such a block with `<!-- verbatim: <capture> -->` …
+`<!-- /verbatim -->`: nothing inside is scanned, and every segment between
+the markers (split on `[…]`, `>` and fences stripped, whitespace collapsed)
+must occur in the named capture or the verdict is `QUOTE` and the gate is
+red. A marker inside inline code — like the one in this sentence — is a
+description, not a region. A quote that cannot be found in its source is
+restored from the source by hand — there is no `--fix` for it, by design.
+Gate: `falsify --case r12verbatim` / `r12verbatimskip`.
 
 Two limits to know before trusting a green result: a citation whose sentence
 names no resolvable symbol at all is reported **SKIP**, not OK (253 of 594

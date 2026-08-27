@@ -1,0 +1,3 @@
+[OK] Plan stored — goal: "Move tally's storage from the JSON file to SQLite without breaking the CLI or the JSON export contract"
+     4 steps · PLAN.md regenerated at C:\Users\skyma\AppData\Local\Temp\ccm-demo-_j0vma_x\tally-plan\memory\PLAN.md
+[OK] directive created: keep-json-export (stated ×1, constraint, active)

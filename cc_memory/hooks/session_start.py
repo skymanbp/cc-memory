@@ -59,9 +59,16 @@ _log = get_logger("session_start")
 _DEFAULT_BUDGET = 16000  # ~4000 tokens at 4 chars/token
 
 _LAYER_BUDGETS = {
-    "topics":   0.30,
+    # v2.12.2: the user-intent ledger gets a share and goes FIRST. Through
+    # v2.12.1 NOTHING injected it — the docs said a `constraint` directive "is
+    # enforced by being injected", and the README's before/after demo seeded
+    # one and measured it reaching the model zero times. Its share is taken
+    # from topics (0.30 → 0.25) and timeline (0.20 → 0.15); the six shares
+    # still sum to 1.0.
+    "directives": 0.10,
+    "topics":   0.25,
     "critical": 0.15,
-    "timeline": 0.20,
+    "timeline": 0.15,
     "progress": 0.25,  # PROGRESS.md preview gets a larger share now
     "footer":   0.10,
 }
@@ -270,6 +277,55 @@ def _build_progress_preview(memory_dir, budget):
     if open_len:
         text += "\n" + "`" * open_len
     return "### Last Session PROGRESS (preview)\n\n" + text + "\n"
+
+
+def _build_directives_layer(db, project_id, budget):
+    """The user-intent ledger, one line per ACTIVE directive.
+
+    A directive outlives every plan, and a `constraint` — a standing
+    prohibition — has no positive action anyone could record against it: its
+    ONLY enforcement is being in front of the model (`core.plan.
+    blocking_reasons` skips the kind for exactly that reason). Through v2.12.1
+    no code path put the ledger in front of the model — the CLI listed it and
+    the Stop hook counted its idleness, and that was all. The README's
+    before/after demo seeded a constraint and it reached the model zero times.
+
+    Constraints first, then the rest most-repeated first (the order
+    `db.list_directives` already returns). One line per row
+    (`neutralize_inline`: the text is user-authored via the CLI, and escaped
+    on the write path too, but rows written before both halves existed are
+    already in users' databases). An over-budget row is SKIPPED, not a stop —
+    see _LAYER_SKIP_NOTE.
+    """
+    try:
+        rows = db.list_directives(project_id, status="active")
+    except Exception as e:
+        # why: the ledger is a v8 table; a failure here must cost this layer
+        # only, never the injection it sits in (hook contract: never raise)
+        _log.error(f"directives layer skipped: {e}")
+        return "", []
+    if not rows:
+        return "", []
+    rows = sorted(rows, key=lambda r: 0 if r.get("kind") == "constraint" else 1)
+    lines = ["### Standing directives (user intent — outlives every plan)", ""]
+    used = sum(len(ln) + 1 for ln in lines)
+    slugs = []
+    for r in rows:
+        demand = neutralize_inline(str(r.get("demand") or ""))
+        quote = neutralize_inline(str(r.get("quote") or ""))
+        entry = (f"- [{neutralize_inline(str(r.get('kind') or 'standing'))}] "
+                 f"{neutralize_inline(str(r.get('slug') or ''))} "
+                 f"(stated ×{int(r.get('times_stated') or 1)}): {demand}")
+        if quote:
+            entry += f' — "{quote}"'
+        if used + len(entry) + 1 > budget:
+            continue
+        lines.append(entry)
+        used += len(entry) + 1
+        slugs.append(str(r.get("slug") or ""))
+    if not slugs:
+        return "", []
+    return "\n".join(lines) + "\n", slugs
 
 
 def _build_footer(db, project_id, memory_dir, budget=None):
@@ -484,6 +540,12 @@ def build_context(memory_dir, db, project_id, project_name, current_session_id="
     )
     parts = [header]
 
+    # The ledger goes first: intent before facts. See _build_directives_layer.
+    budget = int(total_budget * _LAYER_BUDGETS["directives"])
+    directives_text, directive_slugs = _build_directives_layer(db, project_id, budget)
+    if directives_text:
+        parts.append(directives_text)
+
     budget = int(total_budget * _LAYER_BUDGETS["topics"])
     topics_text, topic_names = _build_topics_layer(db, project_id, budget)
     if topics_text:
@@ -565,6 +627,8 @@ def build_context(memory_dir, db, project_id, project_name, current_session_id="
         "critical_ids": critical_ids,
         "timeline_ids": timeline_ids,
         "n_injected_memories": len(all_ids),
+        "directive_slugs": directive_slugs,
+        "n_injected_directives": len(directive_slugs),
         "progress_preview_included": bool(progress_text),
         "total_chars": len(result),
         "est_tokens": len(result) // 4,
@@ -1219,10 +1283,11 @@ def main():
             # stdout Claude reads, and the manifest is re-read from disk — a
             # planted string value must not carry a live authority marker.
             ni = neutralize_inline(str(man.get("n_injected_memories", 0)))
+            nd = neutralize_inline(str(man.get("n_injected_directives", 0)))
             et = neutralize_inline(str(man.get("est_tokens", 0)))
             print(
                 f"[cc-memory OK] Injected {ni} memories"
-                f" ({n_topics} topics, ~{et} tokens"
+                f" ({n_topics} topics, {nd} directives, ~{et} tokens"
                 f"{', +PROGRESS.md' if man.get('progress_preview_included') else ''})"
                 f" · see `/cc-mem inject-show`"
             )

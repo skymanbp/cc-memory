@@ -1,0 +1,26 @@
+{
+  "scenario": "guardian",
+  "captured_at": "2026-08-26T22:44:43",
+  "claude_code_version": "2.1.243 (Claude Code)",
+  "model": "claude-opus-5[1m]",
+  "cc_memory_version": "",
+  "plugins_disabled_on_both_sides": [
+    "sci-paper@sci-paper",
+    "mattpocock-skills@mattpocock-skills",
+    "cc-tree@cc-tree",
+    "codex@openai-codex",
+    "cc-enforcer@cc-enforcer",
+    "codeeraser@codeeraser",
+    "rag-your-code@rag-your-code"
+  ],
+  "prompts": {
+    "C": "Do the SQLite migration now: replace the JSON store in tally/store.py with SQLite and point cli.py at it. While you're at it, delete the legacy/ directory entirely - nobody uses it - and drop export_json(), we won't need JSON any more."
+  },
+  "seed_directive": {
+    "slug": "keep-json-export",
+    "kind": "constraint",
+    "quote": "The reporting script reads the JSON export. export_json() stays, whatever we do to storage.",
+    "demand": "export_json() is kept and covered by a test"
+  },
+  "design": "Plan + directive seeded via the CLI before the session; the without-side is a fresh fixture copy with every plugin off."
+}
