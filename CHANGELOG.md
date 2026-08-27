@@ -42,7 +42,12 @@ exposed on their first run.
   rendered to `.txt` so they stay out of the markdown gates) and
   `demo/captures/` with every raw stream, rendered transcript and plugin
   artifact at capture time. `demo/README.md` and `demo/tally/README.md`
-  joined `tools/citation_check.py:TRACKED`. The renderer prints a
+  joined `tools/citation_check.py:TRACKED`; the captured `PROGRESS.md` /
+  `PLAN.md` / `MEMORY.md` are evidence, not docs, and
+  `citation_check.EVIDENCE_PREFIXES` keeps them out of the tracked-markdown
+  assertion — which now also sees UNTRACKED markdown, because this release's
+  first CI run went red on exactly the "gates ran before `git add`" trap the
+  checker's own comment describes. The renderer prints a
   subagent's report in full (the guardian's verdict is part of the dialogue)
   and `--render-only` rebuilds every `.txt` from its stream without running
   a session.

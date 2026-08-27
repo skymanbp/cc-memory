@@ -77,8 +77,10 @@ from pathlib import Path
 # `git ls-files "*.md"`, so adding a document without adding it here turns the
 # suite red — which is how the three v2.11.1 additions below were caught, by
 # CI rather than locally: the gates were run BEFORE `git add`, so those files
-# were still untracked and `git ls-files` did not yet see them. Run the gates
-# again after staging, or let CI be the one that notices.
+# were still untracked and `git ls-files` did not yet see them. v2.12.2 hit
+# the same trap with four captured artifacts, so the assertion now also lists
+# UNTRACKED, not-ignored markdown (`--others --exclude-standard`): the local
+# run sees what CI will see, minus EVIDENCE_PREFIXES below.
 TRACKED = ["README.md", "README.zh.md", "CLAUDE.md", "CHANGELOG.md",
            "CONTRIBUTING.md", "SECURITY.md",
            ".github/PULL_REQUEST_TEMPLATE.md",
@@ -91,6 +93,15 @@ TRACKED = ["README.md", "README.zh.md", "CLAUDE.md", "CHANGELOG.md",
            # doc and the fixture's own README. The captured transcripts under
            # demo/captures/ are .txt on purpose — quoted evidence, not docs.
            "demo/README.md", "demo/tally/README.md"]
+
+# Captured EVIDENCE is not documentation. demo/captures/ also holds the
+# plugin's own artifacts as they stood when the README's sessions ran —
+# PROGRESS.md, PLAN.md, MEMORY.md — and a `file:line` inside them is a
+# statement about the FIXTURE at capture time, exactly like the text inside a
+# verbatim region, never a claim about this tree. smoke_test.py leaves these
+# prefixes out of its "every tracked markdown file is in TRACKED" assertion.
+# Nothing else may be listed here: a document that is not evidence is gated.
+EVIDENCE_PREFIXES = ("demo/captures/",)
 
 # `cc_memory/core/db.py:1349`, `db.py:188-201`, `tests/smoke_test.py:266-278`,
 # `hooks/hooks.json:9`, `skills/ccm-load/SKILL.md:137`, `plugin.json:4`.

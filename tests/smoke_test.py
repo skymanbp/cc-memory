@@ -1091,9 +1091,20 @@ def main():
     # both agent prompts, the slash command and both skills were checked by
     # nothing. A subset is how "which docs are gated" rots without anyone
     # noticing, so the subset is now the whole set and this asserts it.
-    _cit_git = subprocess.run(["git", "ls-files", "*.md"], cwd=str(_REPO),
-                              capture_output=True, text=True,
-                              encoding="utf-8").stdout.split()
+    # v2.12.2: tracked AND untracked-not-ignored. Twice now (v2.11.1's three
+    # additions, v2.12.2's four captured artifacts) the gates ran green
+    # locally BEFORE `git add` and CI went red on the same assertion, because
+    # `git ls-files` alone shows the index, not what the commit will hold.
+    # `--others --exclude-standard` is what CI will see. Captured evidence
+    # under citation_check.EVIDENCE_PREFIXES is left out on purpose: a
+    # `file:line` in a captured PROGRESS.md is about the fixture, not this tree.
+    _cit_git = []
+    for argv in (["git", "ls-files", "*.md"],
+                 ["git", "ls-files", "--others", "--exclude-standard", "*.md"]):
+        _cit_git += subprocess.run(argv, cwd=str(_REPO), capture_output=True,
+                                   text=True, encoding="utf-8").stdout.split()
+    _cit_git = sorted(p for p in set(_cit_git)
+                      if not p.startswith(citation_check.EVIDENCE_PREFIXES))
     _cit_missing = sorted(set(_cit_git) - set(citation_check.TRACKED))
     assert not _cit_missing, (
         f"{len(_cit_missing)} markdown file(s) are outside the citation gate — "
