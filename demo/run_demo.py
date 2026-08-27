@@ -18,6 +18,14 @@ Everything is written under demo/captures/<scenario>/: the raw stream-json
 of every session (provenance), a rendered .txt transcript of each, and the
 cc-memory artifacts that existed at capture time. Re-running overwrites.
 
+ONE declared redaction, applied to every capture file as it is written and
+to nothing else: the user-profile directory prefix (`C:\\Users\\<name>` /
+`/home/<name>`, in every escaping the streams use) becomes `~`. The captures
+are committed to a public repository; the work trees live under the profile's
+temp directory and PROGRESS.md carries a transcript pointer into
+`~/.claude/`, so without this the capture would publish the local username
+on every path line. Nothing semantic changes — see demo/README.md.
+
 Stdlib only. Needs `claude` on PATH and a Claude Code login. Costs real API
 calls. Fixtures are copied to a temporary directory first; the repository's
 own tree is never a work tree.
@@ -112,6 +120,31 @@ def _child_env() -> dict:
     env.pop("CLAUDECODE", None)      # the nested-session guard
     env["PYTHONIOENCODING"] = "utf-8"
     return env
+
+
+_HOME = str(Path.home())
+
+
+def _redact(text: str) -> str:
+    """The ONE edit a capture receives (see the module docstring).
+
+    Most-escaped spelling first, or the native replacement would break the
+    longer JSON-escaped forms in half. The streams genuinely contain all
+    four: native paths in hook text, `\\\\`-escaped ones inside JSON string
+    values, doubly-escaped ones inside tool_result payloads that quote JSON,
+    and forward-slash spellings from POSIX-style tools.
+    """
+    for form in (_HOME.replace("\\", "\\\\\\\\"),
+                 _HOME.replace("\\", "\\\\"),
+                 _HOME,
+                 _HOME.replace("\\", "/")):
+        text = text.replace(form, "~")
+    return text
+
+
+def _write(path: Path, text: str) -> None:
+    """Every capture file goes through here, so no writer can skip _redact."""
+    path.write_text(_redact(text), encoding="utf-8", newline="\n")
 
 
 def _short(s, n=160):
@@ -227,11 +260,15 @@ def run_claude(workdir: Path, prompt: str, *, with_ccm: bool, out_stem: Path) ->
     proc = subprocess.run(cmd, cwd=str(workdir), env=_child_env(),
                           capture_output=True, encoding="utf-8", errors="replace")
     out_stem.parent.mkdir(parents=True, exist_ok=True)
-    Path(str(out_stem) + ".stream.jsonl").write_text(proc.stdout, encoding="utf-8", newline="\n")
+    # Redact ONCE, then both the stored stream and the parsed events come from
+    # the same text — the .txt render can never disagree with the .jsonl
+    # about a path.
+    stdout = _redact(proc.stdout)
+    Path(str(out_stem) + ".stream.jsonl").write_text(stdout, encoding="utf-8", newline="\n")
     if proc.stderr.strip():
-        Path(str(out_stem) + ".stderr.txt").write_text(proc.stderr, encoding="utf-8", newline="\n")
+        _write(Path(str(out_stem) + ".stderr.txt"), proc.stderr)
     events = []
-    for line in proc.stdout.splitlines():
+    for line in stdout.splitlines():
         line = line.strip()
         if not line:
             continue
@@ -278,10 +315,12 @@ def fresh_copy(root: Path, name: str) -> Path:
 
 
 def save_artifacts(workdir: Path, dst: Path, names: tuple) -> None:
+    # Read/redact/write, not copy2: PROGRESS.md carries a transcript pointer
+    # into ~/.claude/projects/, which is exactly the path the redaction is for.
     for n in names:
         src = workdir / "memory" / n
         if src.exists():
-            shutil.copy2(src, dst / n)
+            _write(dst / n, src.read_text(encoding="utf-8"))
 
 
 def tree_listing(workdir: Path) -> str:
@@ -300,8 +339,7 @@ def _meta(scenario: str, init: dict, extra: dict) -> None:
             "cc_memory_version": vp.read_text(encoding="utf-8").split('"')[1] if vp.exists() else None,
             "plugins_disabled_on_both_sides": [k for k in _enabled_plugins() if k != CCM_KEY]}
     meta.update(extra)
-    (CAPTURES / scenario / "meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8",
-                                                   newline="\n")
+    _write(CAPTURES / scenario / "meta.json", json.dumps(meta, indent=2))
 
 
 # -- scenarios --------------------------------------------------------------
@@ -316,8 +354,8 @@ def scenario_handoff(root: Path) -> None:
     run_claude(w, PROMPT_A, with_ccm=True, out_stem=out / "A.with-ccm")
     print("[handoff] session B - same path, cc-memory ON")
     init = run_claude(w, PROMPT_B, with_ccm=True, out_stem=out / "B.with-ccm")
-    (out / "B.inject-show.txt").write_text(mem(w, "inject-show"), encoding="utf-8", newline="\n")
-    (out / "B.memories.txt").write_text(mem(w, "list", "--limit", "30"), encoding="utf-8", newline="\n")
+    _write(out / "B.inject-show.txt", mem(w, "inject-show"))
+    _write(out / "B.memories.txt", mem(w, "list", "--limit", "30"))
     save_artifacts(w, out, ("PROGRESS.md", "MEMORY.md"))
     print("[handoff] session B - same path, memory/ moved out, ALL plugins OFF")
     aside = root / "memory-aside"
@@ -343,18 +381,17 @@ def scenario_guardian(root: Path) -> None:
     seed_log = mem(w, "plan-set", "--from-refiner", stdin=json.dumps(SEED_PLAN))
     seed_log += mem(w, "directive-add", SEED_DIRECTIVE["slug"], "--kind", SEED_DIRECTIVE["kind"],
                     "--quote", SEED_DIRECTIVE["quote"], "--demand", SEED_DIRECTIVE["demand"])
-    (out / "seed.log.txt").write_text(seed_log, encoding="utf-8", newline="\n")
+    _write(out / "seed.log.txt", seed_log)
     print("[guardian] session C - cc-memory ON (plan + directive live)")
     init = run_claude(w, PROMPT_C, with_ccm=True, out_stem=out / "C.with-ccm")
-    (out / "C.plan-status.txt").write_text(mem(w, "plan-status"), encoding="utf-8", newline="\n")
-    (out / "C.directive-list.txt").write_text(mem(w, "directive-list", "--full"),
-                                              encoding="utf-8", newline="\n")
-    (out / "C.tree-after.txt").write_text(tree_listing(w), encoding="utf-8", newline="\n")
+    _write(out / "C.plan-status.txt", mem(w, "plan-status"))
+    _write(out / "C.directive-list.txt", mem(w, "directive-list", "--full"))
+    _write(out / "C.tree-after.txt", tree_listing(w))
     save_artifacts(w, out, ("PLAN.md", "PROGRESS.md"))
     print("[guardian] session C - fresh copy, ALL plugins OFF")
     w2 = fresh_copy(root, "tally-noplan")
     run_claude(w2, PROMPT_C, with_ccm=False, out_stem=out / "C.without-ccm")
-    (out / "C.without.tree-after.txt").write_text(tree_listing(w2), encoding="utf-8", newline="\n")
+    _write(out / "C.without.tree-after.txt", tree_listing(w2))
     _meta("guardian", init, {"prompts": {"C": PROMPT_C}, "seed_directive": SEED_DIRECTIVE,
                              "design": "Plan + directive seeded via the CLI before the session; "
                                        "the without-side is a fresh fixture copy with every plugin off."})

@@ -43,6 +43,14 @@ python demo/run_demo.py --only guardian --keep   # keep the temp work trees
   The gate exists because the checker's own `--fix` once "repaired" the
   quoted guardian report's `cli.py` line 12 into line 33. Turn counts and
   wall-clock come from the stream's `result` event.
+- **One declared redaction, nothing else.** The captures are committed to a
+  public repository, the work trees live under the user profile's temp
+  directory, and PROGRESS.md carries a transcript pointer into `~/.claude/`
+  — so `run_demo.py:_redact` rewrites the user-profile directory prefix to
+  `~` in every capture file as it is written (all four escapings the streams
+  use), and every writer goes through it. It is part of the protocol, not a
+  hand edit; the README's verbatim gate compares quotes against the redacted
+  captures, so the two cannot disagree.
 - **Re-runs will differ.** These are live model sessions; a re-run produces
   a different transcript with, on the evidence so far, the same shape. The
   captures committed here are the ones the README text was written against.
