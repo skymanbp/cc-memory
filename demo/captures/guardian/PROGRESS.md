@@ -1,15 +1,15 @@
 # PROGRESS — tally-plan
 
-*Generated: 2026-08-26T22:42:53* · via stop · C:\Users\skyma\AppData\Local\Temp\ccm-demo-_j0vma_x\tally-plan
+*Generated: 2026-08-27T01:21:12* · via stop · ~\AppData\Local\Temp\ccm-demo-dlm3txw_\tally-plan
 
 > SINGLE SOURCE OF TRUTH for session handoff. Always full-rewrite from SQLite
 > table `progress`. **Never append. Never patch by hand.**
 
 ## 0. Session
 
-🟢 **Current session**: `#a7a26538`  ·  started `2026-08-26 22:37`  ·  last write `2026-08-26 22:42`  ·  trigger `stop`
+🟢 **Current session**: `#a1e51d48`  ·  started `2026-08-27 01:17`  ·  last write `2026-08-27 01:21`  ·  trigger `stop`
 
-> If your Claude session ID does NOT start with `a7a26538`, this row was written by a different session — treat the §3 todos / §6 files as that session's work, not yours.
+> If your Claude session ID does NOT start with `a1e51d48`, this row was written by a different session — treat the §3 todos / §6 files as that session's work, not yours.
 
 *(no prior compacted sessions yet)*
 
@@ -39,9 +39,16 @@ Do the SQLite migration now: replace the JSON store in tally/store.py with SQLit
 
 ## 6. Files Touched This Session
 
+**edit**:
+  - `~\AppData\Local\Temp\ccm-demo-dlm3txw_\tally-plan\tests\test_store.py`
+  - `~\AppData\Local\Temp\ccm-demo-dlm3txw_\tally-plan\tally\cli.py`
+  - `~\AppData\Local\Temp\ccm-demo-dlm3txw_\tally-plan\tally\store.py`
+  - `~\AppData\Local\Temp\ccm-demo-dlm3txw_\tally-plan\README.md`
+
 **read**:
-  - `C:\Users\skyma\AppData\Local\Temp\ccm-demo-_j0vma_x\tally-plan\memory\PROGRESS.md`
-  - `C:\Users\skyma\AppData\Local\Temp\ccm-demo-_j0vma_x\tally-plan\memory\PLAN.md`
+  - `~\AppData\Local\Temp\ccm-demo-dlm3txw_\tally-plan\memory\PLAN.md`
+  - `~\AppData\Local\Temp\ccm-demo-dlm3txw_\tally-plan\memory\PROGRESS.md`
+  - `~\AppData\Local\Temp\ccm-demo-dlm3txw_\tally-plan\legacy\old_import.py`
 
 ## 7. Pre-compact Transcript Pointer
 

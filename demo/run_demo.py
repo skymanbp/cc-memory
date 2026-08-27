@@ -36,6 +36,7 @@ import argparse
 import datetime as _dt
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -129,17 +130,35 @@ def _redact(text: str) -> str:
     """The ONE edit a capture receives (see the module docstring).
 
     Most-escaped spelling first, or the native replacement would break the
-    longer JSON-escaped forms in half. The streams genuinely contain all
-    four: native paths in hook text, `\\\\`-escaped ones inside JSON string
-    values, doubly-escaped ones inside tool_result payloads that quote JSON,
-    and forward-slash spellings from POSIX-style tools.
+    longer JSON-escaped forms in half. Every one of these shapes was FOUND
+    in a real capture, none is speculative: native paths in hook text,
+    `\\\\`-escaped ones inside JSON string values, doubly-escaped ones
+    inside tool_result payloads that quote JSON, forward-slash spellings
+    from POSIX-style tools, the MSYS drive form (`/c/Users/<name>`) from
+    Git-Bash tools, and the mangled PROJECT-SLUG form (`C--Users-<name>-…`)
+    that Claude Code uses for `~/.claude/projects/` directory names and
+    transcript pointers — every character outside [A-Za-z0-9] becomes `-`,
+    the convention core.extractor.mangle_project_path implements.
+
+    Plus one NON-path shape: `ls -l` prints the username as the file OWNER
+    column. That is redacted only in the owner-column shape (whitespace +
+    username + whitespace + numeric group), never as a bare word — a
+    public handle that merely starts with the username must survive.
     """
-    for form in (_HOME.replace("\\", "\\\\\\\\"),
-                 _HOME.replace("\\", "\\\\"),
-                 _HOME,
-                 _HOME.replace("\\", "/")):
+    slug = "".join(c if c.isalnum() else "-" for c in _HOME)
+    forms = [_HOME.replace("\\", "\\\\\\\\"),
+             _HOME.replace("\\", "\\\\"),
+             _HOME,
+             _HOME.replace("\\", "/"),
+             slug]
+    if _HOME[1:2] == ":":
+        forms.append("/" + _HOME[0].lower() + _HOME[2:].replace("\\", "/"))
+    for form in forms:
         text = text.replace(form, "~")
-    return text
+    return _OWNER_RE.sub(r"\g<1>~\g<2>", text)
+
+
+_OWNER_RE = re.compile(r"(\s)" + re.escape(Path(_HOME).name) + r"(\s+\d+\s)")
 
 
 def _write(path: Path, text: str) -> None:
@@ -333,10 +352,15 @@ def _meta(scenario: str, init: dict, extra: dict) -> None:
     v = subprocess.run([CLAUDE, "--version"], capture_output=True,
                        encoding="utf-8").stdout.strip()
     vp = REPO / "cc_memory" / "core" / "version.py"
+    # A real parse, not split('"')[1]: version.py opens with a docstring, so
+    # the first quoted string in the file is "" and two capture runs shipped
+    # an empty cc_memory_version before anyone read the field back.
+    vm = re.search(r"__version__\s*=\s*[\"']([^\"']+)",
+                   vp.read_text(encoding="utf-8")) if vp.exists() else None
     meta = {"scenario": scenario,
             "captured_at": _dt.datetime.now().isoformat(timespec="seconds"),
             "claude_code_version": v, "model": init.get("model"),
-            "cc_memory_version": vp.read_text(encoding="utf-8").split('"')[1] if vp.exists() else None,
+            "cc_memory_version": vm.group(1) if vm else None,
             "plugins_disabled_on_both_sides": [k for k in _enabled_plugins() if k != CCM_KEY]}
     meta.update(extra)
     _write(CAPTURES / scenario / "meta.json", json.dumps(meta, indent=2))

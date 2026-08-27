@@ -47,26 +47,32 @@ python demo/run_demo.py --only guardian --keep   # keep the temp work trees
   public repository, the work trees live under the user profile's temp
   directory, and PROGRESS.md carries a transcript pointer into `~/.claude/`
   — so `run_demo.py:_redact` rewrites the user-profile directory prefix to
-  `~` in every capture file as it is written (all four escapings the streams
-  use), and every writer goes through it. It is part of the protocol, not a
+  `~` in every capture file as it is written (every escaping the streams
+  use, the mangled `C--Users-<name>` project-slug form included), and every
+  writer goes through it. It is part of the protocol, not a
   hand edit; the README's verbatim gate compares quotes against the redacted
   captures, so the two cannot disagree.
 - **Re-runs will differ.** These are live model sessions; a re-run produces
   a different transcript with, on the evidence so far, the same shape. The
   captures committed here are the ones the README text was written against.
 
-## What the run found that was not in the plan
+## What the first run found that was not in the plan
 
-The seeded `keep-json-export` directive (a `constraint`, which the docs said
-was "enforced by being injected") never reached the model: it appears zero
-times in `C.with-ccm.stream.jsonl`. The plan's success criterion carried the
-contract instead. That was a measured gap in the plugin at v2.12.1 — fixed
-in v2.12.2, where the ledger became the first SessionStart injection layer
-and a `## Standing directives` section of PLAN.md (see `CHANGELOG.md`). The
-captures here are the v2.12.1 run that found it and are kept as they were;
-a re-run on v2.12.2 will show the directive in `C.with-ccm.txt`'s injected
-context.
+The FIRST capture of the guardian scenario, on v2.12.1, found a plugin
+defect: the seeded `keep-json-export` directive (a `constraint`, which the
+docs said was "enforced by being injected") reached the model **zero**
+times — nothing injected the ledger at all; the plan's success criterion
+carried the contract alone. That finding became v2.12.2, where the ledger
+is the first SessionStart injection layer and a `## Standing directives`
+section of PLAN.md (see `CHANGELOG.md`; the v2.12.1 streams that measured
+it live at the `v2.12.2` git tag). The captures here are the v2.12.2
+re-run: `C.with-ccm.txt` opens with the directive layer (`1 directives,
+~99 tokens` on the injection status line), and the model upheld the
+constraint against the prompt's "drop `export_json()`" before any
+enforcement fired — the Stop refusal then came at 24 edits, and the
+guardian caught a silently-skipped plan step that the model implemented on
+the spot.
 
-Costs are recorded as well as wins: the guardian side took 20 turns / 321 s
-against 8 / 99 s without the plugin — enforcement verifies, and verification
-takes turns.
+Costs are recorded as well as wins: the guardian side took 26 turns / 224 s
+against 17 / 127 s without the plugin — enforcement verifies, and
+verification takes turns.

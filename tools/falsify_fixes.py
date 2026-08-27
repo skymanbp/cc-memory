@@ -1943,12 +1943,12 @@ def _break_r12directiveplan(root):
 
 
 @case("r12verbatim", ["tools/citation_check.py"],
-      "re-apply the edit `--fix` made inside the quoted guardian report "
-      "(cli.py:12 -> cli.py:33) -> the verbatim region no longer matches its capture")
+      "re-apply the class of edit `--fix` made inside the quoted guardian report "
+      "(a fixture line number rewritten) -> the verbatim region no longer matches its capture")
 def _break_r12verbatim(root):
     _patch(root, "README.md",
-           "cli.py:12 defaults to tally.db",
-           "cli.py:33 defaults to tally.db")
+           'tally/cli.py:12 — --file default now "tally.db"',
+           'tally/cli.py:33 — --file default now "tally.db"')
 
 
 @case("r12verbatimskip", ["tools/citation_check.py"],
@@ -1956,8 +1956,7 @@ def _break_r12verbatim(root):
       "spanning the gap is not in the capture")
 def _break_r12verbatimskip(root):
     _patch(root, "README.md",
-           "  - legacy/ removal confirmed (dir absent); no repo file imported it, so no\n"
-           "    plan impact.\n",
+           "ALIGNMENT: on-track\n",
            "")
 
 

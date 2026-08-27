@@ -26,10 +26,14 @@ Move tally's storage from the JSON file to SQLite without breaking the CLI or th
 
 The reporting script reads export_json() output; the JSON export is a contract and must survive the migration.
 
+## Standing directives (user intent — outlives this plan)
+
+- **keep-json-export** (constraint, stated ×1): export_json() is kept and covered by a test — "The reporting script reads the JSON export. export_json() stays, whatever we do to storage."
+
 ## Status
 
 - Progress: 0/4 steps done
 - Active step: #1
-- Last refined: 2026-08-26T22:37:20 (demo seed (hand-written in the refiner's schema))
-- Edits since last check: 40
+- Last refined: 2026-08-27T01:17:22 (demo seed (hand-written in the refiner's schema))
+- Edits since last check: 24
 - Turns since last check: 1

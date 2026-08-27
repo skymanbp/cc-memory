@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [Unreleased]
+
+### Changed
+
+- **The demo captures are the v2.12.2 re-run, redacted.** User rulings of
+  2026-08-27: the `ccm-*`/`cc-memory-*` test leftovers under `%TEMP%` were
+  deleted (1,916 directories → 0); `run_demo.py` gained `_redact()` — the
+  ONE declared edit a capture receives: the user-profile prefix becomes `~`
+  in every escaping found in a real stream (native, JSON-escaped,
+  double-JSON-escaped, forward-slash, the MSYS drive form, the mangled
+  `C--Users-<name>` project-slug form) plus the `ls -l` OWNER column
+  (shape-anchored — whitespace + username + numeric group — so a public
+  handle that merely starts with the username survives), applied through
+  the `_write()` choke point every capture writer goes through; and both
+  scenarios were re-run on v2.12.2. `grep -ri <username> demo/` → 0.
+  The re-run also shows the v2.12.2 fix working: the constraint is the
+  first injection layer and the model upheld it against the prompt's
+  "drop export_json()" BEFORE any enforcement fired; the Stop refusal came
+  at 24 edits, the guardian caught a silently-skipped plan step, and the
+  model implemented it. README § Before and after was rewritten against
+  the new captures in both languages (14 verbatim regions verify); the
+  v2.12.1 captures that measured the zero-injection defect remain at the
+  `v2.12.2` git tag. Also fixed in passing: `_meta` parsed
+  `cc_memory_version` with `split('"')[1]`, which reads the empty span
+  between a docstring's first two quotes — both capture runs had shipped
+  an empty field.
+
 ## [2.12.2] — 2026-08-26
 
 ### The before/after demo, and the directive that never reached the model

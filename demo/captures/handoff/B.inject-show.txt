@@ -1,7 +1,8 @@
-Last injection — session b5f6afbd at 2026-08-26T22:40:56
-  memories injected : 4 (critical=1, timeline=3)
+Last injection — session 43ec7f2c at 2026-08-27T01:14:13
+  memories injected : 4 (critical=2, timeline=2)
   topics            : (none)
+  directives        : 0 (none)
   PROGRESS.md preview: yes
-  size              : 4490 chars (~1122 tokens)
-  critical ids      : [1]
-  timeline ids      : [2, 3, 4]
+  size              : 5100 chars (~1275 tokens)
+  critical ids      : [1, 2]
+  timeline ids      : [3, 4]

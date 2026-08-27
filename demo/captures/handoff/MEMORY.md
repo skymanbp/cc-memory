@@ -16,30 +16,29 @@
   this index gets regenerated automatically.
 -->
 
-*Updated: 2026-08-26 22:42*  |  Sessions: 1  |  Memories: 13  |  Topics: 0
+*Updated: 2026-08-27 01:14*  |  Sessions: 1  |  Memories: 11  |  Topics: 0
 
 ## Memory Distribution
 
-- `testing`: 2
-- `storage_migration`: 2
-- `test_status`: 1
-- `tally_project`: 1
-- `storage_location`: 1
-- `project_structure`: 1
-- `migration`: 1
-- `input_validation`: 1
-- `documentation`: 1
-- `cli_scope`: 1
-- `api_design`: 1
+- `validation`: 1
+- `testing`: 1
+- `test results`: 1
+- `test coverage gap`: 1
+- `storage_migration`: 1
+- `storage migration`: 1
+- `sqlite setup`: 1
+- `scope_constraint`: 1
+- `negative amount validation`: 1
+- `legacy migration`: 1
+- `cli compatibility`: 1
 
 ## By Category
 
-- `result`: 4 entries  (avg importance 3.5)
-- `decision`: 3 entries  (avg importance 3.7)
-- `arch`: 2 entries  (avg importance 3.5)
-- `note`: 2 entries  (avg importance 2.0)
-- `bug`: 1 entries  (avg importance 4.0)
-- `task`: 1 entries  (avg importance 3.0)
+- `decision`: 4 entries  (avg importance 4.0)
+- `result`: 3 entries  (avg importance 4.3)
+- `bug`: 2 entries  (avg importance 5.0)
+- `config`: 1 entries  (avg importance 4.0)
+- `note`: 1 entries  (avg importance 2.0)
 
 ---
 *Query:        `python -m cc_memory.cli.mem --project <path> stats`*

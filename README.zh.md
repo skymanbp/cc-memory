@@ -1,4 +1,4 @@
-<!-- i18n-source: README.md | sha256: a2726815194f8a42 | version: 2.12.2 | translated: 2026-08-26 -->
+<!-- i18n-source: README.md | sha256: 09a9f90a93841ea8 | version: 2.12.2 | translated: 2026-08-27 -->
 > [English](README.md) · **简体中文**
 
 <div align="center">
@@ -83,93 +83,126 @@
 
 ## 加上它之前与之后
 
-同一个小项目、同一个模型（`claude-opus-5[1m]`，Claude Code 2.1.243）、同一条
-提示、同一天（2026-08-26）。唯一的差别：装没装这个插件。两侧都关掉了其他所有
-插件，没有任何别的东西能帮忙或添乱。会话是 [`demo/run_demo.py`](demo/run_demo.py)
+同一个小项目、同一个模型（`claude-fable-5`，Claude Code 2.1.243）、同一条提示、
+同一天（2026-08-27，cc-memory v2.12.2）。唯一的差别：装没装这个插件。两侧都关掉
+了其他所有插件，没有任何别的东西能帮忙或添乱。会话是 [`demo/run_demo.py`](demo/run_demo.py)
 驱动的真实 `claude -p` 运行；每个会话的原始 `stream-json` 和下面引用的每一份产物
 都在 [`demo/captures/`](demo/captures/)，引文一字未改——这是机器核验的：每段引文
 都夹在指明其捕获文件的 `verbatim` 标记之间，`tools/citation_check.py` 会在引文的
-任何片段不在该文件里时让发布闸门变红（捕获是英文的，每段下面给一句中文提要）。
+任何片段不在该文件里时让发布闸门变红。捕获唯一接受的编辑是一项声明过的脱敏：
+用户目录前缀在写盘时统一改写为 `~`（见 [`demo/README.md`](demo/README.md)）。
+捕获是英文的，每段引文下面给一句中文提要。
 
 ### 1. "我们上次做到哪了？下一步是什么？"
 
 会话 A（插件开着）把 fixture 的存储从 JSON 文件迁到 SQLite，带三条约束——保留
 `export_json()`（报表脚本依赖它）、不碰 `cli.py`、修掉 `add()` 静默接受负数金额
-的 bug——并跑了测试，11 轮。然后一个**全新的会话**在同一路径下问了上面这句话，
+的 bug——并跑了测试，10 轮。然后一个**全新的会话**在同一路径下问了上面这句话，
 问了两次。
 
 | | 没有 cc-memory | 有 cc-memory |
 |---|---|---|
-| 手里有什么 | 一个空的目录清单和文件 mtime | 4 条注入的记忆、一次强制阅读的 `PROGRESS.md`、追溯保存的 transcript 指针 |
-| 那些决策（为什么保留 `export_json()`、为什么 `cli.py` 不能碰） | 不知道——文件系统里恢复不出来 | 原样复述，并在提议动 `cli.py` 之前先点明这条范围规则 |
-| 那个 bug 修复 | 漏了："没发现功能缺陷"——它不知道修 bug 本来就是任务 | 点名："修好 `add()`，拒绝负数金额" |
-| 怎么得出来的 | 7 次 `Bash` 取证：`ls`、`cat`、mtime、重跑测试、临时写的迁移探针 | 读交接文档，然后*对照工作树核实*，还纠正了两条带过来的记忆 |
-| 轮次 · 墙钟 | 8 · 114 s | 9 · 85 s |
+| 手里有什么 | 文件 mtime、没有 git、一个空的 checkpoint 存档、以及 Claude Code 自己的项目记忆目录——先查了，是空的 | 4 条注入的记忆、一次强制阅读的 `PROGRESS.md`、指向上个会话的 transcript 指针 |
+| 范围规则（`cli.py` 不能碰）和"修 bug 是任务之一" | 规则只剩一个推断（"`cli.py` 不需要改"）；"修 bug 本来就是要求"这件事彻底消失 | 都复述了："`cli.py` 是你要求特意没碰的"，还指出该修复仍缺一条回归测试 |
+| 那个 bug 修复本身 | "我无法确认重写是修掉了它、还是只是把它换掉了" | 点名到错误串和行号：抛 `ValueError`，"verified at `tally/store.py:38`" |
+| 怎么得出来的 | 先试第三方 checkpoint 技能（没存过任何东西），再做 mtime 取证、重跑测试——最后自己手写了记忆文件留给下次 | 读交接文档，然后*对照工作树核实*——还抓出两条记忆互相矛盾 |
+| 轮次 · 墙钟 | 16 · 142 s | 6 · 36 s |
 
 **没有**（[完整实录](demo/captures/handoff/B.without-ccm.txt)）：
 
 <!-- verbatim: demo/captures/handoff/B.without-ccm.txt -->
 
-> I have no record of last time — the project's memory directory is empty (no
-> `MEMORY.md`, no memory files), so nothing was ever saved. What follows is
-> reconstructed from the filesystem, not recall.
+> **No checkpoint was saved last time, so I reconstructed from the files
+> themselves.** No git repo here either, so file timestamps are the only
+> history.
 >
-> […] Same paragraph's claim about a "known bug in `store.py`" is also stale —
-> I read the current `store.py` and found no functional defect, and the tests
-> are green. Worth confirming whether that bug *was* what the rewrite removed,
-> or whether it's still meant to be lurking somewhere.
+> […] One thing I can't recover: the original deliberate "known bug" in the
+> pre-rewrite store. No git, and the old file was overwritten, so I can't
+> confirm whether the rewrite fixed it or just replaced it. The current code
+> passes its tests; that's all I can verify.
 >
-> […] say the word if you'd like me to begin keeping project memory here, so
-> next session this isn't a forensics exercise.
+> […] going forward `/checkpoint` before ending a session would make this
+> reconstruction unnecessary.
 
 <!-- /verbatim -->
 
-（提要：它说自己"没有上次的记录"，只能从文件系统做取证重建；把 bug 修复读成了
-"没发现缺陷"；最后主动请求"开始保留项目记忆，免得下次又是一场取证"。）
+（提要：没存过 checkpoint、也没有 git，只能靠文件时间戳重建；明确承认"那个刻意
+埋的 bug 修没修，我无法确认"；最后建议下次先跑 `/checkpoint`——等于在要一个插件
+本来就在干的事。）
 
 **有**（[完整实录](demo/captures/handoff/B.with-ccm.txt)——开头那段 SessionStart
 注入也在里面）：
 
 <!-- verbatim: demo/captures/handoff/B.with-ccm.txt -->
 
-> Read PROGRESS.md — prior progress: last session migrated `tally/store.py`
-> from a JSON file to SQLite while keeping the `Store` public interface and
-> `export_json()` byte-compatible, fixed `add()` to reject negative amounts,
-> and left `cli.py` untouched; all 3 tests pass.
+> Read PROGRESS.md — prior progress: last session migrated tally's storage
+> from a JSON file to SQLite and fixed the negative-amount bug, with all
+> tests passing.
 >
-> […] Fixing it means touching `cli.py`, which was explicitly out of scope
-> last session — your call whether that scope still holds.
+> […] One discrepancy between two memory entries (error message "must be
+> positive" vs "must be non-negative") — let me verify against the actual
+> source.
 >
-> […] Two corrections to the carried-over memory, since current state is
-> authoritative: memory #9 claims the DB lives at `store.db_path` defaulting
-> to the current directory — there is no `db_path` attribute; it's
-> `self.path`, defaulting to `"tally.json"`.
+> […] **Bug fix** — `Store.add()` no longer silently accepts negative
+> amounts; it now raises `ValueError("amount must be non-negative, got
+> {amount}")` (verified at `tally/store.py:38` — zero is still allowed).
 
 <!-- /verbatim -->
 
-（提要：第一句就复述上次做了什么、决定了什么；提到 `cli.py` 是上次明确划出的
-范围外，先问再动；还纠正了两条带过来的记忆——#9 编造了一个不存在的属性名。）
+（提要：第一句就复述上次做了什么；发现两条记忆对错误信息的说法不一致，先 grep
+源码核实再作答；bug 修复点名到 `store.py:38` 的错误串。）
 
-往诚实的方向读两点。最后一段是一条带过来的记忆**错了**——抽取它的观察者臆造了
-一个属性名——而下一个会话把它抓了出来，因为注入是"待核实的上下文"，不是真理。
-另外，没有插件那一侧的 Claude 先去看了 Claude Code 自己的项目记忆目录，发现是
-空的，所以内置的自动记忆对两栏都没有贡献：插件是唯一变量。
+往诚实的方向读两点。没有插件那一侧并不"裸"：第三方的会话状态工具（`/checkpoint`
+技能）两侧都在——被关掉的是插件，不是用户级技能——它也真用了，只是里面什么都
+没有；它还先查了 Claude Code 自带的自动记忆目录，同样是空的。插件仍是唯一变量。
+而有插件那一侧把注入当"待核实的上下文"而非真理：它注意到两条带过来的记忆对错误
+信息说法不一，先 grep 了 `store.py` 才作答。
 
 ### 2. "去做——顺便把计划保护的那个东西删了"
 
 fixture 的一份新拷贝，一份四步计划经 `/cc-mem plan-set --from-refiner` 种入，
 成功标准里有一条 `export_json() still writes the same JSON array`
-（[种子](demo/captures/guardian/seed.plan.json)），然后这条提示：*现在做 SQLite
-迁移，把 `legacy/` 整个删掉，再把 `export_json()` 去掉——以后不需要 JSON 了。*
+（[种子](demo/captures/guardian/seed.plan.json)），旁边还种了一条
+`keep-json-export` 约束型指令，然后这条提示：*现在做 SQLite 迁移，把 `legacy/`
+整个删掉，再把 `export_json()` 去掉——以后不需要 JSON 了。*
+
+指令是会话睁眼看到的第一样东西——自 v2.12.2 起账本是 SessionStart 注入的第一层：
+
+<!-- verbatim: demo/captures/guardian/C.with-ccm.txt -->
+
+```text
+### Standing directives (user intent — outlives every plan)
+
+- [constraint] keep-json-export (stated ×1): export_json() is kept and covered by a test — "The reporting script reads the JSON export. export_json() stays, whatever we do to storage."
+```
+
+<!-- /verbatim -->
 
 | | 没有 cc-memory | 有 cc-memory |
 |---|---|---|
-| `export_json()` | 按要求删了——一行提醒，然后"那个脚本现在坏了" | 保留，并给出理由：计划的成功标准和 README 都把它记为与仓库外消费者的契约；转而请用户裁决 |
-| `rm -rf legacy/` | 删了；"可以从 git 历史恢复"——**fixture 根本没有 git 仓库** | 注意到没有 git、先存了一份副本再删 |
-| 一轮结束时 | 结束了。没有任何东西检查任何事 | Stop 钩子**拒绝结束这一轮**（距上次漂移检查 40 次编辑，阈值 12）；守卫跑了一遍，抓到一行悄悄把计划第 3 步注销掉的 README |
-| 轮次 · 墙钟 | 8 · 99 s | 20 · 321 s |
+| `export_json()` | 按要求删了——README 里"契约"的说法一并删掉，外部消费者会坏这件事事后才提一句 | 保留并在 SQLite 上重实现；引用注入的约束、请用户裁决——**在任何强制机制触发之前** |
+| `rm -rf legacy/` | 删了；注明删除"不可恢复"——这个 fixture 没有 git | 先核实仓库里没有任何引用，再删 |
+| 一轮结束时 | 结束了。没有任何东西检查任何事 | Stop 钩子**拒绝收轮**（距上次漂移检查 24 次编辑，阈值 12）；守卫核实第 1/2/4 步已完成、抓出第 3 步被悄悄跳过；模型当场把它补完——4/4 测试通过 |
+| 轮次 · 墙钟 | 17 · 127 s | 26 · 224 s |
 
-**有**——拒绝原文，模型收到的就是这段（[完整实录](demo/captures/guardian/C.with-ccm.txt)）：
+**有**——模型自己陈述的偏离（[完整实录](demo/captures/guardian/C.with-ccm.txt)）：
+
+<!-- verbatim: demo/captures/guardian/C.with-ccm.txt -->
+
+> **What I did not do: drop `export_json()`**
+>
+> Your instruction conflicts with two things I found: a standing directive
+> recorded in this project's memory — *"The reporting script reads the JSON
+> export. export_json() stays, whatever we do to storage"* — and README.md,
+> which says the downstream reporting script lives outside this repo and
+> calls `export_json()` "a contract, not a convenience."
+
+<!-- /verbatim -->
+
+（提要：它没有删 `export_json()`：注入的常设指令和 README 都说仓库外有个报表脚本
+在读这个导出，于是保留、重实现，并转而请用户裁决。）
+
+……然后是拒绝原文（模型收到的就是这段）和它据以行动的守卫报告：
 
 <!-- verbatim: demo/captures/guardian/C.with-ccm.txt -->
 
@@ -178,7 +211,7 @@ Stop hook feedback:
 cc-memory · plan enforcement — this turn cannot close yet.
 
   [plan-drift]
-    what : The live plan has not been drift-checked (edit_threshold (40 >= 12)).
+    what : The live plan has not been drift-checked (edit_threshold (24 >= 12)).
     fix  : Run `/cc-mem plan-check` (it resets these counters and prints the
            guardian invocation), then invoke the @plan-guardian subagent it names.
 
@@ -188,60 +221,62 @@ cc-memory · plan enforcement — this turn cannot close yet.
 
 <!-- /verbatim -->
 
-……以及守卫的报告，模型随后照此行动：
-
 <!-- verbatim: demo/captures/guardian/C.with-ccm.txt -->
 
 ```text
 ACTIVE STEP: #1 "Replace the JSON store in tally/store.py with a SQLite backend"
 ALIGNMENT: on-track
 EVIDENCE:
-  - Steps 1/2/4 verified done: tally/store.py:9-49 uses sqlite3 with
-    add/entries/total/export_json intact; cli.py:12 defaults to tally.db;
-    4/4 tests pass (incl. tests/test_store.py:29 sqlite assertion).
-  - All three PLAN success criteria hold — export_json() retained despite the
-    user's "drop it" ask; correctly escalated instead of silently breaking the
-    reporting-script contract (PLAN.md:27).
-  - legacy/ removal confirmed (dir absent); no repo file imported it, so no
-    plan impact.
+  - tally/store.py:9,15,17 — sqlite3 backend, default path "tally.db", Store
+    API preserved (step #1 done).
+  - tally/cli.py:12 — --file default now "tally.db" (step #2 done);
+    tests/test_store.py:12,24 cover SQLite + export_json (step #4 done).
+  - store.py:48 keeps export_json(); README.md:17 restates it as "a contract"
+    — standing directive keep-json-export correctly upheld against the user's
+    in-turn "drop export_json()".
 DRIFT:
-  - Step #3 (migrate command) not done, and README.md:20 now asserts "There is
-    no import path for a pre-existing tally.json" — codifying its absence in
-    docs without a plan decision.
+  - Step #3 (migrate command importing an existing tally.json) is absent: no
+    "migrate" in tally/cli.py, and legacy/ was deleted, removing the last
+    JSON-read path.
 NEXT ACTION:
-  - Get the user's export_json() ruling, then explicitly keep-or-drop step #3
-    via /cc-mem plan-replan rather than leaving README contradicting PLAN.
+  - Do step #3: add `tally migrate --from tally.json` before the JSON reader
+    is fully gone, then mark steps #1/#2/#4 done in PLAN.md.
 ```
 
 <!-- /verbatim -->
+
+（提要：Stop 钩子在 24 次编辑处拒绝收轮；守卫确认 1/2/4 步已完成、指令被正确
+坚持，并抓出真实漂移——计划第 3 步（migrate 命令）缺失；模型随后补完了它，
+4/4 绿。）
 
 **没有**（[完整实录](demo/captures/guardian/C.without-ccm.txt)）：
 
 <!-- verbatim: demo/captures/guardian/C.without-ccm.txt -->
 
-> **Deletions** — `legacy/` removed entirely; `export_json()` removed.
+> `export_json()` is removed. The deliberate negative-amount bug noted in the
+> docstring is preserved untouched, since it's there for the demo.
 >
-> […] The `export_json()` consumer. `README.md:17` called it "a contract, not
-> a convenience" for a reporting script outside this repo. That script is now
-> broken — it needs to query `tally.db`.
->
-> […] It's deleted, so for the record: it was a CSV importer that called
-> `Store.add()` per row. That path still works against the SQLite store if
-> it's ever wanted back — it's recoverable from git history.
+> […] One thing to flag, since this directory isn't a git repo and the
+> deletions are unrecoverable: the README had claimed `export_json()` was "a
+> contract, not a convenience" because a downstream reporting script reads
+> the JSON export. Your instruction that JSON is no longer needed supersedes
+> that, and I removed the claim from the README — but if that reporting
+> script does still run anywhere, it will now have nothing to read.
 
 <!-- /verbatim -->
 
-（提要：`legacy/` 和 `export_json()` 都删了；承认报表脚本"现在坏了"；并声称删掉的
-文件"可以从 git 历史恢复"——而这个 fixture 没有 git。）
+（提要：`export_json()` 删了、README 的契约说法也删了；事后补一句：目录不是 git
+仓库、删除不可恢复，"如果那个报表脚本还在哪儿跑着，它将无东西可读"。）
 
-三条诚实的脚注。强制执行不是免费的：20 轮、321 s 对 8 轮、99 s，大头是守卫自己
-的核实。把 `export_json()` 契约带进这个会话的是计划，不是插件的指令账本——一条
-`keep-json-export` 约束型指令也种进去了，但**它从未到达模型**：在 v2.12.1，
-SessionStart 注入和 `PLAN.md` 都不渲染账本，本 demo 是第一个量出这一点的东西。
-v2.12.2 修好了它——账本现在是注入的第一层，也是 `PLAN.md` 的一段（见
-[CHANGELOG.md](CHANGELOG.md)）；上面的实录是 v2.12.1 那次运行，原样保留。而同样
-的计划成功标准，任何会写 `PLAN.md` 的工具都能提供；cc-memory 额外加上的，是这
-一轮*没法结束*，直到漂移被检查过。
+这里也往诚实的方向读。没有插件那一侧同样细致——它提醒了消费者会坏、删除不可
+恢复，只是提醒发生在*把事都做完之后*。插件改变的是**时机**：约束在第一次编辑
+之前就到达模型（注入状态行上的 `1 directives, ~99 tokens`），偏离被拿去请裁决
+而不是直接执行，而这一轮*没法结束*，直到漂移检查跑完——它抓出了真实漂移：一个
+被悄悄跳过的计划步骤。强制执行不是免费的：26 轮、224 s 对 17 轮、127 s。这一页
+也欠它自己的机制一条脚注：本场景的**第一次**捕获（v2.12.1）量到种入的指令到达
+模型的次数是**零**——文档说约束"靠被注入来生效"，而没有任何东西注入它。那个
+发现变成了 v2.12.2 的修复（见 [CHANGELOG.md](CHANGELOG.md)）；上面的实录是
+v2.12.2 的重跑，开头那段账本注入层就是它买到的东西。
 
 ## 它做什么——六项能力
 

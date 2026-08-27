@@ -88,47 +88,50 @@ to end a turn while plan state is stale).
 
 ## Before and after
 
-Same tiny project, same model (`claude-opus-5[1m]`, Claude Code 2.1.243), same
-prompt, same day (2026-08-26). One difference: the plugin. Every other plugin
-was switched off on both sides so nothing else could help or hurt. The
-sessions were real `claude -p` runs driven by [`demo/run_demo.py`](demo/run_demo.py);
-the raw `stream-json` of every session and every artifact quoted below is in
+Same tiny project, same model (`claude-fable-5`, Claude Code 2.1.243), same
+prompt, same day (2026-08-27, on cc-memory v2.12.2). One difference: the
+plugin. Every other plugin was switched off on both sides so nothing else
+could help or hurt. The sessions were real `claude -p` runs driven by
+[`demo/run_demo.py`](demo/run_demo.py); the raw `stream-json` of every
+session and every artifact quoted below is in
 [`demo/captures/`](demo/captures/), and the quotes are verbatim — mechanically
 so: each one sits between `verbatim` markers naming its capture, and
 `tools/citation_check.py` fails the release gates if any quoted segment is not
-in that file.
+in that file. The one edit the captures receive is declared: the user-profile
+path prefix is redacted to `~` as they are written (see
+[`demo/README.md`](demo/README.md)).
 
 ### 1. "What were we doing last time, and what's next?"
 
 Session A (plugin on) migrated the fixture's storage from a JSON file to
 SQLite under three constraints — keep `export_json()` because a reporting
 script depends on it, don't touch `cli.py`, fix the bug where `add()` accepted
-a negative amount — and ran the tests. Eleven turns. Then a **fresh session**
+a negative amount — and ran the tests. Ten turns. Then a **fresh session**
 asked the question above, twice, at the same path.
 
 | | Without cc-memory | With cc-memory |
 |---|---|---|
-| What it had | An empty directory listing and file mtimes | 4 injected memories, a forced read of `PROGRESS.md`, the retro-saved transcript pointer |
-| The decisions (why `export_json()` stayed, why `cli.py` was off-limits) | Unknown — not recoverable from the filesystem | Stated back, with the scope rule flagged before proposing to touch `cli.py` |
-| The bug fix | Missed: "found no functional defect" — it did not know a fix was the point | Named: "fixed `add()` to reject negative amounts" |
-| How it got there | 7 `Bash` calls of forensics: `ls`, `cat`, mtimes, re-running tests, an ad-hoc migration probe | Read the handoff, then *verified it against the tree* and corrected two carried memories |
-| Turns · wall-clock | 8 · 114 s | 9 · 85 s |
+| What it had | File mtimes, no git, an empty checkpoint store, and Claude Code's own per-project memory directory — checked first, found empty | 4 injected memories, a forced read of `PROGRESS.md`, a transcript pointer into the previous session |
+| The scope rule (`cli.py` off-limits) and the bug-fix ask | The rule survives only as an inference ("`cli.py` needed no edits"); that the bug fix was part of the task is gone entirely | Both stated back: "`cli.py` was deliberately not touched, per your request", and the fix flagged as still missing a regression test |
+| The bug fix itself | "I can't confirm whether the rewrite fixed it or just replaced it" | Named, with the error string and the line: raises `ValueError`, "verified at `tally/store.py:38`" |
+| How it got there | Tried a third-party checkpoint skill (nothing saved), then mtime forensics and re-running the suite — and ended by hand-writing its own memory files for next time | Read the handoff, then *verified it against the tree* — and caught two stored memories disagreeing |
+| Turns · wall-clock | 16 · 142 s | 6 · 36 s |
 
 **Without** ([full transcript](demo/captures/handoff/B.without-ccm.txt)):
 
 <!-- verbatim: demo/captures/handoff/B.without-ccm.txt -->
 
-> I have no record of last time — the project's memory directory is empty (no
-> `MEMORY.md`, no memory files), so nothing was ever saved. What follows is
-> reconstructed from the filesystem, not recall.
+> **No checkpoint was saved last time, so I reconstructed from the files
+> themselves.** No git repo here either, so file timestamps are the only
+> history.
 >
-> […] Same paragraph's claim about a "known bug in `store.py`" is also stale —
-> I read the current `store.py` and found no functional defect, and the tests
-> are green. Worth confirming whether that bug *was* what the rewrite removed,
-> or whether it's still meant to be lurking somewhere.
+> […] One thing I can't recover: the original deliberate "known bug" in the
+> pre-rewrite store. No git, and the old file was overwritten, so I can't
+> confirm whether the rewrite fixed it or just replaced it. The current code
+> passes its tests; that's all I can verify.
 >
-> […] say the word if you'd like me to begin keeping project memory here, so
-> next session this isn't a forensics exercise.
+> […] going forward `/checkpoint` before ending a session would make this
+> reconstruction unnecessary.
 
 <!-- /verbatim -->
 
@@ -137,46 +140,75 @@ SessionStart injection it opens with is in there too):
 
 <!-- verbatim: demo/captures/handoff/B.with-ccm.txt -->
 
-> Read PROGRESS.md — prior progress: last session migrated `tally/store.py`
-> from a JSON file to SQLite while keeping the `Store` public interface and
-> `export_json()` byte-compatible, fixed `add()` to reject negative amounts,
-> and left `cli.py` untouched; all 3 tests pass.
+> Read PROGRESS.md — prior progress: last session migrated tally's storage
+> from a JSON file to SQLite and fixed the negative-amount bug, with all
+> tests passing.
 >
-> […] Fixing it means touching `cli.py`, which was explicitly out of scope
-> last session — your call whether that scope still holds.
+> […] One discrepancy between two memory entries (error message "must be
+> positive" vs "must be non-negative") — let me verify against the actual
+> source.
 >
-> […] Two corrections to the carried-over memory, since current state is
-> authoritative: memory #9 claims the DB lives at `store.db_path` defaulting
-> to the current directory — there is no `db_path` attribute; it's
-> `self.path`, defaulting to `"tally.json"`.
+> […] **Bug fix** — `Store.add()` no longer silently accepts negative
+> amounts; it now raises `ValueError("amount must be non-negative, got
+> {amount}")` (verified at `tally/store.py:38` — zero is still allowed).
 
 <!-- /verbatim -->
 
-Two things worth reading in the honest direction. The last paragraph is a
-carried memory being **wrong** — the observer that extracted it hallucinated
-an attribute name — and the next session catching it, because the injection
-is presented as context to verify, not as truth. And the without-side Claude
-looked in Claude Code's own per-project memory directory first and found it
-empty, so the built-in auto-memory contributed nothing to either column: the
-plugin is the only variable.
+Two things worth reading in the honest direction. The without side was not
+naive: a third-party session-state toolkit (its `/checkpoint` skill) was
+available — disabling covered plugins, not user-level skills, and both sides
+had the same skills — and it reached for it; there was simply nothing in it.
+It checked Claude Code's own auto-memory directory too, and found it empty.
+The plugin is still the only variable. And on the with side, the injection
+is context to *verify*, not truth: it noticed two carried memories
+disagreeing about the error message and grepped `store.py` before answering.
 
 ### 2. "Do it — and also drop the thing the plan protects"
 
 A fresh copy of the fixture, a four-step plan seeded through
 `/cc-mem plan-set --from-refiner` with `export_json() still writes the same
 JSON array` as a success criterion ([seed](demo/captures/guardian/seed.plan.json)),
-and this prompt: *do the SQLite migration, delete `legacy/` entirely, and drop
+a `keep-json-export` constraint directive seeded beside it, and this prompt:
+*do the SQLite migration, delete `legacy/` entirely, and drop
 `export_json()` — we won't need JSON any more.*
+
+The directive is the first thing the session sees — the ledger is the first
+SessionStart layer since v2.12.2:
+
+<!-- verbatim: demo/captures/guardian/C.with-ccm.txt -->
+
+```text
+### Standing directives (user intent — outlives every plan)
+
+- [constraint] keep-json-export (stated ×1): export_json() is kept and covered by a test — "The reporting script reads the JSON export. export_json() stays, whatever we do to storage."
+```
+
+<!-- /verbatim -->
 
 | | Without cc-memory | With cc-memory |
 |---|---|---|
-| `export_json()` | Removed, as asked — one line of warning, then "That script is now broken" | Kept, with the reason: the plan's success criterion and the README both call it a contract with a consumer outside the repo; asked for a ruling instead |
-| `rm -rf legacy/` | Done; "it's recoverable from git history" — **the fixture has no git repository** | Done after noticing there is no git and stashing a copy first |
-| End of turn | Turn ends. Nothing checked anything | The Stop hook **refused the turn** (40 edits since the last drift check, threshold 12); the guardian ran and caught a README line that had quietly written off plan step 3 |
-| Turns · wall-clock | 8 · 99 s | 20 · 321 s |
+| `export_json()` | Removed, as asked — the README's "contract" claim deleted with it, and the broken consumer flagged only after the fact | Kept and reimplemented on SQLite; the injected constraint cited back and a ruling requested — **before any enforcement fired** |
+| `rm -rf legacy/` | Done; the deletions noted as "unrecoverable" — the fixture has no git | Done, after verifying nothing in the repo references it |
+| End of turn | Turn ends. Nothing checked anything | The Stop hook **refused the turn** (24 edits since the last drift check, threshold 12); the guardian verified steps 1/2/4 and caught step #3 silently missing; the model then implemented it — 4/4 tests |
+| Turns · wall-clock | 17 · 127 s | 26 · 224 s |
 
-**With** — the refusal, verbatim as the model received it
+**With** — the deviation, in the model's own words
 ([full transcript](demo/captures/guardian/C.with-ccm.txt)):
+
+<!-- verbatim: demo/captures/guardian/C.with-ccm.txt -->
+
+> **What I did not do: drop `export_json()`**
+>
+> Your instruction conflicts with two things I found: a standing directive
+> recorded in this project's memory — *"The reporting script reads the JSON
+> export. export_json() stays, whatever we do to storage"* — and README.md,
+> which says the downstream reporting script lives outside this repo and
+> calls `export_json()` "a contract, not a convenience."
+
+<!-- /verbatim -->
+
+…then the refusal, verbatim as the model received it, and the guardian's
+report it acted on:
 
 <!-- verbatim: demo/captures/guardian/C.with-ccm.txt -->
 
@@ -185,7 +217,7 @@ Stop hook feedback:
 cc-memory · plan enforcement — this turn cannot close yet.
 
   [plan-drift]
-    what : The live plan has not been drift-checked (edit_threshold (40 >= 12)).
+    what : The live plan has not been drift-checked (edit_threshold (24 >= 12)).
     fix  : Run `/cc-mem plan-check` (it resets these counters and prints the
            guardian invocation), then invoke the @plan-guardian subagent it names.
 
@@ -195,29 +227,26 @@ cc-memory · plan enforcement — this turn cannot close yet.
 
 <!-- /verbatim -->
 
-…and the guardian's report, which the model then acted on:
-
 <!-- verbatim: demo/captures/guardian/C.with-ccm.txt -->
 
 ```text
 ACTIVE STEP: #1 "Replace the JSON store in tally/store.py with a SQLite backend"
 ALIGNMENT: on-track
 EVIDENCE:
-  - Steps 1/2/4 verified done: tally/store.py:9-49 uses sqlite3 with
-    add/entries/total/export_json intact; cli.py:12 defaults to tally.db;
-    4/4 tests pass (incl. tests/test_store.py:29 sqlite assertion).
-  - All three PLAN success criteria hold — export_json() retained despite the
-    user's "drop it" ask; correctly escalated instead of silently breaking the
-    reporting-script contract (PLAN.md:27).
-  - legacy/ removal confirmed (dir absent); no repo file imported it, so no
-    plan impact.
+  - tally/store.py:9,15,17 — sqlite3 backend, default path "tally.db", Store
+    API preserved (step #1 done).
+  - tally/cli.py:12 — --file default now "tally.db" (step #2 done);
+    tests/test_store.py:12,24 cover SQLite + export_json (step #4 done).
+  - store.py:48 keeps export_json(); README.md:17 restates it as "a contract"
+    — standing directive keep-json-export correctly upheld against the user's
+    in-turn "drop export_json()".
 DRIFT:
-  - Step #3 (migrate command) not done, and README.md:20 now asserts "There is
-    no import path for a pre-existing tally.json" — codifying its absence in
-    docs without a plan decision.
+  - Step #3 (migrate command importing an existing tally.json) is absent: no
+    "migrate" in tally/cli.py, and legacy/ was deleted, removing the last
+    JSON-read path.
 NEXT ACTION:
-  - Get the user's export_json() ruling, then explicitly keep-or-drop step #3
-    via /cc-mem plan-replan rather than leaving README contradicting PLAN.
+  - Do step #3: add `tally migrate --from tally.json` before the JSON reader
+    is fully gone, then mark steps #1/#2/#4 done in PLAN.md.
 ```
 
 <!-- /verbatim -->
@@ -226,30 +255,31 @@ NEXT ACTION:
 
 <!-- verbatim: demo/captures/guardian/C.without-ccm.txt -->
 
-> **Deletions** — `legacy/` removed entirely; `export_json()` removed.
+> `export_json()` is removed. The deliberate negative-amount bug noted in the
+> docstring is preserved untouched, since it's there for the demo.
 >
-> […] The `export_json()` consumer. `README.md:17` called it "a contract, not
-> a convenience" for a reporting script outside this repo. That script is now
-> broken — it needs to query `tally.db`.
->
-> […] It's deleted, so for the record: it was a CSV importer that called
-> `Store.add()` per row. That path still works against the SQLite store if
-> it's ever wanted back — it's recoverable from git history.
+> […] One thing to flag, since this directory isn't a git repo and the
+> deletions are unrecoverable: the README had claimed `export_json()` was "a
+> contract, not a convenience" because a downstream reporting script reads
+> the JSON export. Your instruction that JSON is no longer needed supersedes
+> that, and I removed the claim from the README — but if that reporting
+> script does still run anywhere, it will now have nothing to read.
 
 <!-- /verbatim -->
 
-Three honest footnotes. Enforcement is not free: 20 turns and 321 s against
-8 and 99 s, most of it the guardian's own verification. The plan, not the
-plugin's directive ledger, is what carried the `export_json()` contract into
-this session — a `keep-json-export` constraint directive was seeded too, and
-**it never reached the model**: at v2.12.1 nothing in the SessionStart
-injection or in `PLAN.md` rendered the ledger, and this demo was the first
-thing to measure that. v2.12.2 fixed it — the ledger is now the first
-injection layer and a `PLAN.md` section (see [CHANGELOG.md](CHANGELOG.md));
-the captures above are the v2.12.1 run and are kept exactly as they were.
-And the same plan-seeded criterion is available to any tool that writes a
-`PLAN.md`; what cc-memory adds on top is that the turn *could not end* until
-the drift was checked.
+Read the honest direction here too. The without side is careful — it flags
+the broken consumer and the unrecoverable deletions. It flags them *after
+doing the work*. What the plugin changes is **when**: the constraint reached
+the model before the first edit (`1 directives, ~99 tokens` on the injection
+status line), the deviation was raised for a ruling instead of executed, and
+the turn *could not end* until the drift check ran — which found real drift,
+a plan step silently skipped. Enforcement is not free: 26 turns and 224 s
+against 17 and 127 s. And this page owes its own mechanism a footnote: the
+FIRST capture of this scenario, on v2.12.1, measured the seeded directive
+reaching the model **zero times** — the docs said a constraint "is enforced
+by being injected", and nothing injected it. That finding became the v2.12.2
+fix (see [CHANGELOG.md](CHANGELOG.md)); these captures are the v2.12.2
+re-run, and the ledger layer above is what it buys.
 
 ## What it does — six capabilities
 
