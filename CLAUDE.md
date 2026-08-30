@@ -2,7 +2,7 @@
 
 ## Project: cc-memory
 
-**Claude Code persistent memory plugin (v2.13.0)** — anti-patch reconcile-on-write
+**Claude Code persistent memory plugin (v2.13.1)** — anti-patch reconcile-on-write
 + LLM-judged semantic de-duplication with **backpressure-triggered
 consolidation**, forced PROGRESS.md handoff with per-session annotation, live
 PLAN.md anchor with plan-refiner / plan-guardian subagents + mandatory
@@ -11,9 +11,31 @@ injection observability, FTS5 search, AI-judged extraction with Haiku
 (optional local Ollama fallback).
 
 - **Language**: Python 3.8+ (pure stdlib, zero pip dependencies at runtime)
-- **Version**: 2.13.0
+- **Version**: 2.13.1
 - **License**: MIT
 - **Platform**: Windows-primary, cross-platform compatible (Tkinter required for GUI)
+
+## What changed in v2.13.1 (over v2.13.0)
+
+**Nothing that runs.** `git diff v2.13.0..v2.13.1 -- cc_memory/ scripts/
+.claude-plugin/` is empty apart from the version literals. Two things were
+wrong ABOUT v2.13.0 rather than IN it, and one of them is a rule worth
+carrying forward:
+
+- **`tools/falsify_fixes.py --anchors` is a CI step, not a local gate.** It
+  runs in `.github/workflows/gates.yml`; `tests/run_gates.py` does not run it.
+  So `[OK] all 11 gates green` locally is NOT the same evidence CI produces,
+  and v2.13.0 was tagged on that assumption — its `_has_db` rewrite had
+  invalidated the `r5y1roots` anchor, and only the post-tag CI run said so.
+  Before tagging, run `python tools/falsify_fixes.py --anchors` as well; when
+  an anchor is repaired, re-verify it still DETECTS (`--case <id>`), because
+  an anchor edited until it merely matches proves nothing.
+
+- **A path substitution inside fixed-width ASCII art must re-pad.** `.ccm/`
+  is two columns narrower than `memory/`, which pulled two rows of the README
+  hook diagram off the right border in each language. The boxes are now
+  normalised whole (English 77 columns, Chinese 76, counting CJK as two and
+  the East-Asian *Ambiguous* arrows as one).
 
 ## What changed in v2.13.0 (over v2.12.2)
 

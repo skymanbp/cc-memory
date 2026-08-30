@@ -9,6 +9,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.13.1] — 2026-08-30
+
+### A green tag, and two diagrams the rename had pulled open
+
+No runtime change. `git diff v2.13.0..v2.13.1 -- cc_memory/ scripts/
+.claude-plugin/` is empty apart from the version literals, so the plugin this
+release installs behaves exactly as v2.13.0's does. It exists because the
+commit v2.13.0 was tagged at has a red `release gates` run, and a tag whose CI
+failed is not evidence of anything.
+
+### Fixed
+
+- **The `r5y1roots` falsification anchor, which v2.13.0 left pointing at code
+  that no longer existed.** `tools/falsify_fixes.py --anchors` is a step in
+  `.github/workflows/gates.yml` but is NOT one of the eleven gates
+  `tests/run_gates.py` runs, so a locally green 11/11 said nothing about it —
+  the failure only appeared after the tag was pushed. v2.13.0 rewrote
+  `roots._has_db` to loop over both state-directory names, turning the
+  anchored `return False` into a `continue` and the literal `"memory.db"` into
+  `DB_FILENAME`; the anchor still quoted the pre-rewrite line. Repaired to the
+  current form and re-verified BOTH ways: 172/172 anchors intact, and
+  reverting the repaired anchor on a copy still drives its gate RED (1/1
+  detected). An anchor that no longer matches is worse than no anchor: it
+  fails CI for the wrong reason and stops proving its fix is load-bearing.
+
+- **The hook-flow box diagram on both READMEs' front page.** The v2.13.0 sweep
+  substituted `.ccm/` (5 columns) for `memory/` (7) inside a fixed-width box
+  without re-padding, so two rows per file stopped meeting the right border.
+  Those rows were not the whole defect — measured against v2.12.2 the English
+  box already had 8 ragged rows and the Chinese one 12 — so both boxes are
+  normalised to the width most of their rows already carried rather than
+  patching only what the rename touched. Only padding moved: every changed
+  line is identical to its predecessor once spaces and the horizontal box bar
+  are removed, across both files. `README.zh.md`'s i18n marker is re-stamped
+  to the new English digest; no translated prose changed.
+
 ## [2.13.0] — 2026-08-30
 
 ### The state directory is `.ccm/`, and a name that lived at 34 call sites now lives at one
