@@ -60,9 +60,10 @@ THE LADDER
 ----------
 Over a BOUNDED ancestor chain (see `_chain`), first hit wins:
 
-  0. `cwd` itself has `memory/memory.db` → `cwd`, terminal, before anything
+  0. `cwd` itself has `.ccm/memory.db` — or, on a project whose rename
+     has not happened yet, `memory/memory.db` — → `cwd`, terminal, before
      else is even consulted.
-  1. The NEAREST ancestor with `memory/memory.db`. No outward extension: see
+  1. The NEAREST ancestor with `.ccm/memory.db`. No outward extension: see
      above.
   2. `CLAUDE_PROJECT_DIR`, when it names a directory in the chain. Ranked
      BELOW the database rungs on purpose — it says where Claude Code was
@@ -602,7 +603,7 @@ def project_root(cwd, log=None):
     re-raised the TypeError it was catching, so a payload carrying
     `{"cwd": 123}` took the hook to rc=1 with a traceback on stderr, which
     Claude Code renders as an error. A non-path `cwd` now yields `Path(".")`,
-    whose `memory/memory.db` check fails in every caller, so the hook exits
+    whose `.ccm/memory.db` check fails in every caller, so the hook exits
     quietly the way a malformed payload always should.
     """
     try:
@@ -695,7 +696,7 @@ def _safe_path(cwd):
     except Exception:
         # why: `cwd` was not path-like at all (a number, a list). Returning
         # the current directory keeps the contract "never raises" true; every
-        # caller then fails its memory/memory.db existence check and exits 0.
+        # caller then fails its .ccm/memory.db existence check and exits 0.
         return Path(".")
 
 

@@ -250,7 +250,7 @@ def _build_progress_preview(memory_dir, budget):
     text = neutralize_markers(text)
     # Trim to budget
     if len(text) > budget:
-        text = text[:budget].rsplit("\n", 1)[0] + "\n…[truncated, read memory/PROGRESS.md]"
+        text = text[:budget].rsplit("\n", 1)[0] + "\n…[truncated, read .ccm/PROGRESS.md]"
     # Balance code fences (register E4): PROGRESS.md legitimately contains a
     # fenced block (§7's transcript pointer), and a budget cut landing inside
     # it left an ODD number of fence lines — everything concatenated after
@@ -335,7 +335,7 @@ def _build_footer(db, project_id, memory_dir, budget=None):
     It took no budget at all, while `_LAYER_BUDGETS` has declared a 0.10 share
     for it since the table was written — so the one layer the table said was
     bounded was the only unbounded one. Every field below is interpolated from
-    `memory/.last_save.json`, a plain file in the project that anything with
+    `.ccm/.last_save.json`, a plain file in the project that anything with
     the Write tool can create: measured, a single 5 MB field produced a
     5,010,676-character injection against a 16,000-char budget, 313x over.
     The other four layers hold because their own checks do.
@@ -472,11 +472,11 @@ def _build_forced_reminder(memory_dir):
     ]
     n = 1
     if has_progress:
-        lines.append(f"  {n}. Use the Read tool on `memory/PROGRESS.md` "
+        lines.append(f"  {n}. Use the Read tool on `.ccm/PROGRESS.md` "
                      f"(absolute: `{progress.as_posix()}`).")
         n += 1
     if has_memory:
-        lines.append(f"  {n}. Use the Read tool on `memory/MEMORY.md` "
+        lines.append(f"  {n}. Use the Read tool on `.ccm/MEMORY.md` "
                      f"(absolute: `{memory_md.as_posix()}`).")
         n += 1
     lines += [
@@ -507,7 +507,7 @@ def _build_forced_reminder(memory_dir):
 
 
 def _write_inject_manifest(memory_dir, manifest):
-    """Atomically persist the inject manifest to memory/.last_inject.json.
+    """Atomically persist the inject manifest to .ccm/.last_inject.json.
 
     tempfile + os.replace is genuinely atomic (unlike the plain write_text used
     by .last_save.json), so a concurrent /cc-mem inject-show never reads a
@@ -1192,11 +1192,11 @@ def main():
         session_id = ""
 
     # Opt-out gate + root anchor via the ONE shared gate (hooks/_entry.py) —
-    # BEFORE the DB is opened. Gating on memory/memory.db existing is not an
+    # BEFORE the DB is opened. Gating on .ccm/memory.db existing is not an
     # opt-out: for a project initialised before the user listed it, this hook
     # would otherwise still print that project's memories and PROGRESS.md
     # preview into the next session's context, still write
-    # memory/.last_inject.json, and still run retroactive LLM extraction over
+    # .ccm/.last_inject.json, and still run retroactive LLM extraction over
     # its transcripts. Rare hook: it passes the logger, so a redirection is
     # announced and any stray database stepped over is named.
     resolved = resolve_project(cwd, log=_log)
@@ -1225,7 +1225,7 @@ def main():
 
     try:
         # Rare hook, so it carries the reporting duty: a pre-v2.13.0
-        # `memory/` migrated (or refused) here is worth one log line.
+        # `.ccm/` migrated (or refused) here is worth one log line.
         memory_dir = resolve_memory_dir(cwd, log=_log)
         db_path = memory_dir / DB_FILENAME
         if not db_path.exists():

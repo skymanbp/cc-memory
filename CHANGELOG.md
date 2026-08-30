@@ -9,6 +9,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.13.2] — 2026-08-30
+
+### The rename reaches the prose — and one link that was never prose at all
+
+v2.13.0 swept path JOINS (34 sites) and tracked markdown (173 replacements). It
+did not sweep prose inside `.py` files, so 95 lines went on spelling
+`memory/<something>`. Most of that is documentation, but nine lines were shown
+to a user or to the model, and one was not documentation at all.
+
+### Fixed
+
+- **`MEMORY.md`'s archive links pointed at a directory that no longer exists.**
+  `llm/memory_writer._render_memory_index` built every "Recent Archives" entry
+  from a hard-coded `"memory/"` prefix rather than from the directory it had
+  been handed, so after the rename each link read
+  `memory/sessions/YYYY/MM/....md` for a file living under `.ccm/`. It now uses
+  the state directory's OWN name, which is also correct for a project whose
+  migration has not happened yet — the literal only ever got that case right by
+  accident. `tests/smoke_test.py` § *v2.8.0 a6* spelled the same literal in its
+  assertion and therefore passed on the wrong output; it now asks the fixture
+  for the name, and a second case renders against a legacy directory and
+  requires `memory/` back.
+
+- **Nine user- and model-facing strings named the old path.** Two argparse
+  `help=` lines (`/cc-mem progress`, `/cc-mem plan-show`), four `print()`s
+  (raw-plan capture, plan-clear, and the two-line `plan-guardian` invocation
+  hint), and three strings `core/plan.py` renders INTO `PLAN.md` — the file
+  Claude reads as the live plan anchor, which was telling it to open
+  `memory/.plan_raw.md`.
+
+- **64 of the 95 lines rewritten; 31 deliberately left.** A dated measurement,
+  a pre-v2.13.0 narrative, or a sentence whose SUBJECT is the legacy name keeps
+  saying `memory/` — the rule this file already states for its own entries.
+  `core/roots.py`'s ladder summary gained the clause that makes it true of a
+  resolver which accepts BOTH names, rather than being narrowed to one.
+
 ## [2.13.1] — 2026-08-30
 
 ### A green tag, and two diagrams the rename had pulled open

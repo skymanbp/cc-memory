@@ -4795,12 +4795,31 @@ def main():
     os.utime(_a6_new, (_a6_now - 86400, _a6_now - 86400))
     _a6_txt2 = _a6_mw._render_memory_index(_a6_db, _a6_pid,
                                            _a6_root / _MEM)
+    # `_MEM`, not the literal the renderer used to hard-code: through v2.13.1
+    # `_render_memory_index` prefixed every archive link with "memory/"
+    # whatever directory it had been handed, so MEMORY.md pointed at a path
+    # that stopped existing at the rename — and this assertion, spelling the
+    # same literal, passed on the wrong output. It now names the directory the
+    # fixture actually built.
     _a6_arch = [_l for _l in _a6_txt2.splitlines()
-                if _l.startswith("- `memory/sessions/")]
+                if _l.startswith(f"- `{_MEM}/sessions/")]
     assert len(_a6_arch) == 2 and "2026/01" in _a6_arch[0] \
         and "2025/12" in _a6_arch[1], (
         "Recent Archives must rank by stem (name IS time), newest first; "
         "got: " + repr(_a6_arch))
+    # And the prefix is the state directory's OWN name, so a project whose
+    # rename has not happened yet gets links that resolve for IT — which the
+    # hard-coded literal only ever got right by accident.
+    _a6_leg = _a6_root / _OLDMEM
+    (_a6_leg / "sessions" / "2026" / "01").mkdir(parents=True)
+    (_a6_leg / "sessions" / "2026" / "01" / "20260101T000002_000_l.md").write_text(
+        "legacy session", encoding="utf-8")
+    _a6_txt3 = _a6_mw._render_memory_index(_a6_db, _a6_pid, _a6_leg)
+    assert f"- `{_OLDMEM}/sessions/" in _a6_txt3, (
+        f"an unmigrated project's archive links must say {_OLDMEM}/; got: "
+        + repr([_l for _l in _a6_txt3.splitlines() if _l.startswith("- `")]))
+    assert f"- `{_MEM}/sessions/" not in _a6_txt3, (
+        "the renderer must not name a directory it was not handed")
     print(f"[OK] v2.8.0 a6: MEMORY.md topic list capped at {_a6_cap} with a "
           f"visible 'newest N of M' line, and Recent Archives rank by stem "
           f"even when mtime lies")
@@ -5159,7 +5178,7 @@ def main():
     for f in sorted(mem_dir.rglob("*")):
         if f.is_file():
             rel = f.relative_to(mem_dir).as_posix()
-            print(f"  memory/{rel}  ({f.stat().st_size} bytes)")
+            print(f"  {mem_dir.name}/{rel}  ({f.stat().st_size} bytes)")
     print(f"\nTest project was: {tmp}")
 
     # Teardown is a GATE, not a courtesy: every artifact of this run lives

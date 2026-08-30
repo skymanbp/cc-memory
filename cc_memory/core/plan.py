@@ -1,6 +1,6 @@
 """Live plan anchor for cc-memory (v2.2+).
 
-memory/PLAN.md is the project's single source of truth for "what we're
+.ccm/PLAN.md is the project's single source of truth for "what we're
 trying to accomplish right now and how far we've got." Separate from
 PROGRESS.md (which is the cross-session handoff document) because plans
 have a different lifecycle: they outlive a single turn, but they're not
@@ -458,7 +458,7 @@ def blocking_reasons(plan_row: Optional[Dict],
                 "A raw plan is captured but never refined, so every plan "
                 "reader (PLAN.md, plan-status, the guardian) is answering "
                 "from the PREVIOUS plan.",
-                "Invoke the @plan-refiner subagent on memory/.plan_raw.md, "
+                "Invoke the @plan-refiner subagent on .ccm/.plan_raw.md, "
                 "then `/cc-mem plan-set --from-refiner` with its JSON.",
             ))
         else:
@@ -599,7 +599,7 @@ def render_pending_plan_md(raw: str, superseded: Optional[Dict] = None,
         "A raw plan was captured but has NOT been refined into the structured",
         "form yet, so no step statuses are being tracked. **The verbatim text",
         "below is the current plan.** To structure it: invoke the",
-        "`plan-refiner` subagent on `memory/.plan_raw.md`, then",
+        "`plan-refiner` subagent on `.ccm/.plan_raw.md`, then",
         "`/cc-mem plan-set --from-refiner < <its-json-output>`.",
         "",
         "## Raw plan (verbatim, unrefined)",
@@ -626,7 +626,7 @@ def render_pending_plan_md(raw: str, superseded: Optional[Dict] = None,
             f"- Last refined: {meta.get('last_refined_at') or '(never)'}",
             "",
             "Kept for reference only; step statuses are no longer synced to it.",
-            "Full copies of replaced plans live in `memory/.plan_history/`.",
+            "Full copies of replaced plans live in `.ccm/.plan_history/`.",
             "",
         ]
     lines += _render_directives_section(directives)
@@ -731,7 +731,7 @@ def render_plan_md(structured: Dict, active_step_id: int = 0,
 
 
 def write_plan_md(db, project_id: int, memory_dir: Path) -> Path:
-    """Full-rewrite memory/PLAN.md from the plan_active row. Returns the path.
+    """Full-rewrite .ccm/PLAN.md from the plan_active row. Returns the path.
 
     Never raises on a write failure, and that is a deliberate asymmetry with
     `core.progress.write_progress_md`, which does. PLAN.md is a PROJECTION of
@@ -797,7 +797,7 @@ def write_plan_md(db, project_id: int, memory_dir: Path) -> Path:
 # There is deliberately NO force flag: a drop without a recorded reason is
 # exactly the failure mode this gate exists to kill. Belt-and-braces, every
 # outgoing plan (even a cleanly-dispositioned one) is archived append-only
-# under memory/.plan_history/ so a wrong disposition is still recoverable.
+# under .ccm/.plan_history/ so a wrong disposition is still recoverable.
 
 CARRYOVER_MATCH_THRESHOLD = 0.5
 # The SAME question asked of CJK titles, which `core/textsim.py` shingles as
@@ -983,7 +983,7 @@ _ARCHIVE_NAME_TRIES = 200
 def archive_plan(row: Optional[Dict], memory_dir: Optional[Path],
                  event: str, reason: str = "") -> Optional[Path]:
     """Append-only archive of an outgoing plan (replace/clear) under
-    memory/.plan_history/. Last-resort backstop: even a wrong disposition
+    .ccm/.plan_history/. Last-resort backstop: even a wrong disposition
     stays recoverable. Returns the path, or None."""
     if memory_dir is None or not row:
         return None
@@ -1063,7 +1063,7 @@ def capture_exit_plan_mode(db, project_id: int, plan_text: str,
     that was never written. Callers must print based on this return value.
 
     Side effects when True: `plan_active.raw` is replaced, `needs_refine=1`,
-    `memory/.plan_raw.md` is written for the refiner subagent, and PLAN.md is
+    `.ccm/.plan_raw.md` is written for the refiner subagent, and PLAN.md is
     regenerated immediately so the freshly captured plan is visible there
     instead of the superseded structured one.
     """
@@ -1194,7 +1194,7 @@ def apply_refined_plan(db, project_id: int, structured: Dict,
             raise ValueError(
                 "a NEWER raw plan was captured while this refinement was "
                 "being applied — run the refiner against the current "
-                "memory/.plan_raw.md and plan-set that output instead")
+                ".ccm/.plan_raw.md and plan-set that output instead")
         violations = check_carryover(
             old_row.get("structured") or {},
             structured if isinstance(structured, dict) else {})

@@ -2,7 +2,7 @@
 
 ## Project: cc-memory
 
-**Claude Code persistent memory plugin (v2.13.1)** — anti-patch reconcile-on-write
+**Claude Code persistent memory plugin (v2.13.2)** — anti-patch reconcile-on-write
 + LLM-judged semantic de-duplication with **backpressure-triggered
 consolidation**, forced PROGRESS.md handoff with per-session annotation, live
 PLAN.md anchor with plan-refiner / plan-guardian subagents + mandatory
@@ -11,9 +11,45 @@ injection observability, FTS5 search, AI-judged extraction with Haiku
 (optional local Ollama fallback).
 
 - **Language**: Python 3.8+ (pure stdlib, zero pip dependencies at runtime)
-- **Version**: 2.13.1
+- **Version**: 2.13.2
 - **License**: MIT
 - **Platform**: Windows-primary, cross-platform compatible (Tkinter required for GUI)
+
+## What changed in v2.13.2 (over v2.13.1)
+
+**A rename is not finished when the joins are.** v2.13.0 swept path joins and
+tracked markdown; 95 lines of prose inside `.py` files still spelled
+`memory/<something>`, and one of them was not prose:
+`llm/memory_writer._render_memory_index` built `MEMORY.md`'s archive links from
+a hard-coded `"memory/"` instead of the directory it was handed, so every
+generated index pointed at a path that had stopped existing. Three rules:
+
+1. **A rename sweep must cover strings the user or the model READS, not only
+   paths the code JOINS.** Nine such lines survived v2.13.0: two argparse
+   `help=` strings, four `print()`s, and three that `core/plan.py` renders into
+   `PLAN.md` — the live plan anchor, telling Claude to open
+   `memory/.plan_raw.md`. Grep for the old name in `help=`, `print(`, and any
+   list of strings a renderer joins, not just for `/ "name"`.
+
+2. **A test that spells the same literal as the code cannot catch the code.**
+   `smoke_test.py` § *v2.8.0 a6* filtered on `"- \`memory/sessions/"` and so
+   passed on the wrong output for a whole release. Assertions about a rendered
+   path take the name from the fixture (`_MEM` / `_OLDMEM`), never from a
+   literal — and the legacy case gets its own render, because a renderer must
+   name the directory it was given.
+
+3. **Do not rewrite a file with `splitlines()` + `"\n".join()`.** That splits
+   on CR, VT, FF, FS, GS, RS, NEL, U+2028 and U+2029 as well as newlines, and
+   `core/privacy.py`, `tools/falsify_fixes.py` and `tests/smoke_test.py` carry
+   those characters INSIDE string literals — measured, the round-trip broke a
+   regex literal across a line and stopped `core/privacy.py` compiling. Also
+   pass `newline=""` when writing: `Path.write_text` otherwise translates every
+   `\n` to `\r\n` on Windows, and `Path.read_text` translates it back, so the
+   damage is invisible to a read-back check.
+
+31 of the 95 lines were deliberately left saying `memory/`: dated
+measurements, pre-v2.13.0 narratives, and sentences whose SUBJECT is the legacy
+name — the same rule CHANGELOG.md states for its own entries.
 
 ## What changed in v2.13.1 (over v2.13.0)
 

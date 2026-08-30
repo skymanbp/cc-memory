@@ -83,7 +83,7 @@ MEMORY_GITIGNORE_LINES = [
 
 
 def ensure_memory_gitignore(memory_dir: Path) -> None:
-    """Create memory/.gitignore, or ADD any lines a older install is missing.
+    """Create .ccm/.gitignore, or ADD any lines a older install is missing.
 
     Every previous generator was guarded by ``if not gi.exists()``, so each time
     the plugin started writing a new artifact, every existing install kept the
@@ -388,7 +388,7 @@ def _render_session_section(db: MemoryDB, project_id: int, prog: Dict) -> List[s
 
 
 def write_progress_md(db: MemoryDB, project_id: int, memory_dir: Path) -> Path:
-    """Render the `progress` row to memory/PROGRESS.md (FULL REWRITE).
+    """Render the `progress` row to .ccm/PROGRESS.md (FULL REWRITE).
 
     Returns the path to the written file.
 

@@ -21,7 +21,7 @@ This is the OPPOSITE of "always append + dedup later". It prevents the
 patch-style stacking the user flagged (cf. docs/CONTRACTS.md#anti-patch-contract).
 
 After every successful upsert, `regenerate_memory_index(project_id, memory_dir)`
-is called so memory/MEMORY.md is always fresh (anti the 50-day-stale failure
+is called so .ccm/MEMORY.md is always fresh (anti the 50-day-stale failure
 mode observed in v2.0).
 """
 import json
@@ -256,7 +256,7 @@ _RENDER_ATTEMPTS = 3
 
 
 def regenerate_memory_index(db: MemoryDB, project_id: int, memory_dir: Path) -> None:
-    """Rewrite memory/MEMORY.md from the current DB state.
+    """Rewrite .ccm/MEMORY.md from the current DB state.
 
     Called automatically after every batch upsert AND on consolidation /
     Stop-hook idle reorg, so MEMORY.md never goes stale.
@@ -409,7 +409,10 @@ def _render_memory_index(db: MemoryDB, project_id: int, memory_dir: Path) -> str
                 # POSIX filename character, so the "every interpolated value
                 # below is neutralised" claim was false for exactly one slot.
                 rel = neutralize_inline(af.relative_to(memory_dir).as_posix())
-                lines.append(f"- `memory/{rel}`")
+                # `.name`, not `MEMORY_DIRNAME`: a project whose rename
+                # has not happened yet is still on `memory/`, and this
+                # link has to resolve for the reader either way.
+                lines.append(f"- `{memory_dir.name}/{rel}`")
             lines.append("")
 
     lines += [

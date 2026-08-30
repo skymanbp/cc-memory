@@ -27,7 +27,7 @@ enable_utf8_io()
 # live in hooks/_entry.py, ONCE. Six hand-rolled copies of this ladder is how
 # guard drift between hooks kept becoming shipped defects (v2.7.0's whole
 # release theme; the v2.9.0 junk-cwd database plant). This hook is the one
-# that mkdir's memory/, so it is the one a wrong `cwd` turns into a second
+# that mkdir's .ccm/, so it is the one a wrong `cwd` turns into a second
 # database — see hooks/_entry.py for the ordering contract.
 from hooks._entry import parse_payload, resolve_project
 # safe_id replaces this hook's private `[:16]` truncating copy (three hooks
@@ -153,7 +153,7 @@ def main():
         #   * the temp prompt file below, which hooks/stop.py reads and
         #     splices VERBATIM into the Anthropic observer request as
         #     "User request: …" (stop.py `_observer_evaluate`);
-        #   * progress.current_request, rendered into memory/PROGRESS.md —
+        #   * progress.current_request, rendered into .ccm/PROGRESS.md —
         #     a file core.progress.MEMORY_GITIGNORE_LINES deliberately does
         #     NOT ignore, so it is committed to the user's repository.
         # Cleaned BEFORE the 500-char cut so a span straddling the cut is

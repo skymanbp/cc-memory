@@ -70,7 +70,7 @@ Tools:
   memory_topics       List topic summaries
   memory_recent       Recent memories with filters
   progress_get        Read PROGRESS.md state (forced-handoff support)
-  progress_regenerate Force-rewrite memory/PROGRESS.md
+  progress_regenerate Force-rewrite .ccm/PROGRESS.md
 
 Registration is manual (nothing reads config.json's inert `mcp.auto_register`).
 The shipped `mcpServers` entry is `.claude-plugin/plugin.json`, which points at
@@ -304,7 +304,7 @@ TOOLS = [
     },
     {
         "name": "progress_regenerate",
-        "description": "Force-rewrite memory/PROGRESS.md from the SQL state.",
+        "description": "Force-rewrite .ccm/PROGRESS.md from the SQL state.",
         "inputSchema": {
             "type": "object",
             "properties": {"project": {"type": "string", "minLength": 1}},

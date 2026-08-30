@@ -2,9 +2,9 @@
 Per-session temp markers — ONE directory, owner-only, symlink-proof.
 
 Every hook keeps a little cross-process state that must NOT live under the
-project's `memory/`: the turn counter, the last user prompt, the last
+project's `.ccm/`: the turn counter, the last user prompt, the last
 observation-eval timestamp, the idle-reorg stamp, the plan-refine nudge. Anything
-written under `memory/` also has to be added to
+written under `.ccm/` also has to be added to
 `core.progress.MEMORY_GITIGNORE_LINES` or it leaks into the user's repository
 forever — the v2.4.2 lesson — so these deliberately live in the temp directory
 instead.

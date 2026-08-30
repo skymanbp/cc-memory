@@ -7,7 +7,7 @@ queue (add -> evaluate -> approve -> exec -> done) that predates v2.2.
 
 It is NOT the v2.2 live plan anchor, despite the similar name. That is a
 separate system: the **`plan_active`** table (one row per project) backs
-`memory/PLAN.md` and is driven by `/cc-mem plan-*` (`cc_memory/cli/mem.py`)
+`.ccm/PLAN.md` and is driven by `/cc-mem plan-*` (`cc_memory/cli/mem.py`)
 together with `cc_memory/core/plan.py` and the `plan-refiner` / `plan-guardian`
 subagents. The two systems share no rows, no files and no code path -- only a
 word. See `docs/CONTRACTS.md#plan-contract` for the live plan anchor.
@@ -88,7 +88,7 @@ def _get_db(project, create=True):
             _die(f"no memory database at {db_path}\n"
                  f"       Run /ccm-load in that project, or a plan command "
                  f"that writes (e.g. add), to create one.")
-        # ensure_memory_dir also writes memory/.gitignore. This creator did not,
+        # ensure_memory_dir also writes .ccm/.gitignore. This creator did not,
         # and a database created without it is exactly how a 184 KB memory.db
         # rode into three commits of a sibling repository. A vanished project
         # directory raises FileNotFoundError, which _die reports rather than
@@ -456,7 +456,7 @@ def make_parser():
               clear                              # Clean up
 
             This CLI owns the `plans` queue table only. The v2.2 live plan
-            anchor (memory/PLAN.md, `plan_active`) is `/cc-mem plan-*`.
+            anchor (.ccm/PLAN.md, `plan_active`) is `/cc-mem plan-*`.
         """))
     p.add_argument("--project", required=True, help="Project root path")
     sub = p.add_subparsers(dest="command", required=True)

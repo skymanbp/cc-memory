@@ -35,7 +35,7 @@ emitted.
 Marker neutralisation (v2.5.2) — why stripping two tags was never enough
 -----------------------------------------------------------------------
 Everything that survives storage is concatenated RAW into the SessionStart
-injection (`hooks/session_start.py`) and into `memory/PROGRESS.md`
+injection (`hooks/session_start.py`) and into `.ccm/PROGRESS.md`
 (`core/progress.py`), and neither escaped the plugin's OWN authority markers.
 A stored memory whose content is
 
@@ -51,7 +51,7 @@ from ONE stored memory:
 
     complete <system-reminder>…</system-reminder> blocks in stdout : 8   (plugin emits 1)
     "=== CC-MEMORY: Context Restored ===" banners in stdout        : 6   (plugin emits 1)
-    forged POLICY text in memory/PROGRESS.md                       : True
+    forged POLICY text in .ccm/PROGRESS.md                         : True
 
 plus U+202E RTL override, zero-width joiners, NUL and ANSI ESC bytes verbatim.
 `memory_add` is a MODEL-INVOKABLE MCP tool, so one indirect injection (hostile

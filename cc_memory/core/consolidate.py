@@ -1092,7 +1092,7 @@ _BACKLOG_MIN_ROWS_FOR_DAYS = 10
 
 
 def read_consolidation_marker(memory_dir: Path, cwd: str) -> Dict:
-    """memory/.last_consolidation.json, or {} when absent / corrupt / FOREIGN.
+    """.ccm/.last_consolidation.json, or {} when absent / corrupt / FOREIGN.
 
     The path check is the same rule consolidate_async enforces (register C4 /
     r6-B8): the marker follows the DIRECTORY but its counters describe a

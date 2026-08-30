@@ -1581,7 +1581,7 @@ def _plan_db(project):
 
 
 def cmd_plan_show(args):
-    """Regenerate memory/PLAN.md from SQL and print it. No-op-safe if no plan."""
+    """Regenerate .ccm/PLAN.md from SQL and print it. No-op-safe if no plan."""
     from core.plan import write_plan_md
     db, pid, memory_dir = _plan_db(args.project)
     path = write_plan_md(db, pid, memory_dir)
@@ -1668,7 +1668,7 @@ def cmd_plan_set(args):
         # why: the R610 gate guards `steps` only. Snapshot the outgoing plan
         # BEFORE the replacement so the advisory below can name the criteria
         # that did not obviously survive — afterwards the old plan is out of
-        # the slot and lives on only in memory/.plan_history/.
+        # the slot and lives on only in .ccm/.plan_history/.
         outgoing = (db.get_plan_active(pid) or {}).get("structured") or {}
         try:
             result = plan_mod.apply_refined_plan(db, pid, structured,
@@ -1696,7 +1696,7 @@ def cmd_plan_set(args):
                 print(f"      - {one[:150]}{'…' if len(one) > 150 else ''}")
             print("    `context` is free text and is NOT compared at all — "
                   "re-read it yourself. The outgoing plan is archived under "
-                  "memory/.plan_history/.")
+                  ".ccm/.plan_history/.")
         # Directive step-reference audit (v2.12.0, Autoshop report #1): step
         # ids are positional and this replacement just re-assigned them, so
         # any ACTIVE directive whose text says "step #N" may now be pointing
@@ -1751,7 +1751,7 @@ def cmd_plan_set(args):
     if stored is not None and not stored:
         print("[FAIL] core.plan refused the plan text — nothing stored.")
         sys.exit(1)
-    print(f"[OK] Raw plan captured ({len(raw)} chars) at memory/.plan_raw.md.")
+    print(f"[OK] Raw plan captured ({len(raw)} chars) at .ccm/.plan_raw.md.")
     print("     Next: invoke @plan-refiner subagent, then "
           "`/cc-mem plan-set --from-refiner < <its-json-output>`.")
 
@@ -1776,7 +1776,7 @@ def cmd_plan_clear(args):
             print(f"    - #{s.get('id')} {s.get('title')}")
         print("  Clearing would silently sink them. Re-run with "
               "--reason \"<why these steps are being dropped>\" -- the "
-              "reason is recorded in memory/.plan_history/.")
+              "reason is recorded in .ccm/.plan_history/.")
         sys.exit(1)
     archive_plan(row, memory_dir, event="clear", reason=reason)
     db.clear_plan_active(pid)
@@ -1786,7 +1786,7 @@ def cmd_plan_clear(args):
     raw_md = memory_dir / ".plan_raw.md"
     if raw_md.exists():
         raw_md.unlink()
-    print("[OK] Active plan cleared (archived to memory/.plan_history/).")
+    print("[OK] Active plan cleared (archived to .ccm/.plan_history/).")
 
 
 def cmd_plan_replan(args):
@@ -1804,7 +1804,7 @@ def cmd_plan_replan(args):
     write_atomic(memory_dir / ".plan_raw.md", row["raw"],
                  budget_s=_DERIVED_BUDGET_S)
     print("[OK] Marked for re-refining. Invoke @plan-refiner subagent on "
-          "memory/.plan_raw.md, then `/cc-mem plan-set --from-refiner`.")
+          ".ccm/.plan_raw.md, then `/cc-mem plan-set --from-refiner`.")
 
 
 def cmd_plan_check(args):
@@ -1835,7 +1835,7 @@ def cmd_plan_check(args):
               "superseded plan is meaningless, and resetting would silence "
               "the nudge for the plan that is actually live.")
         print("    Next: invoke the @plan-refiner subagent on "
-              "memory/.plan_raw.md, then `/cc-mem plan-set --from-refiner`, "
+              ".ccm/.plan_raw.md, then `/cc-mem plan-set --from-refiner`, "
               "then re-run `/cc-mem plan-check`.")
         return
     if not is_valid_structured(row.get("structured")):
@@ -1851,8 +1851,8 @@ def cmd_plan_check(args):
     print(f"  Active step: #{row.get('active_step', 0)}")
     print()
     print("Now invoke the plan-guardian subagent:")
-    print("  Task(subagent_type='plan-guardian', prompt='Read memory/PLAN.md and")
-    print("       memory/PROGRESS.md, compare against the last 20 messages of this")
+    print("  Task(subagent_type='plan-guardian', prompt='Read .ccm/PLAN.md and")
+    print("       .ccm/PROGRESS.md, compare against the last 20 messages of this")
     print("       session, and report: (a) current step alignment, (b) any drift,")
     print("       (c) recommended next action. ≤150 words.')")
 
@@ -2030,7 +2030,7 @@ def cmd_dashboard(args):
 # ── observability + encoding (v2.3) ─────────────────────────────────────────
 
 def cmd_inject_show(args):
-    """Dump memory/.last_inject.json — exactly what the last SessionStart
+    """Dump .ccm/.last_inject.json — exactly what the last SessionStart
     injected (ground truth, independent of whether Claude echoed it)."""
     memory_dir, db_path, _ = _resolve_db(args.project)
     manifest = memory_dir / ".last_inject.json"
@@ -2268,7 +2268,7 @@ def make_parser():
                                       "(DB / PROGRESS.md / PLAN.md / MEMORY.md)")
     pp.add_argument("--json", action="store_true",
                     help="Machine-readable, pure-ASCII")
-    sub.add_parser("progress", help="Regenerate memory/PROGRESS.md from DB")
+    sub.add_parser("progress", help="Regenerate .ccm/PROGRESS.md from DB")
 
     psup = sub.add_parser("supersedes", help="Show supersede chain for a memory ID")
     psup.add_argument("memory_id", type=int)
@@ -2298,7 +2298,7 @@ def make_parser():
     sub.add_parser("dashboard", help="Launch the Tkinter GUI dashboard")
 
     # ── plan-* subcommands (v2.2) ──────────────────────────────────────────
-    sub.add_parser("plan-show", help="Regenerate memory/PLAN.md and print it")
+    sub.add_parser("plan-show", help="Regenerate .ccm/PLAN.md and print it")
     sub.add_parser("plan-status", help="Show plan counters / freshness summary")
 
     pps = sub.add_parser("plan-set", help="Set a raw or refined plan")

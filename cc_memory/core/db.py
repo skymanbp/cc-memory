@@ -185,7 +185,7 @@ _MIGRATIONS = [
      "CREATE INDEX IF NOT EXISTS idx_memories_supersedes ON memories (supersedes_id)"),
 
     # PROGRESS.md backing store: one row per project, ALWAYS overwritten,
-    # never appended. SOT for memory/PROGRESS.md.
+    # never appended. SOT for .ccm/PROGRESS.md.
     ("v3_progress", """
         CREATE TABLE IF NOT EXISTS progress (
             project_id        INTEGER PRIMARY KEY REFERENCES projects(id),
@@ -516,7 +516,7 @@ class MemoryDB:
                     f"{probe} is a symlink/junction; cc-memory refuses to "
                     f"operate through links (privacy fail-closed — use a "
                     f"real directory, or pin exotic layouts with .ccm-root)")
-        # No parents=True: this line creates memory/, and with parents=True it
+        # No parents=True: this line creates .ccm/, and with parents=True it
         # also recreated a PROJECT directory the user had deleted, turning a
         # vanished project into an empty shell on the next hook. The stdlib
         # raises FileNotFoundError for exactly this case, so the backstop costs
@@ -528,9 +528,9 @@ class MemoryDB:
         self._bootstrap()
 
     def _ensure_gitignore(self):
-        """Write memory/.gitignore beside the database, always.
+        """Write .ccm/.gitignore beside the database, always.
 
-        This belongs HERE because this is the line that brings a `memory/`
+        This belongs HERE because this is the line that brings a `.ccm/`
         directory into existence — every caller that creates a database goes
         through it. Leaving the ignore file to callers meant each new creator
         forgot: `cli/mem.py` has thirteen `MemoryDB(...)` sites and none of

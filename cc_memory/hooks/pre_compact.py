@@ -9,7 +9,7 @@ handoff-critical work that must complete before the next session:
      routing every save through llm.memory_writer.upsert_smart so
      reconciliation (merge / supersede / insert) happens at write time.
 
-  2. FULL-REWRITE memory/PROGRESS.md from the `progress` SQLite table.
+  2. FULL-REWRITE .ccm/PROGRESS.md from the `progress` SQLite table.
      This is the handoff contract for the next session.
 
 Consolidation (the every-Nth-session LLM cleanup) is NO LONGER done here.
@@ -304,7 +304,7 @@ def _first_user_request(messages, max_scan=200):
     `clean_for_storage` is applied HERE rather than at the two call sites
     (`session_summaries.request` and `progress.current_request`, both below)
     because both store the value and PROGRESS.md renders `current_request`
-    verbatim — into a file `memory/.gitignore` does NOT ignore, so a
+    verbatim — into a file `.ccm/.gitignore` does NOT ignore, so a
     `<private>` span in the opening request used to be committed to the user's
     repository. Cleaning at the source covers every present and future
     consumer; cleaning at the call sites is the shape that let this ingress

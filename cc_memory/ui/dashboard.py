@@ -455,7 +455,7 @@ class DashboardApp:
         """Read-only view of the two post-v2.0 SQL anchors.
 
         `progress` (one row per project) is the source of truth behind
-        memory/PROGRESS.md; `plan_active` (also one row) backs memory/PLAN.md.
+        .ccm/PROGRESS.md; `plan_active` (also one row) backs .ccm/PLAN.md.
         Both shipped as headline features and neither was visible anywhere in
         this GUI — the "Plans" tab is the unrelated legacy v2.0 `plans` queue.
         Read-only by design: PROGRESS.md is owned by the hooks and PLAN.md by
@@ -1091,8 +1091,8 @@ Category Breakdown:
     def _load_progress_plan(self):
         """Render the `progress` row and the `plan_active` row (read-only).
 
-        These are the SQL sources of truth behind memory/PROGRESS.md and
-        memory/PLAN.md. Neither was reachable from this GUI before. The text
+        These are the SQL sources of truth behind .ccm/PROGRESS.md and
+        .ccm/PLAN.md. Neither was reachable from this GUI before. The text
         itself comes from the module-level `_render_progress_plan` (v2.10.1:
         extracted so the render logic is drivable without a Tk display —
         this method keeps only the widget plumbing).
@@ -1135,7 +1135,7 @@ Category Breakdown:
             _nm = _ni
 
         out = ["=" * 74,
-               "PROGRESS   (SQL source of truth for memory/PROGRESS.md)",
+               "PROGRESS   (SQL source of truth for .ccm/PROGRESS.md)",
                "=" * 74, ""]
         if not prog:
             out.append("(no progress row yet — PreCompact writes it at the first "
@@ -1189,7 +1189,7 @@ Category Breakdown:
                        f"  started {prog.get('session_started_at') or '-'}")
 
         out += ["", "=" * 74,
-                "PLAN   (SQL source of truth for memory/PLAN.md)",
+                "PLAN   (SQL source of truth for .ccm/PLAN.md)",
                 "=" * 74, ""]
         if not pa:
             out.append("(no live plan — capture one with Claude's plan mode, "

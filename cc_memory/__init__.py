@@ -35,7 +35,7 @@ v2.4.2: Bounded transcript reads. An unbounded full-file load in the PreCompact
       minutes; it now fills from the newest backwards. Adds a
       `.pre_compact_attempt.json` start marker so a killed hook is no longer
       invisible, `trigger` in `.last_save.json` so AUTO compactions are
-      distinguishable, and a migrating `memory/.gitignore` so generated state
+      distinguishable, and a migrating `.ccm/.gitignore` so generated state
       (including verbatim plan prose) stops leaking into user repos.
 
 v2.4.1: Carryover auto-carry matches bare titles too — a step whose title was
@@ -47,7 +47,7 @@ v2.4.0: Mandatory plan carryover gate. `plan_active` is a single-row slot, so
       unfinished steps vanished with no accounting. Replacement now requires
       every unfinished step to be auto-carried or explicitly dispositioned,
       `plan-clear` refuses without `--reason`, and every outgoing plan is
-      archived to `memory/.plan_history/`. No force flag, by design.
+      archived to `.ccm/.plan_history/`. No force flag, by design.
 
 v2.3.4: Anthropic auth fall-through (env key -> OAuth token, correct wire
       format per credential) so a dead env key no longer blackholes a healthy
