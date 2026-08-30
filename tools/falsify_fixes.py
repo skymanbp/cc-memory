@@ -660,9 +660,15 @@ def _break_r5d7parsed(root):
       "follow a symlinked memory/ in _has_db -> rung 0 adopts a linked identity")
 def _break_r5y1roots(root):
     # anchor repaired 2026-08-09: junction-aware probe, same change as r5y1emd.
+    # anchor repaired 2026-08-30 (v2.13.0): `_has_db` became a LOOP over both
+    # state-directory names, so the guard is indented one level deeper and
+    # `continue`s to the next candidate instead of returning. The name itself
+    # is `core.layout.DB_FILENAME` now, not a literal. Same guard, same
+    # breakage — this register anchors on text, so a refactor that leaves the
+    # fix intact still rots it, which is exactly what CI caught here.
     _patch(root, "cc_memory/core/roots.py",
-           '        if _markers_is_link(mem) or _markers_is_link(mem / "memory.db"):\n            return False\n',
-           '        if False:  # BREAKAGE: pre-fix, a linked memory/ was followed\n            return False\n')
+           '            if _markers_is_link(mem) or _markers_is_link(mem / DB_FILENAME):\n                continue\n',
+           '            if False:  # BREAKAGE: pre-fix, a linked state dir was followed\n                continue\n')
 
 
 @case("r5y1emd", ["tests/smoke_test.py"],
