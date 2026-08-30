@@ -1,4 +1,4 @@
-<!-- i18n-source: README.md | sha256: 841872b23edd76f2 | version: 2.13.0 | translated: 2026-08-30 -->
+<!-- i18n-source: README.md | sha256: 5b30f6acd614d6c9 | version: 2.13.0 | translated: 2026-08-30 -->
 > [English](README.md) · **简体中文**
 
 <div align="center">
@@ -320,25 +320,25 @@ observation）、压缩时（有界的 head+tail transcript 窗口，2 GiB 的 t
 ## 它怎么工作
 
 ```
-┌──────────────────────── 你的 Claude Code 会话 ────────────────────────────┐
+┌──────────────────────── 你的 Claude Code 会话 ───────────────────────────┐
 │                                                                          │
-│  UserPromptSubmit ──▶ 首次接触时创建 .ccm/、计轮次、                      │
-│                       在第 1 轮播种"用户要什么"                            │
+│  UserPromptSubmit ──▶ 首次接触时创建 .ccm/、计轮次、                     │
+│                       在第 1 轮播种"用户要什么"                          │
 │                                                                          │
-│  PostToolUse     ──▶ 实时计划锚点（ExitPlanMode → 捕获计划、                │
-│                       TodoWrite → 步骤同步、编辑 → 漂移计数器）             │
-│                       + 每次被观察的工具调用写一行 observation             │
+│  PostToolUse     ──▶ 实时计划锚点（ExitPlanMode → 捕获计划、             │
+│                       TodoWrite → 步骤同步、编辑 → 漂移计数器）          │
+│                       + 每次被观察的工具调用写一行 observation           │
 │                                                                          │
-│  Stop            ──▶ Haiku 读本轮 observation 写记忆 · 增量更新             │
-│                       PROGRESS.md · 强制执行计划 · 写入积压到期时           │
-│                       拉起后台整理                                        │
+│  Stop            ──▶ Haiku 读本轮 observation 写记忆 · 增量更新          │
+│                       PROGRESS.md · 强制执行计划 · 写入积压到期时        │
+│                       拉起后台整理                                       │
 │                                                                          │
-│  PreCompact      ──▶ 同步腿：从有界的 transcript 窗口抽取                   │
-│                       → 调和 → 全量重写 PROGRESS.md → 归档                 │
-│                       异步腿：LLM 整理，不在阻塞路径上                       │
+│  PreCompact      ──▶ 同步腿：从有界的 transcript 窗口抽取                │
+│                       → 调和 → 全量重写 PROGRESS.md → 归档               │
+│                       异步腿：LLM 整理，不在阻塞路径上                   │
 │                                                                          │
-│  SessionStart    ──▶ 注入主题 + 关键记忆 + 时间线，然后                     │
-│                       强制："回应之前先读 .ccm/PROGRESS.md"               │
+│  SessionStart    ──▶ 注入主题 + 关键记忆 + 时间线，然后                  │
+│                       强制："回应之前先读 .ccm/PROGRESS.md"              │
 └──────────────────────────────────────────────────────────────────────────┘
                                     │
                                     ▼

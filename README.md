@@ -337,26 +337,26 @@ an existing backlog down in one sitting, looping the judge until it runs dry.
 ## How it works
 
 ```
-┌──────────────────────── your Claude Code session ────────────────────────┐
-│                                                                          │
-│  UserPromptSubmit ──▶ create .ccm/ on first contact, count the turn,    │
-│                       seed "what the user asked for" on turn 1           │
-│                                                                          │
+┌──────────────────────── your Claude Code session ─────────────────────────┐
+│                                                                           │
+│  UserPromptSubmit ──▶ create .ccm/ on first contact, count the turn,      │
+│                       seed "what the user asked for" on turn 1            │
+│                                                                           │
 │  PostToolUse     ──▶ live plan anchor (ExitPlanMode → captured plan,      │
 │                       TodoWrite → step sync, edits → drift counters)      │
 │                       + one observation row per observed tool call        │
-│                                                                          │
+│                                                                           │
 │  Stop            ──▶ Haiku reads this turn's observations and writes      │
 │                       memories · patches PROGRESS.md · enforces the plan  │
 │                       · spawns background consolidation on write backlog  │
-│                                                                          │
+│                                                                           │
 │  PreCompact      ──▶ sync leg  : extract from a bounded transcript window │
 │                       → reconcile → FULL-REWRITE PROGRESS.md → archive    │
 │                       async leg: LLM consolidation, off the blocking path │
-│                                                                          │
+│                                                                           │
 │  SessionStart    ──▶ inject topics + critical memories + timeline, then   │
-│                       FORCE: "Read .ccm/PROGRESS.md before responding"  │
-└──────────────────────────────────────────────────────────────────────────┘
+│                       FORCE: "Read .ccm/PROGRESS.md before responding"    │
+└───────────────────────────────────────────────────────────────────────────┘
                                     │
                                     ▼
                      <project>/.ccm/memory.db   (SQLite + FTS5)
