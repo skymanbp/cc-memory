@@ -15,18 +15,27 @@ build/
 *.exe
 projects.json
 
-# cc-memory's OWN memory/ directory is a runtime artifact, not source.
+# cc-memory's OWN state directory is a runtime artifact, not source.
 # Anyone who clones this repo will generate their own when they enable the
 # plugin. Don't commit the maintainer's local memory data.
 #
-# ANCHORED (leading slash) ON PURPOSE. Unanchored, `memory/` matches at every
+# ANCHORED (leading slash) ON PURPOSE. Unanchored, `.ccm/` matches at every
 # depth, and a stray in-repo test project -- whose only content IS its own
-# memory/ -- becomes 100% invisible to `git status`. That is exactly how an
-# `x/` scratch project created by a v2.5.x verification harness (0 memories,
-# 0 sessions, one SessionStart injection) sat in the repo root undetected: the
-# tempfile-only test rule in CLAUDE.md was broken and .gitignore hid the
-# evidence. This repo has exactly ONE legitimate memory/ -- this one. Any other
-# is a leaked test artifact and MUST show up as untracked.
+# state directory -- becomes 100% invisible to `git status`. That is exactly
+# how an `x/` scratch project created by a v2.5.x verification harness (0
+# memories, 0 sessions, one SessionStart injection) sat in the repo root
+# undetected: the tempfile-only test rule in CLAUDE.md was broken and
+# .gitignore hid the evidence. This repo has exactly ONE legitimate state
+# directory -- this one. Any other is a leaked test artifact and MUST show up
+# as untracked.
+#
+# This rule keeps the PRE-v2.13.0 name. The directory is `.ccm/` since
+# v2.13.0, and a clone made before the first post-upgrade session still
+# carries `memory/` until a hook migrates it, so both are ignored -- but the
+# `.ccm/` half CANNOT live here. It is a dotted directory, so it is governed
+# by the `.*/` blanket further down, and git applies the LAST matching
+# pattern: anything written here would be overruled by that blanket. Its rules
+# are in that block, and they reproduce this one's anchoring exactly.
 /memory/
 
 # Per-user local Claude Code state — settings, agents, project skills.
@@ -52,9 +61,26 @@ projects.json
 # blanket hides its own damage. A negation only works because git can still
 # DESCEND into a re-included directory — `!.github/` re-includes the directory
 # itself, not just its contents, and that ordering is load-bearing.
+#
+# `.ccm/` is the THIRD re-include and the subtlest. v2.13.0 renamed the state
+# directory from `memory/` to `.ccm/`, which moved it under this blanket — and
+# a blanket-ignored state directory is exactly the invisibility the /memory/
+# block above was anchored to prevent, reintroduced by the rename. The two
+# lines below restore that block's semantics for the new name, in this order
+# because git applies the LAST matching pattern:
+#
+#   !.ccm/   un-ignores the name at EVERY depth, overriding `.*/`
+#   /.ccm/   re-ignores ONLY the repo's own, at the root
+#
+# So this repo's own state directory stays ignored, and a stray `.ccm/` under
+# a leaked in-repo test project shows up as untracked — which is the whole
+# point of anchoring, and the reason the pair cannot be written up beside
+# /memory/ where it would be overruled by `.*/` below it.
 .*/
 !.github/
 !.claude-plugin/
+!.ccm/
+/.ccm/
 
 # cc-tree audit output — working evidence for the v2.8.0 audit rounds
 # (adjudications, raw candidate JSON, the convergence report). Excluded by

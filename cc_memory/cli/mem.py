@@ -31,6 +31,11 @@ from core.encoding_setup import enable_utf8_io
 enable_utf8_io()
 
 from core.db import CATEGORIES, MemoryDB
+# The state directory, resolved rather than spelled (v2.13.0).
+# `find_db_path` is the read-only twin, for the scans that must not rename
+# another project's directory.
+from core.layout import (DB_FILENAME, find_db_path,
+                         memory_dir as resolve_memory_dir)
 
 
 def _resolve_version() -> str:
@@ -80,8 +85,16 @@ __version__ = _resolve_version()
 
 
 def _resolve_db(project):
+    """(state dir, database, project name) for ONE named project.
+
+    The migrating resolver: this CLI always acts on a single project the
+    user named, so moving a pre-v2.13.0 `memory/` to `.ccm/` here is the
+    intent, not a side effect. The read-only `find_*` twins are for the
+    surfaces that SCAN many projects — see _report_nested_databases.
+    """
     p = Path(project).resolve()
-    return p / "memory", p / "memory" / "memory.db", p.name
+    mem = resolve_memory_dir(p)
+    return mem, mem / DB_FILENAME, p.name
 
 
 def _require_db_path(db_path):
@@ -264,6 +277,13 @@ _REQUIRED_PLUGIN_FILES = [
     # It was absent from this list, which is what let `status` report an
     # install "healthy" while nothing worked.
     "cc_memory/core/roots.py",
+    # v2.13.0, and the SAME shape a FOURTH time — the comment below already
+    # named this list "the copy that goes quiet", and here is the next module
+    # to test it. `core/layout.py` owns the state directory's NAME; core/roots
+    # imports it at module level and every hook imports core.roots, so an
+    # install missing this one file loses all six hooks <!--ce:hooks--> at
+    # import while `status` certifies the install healthy.
+    "cc_memory/core/layout.py",
     # v2.8.0, and the SAME shape a second time: two hooks <!--ce:hooks:subset-->
     # (stop, user_prompt) and core/idle.py import this at module level for the
     # per-session marker paths. A new core module has to
@@ -664,7 +684,9 @@ def _report_nested_databases(project):
         print(f"  [WARN] Nested-database scan skipped: {exc}")
         return
     for sub in nested:
-        n_sub = _count_active_memories(sub / "memory" / "memory.db")
+        # find_db_path, not the migrating resolver: these are OTHER
+        # projects found by a scan, and a report must not rename them.
+        n_sub = _count_active_memories(find_db_path(sub))
         print(f"  [WARN] Separate database below this project: {sub} "
               f"(~{n_sub} memories). Sessions run there use IT, not this one. "
               f"If that is a stray, move or delete it; if it is a project in "
@@ -1254,7 +1276,7 @@ def cmd_consolidate(args):
 def cmd_cleanup(args):
     from core.consolidate import cleanup_garbage, merge_near_duplicates, assign_topics_auto
     from llm.memory_writer import regenerate_memory_index
-    memory_dir = Path(args.project).resolve() / "memory"
+    memory_dir = resolve_memory_dir(Path(args.project).resolve())
     # Refuse rather than create, exactly like its sibling `cmd_consolidate`
     # (its `if not db_path.exists()` guard). A bare line range was cited here
     # and had already rotted onto an unrelated SELECT: tools/citation_check.py
@@ -1265,11 +1287,11 @@ def cmd_cleanup(args):
     # memories, MEMORY.md regenerated" — a success line for work that could not
     # have happened. Two commands that both operate on existing memories must
     # not disagree about whether there have to be any.
-    if not (memory_dir / "memory.db").exists():
-        print(f"Error: no memory database at {memory_dir / 'memory.db'} — "
+    if not (memory_dir / DB_FILENAME).exists():
+        print(f"Error: no memory database at {memory_dir / DB_FILENAME} — "
               f"nothing to clean up.")
         sys.exit(1)
-    db = MemoryDB(memory_dir / "memory.db")
+    db = MemoryDB(memory_dir / DB_FILENAME)
     pid = db.upsert_project(args.project)
     print(f"\n{'='*50}\n  Cleanup for {Path(args.project).name}\n{'='*50}\n")
     print(f"  Garbage archived: {cleanup_garbage(db, pid)}")

@@ -42,6 +42,11 @@ enable_utf8_io()
 # subdirectory turn from being recorded against a different project row.
 from hooks._entry import parse_payload, resolve_project
 from core.logger import get_logger
+# The state directory, resolved rather than spelled (v2.13.0): `.ccm`, with a
+# pre-v2.13.0 `memory/` migrated on the way. Aliased because two functions in
+# this module already bind a local named `memory_dir`, and a shadowed import
+# is a NameError waiting for the first refactor that moves a line.
+from core.layout import DB_FILENAME, memory_dir as resolve_memory_dir
 
 # Construction is I/O-free (the file opens on first WRITE, core/logger.py
 # Logger._get_file), so a module-level logger costs this per-tool-call hook
@@ -94,7 +99,7 @@ def _apply_plan_integration(db, project_id, cwd, tool_name, tool_input):
     Deliberately independent of `core.modes.should_observe` — see main().
     """
     from core import plan as plan_mod
-    memory_dir = Path(cwd) / "memory"
+    memory_dir = resolve_memory_dir(cwd)
 
     if tool_name == "ExitPlanMode":
         raw_plan = tool_input.get("plan", "") if isinstance(tool_input, dict) else ""
@@ -149,7 +154,7 @@ def main():
         sys.exit(0)
 
     # Opt-out gate + root anchor via the ONE shared gate (hooks/_entry.py),
-    # ahead of the DB probe. Gating on memory/memory.db existing is not an
+    # ahead of the DB probe. Gating on the state database existing is not an
     # opt-out: a project initialised BEFORE the user listed it would otherwise
     # keep storing every tool input and output. No log passed — this hook
     # fires after every tool call, so a redirection line would be a line per
@@ -158,7 +163,7 @@ def main():
     if cwd is None:
         sys.exit(0)
 
-    db_path = Path(cwd) / "memory" / "memory.db"
+    db_path = resolve_memory_dir(cwd) / DB_FILENAME
     if not db_path.exists():
         sys.exit(0)
 
@@ -190,7 +195,7 @@ def main():
         # mode's skip_tools and `ExitPlanMode` is in no mode's non-empty
         # observe_tools allow-list, so should_observe() was False for both
         # plan-control tools in all three modes — plan_active was never
-        # written, memory/.plan_raw.md and memory/PLAN.md never appeared, and
+        # written, .ccm/.plan_raw.md and .ccm/PLAN.md never appeared, and
         # the guardian drift counters silently varied by mode (research
         # counted no Edits; writing counted no sensitive Bash).
         # Plan control is NOT observation. Mode selects what is worth

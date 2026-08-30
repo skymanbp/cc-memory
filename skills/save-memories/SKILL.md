@@ -112,7 +112,7 @@ from core.db import MemoryDB
 from llm.memory_writer import upsert_batch
 
 # Anchor before MemoryDB touches the path: MemoryDB CREATES the file and its
-# parent, so run from a subdirectory this planted <subdir>/memory/memory.db --
+# parent, so run from a subdirectory this planted <subdir>/.ccm/memory.db --
 # the exact stray the hooks have refused to create since v2.6.0, and because
 # an existing database is a terminal rung, planting one there pinned all six
 # hooks to it permanently. Falls back to cwd if the resolver is missing, which
@@ -154,7 +154,7 @@ memories = [
     # LLM writes with markdown backticks. A memory recording a shell command
     # would RUN that command in the user's project; one recording an
     # environment variable assignment would expand the live value into a
-    # string that then lands in memory/MEMORY.md; and one quoting a phrase
+    # string that then lands in .ccm/MEMORY.md; and one quoting a phrase
     # breaks the skill outright. Write command names and paths in plain text,
     # or single quotes. (This comment spells the characters out in words for
     # the same reason it is telling you not to type them — an earlier revision

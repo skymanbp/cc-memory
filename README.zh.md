@@ -1,4 +1,4 @@
-<!-- i18n-source: README.md | sha256: 09a9f90a93841ea8 | version: 2.12.2 | translated: 2026-08-27 -->
+<!-- i18n-source: README.md | sha256: 841872b23edd76f2 | version: 2.13.0 | translated: 2026-08-30 -->
 > [English](README.md) · **简体中文**
 
 <div align="center">
@@ -293,13 +293,13 @@ observation）、压缩时（有界的 head+tail transcript 窗口，2 GiB 的 t
 字符 bigram——纯 trigram 会把一个十字中文事实的一字修正打到 0.45 分，于是每次
 修正都被存成一条新的、互相矛盾的事实）。
 
-**能力三——强制交接。** `memory/PROGRESS.md` 是"我们做到哪了"的唯一真相来源：
+**能力三——强制交接。** `.ccm/PROGRESS.md` 是"我们做到哪了"的唯一真相来源：
 当前请求、已完成 / 进行中 / 受阻、待办、触碰过的文件、一个 transcript 指针。
 永远由一行 SQL **全量重写**——它不可能自相矛盾——而 SessionStart 发出的
 `<system-reminder>` 会*强制*下一个会话先读它。到底读没读，
 `/cc-mem inject-usage` 会告诉你。
 
-**能力四——计划锚点 + 指令账本，带强制执行。** `memory/PLAN.md` 跟踪实时计划
+**能力四——计划锚点 + 指令账本，带强制执行。** `.ccm/PLAN.md` 跟踪实时计划
 （ExitPlanMode 的输出被自动捕获；TodoWrite 机械地同步步骤状态）。替换计划要过
 **强制的结转闸门**——每条未完成步骤必须被结转或被显式处置，没有 force 开关。
 与之独立的**指令账本**记录*用户*提了什么要求，因为计划步骤随计划一起死，而指令
@@ -322,7 +322,7 @@ observation）、压缩时（有界的 head+tail transcript 窗口，2 GiB 的 t
 ```
 ┌──────────────────────── 你的 Claude Code 会话 ────────────────────────────┐
 │                                                                          │
-│  UserPromptSubmit ──▶ 首次接触时创建 memory/、计轮次、                      │
+│  UserPromptSubmit ──▶ 首次接触时创建 .ccm/、计轮次、                      │
 │                       在第 1 轮播种"用户要什么"                            │
 │                                                                          │
 │  PostToolUse     ──▶ 实时计划锚点（ExitPlanMode → 捕获计划、                │
@@ -338,17 +338,17 @@ observation）、压缩时（有界的 head+tail transcript 窗口，2 GiB 的 t
 │                       异步腿：LLM 整理，不在阻塞路径上                       │
 │                                                                          │
 │  SessionStart    ──▶ 注入主题 + 关键记忆 + 时间线，然后                     │
-│                       强制："回应之前先读 memory/PROGRESS.md"               │
+│                       强制："回应之前先读 .ccm/PROGRESS.md"               │
 └──────────────────────────────────────────────────────────────────────────┘
                                     │
                                     ▼
-                     <project>/memory/memory.db   (SQLite + FTS5)
-                     <project>/memory/PROGRESS.md (交接，全量重写)
-                     <project>/memory/PLAN.md     (实时计划锚点)
-                     <project>/memory/MEMORY.md   (可浏览索引)
+                     <project>/.ccm/memory.db   (SQLite + FTS5)
+                     <project>/.ccm/PROGRESS.md (交接，全量重写)
+                     <project>/.ccm/PLAN.md     (实时计划锚点)
+                     <project>/.ccm/MEMORY.md   (可浏览索引)
 ```
 
-一切都是**项目本地**的。`memory/` 就在你的仓库里，由 cc-memory 自己写的
+一切都是**项目本地**的。`.ccm/` 就在你的仓库里，由 cc-memory 自己写的
 `.gitignore` 忽略掉，除了发往 Anthropic 的抽取调用之外不出本机——而那次调用你
 可以用 `<private>` 标签划定范围，或者按项目整个关掉。
 
@@ -412,7 +412,7 @@ Windows 上也可以从 [Releases](https://github.com/skymanbp/cc-memory/release
 ### 然后
 
 什么都不用做。每个项目的初始化是自动的：你在一个项目里发出的第一条消息就会创建
-`<project>/memory/` 和它的数据库。用这个确认：
+`<project>/.ccm/` 和它的数据库。用这个确认：
 
 ```
 /cc-mem status
@@ -472,7 +472,7 @@ Project: cc-memory  |  2026-08-26 15:06
 ### Critical memories
 - #506 [release] v2.9.0 released with commit 0313339, tag v2.9.0 …
 ### <system-reminder>
-You MUST Read memory/PROGRESS.md before responding …
+You MUST Read .ccm/PROGRESS.md before responding …
 ```
 
 **以及它在真实项目里抓到的失败**——驱动最近三个版本的那些测量，留在这里是因为
@@ -544,13 +544,13 @@ You MUST Read memory/PROGRESS.md before responding …
 /cc-mem encoding-check [--apply]    U+FFFD 损坏扫描
 
 # ── 交接 ───────────────────────────────────────────────────────────────────
-/cc-mem progress                    重建 memory/PROGRESS.md 并打印
+/cc-mem progress                    重建 .ccm/PROGRESS.md 并打印
 /cc-mem inject-show                 上次 SessionStart 注入了什么
 /cc-mem inject-usage                Claude 到底有没有读 PROGRESS.md / MEMORY.md
 
 # ── 实时计划锚点 ───────────────────────────────────────────────────────────
 /cc-mem plan-status                 计数器 + 新鲜度摘要
-/cc-mem plan-show                   重建并打印 memory/PLAN.md
+/cc-mem plan-show                   重建并打印 .ccm/PLAN.md
 /cc-mem plan-set --raw "<text>"     捕获原始计划，标记 needs_refine
 /cc-mem plan-set --raw-file FILE    同上，从文件读
 /cc-mem plan-set --from-refiner     从 stdin 存入结构化 JSON（替换时会审计
@@ -627,7 +627,7 @@ LF 换行——**不需要任何 `PYTHONUTF8` / `PYTHONIOENCODING` 环境变量*
 | `memory_topics` | 主题摘要（有上限） |
 | `memory_recent` | 带过滤的最近记忆 |
 | `progress_get` | 以结构化字段读取 PROGRESS 状态 |
-| `progress_regenerate` | 从 SQL 强制重写 `memory/PROGRESS.md` |
+| `progress_regenerate` | 从 SQL 强制重写 `.ccm/PROGRESS.md` |
 
 **marketplace / dev checkout——什么都不用做。** `.claude-plugin/plugin.json`
 里已内联注册。
@@ -682,7 +682,7 @@ LF 换行——**不需要任何 `PYTHONUTF8` / `PYTHONIOENCODING` 环境变量*
 ### 每个项目的文件
 
 ```
-<project>/memory/
+<project>/.ccm/
 ├── memory.db                   SQLite（WAL）——真相来源
 ├── MEMORY.md                   可浏览索引，每次写入后刷新
 ├── PROGRESS.md                 交接；由 `progress` 行全量重写
@@ -700,7 +700,7 @@ LF 换行——**不需要任何 `PYTHONUTF8` / `PYTHONIOENCODING` 环境变量*
 └── topics/                     预留给按主题导出
 ```
 
-注意：这个 `memory/` 位于**你的项目目录**里——它与
+注意：这个 `.ccm/` 位于**你的项目目录**里——它与
 `~/.claude/projects/<slug>/memory/` 无关，后者是某些 Claude Code 配置自己的
 按项目笔记。`/cc-mem paths` 精确打印本插件为当前项目读写的每个文件。
 
@@ -730,7 +730,7 @@ LF 换行——**不需要任何 `PYTHONUTF8` / `PYTHONIOENCODING` 环境变量*
 
 | 事件 | 脚本 | 超时 | 职责 |
 |---|---|---|---|
-| `UserPromptSubmit` | `hooks/user_prompt.py` | 8 秒 | 自动初始化 `memory/`、计轮次、第 1 轮播种请求 |
+| `UserPromptSubmit` | `hooks/user_prompt.py` | 8 秒 | 自动初始化 `.ccm/`、计轮次、第 1 轮播种请求 |
 | `PostToolUse` | `hooks/post_tool_use.py` | 8 秒 | **在每种模式下**维护实时计划锚点，然后为被观察的工具各写一行 observation |
 | `Stop` | `hooks/stop.py` | 22 秒 | Haiku 观察者、按轮增量更新 PROGRESS、每 5 轮空闲整理、背压探针、计划强制执行 |
 | `PreCompact`（同步） | `hooks/pre_compact.py` | 120 秒 | 抽取 → 调和 → 全量重写 PROGRESS.md → 归档 |
@@ -881,11 +881,11 @@ Release，附上两个 exe，并以对应的 CHANGELOG 段落作为正文。与 
 | 什么都没被抽取 | 没有凭据。`/cc-mem status` 会检查。登录 Claude Code，或设置 `ANTHROPIC_API_KEY` |
 | 数据库到底在哪？ | `/cc-mem paths` 打印解析后的 DB / PROGRESS.md / PLAN.md / MEMORY.md 及各自的存在/缺失结论——不要用递归 glob 去找；它先找到的那个 `*.db` 可能属于别的工具 |
 | CJK 输出显示成 `�` | 是*捕获输出的 shell* 用自己的码页解码了 UTF-8（PowerShell 5.1 用的是控制台码页）。改用 `--json`——纯 ASCII 输出，任何捕获码页都糟蹋不了 |
-| 子目录里冒出一个 `memory/` | 根锚定之前留下的游离数据库。`/cc-mem status` 会列出项目根之下每一个独立数据库及其记忆数。游离库只被**报告，绝不合并或删除**——真正的嵌套子项目请用 `.ccm-root` 文件钉住 |
+| 子目录里冒出一个 `.ccm/` | 根锚定之前留下的游离数据库。`/cc-mem status` 会列出项目根之下每一个独立数据库及其记忆数。游离库只被**报告，绝不合并或删除**——真正的嵌套子项目请用 `.ccm-root` 文件钉住 |
 | 插件彻底不出声了 | 存在但无法解析的 `config.json` 会**失败即关闭**并排除所有项目。`SessionStart` 会打印一行说明；把 JSON 修好即可 |
 | Claude 结束不了一轮 | 计划强制执行正在拦截。读那段拒绝文本——它会指明是哪个条件以及怎么修。逃生预算耗尽后它一定会退化成建议；`CC_MEMORY_PLAN_ENFORCE=0` 可以整个关掉 |
 | 某条指令总在拦截，但它明明在等*我* | `/cc-mem directive-edit <slug> --status blocked` 把它停靠起来（闲置强制执行会跳过它）；`--status active` 解除停靠。"绝不做 X"类规则应该用 `--kind constraint`——它根本不做闲置检查 |
-| 压缩时出现 `Hook cancelled` | v2.3.2 已通过把整理移到 `async` 腿修掉。若仍出现，请带上 `memory/.last_save.json` 提 issue |
+| 压缩时出现 `Hook cancelled` | v2.3.2 已通过把整理移到 `async` 腿修掉。若仍出现，请带上 `.ccm/.last_save.json` 提 issue |
 | 某条记忆就是错的 | `/cc-mem archive <id>`——调和处理的是*重述*，`archive` 处理的是*推翻* |
 
 ---

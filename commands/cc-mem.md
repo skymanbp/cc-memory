@@ -29,7 +29,7 @@ someone who knows the command exists.
 | `schema` | Print the live SQLite schema (tables, indexes, migrations) |
 | `paths [--json]` | Print the resolved project artifact paths — database, `PROGRESS.md`, `PLAN.md`, `MEMORY.md` — each with an exists/absent verdict. Read-only: an absent artifact is an answer, not an error. Exists because `status` reports counts with no locations, and hunting for the DB with an rglob found another project's file first |
 | `sql "<SELECT ...>" [--json\|--full]` | Run a **read-only** query. Write statements are refused — only plain `SELECT`, `WITH … SELECT`, `EXPLAIN` and read-only `PRAGMA` run, and the `PRAGMA name(value)` setter form is refused too (an `=`-only test used to let it through). The default table truncates cells at 60 chars; `--full` prints untruncated `column: value` blocks, and `--json` emits pure-ASCII JSON (`\uXXXX` escapes), which no capturing shell's decode codec can garble — use it whenever CJK text comes back as `�` |
-| `progress` | Force-regenerate `memory/PROGRESS.md` from DB and print it |
+| `progress` | Force-regenerate `.ccm/PROGRESS.md` from DB and print it |
 | `supersedes <id>` | Walk the supersede chain for a memory ID (anti-patch history) |
 | `archive <id>... [--supersedes ID]` | Retire memories found to be WRONG: `is_active=0`, recoverable, never `DELETE`. The supported exit from "this stored fact is false" — `sql` is read-only and `add` reconciles only when the new text scores similar enough to the old. `--supersedes` records which memory replaced them, keeping the chain walkable. Refuses ids from another project (`memories.id` is global to the DB file) |
 | `consolidate [--deep] [--no-llm]` | Run the full LLM-backed consolidation pipeline, then stamp the cadence marker (so the Stop hook's backpressure probe doesn't re-run what you just ran). `--deep` first loops the semantic-dedup judge until a round confirms nothing new — the way to pay a months-old backlog down in one sitting; already-refused groups are never re-judged within the run |
@@ -39,13 +39,13 @@ someone who knows the command exists.
 | `serve [--port N]` | Launch the browser-based web viewer (stdlib http.server) |
 | `dashboard` | Launch the Tkinter GUI dashboard for this project |
 | `plan-status` | Live-plan counters + freshness summary (no LLM) |
-| `plan-show` | Regenerate + print `memory/PLAN.md` |
+| `plan-show` | Regenerate + print `.ccm/PLAN.md` |
 | `plan-set --raw '<text>'` | Capture a raw plan, mark `needs_refine=1` |
 | `plan-set --raw-file FILE` | Same, but read raw from a file |
 | `plan-set --from-refiner` | Read structured JSON from stdin (refiner output) |
 | `plan-check` | Reset guardian counters + emit plan-guardian invocation hint |
 | `plan-replan` | Re-arm `needs_refine` on the current raw |
-| `plan-clear` | Drop the active plan + delete PLAN.md. Archived to `memory/.plan_history/` first; **`--reason "<why>"` is required when unfinished steps exist** (refuses and exits 1 otherwise — v2.4.0 carryover gate) |
+| `plan-clear` | Drop the active plan + delete PLAN.md. Archived to `.ccm/.plan_history/` first; **`--reason "<why>"` is required when unfinished steps exist** (refuses and exits 1 otherwise — v2.4.0 carryover gate) |
 | `directive-list [--status active\|blocked\|done\|superseded\|dropped\|all] [--json\|--full]` | Standing user directives, **most-repeated first**. A directive is a unit of user INTENT and outlives every plan; a plan step is a unit of execution and dies with its plan. Default filter is `active`; `blocked` rows show as `[b]`. `--full` lifts the per-field truncation, `--json` emits full rows as pure-ASCII JSON |
 | `directive-add <slug> [--quote "..."] [--demand "..."] [--kind standing\|feature\|process\|oneoff\|constraint] [--times N]` | Record a directive. **Re-adding the same slug bumps `times_stated` on the ONE row** rather than creating a second — repetition is the importance signal a plan cannot express. `--times` sets the count outright, for backfilling from a transcript audit. **Reference plan steps by TITLE, never by number** — step ids are re-assigned on every replacement, and the command warns when the text contains `step #N` / `步骤 N` |
 | `directive-edit <slug> [--demand ...] [--quote ...] [--kind ...] [--status active\|blocked]` | Correct a directive's record **without bumping its count** — an edit is maintenance, not a re-statement, and `directive-list` sorts by the count. Never creates (exits 1 on an unknown slug). `--status blocked` parks a directive that is waiting on the *user* — idle enforcement skips it — and `--status active` un-parks it; closure stays with `directive-close`, whose evidence gate this door must not bypass |

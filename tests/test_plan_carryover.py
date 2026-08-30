@@ -95,6 +95,7 @@ def _cleanup_sandbox():
 sys.path.insert(0, str(REPO / "cc_memory"))
 
 from core.db import MemoryDB          # noqa: E402  -- why: imports must follow the sys.path bootstrap above; repo tests run as plain scripts
+from core.layout import MEMORY_DIRNAME as _MEM  # noqa: E402  -- why: same bootstrap ordering
 from core import plan as plan_mod     # noqa: E402  -- why: same bootstrap ordering
 from core.encoding_setup import enable_utf8_io  # noqa: E402  -- why: same bootstrap ordering
 
@@ -122,7 +123,7 @@ def check(name: str, cond: bool, detail: str = ""):
 
 def _mk_project():
     root = Path(tempfile.mkdtemp(prefix="ccm_gate_"))
-    memory_dir = root / "memory"
+    memory_dir = root / _MEM
     memory_dir.mkdir()
     db = MemoryDB(memory_dir / "memory.db")
     pid = db.upsert_project(str(root))

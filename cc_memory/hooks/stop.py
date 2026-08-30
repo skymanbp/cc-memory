@@ -37,6 +37,7 @@ from core.encoding_setup import enable_utf8_io
 enable_utf8_io()
 
 from core.db import CATEGORIES, MemoryDB
+from core.layout import DB_FILENAME, memory_dir as resolve_memory_dir
 from core.logger import get_logger
 # read_marker, not bare read_text: it refuses to follow a planted symlink —
 # load-bearing for the PROMPT marker below, whose content is spliced into the
@@ -253,7 +254,7 @@ def _observer_evaluate(cwd, session_id, memory_dir):
     from core.auth import get_api_key
     from core.privacy import clean_for_storage
 
-    db_path = memory_dir / "memory.db"
+    db_path = memory_dir / DB_FILENAME
     if not db_path.exists():
         return 0
 
@@ -506,8 +507,8 @@ def main():
     if cwd is None:
         sys.exit(0)
 
-    memory_dir = Path(cwd) / "memory"
-    if not (memory_dir / "memory.db").exists():
+    memory_dir = resolve_memory_dir(cwd)
+    if not (memory_dir / DB_FILENAME).exists():
         sys.exit(0)
 
     # Job 1: observer evaluation
@@ -525,7 +526,7 @@ def main():
 
     # Job 3: per-turn PROGRESS.md files_touched patch
     try:
-        db = MemoryDB(memory_dir / "memory.db")
+        db = MemoryDB(memory_dir / DB_FILENAME)
         project_id = db.upsert_project(cwd)
         # v5: tag the session BEFORE patching files_touched so PROGRESS.md §0
         # attributes "Files Touched This Session" to the right session.

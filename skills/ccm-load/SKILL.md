@@ -1,12 +1,12 @@
 ---
 name: ccm-load
-description: Load cc-memory for this project — verify the plugin is globally enabled, ensure the project's memory/ directory is initialized, and report end-to-end health. The cc-memory equivalent of "make sure I'm wired up here".
+description: Load cc-memory for this project — verify the plugin is globally enabled, ensure the project's .ccm/ directory is initialized, and report end-to-end health. The cc-memory equivalent of "make sure I'm wired up here".
 ---
 
 ## /ccm-load — Load cc-memory into this project
 
 Run this once in any new project to confirm cc-memory is **active**, the
-project's `memory/` is initialized, and PROGRESS.md/MEMORY.md are generated.
+project's `.ccm/` is initialized, and PROGRESS.md/MEMORY.md are generated.
 Idempotent — safe to re-run.
 
 ### What this skill does
@@ -36,7 +36,7 @@ deliberately disjoint (see the table at the end of this file).
 2. **Resolve the installed package tree** across both layouts (nested
    marketplace/dev checkout, flat standalone install) and fail loudly with
    actionable instructions if neither resolves.
-3. **Auto-initialize this project's `memory/`** — if `memory/memory.db` is
+3. **Auto-initialize this project's `.ccm/`** — if `.ccm/memory.db` is
    absent, create the directory tree + DB + `.gitignore`. (This also happens
    on first UserPromptSubmit; this skill makes it explicit.)
 4. **Seed PROGRESS.md** — write a current snapshot from the (possibly empty)
@@ -260,11 +260,21 @@ try:
         project = anchored
 except Exception as _anchor_err:
     print(f'[init] root anchoring unavailable ({_anchor_err}); using {project}')
-mem_dir = project / 'memory'
+mem_dir = project / '.ccm'
+try:
+    # The migrating resolver, not a join: a project last touched before
+    # v2.13.0 still has its state under 'memory', and this skill is often the
+    # first thing run in it. Imported the same way project_root just was, and
+    # degraded the same way - the literal above is what a broken import falls
+    # back to, and it is held to core.layout.MEMORY_DIRNAME by the parity gate.
+    from core.layout import memory_dir as _resolve_state_dir
+    mem_dir = _resolve_state_dir(project)
+except Exception as _layout_err:
+    print(f'[init] state-directory resolver unavailable ({_layout_err}); using {mem_dir}')
 db_path = mem_dir / 'memory.db'
 
 if not db_path.exists():
-    print(f'[init] Creating memory/ at {mem_dir}')
+    print(f'[init] Creating {mem_dir.name}/ at {mem_dir}')
     mem_dir.mkdir(exist_ok=True)
     (mem_dir / 'sessions').mkdir(exist_ok=True)
     (mem_dir / 'topics').mkdir(exist_ok=True)
@@ -347,7 +357,7 @@ Summarize to the user in 1-2 sentences:
 ### When to invoke
 
 - **New project** that should benefit from cross-session memory.
-- **After cloning** a repo that has a `memory/` directory but you've not yet
+- **After cloning** a repo that has a `.ccm/` directory but you've not yet
   loaded the project under cc-memory globally.
 - **After upgrading** cc-memory (e.g. v2.0 → v2.1) to confirm the new
   PROGRESS.md mechanism initialized correctly.
@@ -361,7 +371,7 @@ others cannot do. Nothing here is a subset of anything else.
 
 | Entry point | Owns |
 |-------------|------|
-| `/ccm-load` (this) | **Activation + bootstrap**: global plugin-enablement check, package-tree resolution, project `memory/` creation, PROGRESS.md seeding. Run once per new project |
+| `/ccm-load` (this) | **Activation + bootstrap**: global plugin-enablement check, package-tree resolution, project `.ccm/` creation, PROGRESS.md seeding. Run once per new project |
 | `/cc-mem status` | **Ongoing diagnostics**: install-layout inspection, hook-registration verdicts, API-key resolution, last-save staleness. None of these are run by `/ccm-load` |
 | `/cc-mem <other>` | **Querying and management**: search, list, topics, progress, consolidate, plan-* |
 | `/cc-mem dashboard` | Tkinter GUI for the current project |

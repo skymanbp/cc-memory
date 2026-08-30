@@ -15,7 +15,7 @@ python demo/run_demo.py --only guardian --keep   # keep the temp work trees
 |---|---|
 | `tally/` | The fixture: a tiny expense-tally CLI (JSON store, a deliberate negative-amount bug, a `legacy/` folder nobody uses). Copied to a temp directory before every run — the repository tree is never a work tree |
 | `run_demo.py` | The protocol, as code. Stdlib only |
-| `captures/handoff/` | Scenario 1: session A does real work with the plugin on; session B asks "what were we doing last time?" twice at the SAME path — with the plugin (its `memory/` present) and without (`memory/` moved out, plugin off) |
+| `captures/handoff/` | Scenario 1: session A does real work with the plugin on; session B asks "what were we doing last time?" twice at the SAME path — with the plugin (its `.ccm/` present) and without (`.ccm/` moved out, plugin off) |
 | `captures/guardian/` | Scenario 2: a four-step plan and one constraint directive are seeded through the CLI; session C is asked to migrate AND delete `legacy/` AND drop `export_json()`. Run with the plugin, then on a fresh copy without it |
 | `captures/*/X.stream.jsonl` | The raw `--output-format stream-json --verbose` of each session: every hook response, tool call and assistant message. This is the provenance |
 | `captures/*/X.txt` | The same session rendered readable (hook context that reached the model, assistant text, one line per tool call, and a subagent's report in full — the guardian's verdict is part of the dialogue). `.txt` on purpose: every tracked markdown file in this repository runs through the citation and claims gates, and a transcript is quoted evidence, not a document. `python demo/run_demo.py --render-only` rebuilds every `.txt` from its stream without running anything |

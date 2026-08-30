@@ -27,6 +27,7 @@ if str(_PKG_ROOT) not in sys.path:
 
 from core.db import MemoryDB
 from core.consolidate import cleanup_garbage, assign_topics_auto
+from core.layout import DB_FILENAME, memory_dir as resolve_memory_dir
 from core.logger import get_logger
 # safe_id replaces this module's private `[:16]` truncating copy (three
 # modules each had one; truncation cross-wired any two sessions sharing a
@@ -74,8 +75,8 @@ def maybe_run_idle(cwd: str, session_id: str, turn_count: int,
         if turn_count - last < IDLE_INTERVAL_TURNS:
             return {}
 
-    memory_dir = Path(cwd) / "memory"
-    db_path = memory_dir / "memory.db"
+    memory_dir = resolve_memory_dir(cwd)
+    db_path = memory_dir / DB_FILENAME
     if not db_path.exists():
         return {}
 

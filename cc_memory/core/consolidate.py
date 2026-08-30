@@ -32,6 +32,7 @@ if str(_PKG_ROOT) not in sys.path:
     sys.path.insert(0, str(_PKG_ROOT))
 
 from core.db import MemoryDB
+from core.layout import DB_FILENAME, memory_dir as resolve_memory_dir
 from core.logger import get_logger
 
 _log = get_logger("consolidate")
@@ -1204,8 +1205,8 @@ def run_consolidation(cwd, use_llm=True, verbose=True, budget=None):
     call cost before starting, the run finishes by total_s - safety_s < 300s,
     so it can never be killed mid-write.
     """
-    memory_dir = Path(cwd) / "memory"
-    db_path = memory_dir / "memory.db"
+    memory_dir = resolve_memory_dir(cwd)
+    db_path = memory_dir / DB_FILENAME
     if not db_path.exists():
         if verbose:
             (globals().get("_cli_echo") or _log.info)(f"no DB at {db_path}")  # cli.mem sets _cli_echo=print so `verbose` reaches the user; hooks leave it unset -> log only

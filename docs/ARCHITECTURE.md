@@ -43,7 +43,7 @@ number rather than hand-counting.
 - [4. Database schema](#4-database-schema)
 - [5. Data flow](#5-data-flow)
 - [6. LLM backends and auth](#6-llm-backends-and-auth)
-- [7. Per-project state (memory/)](#7-per-project-state-memory)
+- [7. Per-project state (.ccm/)](#7-per-project-state-ccm)
 - [8. Install layouts](#8-install-layouts)
 - [9. Documentation language convention (i18n)](#9-documentation-language-convention-i18n)
 
@@ -61,7 +61,7 @@ Three design constraints drive everything else:
 
 2. **Forced handoff.** At every `SessionStart`, the plugin emits a
    `<system-reminder>` block instructing the next Claude to `Read
-   memory/PROGRESS.md` before responding. PROGRESS.md is a single SOT,
+   .ccm/PROGRESS.md` before responding. PROGRESS.md is a single SOT,
    always full-rewritten from the `progress` SQLite table — never appended
    to. The previous v2.0 `SESSION_HANDOFF.md` (which drifted into patch-style
    pollution) is migrated aside.
@@ -216,12 +216,12 @@ would falsify the record.
 
 | Hook | Entry | Timeout | Job |
 |------|-------|---------|-----|
-| `PreCompact` (sync) | [`cc_memory/hooks/pre_compact.py`](../cc_memory/hooks/pre_compact.py) | 120s | Read a BOUNDED head+tail transcript window (`extractor.load_transcript_window`); LLM extract memories via Haiku; route through `memory_writer.upsert_batch`; FULL-REWRITE `memory/PROGRESS.md`; archive session. Writes a start marker so a killed run is detectable. |
+| `PreCompact` (sync) | [`cc_memory/hooks/pre_compact.py`](../cc_memory/hooks/pre_compact.py) | 120s | Read a BOUNDED head+tail transcript window (`extractor.load_transcript_window`); LLM extract memories via Haiku; route through `memory_writer.upsert_batch`; FULL-REWRITE `.ccm/PROGRESS.md`; archive session. Writes a start marker so a killed run is detectable. |
 | `PreCompact` (async) | [`cc_memory/hooks/consolidate_async.py`](../cc_memory/hooks/consolidate_async.py) | 300s, `async: true` | LLM consolidation, moved OFF the blocking compaction path in v2.3.2 (interval marker + lock, budget-gated). Due every Nth session OR when the write backlog says so (v2.12.0); also spawnable standalone (`--cwd <root>`) by the Stop hook's backpressure probe. |
 | `SessionStart` | [`cc_memory/hooks/session_start.py`](../cc_memory/hooks/session_start.py) | 15s | Inject layered context (standing directives / topics / critical / timeline / PROGRESS preview / footer — the directive ledger is the first layer since v2.12.2; before that nothing injected it); emit the FORCED `<system-reminder>` to Read `PROGRESS.md` + `MEMORY.md`; retroactive save of unsaved JSONLs. |
 | `Stop` | [`cc_memory/hooks/stop.py`](../cc_memory/hooks/stop.py) | 22s | Observer: extract from last turn's observations via Haiku; per-turn `patch_progress(files_touched, ...)`; every 5 turns run `idle.maybe_run_idle` (cleanup + MEMORY.md regen); probe the consolidation backlog and spawn the detached async worker when it is due (v2.12.0); when a plan is LIVE, bump its turn counter and **enforce** — refuse the turn (`{"decision": "block"}`) over an unrefined plan, an undrift-checked plan, or an idle directive, with the escape budget CONTRACTS.md specifies (v2.11.0; the advisory nudge this row used to describe is gone). |
 | `PostToolUse` | [`cc_memory/hooks/post_tool_use.py`](../cc_memory/hooks/post_tool_use.py) | 8s | Live-plan integration FIRST, in every mode: `ExitPlanMode` → `plan_active.raw`, `TodoWrite` → mechanical step sync, `Edit`/`Write`/`MultiEdit`/`NotebookEdit` → +1 drift counter, sensitive Bash call → +20. THEN one row into `observations`, for OBSERVED tool calls only (mode allowlist / skip list — `core.modes.should_observe`). No LLM. Measured ~180-290 ms end to end, of which ~75-120 ms is interpreter start-up. |
-| `UserPromptSubmit` | [`cc_memory/hooks/user_prompt.py`](../cc_memory/hooks/user_prompt.py) | 8s | Auto-init `memory/` on first contact; track turn count; save prompt for the Stop observer; on turn 1, tag the session and seed `progress.current_request` (typing the trigger `resume_request` vs `user_prompt` from the bilingual resume-signal whitelist). |
+| `UserPromptSubmit` | [`cc_memory/hooks/user_prompt.py`](../cc_memory/hooks/user_prompt.py) | 8s | Auto-init `.ccm/` on first contact; track turn count; save prompt for the Stop observer; on turn 1, tag the session and seed `progress.current_request` (typing the trigger `resume_request` vs `user_prompt` from the bilingual resume-signal whitelist). |
 
 ### Hook stdout contract
 
@@ -246,14 +246,14 @@ the event:
   PROGRESS.md, ~1-5s; `pre_compact.py:5-20`).
 - The **async leg** runs `core.consolidate.run_consolidation` under a
   `BudgetGate` with `_BUDGET_TOTAL_S = 240.0` and `_BUDGET_SAFETY_S = 8.0`
-  (`consolidate_async.py:70`), so the last LLM call it starts finishes by
+  (`consolidate_async.py:71`), so the last LLM call it starts finishes by
   `total_s - safety_s` = 232s < the hook's own 300s timeout — the worker is
   never killed mid-write.
 - Cadence is an **interval marker + lock**, not a fragile
-  `session_count % N` check: `memory/.last_consolidation.json` records the
+  `session_count % N` check: `.ccm/.last_consolidation.json` records the
   session count at the last successful run and
-  `memory/.consolidation.lock` prevents overlapping workers (a lock older than
-  `_STALE_LOCK_S = 360.0`, `consolidate_async.py:74`, is reclaimed). This is
+  `.ccm/.consolidation.lock` prevents overlapping workers (a lock older than
+  `_STALE_LOCK_S = 360.0`, `consolidate_async.py:75`, is reclaimed). This is
   race-immune against the concurrent sync leg — a ±1 drift in the count can
   cause neither a double-run nor a miss (`consolidate_async.py:19-28`).
 - **Backpressure is the third trigger (v2.12.0).** The sessions interval
@@ -307,8 +307,8 @@ modes:
 - `ExitPlanMode` is in no mode's `observe_tools` → `should_observe` is False.
 
 So the entire v2.2 live-plan anchor was **dead through its own hook**:
-`plan_active` was never written by `PostToolUse`, `memory/.plan_raw.md` and
-`memory/PLAN.md` never appeared from a plan-mode exit, and the drift counters
+`plan_active` was never written by `PostToolUse`, `.ccm/.plan_raw.md` and
+`.ccm/PLAN.md` never appeared from a plan-mode exit, and the drift counters
 silently varied by mode (the edit bump fired in `code` and `writing` but not
 `research`; the sensitive-Bash bump fired in `code` and `research` but not
 `writing`). The live plan was reachable only through `/cc-mem plan-set`, and
@@ -338,7 +338,7 @@ has always been `core/modes.py`'s per-mode `skip_tools` + `observe_tools`.
 ## 4. Database schema
 
 SQLite tables (defined in [`cc_memory/core/db.py`](../cc_memory/core/db.py)),
-project-local at `<project>/memory/memory.db`, WAL mode:
+project-local at `<project>/.ccm/memory.db`, WAL mode:
 
 | Table | Purpose |
 |-------|---------|
@@ -350,8 +350,8 @@ project-local at `<project>/memory/memory.db`, WAL mode:
 | `plans` | Plan queue (draft → ready → done) (`db.py:90`) |
 | `observations` | Raw PostToolUse events, cleaned up after extraction (`db.py:131`) |
 | `session_summaries` | 6-field structured summary per session (request / investigated / learned / completed / next_steps / notes) + files_read/files_modified (`db.py:144`) |
-| **`progress`** | NEW in v2.1 — single row per project. SOT for `memory/PROGRESS.md` (`db.py:188`). |
-| **`plan_active`** | NEW in v2.2 — single row per project. SOT for `memory/PLAN.md` (`db.py:212`). Carries `turns_total` since `v9_plan_turns_total`: a MONOTONIC turn count that nothing resets, distinct from `turns_since_last_guardian`, which every guardian check and plan replacement zeroes |
+| **`progress`** | NEW in v2.1 — single row per project. SOT for `.ccm/PROGRESS.md` (`db.py:188`). |
+| **`plan_active`** | NEW in v2.2 — single row per project. SOT for `.ccm/PLAN.md` (`db.py:212`). Carries `turns_total` since `v9_plan_turns_total`: a MONOTONIC turn count that nothing resets, distinct from `turns_since_last_guardian`, which every guardian check and plan replacement zeroes |
 | **`directives`** | NEW in v2.11.0 — the user-INTENT ledger. `times_stated` accumulates on ONE row per `slug`; a directive outlives every plan, which is why it is not plan steps. Carries `turns_at_touch` since `v9_directives_turns_at_touch` — the value of `turns_total` when it was last written, so idleness is subtraction between two monotonic numbers. Since v2.12.0 `status` may also be `blocked` (parked on the user, idle-exempt) and `kind` may be `constraint` (a standing prohibition, idle-exempt) — vocabulary additions, no schema change; only `directive-add` may bump the count (`directive-edit` corrects fields without touching it) |
 | `_migrations` | Tracks applied migrations (`db.py:651`) |
 
@@ -450,15 +450,15 @@ caller's responsibility, and there are exactly two shapes:
 
 - `upsert_batch` (`memory_writer.py:200-235`) loops `upsert_smart` per item and
   regenerates ONCE at the end, but only when a `memory_dir` is passed
-  (`memory_writer.py:190-194`). All hook callers pass it
+  (`memory_writer.py:221`). All hook callers pass it
   (`pre_compact.py:435`, `stop.py:166`, `session_start.py:1056`); the sync
   PreCompact leg additionally touches it again after the rest of its state
-  changes (`pre_compact.py:782`).
+  changes (`pre_compact.py:783`).
 - Single-shot callers call `regenerate_memory_index` explicitly:
-  `cli/mem.py:1125` and `:584`, `mcp/server.py:644`, `ui/dashboard.py:1664`,
+  `cli/mem.py:1147` and `:584`, `mcp/server.py:647`, `ui/dashboard.py:1674`,
   `ui/web_viewer.py:1034`, plus the `skills/ccm-load` inline script
   (`skills/ccm-load/SKILL.md:308, 318`). `core/idle.py:96` and
-  `hooks/consolidate_async.py:188` also refresh it after maintenance.
+  `hooks/consolidate_async.py:276` also refresh it after maintenance.
 
 (The pre-merge diagram showed regeneration as an unconditional step of
 `upsert_smart` and elided the `db` argument; both are corrected above against
@@ -521,7 +521,7 @@ PreCompact (sync):
     ↓
   db.upsert_progress(...)                   ← full overwrite of progress row
     ↓
-  write_progress_md(db, project_id, memory_dir)   ← FULL REWRITE of memory/PROGRESS.md
+  write_progress_md(db, project_id, memory_dir)   ← FULL REWRITE of .ccm/PROGRESS.md
     ↓
   .last_save.json (incl. trigger: auto|manual) + _clear_attempt(memory_dir)
 
@@ -547,7 +547,7 @@ SessionStart:
   footer may carry: killed-PreCompact warning (surviving .pre_compact_attempt.json,
                     after a 10-minute grace window), OAuth/api-key warnings, counts
   emit: <system-reminder>
-          You MUST Read memory/PROGRESS.md and memory/MEMORY.md before
+          You MUST Read .ccm/PROGRESS.md and .ccm/MEMORY.md before
           responding to any user request. Explicitly state in your reply:
           "Read PROGRESS.md — prior progress: <summary>."
           … plus the RESUME PROTOCOL (bilingual token whitelist → auto-execute
@@ -556,9 +556,9 @@ SessionStart:
 ```
 
 Call signatures above are the real ones: `write_progress_md(db, project_id,
-memory_dir)` (`core/progress.py:331-490`; call sites `pre_compact.py:751`,
-`stop.py:473`, `user_prompt.py:133`, `session_start.py:912`, `mcp/server.py:243`,
-`cli/mem.py:1216`). See
+memory_dir)` (`core/progress.py:331-490`; call sites `pre_compact.py:752`,
+`stop.py:474`, `user_prompt.py:75`, `session_start.py:937`, `mcp/server.py:243`,
+`cli/mem.py:1238`). See
 [docs/CONTRACTS.md](CONTRACTS.md#handoff-contract) for the PROGRESS.md
 schema.
 
@@ -567,7 +567,7 @@ schema.
 A `PreCompact` killed by the host timeout dies on `TerminateProcess`: no
 `except`, no `finally`, so `.last_save.json` still describes the *previous*
 successful run and the failure is invisible. The sync leg therefore writes
-`memory/.pre_compact_attempt.json` **before** the transcript load
+`.ccm/.pre_compact_attempt.json` **before** the transcript load
 (`pre_compact.py:359-368`) and removes it only on a completed run
 (`pre_compact.py:795`) — including on its own error path (`pre_compact.py:731`),
 so an *errored* run is never reported as a *killed* one. `SessionStart` reports
@@ -673,9 +673,9 @@ while the same token via Bearer + beta gets HTTP 200 (`core/auth.py:14-15`).
 `get_api_key()` is the single-credential back-compat view of that same list (it
 does not retry, `core/auth.py:60-93`); it also carries the `oauth_expired`
 signal behind SessionStart's "[WARNING: OAuth expired — LLM extraction
-disabled]" footer (`session_start.py:658`). Hook callers use it to *supply*
-the credential passed into `call_llm`: `pre_compact.py:80 → :166`,
-`stop.py:85`, `session_start.py:658`, `core/consolidate.py:425, 549, 724`.
+disabled]" footer (`session_start.py:659`). Hook callers use it to *supply*
+the credential passed into `call_llm`: `pre_compact.py:81 → :166`,
+`stop.py:86`, `session_start.py:659`, `core/consolidate.py:426, 549, 724`.
 
 Fall-through was added in v2.3.4 for a concrete failure: a dead env key (e.g.
 zero credit → HTTP 400) used to blackhole the healthy subscription token behind
@@ -749,12 +749,12 @@ so a total LLM outage escaped to the hook's outer handler and skipped the
 
 ---
 
-## 7. Per-project state (memory/)
+## 7. Per-project state (.ccm/)
 
-Per-project state lives at `<project>/memory/`:
+Per-project state lives at `<project>/.ccm/`:
 
 ```
-<project>/memory/
+<project>/.ccm/
 ├── memory.db                    SQLite (WAL mode, all tables)
 ├── MEMORY.md                    auto-generated, refreshed after every batch write
 ├── PROGRESS.md                  full-rewrite from `progress` row, every Stop+PreCompact
@@ -790,7 +790,7 @@ Writers, for traceability: `MEMORY.md` ← `memory_writer.regenerate_memory_inde
 path touches the project first — `user_prompt.py:57-63` on auto-init, or
 `pre_compact.py:342-343`.
 
-`memory/PROGRESS.md`, `memory/MEMORY.md`, and `memory/PLAN.md` are **generated
+`.ccm/PROGRESS.md`, `.ccm/MEMORY.md`, and `.ccm/PLAN.md` are **generated
 artifacts**. Edit the SQL source of truth instead (`progress` for PROGRESS.md,
 `plan_active` for PLAN.md, `memories`/`topics`/`keywords` for MEMORY.md).
 
@@ -801,7 +801,7 @@ session's CURRENT working directory and follows the agent's own `cd`, so a
 session launched at a repo root that ran one command inside `cli/` began
 reporting `<root>/cli` — and `_init_project_if_needed` (`user_prompt.py:50-78`)
 mkdir'd a second, fully independent database there. Four of the six hooks <!--ce:hooks:subset--> gate
-on `memory/memory.db` merely EXISTING, so once born the stray kept being
+on `.ccm/memory.db` merely EXISTING, so once born the stray kept being
 written: measured 27 memories and its own `projects` row in one such database,
 against 161 in the real one two levels up. It also had no `.gitignore` (only
 the directory the init path creates gets one), so a 184 KB binary `memory.db`
@@ -811,12 +811,12 @@ rode into three commits of the user's repository.
 this resolver tried to *heal* an existing stray by taking the outermost end of
 a contiguous run of database-bearing ancestors, on the theory that a stray is
 always deeper than the real root. An adversarial design review killed it
-against ground truth: enumerating every `memory/memory.db` on the reporting
+against ground truth: enumerating every `.ccm/memory.db` on the reporting
 machine found **20** databases, and **four** of them are legitimately nested
 inside another one — `Claude-Code-Local/companion` alone holds 3725 memories
 and carries its own `.git`. A stray sub-database and a deliberate nested
 sub-project are **byte-for-byte indistinguishable on disk**: both have
-`memory/memory.db` whose `projects` row names their own directory, because
+`.ccm/memory.db` whose `projects` row names their own directory, because
 `upsert_project` (`core/db.py:1041-1073`) records whatever cwd it was handed.
 Outermost-wins resolves that ambiguity unconditionally in the direction that
 destroys data, so the first post-upgrade session in `companion` would have
@@ -829,7 +829,7 @@ already exists means merging two SQLite files — destructive and irreversible �
 which belongs in an explicit, confirmed command, not in a hook that runs on
 every prompt.
 
-`project_root` (`core/roots.py:530-575`) resolves a root first. Every hook
+`project_root` (`core/roots.py:587-632`) resolves a root first. Every hook
 rebinds `cwd` to it immediately **after** `is_excluded` and never before:
 resolving first would widen a per-subdirectory exclusion away by climbing to
 its unexcluded parent. Since v2.10.0 that ordering is not a per-hook
@@ -842,15 +842,15 @@ once inside the gate, refuses a direct import in any hook, and
 directory, below the filesystem root, at a `.ccm-root` pin, and after 25
 levels (`_chain`, `core/roots.py:267-295`). First hit wins:
 
-0. `cwd` itself has `memory/memory.db` → `cwd`. Terminal, before anything else
+0. `cwd` itself has `.ccm/memory.db` → `cwd`. Terminal, before anything else
    is consulted. This single line is what discharges the "never orphan"
    constraint for every database that exists today.
-1. The **nearest** ancestor with `memory/memory.db` (`_nearest`). No outward
+1. The **nearest** ancestor with `.ccm/memory.db` (`_nearest`). No outward
    extension — see above. This is the rung that fixes the reported bug, since
    `CodeEraser/cli` has no database while `CodeEraser` does. It needs no VCS
    and no manifest, which matters for projects that are not repositories.
 2. `CLAUDE_PROJECT_DIR`, when it names a directory in the chain (`_from_env`,
-   `core/roots.py:541-559`). Ranked *below* the database rungs deliberately:
+   `core/roots.py:566-584`). Ranked *below* the database rungs deliberately:
    it records where Claude Code was launched, which is not authority to orphan
    a database. Containment is likewise the point — a value left over from
    another project must not redirect this one.
@@ -866,11 +866,11 @@ levels (`_chain`, `core/roots.py:267-295`). First hit wins:
 **The guards belong to the CANDIDATE SET, not to any one rung (v2.7.0).**
 v2.6.0 hung them off the marker rung's extension loop alone, and every rung
 that did not inherit them became a separate data-integrity defect: the
-database rung consulted nothing, so a `memory/` created by one session in a
+database rung consulted nothing, so a `.ccm/` created by one session in a
 projects folder captured every uninitialised project under it; the marker rung
 never checked the FIRST marker it found, so one stray `package.json` there did
 the same; and neither had any notion of a dependency tree. `_candidates`
-(`core/roots.py:409-458`) now filters the chain once, before any rung reads it:
+(`core/roots.py:466-515`) now filters the chain once, before any rung reads it:
 
 - **Containers of projects are removed** (`_is_container`). Two asymmetric
   triggers: two or more children that are VCS roots is always decisive (the
@@ -913,7 +913,7 @@ platform-conventional shape — a child of a directory named `Users` or `home`
 **that itself sits at the filesystem root** (`_is_profile_dir`). Containers,
 CI, `sudo` and this project's own test sandbox all redirect the former.
 Measured with `HOME` pointed into a sandbox: the walk climbed seven levels out
-of a temp fixture into the real profile and matched the `memory/memory.db`
+of a temp fixture into the real profile and matched the `.ccm/memory.db`
 that one session run in the home directory had left there. Structure survives
 that redirection; environment does not. The filesystem-root qualifier is
 v2.7.0 and is load-bearing in the other direction: without it any in-repo
@@ -925,7 +925,7 @@ stray four levels down — the defect produced by the guard against it.
 and delivered it for `cli/mem.py` alone; the audit that followed found seven
 more surfaces that turn a supplied string into a database path, none of them
 anchoring. They now share one implementation, `anchor_project`
-(`core/roots.py:551-612`):
+(`core/roots.py:635-688`):
 
 | Surface | Can it CREATE? | Announces via |
 |---|---|---|
@@ -960,7 +960,7 @@ every single call.
 
 `cli/plan.py` additionally stopped conjuring databases from read-only
 commands. `MemoryDB.__init__` mkdirs and creates, so `list` and `status` used
-to fabricate a 140 KB empty database — *without* `memory/.gitignore`, the one
+to fabricate a 140 KB empty database — *without* `.ccm/.gitignore`, the one
 omission that let a stray ride into version control — merely for asking what
 was in the queue. `cli/mem.py` had always refused instead; two halves of one
 CLI pair must not disagree about that.
@@ -979,7 +979,7 @@ that every hook resolves *after* the opt-out.
 ### .gitignore migrates, not just creates (v2.4.2)
 
 `core.progress.MEMORY_GITIGNORE_LINES` (`progress.py:42-56`) is the canonical
-ignore set, and `ensure_memory_gitignore` (`progress.py:59-80`) **appends only
+ignore set, and `ensure_memory_gitignore` (`progress.py:85-122`) **appends only
 the missing lines**, preserving anything the user added. Every previous
 generator was guarded by `if not gi.exists()`, so each time the plugin started
 writing a new artifact, existing installs kept the stale ignore list forever and
@@ -993,7 +993,7 @@ exist because they cannot import this module and must be kept in sync:
 
 Old v2.0 `SESSION_HANDOFF.md` files are renamed to `SESSION_HANDOFF.md.v2.bak`
 on first PreCompact under v2.1 (one-shot migration
-`core.progress.migrate_legacy_handoff`, `progress.py:590-608`).
+`core.progress.migrate_legacy_handoff`, `progress.py:628-646`).
 
 ---
 
@@ -1015,7 +1015,7 @@ reports on each:
   `installPath` that no longer exists is reported as a broken layout rather
   than skipped (`mem.py:158-170`).
 - **legacy / standalone install** — `~/.claude/hooks/cc-memory/`
-  (`mem.py:43`), written by the PyInstaller installer
+  (`mem.py:48`), written by the PyInstaller installer
   (`ui/installer.py:72` `TARGET_DIR`). Hooks here are registered directly in
   `~/.claude/settings.json` by `_merge_into_settings` (`installer.py:1047-1081+`),
   not via a plugin manifest.
@@ -1054,8 +1054,8 @@ segment**, and `_make_hooks_config` (`installer.py:695-717`) builds commands as
 ├── config.json
 ├── installed_surfaces.json  ← what was written into ~/.claude (v2.5)
 ├── core/    atomic.py auth.py consolidate.py db.py encoding_setup.py
-│            extractor.py idle.py logger.py markers.py modes.py plan.py
-│            privacy.py progress.py roots.py textsim.py version.py
+│            extractor.py idle.py layout.py logger.py markers.py modes.py
+│            plan.py privacy.py progress.py roots.py textsim.py version.py
 ├── hooks/   _entry.py consolidate_async.py post_tool_use.py pre_compact.py
 │            session_start.py stop.py user_prompt.py
 ├── llm/     ccl_backend.py memory_writer.py parse.py
@@ -1127,7 +1127,7 @@ against the layout **root**, so a healthy flat install reported all 22 files
 missing, printed `[FAIL]`, and — because `/cc-mem status` only runs the API-key
 check against a "fully-functional" layout — skipped that check entirely.
 
-It now resolves `pkg_dir` once (`mem.py:441`:
+It now resolves `pkg_dir` once (`mem.py:539`:
 `root/"cc_memory"` if that directory exists, else `root`), strips the prefix
 accordingly, and requires `hooks/hooks.json` only for plugin-manifest installs —
 the standalone installer never copies it, and it is meaningless when the hooks
@@ -1393,7 +1393,7 @@ or the checker will report `[FAIL] ORPHAN`.
 - `CLAUDE.md`, `commands/`, `skills/`, `agents/` — Claude-facing, and their YAML
   front-matter is owned by the loader; adding unknown keys risks loader rejection.
 - `CHANGELOG.md` — append-only release churn; not a document you read top-to-bottom.
-- `memory/**` — generated artifacts.
+- `.ccm/**` — generated artifacts.
 - Runtime UI strings (CLI / dashboard) — LLM-facing (Tier 1) and with no central
   output seam; deliberately deferred, not part of this convention.
 

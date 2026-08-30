@@ -67,6 +67,7 @@ from hooks._entry import parse_payload, resolve_project
 # write paths honoured <private> from v2.5.0; this hook's progress ingress
 # never did (see _first_user_request).
 from core.privacy import clean_for_storage, strip_harness_blocks
+from core.layout import DB_FILENAME, memory_dir as resolve_memory_dir
 from core.progress import (write_progress_md, write_session_archive, collect_progress_state,
                            migrate_legacy_handoff, ensure_memory_dir)
 from llm.memory_writer import upsert_batch, regenerate_memory_index
@@ -514,9 +515,9 @@ def main():
         sys.exit(0)
 
     # Opt-out gate + root anchor via the ONE shared gate (hooks/_entry.py) —
-    # MUST precede the try block below, whose first act is to mkdir memory/ +
-    # sessions/ + topics/ in cwd (this is the SECOND path that mkdir's
-    # memory/, so an unanchored cwd would keep a compaction able to create
+    # MUST precede the try block below, whose first act is to mkdir the
+    # state directory + sessions/ + topics/ in cwd (this is the SECOND path
+    # that mkdirs it, so an unanchored cwd would keep a compaction able to create
     # the very stray database UserPromptSubmit no longer creates). Placed
     # after the empty-cwd guard so `Path("").resolve()` can never widen the
     # match to the interpreter's own working directory. Logged (unlike the
@@ -532,16 +533,16 @@ def main():
     try:
         # ensure_memory_dir refuses a project directory that no longer exists
         # (FileNotFoundError -> the handler at the bottom of this try), and
-        # writes memory/.gitignore on EVERY compaction rather than only at
+        # writes .ccm/.gitignore on EVERY compaction rather than only at
         # project creation: user_prompt's initializer returns early once
         # memory.db exists, so an install created before an artifact was
         # introduced would otherwise never learn to ignore it.
-        memory_dir = ensure_memory_dir(Path(cwd) / "memory")
+        memory_dir = ensure_memory_dir(resolve_memory_dir(cwd, log=_log))
 
         # Migrate old SESSION_HANDOFF.md aside (one-shot)
         migrate_legacy_handoff(memory_dir)
 
-        db = MemoryDB(memory_dir / "memory.db")
+        db = MemoryDB(memory_dir / DB_FILENAME)
         project_id = db.upsert_project(cwd)
         project_name = Path(cwd).name
 
@@ -839,7 +840,9 @@ def main():
     except Exception:
         _log.error_tb("pre_compact ERROR")
         try:
-            memory_dir = Path(cwd) / "memory"
+            # resolve_memory_dir never raises, unlike the bare join this
+            # replaced — load-bearing in a LAST-RESORT handler.
+            memory_dir = resolve_memory_dir(cwd)
             (memory_dir / ".last_save.json").write_text(
                 json.dumps({
                     "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),

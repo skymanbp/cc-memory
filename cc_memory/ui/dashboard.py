@@ -41,6 +41,11 @@ if getattr(sys, 'frozen', False):
 else:
     sys.path.insert(0, str(_PKG_ROOT))
 from core.db import CATEGORIES, MemoryDB
+# The state directory, resolved rather than spelled (v2.13.0).
+# `find_db_path` is the read-only twin: the project SCANS below must
+# never rename the state directory of a project merely being listed.
+from core.layout import (DB_FILENAME, find_db_path,
+                         memory_dir as resolve_memory_dir)
 from core.encoding_setup import enable_utf8_io
 from core.extractor import (
     build_extraction,
@@ -170,6 +175,10 @@ class DashboardApp:
         self.db = None
         self.project_id = None
         self.project_path = None
+        # Resolved ONCE per project load (v2.13.0). Four call sites used to
+        # rebuild `self.project_path / "memory"` independently, so each was a
+        # chance to disagree with the directory self.db was opened from.
+        self.memory_dir = None
         self._manual_api_key = ""  # Set via Settings dialog
         self._projects_file = _registry_path()
 
@@ -573,7 +582,7 @@ class DashboardApp:
         for sd in search_dirs:
             try:
                 for child in sd.iterdir():
-                    db_path = child / "memory" / "memory.db"
+                    db_path = find_db_path(child)
                     if db_path.exists():
                         resolved = str(child.resolve())
                         if resolved.lower() not in known_lower:
@@ -639,7 +648,7 @@ class DashboardApp:
         # Populate
         projects = self._load_project_registry()
         for p in projects:
-            has_db = (Path(p) / "memory" / "memory.db").exists()
+            has_db = find_db_path(p).exists()
             prefix = "" if has_db else "[no DB] "
             listbox.insert(tk.END, f"{prefix}{p}")
 
@@ -662,7 +671,7 @@ class DashboardApp:
             if resolved.lower() in {p.lower() for p in current_paths}:
                 messagebox.showinfo("Duplicate", "This project is already in the list.")
                 return
-            has_db = (Path(resolved) / "memory" / "memory.db").exists()
+            has_db = find_db_path(resolved).exists()
             prefix = "" if has_db else "[no DB] "
             listbox.insert(tk.END, f"{prefix}{resolved}")
             status_label.config(text=f"{listbox.size()} project(s)")
@@ -708,7 +717,7 @@ class DashboardApp:
             found = 0
             try:
                 for child in Path(path).iterdir():
-                    if child.is_dir() and (child / "memory" / "memory.db").exists():
+                    if child.is_dir() and find_db_path(child).exists():
                         resolved = str(child.resolve())
                         if resolved.lower() not in current_paths:
                             listbox.insert(tk.END, resolved)
@@ -766,7 +775,7 @@ class DashboardApp:
         correct version here as a private method is why six other creators
         each shipped their own parents=True copy and kept resurrecting.
         """
-        return ensure_memory_dir(Path(project) / "memory")
+        return ensure_memory_dir(resolve_memory_dir(project))
 
     def _set_busy(self, busy: bool, msg: str = ""):
         """Toggle a wait cursor + status text around a long main-thread job."""
@@ -810,7 +819,7 @@ class DashboardApp:
         try:
             resolved = Path(self._anchor(project_path)).resolve()
             memory_dir = self._ensure_memory_dir(resolved)
-            db = MemoryDB(memory_dir / "memory.db")
+            db = MemoryDB(memory_dir / DB_FILENAME)
             project_id = db.upsert_project(str(resolved))
         except Exception as e:
             # why: every failure mode here — missing drive, deleted directory,
@@ -821,6 +830,7 @@ class DashboardApp:
             return
 
         self.project_path = resolved
+        self.memory_dir = memory_dir
         self.db = db
         self.project_id = project_id
         self.project_var.set(str(resolved))
@@ -1662,7 +1672,7 @@ Memories:
             # trees, so without this the file kept advertising the retired
             # rows (header count included) until the next hook run.
             regenerate_memory_index(self.db, self.project_id,
-                                    self.project_path / "memory")
+                                    self.memory_dir)
             self._refresh()
             skipped = len(picked) - n
             self.status_var.set(f"Archived {n} memories"
@@ -1766,7 +1776,7 @@ Memories:
                 importance=importance,
                 tags=["manual", "dashboard"],
             )
-            regenerate_memory_index(self.db, self.project_id, self.project_path / "memory")
+            regenerate_memory_index(self.db, self.project_id, self.memory_dir)
             msg = f"Add Memory: {result['action']} #{result.get('id')}"
             sim = result.get("similarity")
             # Only report a similarity that was actually COMPUTED. The writer
@@ -2219,7 +2229,7 @@ Output ONLY valid JSON array."""
             f"File: {latest.name}\n"
             f"Modified: {mtime.strftime('%Y-%m-%d %H:%M:%S')}\n"
             f"Size: {latest.stat().st_size / 1024:.0f} KB\n\n"
-            f"Memories will be written to: {self.project_path / 'memory'}"):
+            f"Memories will be written to: {self.memory_dir}"):
             return
 
         try:
@@ -2307,7 +2317,7 @@ Output ONLY valid JSON array."""
 
             counts = upsert_batch(
                 self.db, self.project_id, session_id, batch,
-                memory_dir=self.project_path / "memory",
+                memory_dir=self.memory_dir,
             )
             # Receipt after the memories landed (register X6): insert_session
             # writes complete=0, and _get_saved_session_ids only believes a
@@ -2351,8 +2361,8 @@ Output ONLY valid JSON array."""
             self._report_opt_out(path, notice)
             return
         project = Path(self._anchor(path)).resolve()
-        memory_dir = project / "memory"
-        if (memory_dir / "memory.db").exists():
+        memory_dir = resolve_memory_dir(project)
+        if (memory_dir / DB_FILENAME).exists():
             self._load_project(str(project))
             if not (project / "CLAUDE.md").exists():
                 if messagebox.askyesno("Generate CLAUDE.md?",
@@ -2449,7 +2459,7 @@ Output ONLY valid JSON array."""
                 memory_dir = self._ensure_memory_dir(project)
 
                 # Initialize DB and save confirmed memories
-                db = MemoryDB(memory_dir / "memory.db")
+                db = MemoryDB(memory_dir / DB_FILENAME)
                 pid = db.upsert_project(str(project))
                 counts = upsert_batch(db, pid, None, batch, memory_dir=memory_dir)
                 saved = (counts.get("inserted", 0) + counts.get("merged", 0)
@@ -2929,7 +2939,7 @@ def main():
     args = parser.parse_args()
 
     # Anchor like every other entry point. The dashboard opens the project with
-    # MemoryDB(memory_dir / "memory.db"), which CREATES, so `--project <subdir>`
+    # MemoryDB(memory_dir / DB_FILENAME), which CREATES, so `--project <subdir>`
     # planted a stray there and rung 0 then pinned all six hooks
     # <!--ce:hooks:asof--> to it. Printed, not silent, for the same reason the
     # CLIs print it: an explicit --project is an instruction. `is not None` so

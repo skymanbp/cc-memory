@@ -12,12 +12,12 @@ JSON that cc-memory's `plan_active` table expects.
 
 ## Input
 
-You will be told to read `memory/.plan_raw.md` (relative to the current
+You will be told to read `.ccm/.plan_raw.md` (relative to the current
 working directory). This file contains either:
 - The raw `plan` field of a recent `ExitPlanMode` tool call, or
 - A markdown plan that the user pasted via `/cc-mem plan-set --raw-file`.
 
-Read that file. If absent, read `memory/PLAN.md` instead and refine its
+Read that file. If absent, read `.ccm/PLAN.md` instead and refine its
 `## Goal` + `## Steps` sections.
 
 ## Output schema (STRICT)
@@ -61,7 +61,7 @@ trailing prose. Stdout must parse with `json.loads()` directly:
 8. **Carryover gate (R610 — MANDATORY when a plan is being REPLACED).**
    Before producing output, run
    `python <mem.py path from your instructions> --project . plan-show`
-   (or read `memory/PLAN.md`) to see the CURRENT plan. If it has UNFINISHED
+   (or read `.ccm/PLAN.md`) to see the CURRENT plan. If it has UNFINISHED
    steps — status `pending`, `in_progress` or `blocked`; a `skipped` step is
    finished and needs no accounting — the storage layer will REFUSE your
    JSON unless every one of them is either (a) present in your `steps`

@@ -178,6 +178,8 @@ from core.encoding_setup import enable_utf8_io     # noqa: E402  -- why: imports
 enable_utf8_io()
 
 from core.db import MemoryDB                       # noqa: E402  -- why: same bootstrap ordering
+from core.layout import (MEMORY_DIRNAME as _MEM,   # noqa: E402  -- why: same bootstrap ordering
+                         LEGACY_MEMORY_DIRNAME as _OLDMEM)
 from llm.memory_writer import (                    # noqa: E402  -- why: same bootstrap ordering
     MIN_CONTENT_LEN, regenerate_memory_index)
 from mcp import server as mcp_server               # noqa: E402  -- why: same bootstrap ordering
@@ -194,7 +196,7 @@ WEB_VIEWER_PY = REPO / "cc_memory" / "ui" / "web_viewer.py"
 def _mk_project(tag):
     """Throwaway project with memory/memory.db. Returns (root, mem_dir, db, pid)."""
     root = Path(tempfile.mkdtemp(prefix=f"ccm-{tag}-"))
-    mem = root / "memory"
+    mem = root / _MEM
     mem.mkdir(parents=True, exist_ok=True)
     db = MemoryDB(mem / "memory.db")
     pid = db.upsert_project(str(root))
@@ -635,7 +637,7 @@ def test_mcp():
         assert res.get("isError") is True, f"{tool} on a missing DB: {res}"
     rc, err, _ = mcp.finish()
     assert rc == 0 and err == b""
-    assert not (empty / "memory" / "memory.db").exists(), \
+    assert not (empty / _MEM / "memory.db").exists(), \
         "a read against a project with no DB must not create one"
     print(f"[OK] MCP missing DB: all {len(mcp_server._HANDLERS)} tools set "
           f"isError, no memory.db conjured")
@@ -1413,7 +1415,7 @@ def _seed_project(root, n_sessions=6):
     sensitive). n_sessions is >= config.json consolidation.auto_interval_
     sessions so consolidate_async's interval gate is OPEN and the opt-out is
     the only thing that can stop it."""
-    mem = root / "memory"
+    mem = root / _MEM
     mem.mkdir(parents=True, exist_ok=True)
     db = MemoryDB(mem / "memory.db")
     pid = db.upsert_project(str(root))
@@ -1477,7 +1479,7 @@ def test_excluded_projects():
 
     excl_db, excl_pid = _seed_project(excluded)
     ctrl_db, ctrl_pid = _seed_project(control)
-    seeded = _memory_names(excluded / "memory")
+    seeded = _memory_names(excluded / _MEM)
     # `.gitignore` joins the baseline in v2.8.0: `MemoryDB.__init__` writes it
     # beside every database it creates, because leaving it to callers meant
     # cli/mem.py's thirteen construction sites all forgot and a first
@@ -1512,10 +1514,10 @@ def test_excluded_projects():
         assert not (tmp_dir / f"cc_mem_turns_{safe_id(sid)}").exists(), \
             f"{tag}: a turn marker was written for an excluded project"
 
-    assert _memory_names(excluded / "memory") == seeded, \
+    assert _memory_names(excluded / _MEM) == seeded, \
         (f"the excluded project gained artifacts: "
          f"{sorted(_memory_names(excluded / 'memory') - seeded)}")
-    assert not (beneath / "memory").exists(), \
+    assert not (beneath / _MEM).exists(), \
         "memory/ was created in a directory BENEATH the excluded root"
     assert excl_db.get_observation_count(excl_pid) == 0, \
         "tool inputs/outputs were stored for an excluded project"
@@ -1544,7 +1546,7 @@ def test_excluded_projects():
         "control: Stop printed no status line"
     assert ctrl_db.get_progress(ctrl_pid) is not None, \
         "control: no progress row, so 'no progress row' above is vacuous"
-    assert (control / "memory" / "PROGRESS.md").is_file(), \
+    assert (control / _MEM / "PROGRESS.md").is_file(), \
         "control: PreCompact wrote no PROGRESS.md"
     assert (tmp_dir / f"cc_mem_turns_{safe_id(ctrl_sid)}").is_file(), \
         "control: UserPromptSubmit wrote no turn marker"
@@ -1563,7 +1565,7 @@ def test_excluded_projects():
         assert out == "", \
             (f"narrow: {hook} wrote {len(out)} chars into the session for an "
              f"excluded subdirectory: {out[:300]!r}")
-    assert not (narrow / "memory").exists(), \
+    assert not (narrow / _MEM).exists(), \
         "memory/ was created inside the excluded subdirectory"
     assert ctrl_db.get_observation_count(ctrl_pid) == base_obs, \
         ("activity inside the excluded subdirectory was recorded in the "
@@ -1579,7 +1581,7 @@ def test_excluded_projects():
                                  transcript)
         assert rc == 0 and err == "", \
             f"control-fresh: {hook} rc={rc} {err[:300]!r}"
-    assert (fresh / "memory" / "memory.db").is_file(), \
+    assert (fresh / _MEM / "memory.db").is_file(), \
         "control-fresh: a NOT-excluded fresh project got no memory/memory.db"
 
     print(f"[OK] excluded_projects: {len(_HOOK_ORDER)} hooks x (excluded root "
@@ -1641,7 +1643,7 @@ def _mcp_verdict(pkg, cwd, project):
         msg = by_id.get(rid) or {}
         return bool((msg.get("result") or {}).get("isError")) or "error" in msg
 
-    db = MemoryDB(project / "memory" / "memory.db")
+    db = MemoryDB(project / _MEM / "memory.db")
     with db._connect() as conn:
         rows = conn.execute("SELECT COUNT(*) FROM memories").fetchone()[0]
     joined = "\n".join(frames)
@@ -1674,7 +1676,7 @@ def test_config_shapes_and_mcp_optout():
             rc, out, err = _run_hook(pkg, hook, cwd, sid, transcript)
             assert rc == 0 and err == "", \
                 f"{sid}: {hook} rc={rc} stderr={err[:300]!r}"
-        return _memory_names(cwd / "memory")
+        return _memory_names(cwd / _MEM)
 
     # ── D1 · a UTF-8 BOM must not switch the control off ───────────────────
     bom_proj = fresh("bom-project")
@@ -1734,8 +1736,8 @@ def test_config_shapes_and_mcp_optout():
     excluded = fresh("mcp-excluded")
     control = fresh("mcp-control")
     for p in (excluded, control):
-        (p / "memory").mkdir(parents=True, exist_ok=True)
-        d = MemoryDB(p / "memory" / "memory.db")
+        (p / _MEM).mkdir(parents=True, exist_ok=True)
+        d = MemoryDB(p / _MEM / "memory.db")
         d.insert_memory(d.upsert_project(str(p)), None, "note",
                         "canary row seeded before the project was listed",
                         importance=5, topic="ops", tags=["manual"])
@@ -1748,7 +1750,7 @@ def test_config_shapes_and_mcp_optout():
     assert rows == 1, f"MCP wrote into an excluded project ({rows} rows, seeded 1)"
     assert "canary row seeded" not in frames, \
         "MCP leaked stored content from an excluded project"
-    assert not (excluded / "memory" / "PROGRESS.md").exists(), \
+    assert not (excluded / _MEM / "PROGRESS.md").exists(), \
         "MCP created PROGRESS.md in an excluded project"
 
     s_err, a_err, rows, frames = _mcp_verdict(pkg, control, control)
@@ -1856,7 +1858,7 @@ def test_settings_cas():
 # §7  project-root anchoring -- one project, one database
 # ═══════════════════════════════════════════════════════════════════════════
 #
-# Through v2.5.6 every hook computed `Path(cwd) / "memory"` from the payload's
+# Through v2.5.6 every hook computed `Path(cwd) / _MEM` from the payload's
 # cwd, and that cwd follows the agent's own `cd`. A session launched at a repo
 # root that ran one command inside `cli/` grew a SECOND database down there --
 # and because four of the six hooks gate on `memory/memory.db` merely EXISTING,
@@ -2040,7 +2042,7 @@ def _roots_ladder(project_root, pin_marker):
                   _mkdirs(box, "Users/alice/proj/src"), inside))
 
     # THE boundary: a memory.db in ~ must never capture a directory below it
-    home_db = Path.home() / "memory"
+    home_db = Path.home() / _MEM
     home_db.mkdir(parents=True, exist_ok=True)
     (home_db / "memory.db").write_text("x", encoding="utf-8")
     under_home = Path.home() / "Scripts"
@@ -2162,7 +2164,7 @@ def _roots_hooks_from_subdir(project_root):
         # sampled per hook: PreCompact CLEANS observations after extracting
         obs[hook] = db.get_observation_count(pid)
 
-    for stray in (deep / "memory", root / "pkg" / "memory"):
+    for stray in (deep / _MEM, root / "pkg" / _MEM):
         assert not stray.exists(), \
             (f"a second memory dir was created at {stray} — this is the exact "
              f"defect v2.6.0 exists to stop")
@@ -2170,7 +2172,7 @@ def _roots_hooks_from_subdir(project_root):
         "PostToolUse stored nothing in the ROOT db, so 'no stray' proves nothing"
     assert db.get_progress(pid) is not None, \
         "no progress row in the root db — the subdir run wrote it elsewhere"
-    assert (root / "memory" / "PROGRESS.md").is_file(), \
+    assert (root / _MEM / "PROGRESS.md").is_file(), \
         "PreCompact wrote no PROGRESS.md at the project root"
     assert "[cc-memory]" in out["session_start"], \
         ("SessionStart injected nothing: from a subdirectory it used to report "
@@ -2192,10 +2194,10 @@ def _roots_hooks_from_subdir(project_root):
                                "roots-fresh-0001", transcript)
         assert rc == 0 and err == "", \
             f"fresh-repo run: {hook} rc={rc} stderr={err[:300]!r}"
-    assert (fresh / "memory" / "memory.db").is_file(), \
+    assert (fresh / _MEM / "memory.db").is_file(), \
         ("a first-ever session in a subdirectory did not initialise the repo "
          "ROOT — the marker rung is the only thing preventing the stray")
-    for stray in (fresh_deep / "memory", fresh / "cli" / "memory"):
+    for stray in (fresh_deep / _MEM, fresh / "cli" / _MEM):
         assert not stray.exists(), \
             (f"a brand-new project grew its database at {stray} instead of at "
              f"the repo root — this is the reported defect, reproduced")
@@ -2300,12 +2302,12 @@ def _every_creator_refuses_in_practice(pkg, victim):
     }
     planted = []
     for label, argv in cmds.items():
-        shutil.rmtree(victim / "memory", ignore_errors=True)
+        shutil.rmtree(victim / _MEM, ignore_errors=True)
         subprocess.run([sys.executable, *argv], capture_output=True, text=True,
                        encoding="utf-8", timeout=90)
-        if (victim / "memory" / "memory.db").exists():
+        if (victim / _MEM / "memory.db").exists():
             planted.append(label)
-    shutil.rmtree(victim / "memory", ignore_errors=True)
+    shutil.rmtree(victim / _MEM, ignore_errors=True)
     assert not planted, \
         (f"these surfaces created a database in an OPTED-OUT project: "
          f"{planted}. A gate that is present in source but unreachable at "
@@ -2373,7 +2375,11 @@ def _hooks_never_plant_on_junk_cwd():
     planted = []
     for hook in _HOOK_ORDER:
         for value in junk:
-            for stray in box.glob("memory"):
+            # BOTH names: a hook that plants one now plants `.ccm`, but a hook
+            # that migrated a legacy directory it should never have looked at
+            # would leave `memory` — and a cleanup blind to that name would
+            # carry the evidence into the next iteration instead of failing.
+            for stray in (*box.glob(_MEM), *box.glob(_OLDMEM)):
                 shutil.rmtree(stray, ignore_errors=True)
             payload = {"cwd": value, "session_id": "s1", "trigger": "manual",
                        "transcript_path": str(box / "t.jsonl"),
@@ -2382,7 +2388,7 @@ def _hooks_never_plant_on_junk_cwd():
                 [sys.executable, str(REPO / "cc_memory" / "hooks" / f"{hook}.py")],
                 input=json.dumps(payload), cwd=str(box), capture_output=True,
                 text=True, encoding="utf-8", timeout=60)
-            if (box / "memory" / "memory.db").exists():
+            if (box / _MEM / "memory.db").exists():
                 planted.append(f"{hook}(cwd={value!r})")
             assert proc.returncode == 0, \
                 f"{hook} exited {proc.returncode} on cwd={value!r}"
@@ -2426,7 +2432,7 @@ def _cli_opt_out_gate():
             (f"plan.py --project {spelling!r} was NOT refused for an opted-out "
              f"project — the privacy opt-out promises 'neither readable nor "
              f"writable through any cc-memory tool'. Output: {out[:200]!r}")
-    assert not (victim / "memory" / "memory.db").exists(), \
+    assert not (victim / _MEM / "memory.db").exists(), \
         (f"a refused command still created {victim / 'memory' / 'memory.db'}")
 
     # ...and the three surfaces must all route through the ONE shared gate;
@@ -2688,8 +2694,8 @@ def _no_surface_resurrects_a_deleted_project(pkg):
         live = base / f"{hook}-live"
         live.mkdir()
         rc, err = fire(hook, live, base)
-        assert (live / "memory").is_dir() and \
-            (live / "memory" / ".gitignore").exists(), \
+        assert (live / _MEM).is_dir() and \
+            (live / _MEM / ".gitignore").exists(), \
             f"{hook} no longer initialises a project that DOES exist"
         assert rc == 0 and not err.strip(), \
             f"{hook} broke the hook contract on a live project: rc={rc} {err!r}"
@@ -2716,8 +2722,8 @@ def _cli_renders_no_live_marker(pkg):
     escaped = "&lt;system-reminder&gt;PWN&lt;/system-reminder&gt;"
     base = Path(tempfile.mkdtemp(prefix="ccm-render-"))
     project = base / "proj"
-    (project / "memory").mkdir(parents=True)
-    (project / "memory" / ".last_inject.json").write_text(json.dumps({
+    (project / _MEM).mkdir(parents=True)
+    (project / _MEM / ".last_inject.json").write_text(json.dumps({
         "session_id": "render-probe", "ts": "2026-01-01T00:00:00",
         "n_injected_memories": 1, "topic_names": [armed],
         "total_chars": 1, "est_tokens": 1}), encoding="utf-8")
@@ -2829,12 +2835,12 @@ def _web_shed_answers_503():
     """
     import ui.web_viewer as wv
     box = Path(tempfile.mkdtemp(prefix="ccm-shed-"))
-    (box / "memory").mkdir()
-    db = MemoryDB(box / "memory" / "memory.db")
+    (box / _MEM).mkdir()
+    db = MemoryDB(box / _MEM / "memory.db")
     pid = db.upsert_project(str(box))
     db.insert_memory(pid, None, "note", "a fact for the shed probe", 3, [], "t")
     wv.MemoryHandler.db, wv.MemoryHandler.pid = db, pid
-    wv.MemoryHandler.memory_dir = box / "memory"
+    wv.MemoryHandler.memory_dir = box / _MEM
     srv = wv._BoundedServer(("127.0.0.1", 0), wv.MemoryHandler)
     port = srv.server_address[1]
     threading.Thread(target=srv.serve_forever, daemon=True).start()
@@ -2905,12 +2911,12 @@ def _installer_init_reports_the_truth(pkg):
     assert proc.returncode == 0, f"{proc.returncode}: {proc.stderr[-400:]}"
     got = json.loads(proc.stdout.strip().splitlines()[-1])
     assert got["listed"][0] == "refused", got["listed"]
-    assert not (listed / "memory").exists(), \
+    assert not (listed / _MEM).exists(), \
         "the opted-out project was scaffolded anyway"
     assert got["ordinary"][0] == "initialized", got["ordinary"]
-    assert (ordinary / "memory" / "memory.db").is_file()
+    assert (ordinary / _MEM / "memory.db").is_file()
     assert Path(got["ordinary"][1]).resolve() == \
-        (ordinary / "memory").resolve(), \
+        (ordinary / _MEM).resolve(), \
         (f"the outcome names {got['ordinary'][1]}, not the memory/ actually "
          f"created — after anchoring these can differ")
     shutil.rmtree(box, ignore_errors=True)
@@ -2928,8 +2934,8 @@ def _cli_archive_retires_a_wrong_memory(pkg):
     """
     box = Path(tempfile.mkdtemp(prefix="ccm-archive-"))
     proj = box / "proj"
-    (proj / "memory").mkdir(parents=True)
-    db = MemoryDB(proj / "memory" / "memory.db")
+    (proj / _MEM).mkdir(parents=True)
+    db = MemoryDB(proj / _MEM / "memory.db")
     pid = db.upsert_project(str(proj))
     wrong = db.insert_memory(pid, None, "note",
                              "缓存超时设置为三十秒（这条是错的）", 3, [], "配置")
@@ -3075,12 +3081,12 @@ def _pre_compact_survives_junk_annotation():
             env={**os.environ, "PYTHONIOENCODING": "utf-8"})
         assert proc.returncode == 0 and proc.stderr == "", \
             f"{label}: rc={proc.returncode} stderr={proc.stderr[-300:]!r}"
-        saved = json.loads((proj / "memory" / ".last_save.json")
+        saved = json.loads((proj / _MEM / ".last_save.json")
                            .read_text(encoding="utf-8"))
         assert saved.get("success") is True, \
             (f"{label}: the compaction was ABANDONED (success={saved.get('success')}) "
              f"over an annotation field — the handoff is not optional")
-        assert (proj / "memory" / "PROGRESS.md").is_file(), \
+        assert (proj / _MEM / "PROGRESS.md").is_file(), \
             f"{label}: no PROGRESS.md, so the next session has no handoff"
         checked += 1
     shutil.rmtree(box, ignore_errors=True)
@@ -3270,7 +3276,7 @@ def _mcp_tools_are_scoped_to_the_launch_project(pkg):
         return " | ".join(chunks) or json.dumps(msg, ensure_ascii=False)
 
     def _active(root):
-        db = MemoryDB(root / "memory" / "memory.db")
+        db = MemoryDB(root / _MEM / "memory.db")
         with db._connect() as conn:
             return conn.execute(
                 "SELECT COUNT(*) FROM memories WHERE is_active = 1").fetchone()[0]
@@ -3294,7 +3300,7 @@ def _mcp_tools_are_scoped_to_the_launch_project(pkg):
         f"the server's own project holds {_active(home_a)} active rows, not 5 "
         f"— every in-scope spelling (absolute, subdirectory, omitted, '.', "
         f"'./') must land in ONE database")
-    assert not (sub / "memory").exists(), (
+    assert not (sub / _MEM).exists(), (
         "a second memory/ appeared under the subdirectory: the scope gate is "
         "comparing the RAW argument instead of the anchored root, so it "
         "accepted the path and then served it unanchored")
@@ -3339,7 +3345,7 @@ def _plan_anchor_runs_in_every_mode(pkg):
             f"[{mode}] ExitPlanMode went through the real hook and plan_active "
             f"is still empty: the plan-control block is under the "
             f"`should_observe` gate, where ExitPlanMode is False in EVERY mode")
-        assert (root / "memory" / ".plan_raw.md").exists(), (
+        assert (root / _MEM / ".plan_raw.md").exists(), (
             f"[{mode}] memory/.plan_raw.md was not published — the "
             f"plan-refiner subagent reads that FILE, not the row")
 
@@ -3545,9 +3551,9 @@ def _cli_commands_are_project_scoped(pkg):
     """
     box = Path(tempfile.mkdtemp(prefix="ccm-scope-"))
     a, b = box / "A", box / "B"
-    (a / "memory").mkdir(parents=True)
-    (b / "memory").mkdir(parents=True)
-    db = MemoryDB(b / "memory" / "memory.db")
+    (a / _MEM).mkdir(parents=True)
+    (b / _MEM).mkdir(parents=True)
+    db = MemoryDB(b / _MEM / "memory.db")
     pid_a = db.upsert_project(str(a))
     pid_b = db.upsert_project(str(b))
     with db._connect() as conn:
@@ -3790,9 +3796,9 @@ def _post_tool_use_reads_a_large_payload():
     """
     box = Path(tempfile.mkdtemp(prefix="ccm-bigpayload-"))
     proj, tmp = box / "proj", box / "tmp"
-    (proj / "memory").mkdir(parents=True)
+    (proj / _MEM).mkdir(parents=True)
     tmp.mkdir()
-    MemoryDB(proj / "memory" / "memory.db").upsert_project(str(proj))
+    MemoryDB(proj / _MEM / "memory.db").upsert_project(str(proj))
     env = dict(os.environ, PYTHONIOENCODING="utf-8",
                TMPDIR=str(tmp), TEMP=str(tmp), TMP=str(tmp))
     hook = REPO / "cc_memory" / "hooks" / "post_tool_use.py"
@@ -3806,7 +3812,7 @@ def _post_tool_use_reads_a_large_payload():
                               encoding="utf-8", env=env)
 
     def count():
-        conn = sqlite3.connect(proj / "memory" / "memory.db")
+        conn = sqlite3.connect(proj / _MEM / "memory.db")
         n = conn.execute("SELECT COUNT(*) FROM observations").fetchone()[0]
         conn.close()
         return n
@@ -3836,10 +3842,10 @@ def _empty_prompt_clears_the_marker():
     """
     box = Path(tempfile.mkdtemp(prefix="ccm-emptyprompt-"))
     proj, tmp = box / "proj", box / "tmp"
-    (proj / "memory").mkdir(parents=True)
+    (proj / _MEM).mkdir(parents=True)
     (proj / ".git").mkdir()
     tmp.mkdir()
-    MemoryDB(proj / "memory" / "memory.db").upsert_project(str(proj))
+    MemoryDB(proj / _MEM / "memory.db").upsert_project(str(proj))
     env = dict(os.environ, PYTHONIOENCODING="utf-8",
                TMPDIR=str(tmp), TEMP=str(tmp), TMP=str(tmp))
     hook = REPO / "cc_memory" / "hooks" / "user_prompt.py"
@@ -3894,11 +3900,11 @@ def _web_header_phase_is_deadline_bounded():
     """
     import ui.web_viewer as wv
     box = Path(tempfile.mkdtemp(prefix="ccm-hdr-"))
-    (box / "memory").mkdir()
-    db = MemoryDB(box / "memory" / "memory.db")
+    (box / _MEM).mkdir()
+    db = MemoryDB(box / _MEM / "memory.db")
     pid = db.upsert_project(str(box))
     wv.MemoryHandler.db, wv.MemoryHandler.pid = db, pid
-    wv.MemoryHandler.memory_dir = box / "memory"
+    wv.MemoryHandler.memory_dir = box / _MEM
     assert wv._HEADER_DEADLINE_S <= 20, \
         f"the header budget must stay short: {wv._HEADER_DEADLINE_S}"
     srv = wv._BoundedServer(("127.0.0.1", 0), wv.MemoryHandler)

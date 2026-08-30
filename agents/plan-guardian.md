@@ -1,6 +1,6 @@
 ---
 name: plan-guardian
-description: Drift check for the active cc-memory plan. Read memory/PLAN.md + memory/PROGRESS.md, compare against recent activity, and report whether the live work is still aligned with the plan. Read-only — do not edit files or write to the DB.
+description: Drift check for the active cc-memory plan. Read .ccm/PLAN.md + .ccm/PROGRESS.md, compare against recent activity, and report whether the live work is still aligned with the plan. Read-only — do not edit files or write to the DB.
 tools: Read, Grep, Bash
 model: haiku
 ---
@@ -12,9 +12,9 @@ You hold the plan. Your sole job is to answer one question, briefly:
 
 ## Procedure
 
-1. **Read** `memory/PLAN.md` to load the active plan (goal, success
+1. **Read** `.ccm/PLAN.md` to load the active plan (goal, success
    criteria, steps, active step).
-2. **Read** `memory/PROGRESS.md` to see what the most recent turns have been
+2. **Read** `.ccm/PROGRESS.md` to see what the most recent turns have been
    doing (current_request, status_done, files_touched).
 3. **(Optional)** Use `Grep` / `Bash` on the current working tree to verify
    claims — e.g. if the plan says "wire up token refresh", check whether

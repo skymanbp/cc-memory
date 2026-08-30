@@ -104,6 +104,12 @@ from pathlib import Path
 # Module-level like every other import: this file is on every hook's path
 # already, and markers.py is pure stdlib with no imports back into core.
 from core.markers import _is_link as _markers_is_link
+# The state directory's NAME — both the current `.ccm` and the pre-v2.13.0
+# `memory` this resolver must still recognise — lives in core/layout.py, once.
+# Module-level like the import above: layout.py is pure stdlib plus markers.py
+# and imports nothing back into this file, so the hook path pays a name lookup,
+# not a new dependency (its `core/db` import is deliberately lazy).
+from core.layout import DB_FILENAME, state_dir_candidates
 
 # Depth cap. Nothing legitimate is 25 levels below its own project root; the
 # cap exists so a pathological path (a mount loop, a fuzzed payload) costs a
@@ -316,10 +322,27 @@ def _chain(start):
 
 
 def _has_db(directory):
-    """memory/memory.db exists AND neither component is a symlink.
+    """`<dir>/.ccm/memory.db` — or the pre-v2.13.0 `<dir>/memory/memory.db` —
+    exists, AND neither component of the one that answered is a symlink.
+
+    BOTH spellings, because this predicate is what makes an UNMIGRATED project
+    still a project. `core/layout.memory_dir` renames `memory/` to `.ccm/` on
+    the first surface that asks, but the rename can be refused — a handle open
+    inside the directory is enough on Windows (measured) — and resolution runs
+    BEFORE anything asks. If rung 0 and rung 1 knew only the new name, a
+    project whose move had not happened yet would stop being recognised as a
+    root, and the marker rung would answer for it instead: the stray-database
+    shape this whole module exists to prevent, reintroduced by the rename.
+    `core/layout.state_dir_candidates` is the single place the two names live.
+
+    Each candidate is judged INDEPENDENTLY: a link on `.ccm` does not
+    invalidate a real `memory/` beside it. Adopting a directory through its
+    real legacy database is safe, because the write side fails closed on its
+    own — `core/progress.ensure_memory_dir` refuses a linked state directory
+    whatever the resolver decided.
 
     The link check is fail-closed identity hygiene (register Y1): a symlinked
-    memory/ redirected every write to wherever the link pointed — this
+    state directory redirected every write to wherever the link pointed — this
     predicate returned True THROUGH the link, rung 0 adopted the directory as
     a project root, and memory.db landed at the link's target, outside the
     project and outside every reporting path. `is_symlink()` is an lstat, the
@@ -330,20 +353,22 @@ def _has_db(directory):
     symlink support is for the PROJECT directory itself, which stays intact:
     the probe below never resolves `directory`.
     """
-    mem = directory / "memory"
-    try:
-        # core.markers._is_link, not bare is_symlink(): S_ISLNK is False for
-        # a Windows junction, and the symlink-only probe returned True
-        # THROUGH a junctioned memory/ — rung 0 then adopted the directory
-        # as a project root (measured; the exact hole this guard exists to
-        # close, open on the primary platform).
-        if _markers_is_link(mem) or _markers_is_link(mem / "memory.db"):
-            return False
-    except OSError:
-        # why: a probe that cannot even lstat proves nothing — treat as no
-        # database, same degradation as _exists on an unreadable ancestor
-        return False
-    return _exists(mem / "memory.db")
+    for mem in state_dir_candidates(directory):
+        try:
+            # core.markers._is_link, not bare is_symlink(): S_ISLNK is False
+            # for a Windows junction, and the symlink-only probe returned True
+            # THROUGH a junctioned state directory — rung 0 then adopted the
+            # directory as a project root (measured; the exact hole this guard
+            # exists to close, open on the primary platform).
+            if _markers_is_link(mem) or _markers_is_link(mem / DB_FILENAME):
+                continue
+        except OSError:
+            # why: a probe that cannot even lstat proves nothing — treat as no
+            # database, same degradation as _exists on an unreadable ancestor
+            continue
+        if _exists(mem / DB_FILENAME):
+            return True
+    return False
 
 
 def _has_marker(directory):
@@ -675,7 +700,13 @@ def _safe_path(cwd):
 
 
 def nested_databases(root, max_depth=3):
-    """Every `memory/memory.db` strictly BELOW `root`, for `mem.py status`.
+    """Every nested `memory.db` strictly BELOW `root`, for `mem.py status`.
+
+    Looks under BOTH state-directory names, `.ccm` and the pre-v2.13.0
+    `memory` — a stray is reported for the name it actually has on disk, and
+    an unmigrated one is exactly the kind most likely to have been forgotten.
+    A directory holding both spellings is reported ONCE: the answer is the
+    owning project, and naming it twice would read as two strays.
 
     Resolution never merges or moves one of these — an existing database is a
     declaration of identity (see the module docstring). But a stray born
@@ -702,6 +733,11 @@ def nested_databases(root, max_depth=3):
         # why: an unresolvable root has nothing to report on
         return out
     skip = {".git", "__pycache__"}
+    # Both spellings, taken from the one module that owns them. A relative
+    # probe root gives `state_dir_candidates` nothing to join against, so the
+    # NAMES are what is read out of it, never the paths.
+    state_names = {c.name for c in state_dir_candidates(".")}
+    seen = set()
 
     def walk(directory, depth):
         if depth > max_depth:
@@ -718,9 +754,12 @@ def nested_databases(root, max_depth=3):
             except OSError:
                 continue
             child = Path(entry.path)
-            if entry.name == "memory":
-                if _exists(child / "memory.db") and child.parent != base:
-                    out.append(child.parent)
+            if entry.name in state_names:
+                owner = child.parent
+                if _exists(child / DB_FILENAME) and owner != base \
+                        and _norm(owner) not in seen:
+                    seen.add(_norm(owner))
+                    out.append(owner)
                 continue
             walk(child, depth + 1)
 

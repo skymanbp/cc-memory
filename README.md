@@ -300,14 +300,14 @@ walkable. Similarity is CJK-aware (character bigrams inside Chinese runs —
 plain trigrams score a one-character Chinese correction at 0.45 and would file
 every correction as a new contradictory fact).
 
-**Capability 3 — forced handoff.** `memory/PROGRESS.md` is the single source
+**Capability 3 — forced handoff.** `.ccm/PROGRESS.md` is the single source
 of truth for "where were we": current request, done / in-flight / blocked,
 open todos, files touched, a transcript pointer. Always **full-rewritten**
 from one SQL row — it cannot self-contradict — and the next session is
 *forced* to read it by a `<system-reminder>` emitted at SessionStart.
 `/cc-mem inject-usage` tells you whether that actually happened.
 
-**Capability 4 — plan anchor + directive ledger, enforced.** `memory/PLAN.md`
+**Capability 4 — plan anchor + directive ledger, enforced.** `.ccm/PLAN.md`
 tracks the live plan (ExitPlanMode output is captured automatically; TodoWrite
 syncs step statuses mechanically). Replacing a plan runs a **mandatory
 carryover gate** — every unfinished step must be carried or explicitly
@@ -339,7 +339,7 @@ an existing backlog down in one sitting, looping the judge until it runs dry.
 ```
 ┌──────────────────────── your Claude Code session ────────────────────────┐
 │                                                                          │
-│  UserPromptSubmit ──▶ create memory/ on first contact, count the turn,    │
+│  UserPromptSubmit ──▶ create .ccm/ on first contact, count the turn,    │
 │                       seed "what the user asked for" on turn 1           │
 │                                                                          │
 │  PostToolUse     ──▶ live plan anchor (ExitPlanMode → captured plan,      │
@@ -355,17 +355,17 @@ an existing backlog down in one sitting, looping the judge until it runs dry.
 │                       async leg: LLM consolidation, off the blocking path │
 │                                                                          │
 │  SessionStart    ──▶ inject topics + critical memories + timeline, then   │
-│                       FORCE: "Read memory/PROGRESS.md before responding"  │
+│                       FORCE: "Read .ccm/PROGRESS.md before responding"  │
 └──────────────────────────────────────────────────────────────────────────┘
                                     │
                                     ▼
-                     <project>/memory/memory.db   (SQLite + FTS5)
-                     <project>/memory/PROGRESS.md (handoff, full-rewrite)
-                     <project>/memory/PLAN.md     (live plan anchor)
-                     <project>/memory/MEMORY.md   (browsable index)
+                     <project>/.ccm/memory.db   (SQLite + FTS5)
+                     <project>/.ccm/PROGRESS.md (handoff, full-rewrite)
+                     <project>/.ccm/PLAN.md     (live plan anchor)
+                     <project>/.ccm/MEMORY.md   (browsable index)
 ```
 
-Everything is **project-local**. `memory/` lives inside your repository, is
+Everything is **project-local**. `.ccm/` lives inside your repository, is
 git-ignored by a `.gitignore` cc-memory writes itself, and never leaves your
 machine except for the extraction call to Anthropic (which you can scope with
 `<private>` tags, or switch off per-project entirely).
@@ -439,7 +439,7 @@ Or download `cc-memory-installer.exe` from
 ### Then
 
 Nothing. Per-project initialization is automatic: the first message you send in
-a project creates `<project>/memory/` and its database. Verify with:
+a project creates `<project>/.ccm/` and its database. Verify with:
 
 ```
 /cc-mem status
@@ -504,7 +504,7 @@ Project: cc-memory  |  2026-08-26 15:06
 ### Critical memories
 - #506 [release] v2.9.0 released with commit 0313339, tag v2.9.0 …
 ### <system-reminder>
-You MUST Read memory/PROGRESS.md before responding …
+You MUST Read .ccm/PROGRESS.md before responding …
 ```
 
 **And the failures it caught in real projects** — the measurements that drove
@@ -578,13 +578,13 @@ Inside Claude Code (path-agnostic — the wrapper resolves the plugin root):
 /cc-mem encoding-check [--apply]    U+FFFD corruption scan
 
 # ── handoff ────────────────────────────────────────────────────────────────
-/cc-mem progress                    Regenerate memory/PROGRESS.md and print it
+/cc-mem progress                    Regenerate .ccm/PROGRESS.md and print it
 /cc-mem inject-show                 What the last SessionStart injected
 /cc-mem inject-usage                Did Claude actually read PROGRESS.md / MEMORY.md
 
 # ── live plan anchor ───────────────────────────────────────────────────────
 /cc-mem plan-status                 Counters + freshness summary
-/cc-mem plan-show                   Regenerate + print memory/PLAN.md
+/cc-mem plan-show                   Regenerate + print .ccm/PLAN.md
 /cc-mem plan-set --raw "<text>"     Capture a raw plan, mark needs_refine
 /cc-mem plan-set --raw-file FILE    Same, from a file
 /cc-mem plan-set --from-refiner     Store structured JSON from stdin (audits
@@ -663,7 +663,7 @@ is required**.
 | `memory_topics` | Topic summaries (bounded) |
 | `memory_recent` | Recent memories with filters |
 | `progress_get` | Read the PROGRESS state as structured fields |
-| `progress_regenerate` | Force-rewrite `memory/PROGRESS.md` from SQL |
+| `progress_regenerate` | Force-rewrite `.ccm/PROGRESS.md` from SQL |
 
 **Marketplace / dev checkout — nothing to do.** `.claude-plugin/plugin.json`
 ships the registration inline.
@@ -721,7 +721,7 @@ config key.
 ### Per-project files
 
 ```
-<project>/memory/
+<project>/.ccm/
 ├── memory.db                   SQLite (WAL) — the source of truth
 ├── MEMORY.md                   browsable index, refreshed after every write
 ├── PROGRESS.md                 handoff; full-rewritten from the `progress` row
@@ -739,7 +739,7 @@ config key.
 └── topics/                     reserved for per-topic exports
 ```
 
-Note: this `memory/` lives in **your project directory** — it is unrelated to
+Note: this `.ccm/` lives in **your project directory** — it is unrelated to
 `~/.claude/projects/<slug>/memory/`, which some Claude Code setups use for
 their own per-project notes. `/cc-mem paths` prints exactly which files this
 plugin reads and writes for the current project.
@@ -770,7 +770,7 @@ Six hook commands <!--ce:hooks--> across five Claude Code events, declared in
 
 | Event | Script | Timeout | Job |
 |---|---|---|---|
-| `UserPromptSubmit` | `hooks/user_prompt.py` | 8 s | Auto-init `memory/`, count the turn, seed the request on turn 1 |
+| `UserPromptSubmit` | `hooks/user_prompt.py` | 8 s | Auto-init `.ccm/`, count the turn, seed the request on turn 1 |
 | `PostToolUse` | `hooks/post_tool_use.py` | 8 s | Live plan anchor **in every mode**, then one observation row per observed tool |
 | `Stop` | `hooks/stop.py` | 22 s | Haiku observer, per-turn PROGRESS patch, idle reorg every 5 turns, backpressure probe, plan enforcement |
 | `PreCompact` (sync) | `hooks/pre_compact.py` | 120 s | Extract → reconcile → full-rewrite PROGRESS.md → archive |
@@ -935,11 +935,11 @@ See [CONTRIBUTING.md](CONTRIBUTING.md). Security reports: [SECURITY.md](SECURITY
 | Nothing is being extracted | No credential. `/cc-mem status` checks it. Log in to Claude Code, or set `ANTHROPIC_API_KEY` |
 | Where is the database, actually? | `/cc-mem paths` prints the resolved DB / PROGRESS.md / PLAN.md / MEMORY.md with exists/absent verdicts — do not hunt with a recursive glob; the first `*.db` it finds may belong to another tool |
 | CJK output shows as `�` | The *capturing shell* decoded UTF-8 with its own codepage (PowerShell 5.1 uses the console codepage). Use `--json` — pure-ASCII output that no capture codec can garble |
-| A `memory/` appeared in a subdirectory | A stray from before root anchoring. `/cc-mem status` lists every separate database below the project root with its memory count. A stray is **reported, never merged or deleted** — pin a genuinely nested project with a `.ccm-root` file |
+| A `.ccm/` appeared in a subdirectory | A stray from before root anchoring. `/cc-mem status` lists every separate database below the project root with its memory count. A stray is **reported, never merged or deleted** — pin a genuinely nested project with a `.ccm-root` file |
 | The plugin went completely silent | A `config.json` that exists but cannot be parsed **fails closed** and excludes every project. `SessionStart` prints one line saying so; fix the JSON |
 | Claude cannot end a turn | Plan enforcement is blocking. Read the refusal — it names the condition and the fix. It always degrades to an advisory after its escape budget; `CC_MEMORY_PLAN_ENFORCE=0` switches it off |
 | A directive keeps blocking but it's waiting on *me* | `/cc-mem directive-edit <slug> --status blocked` parks it (idle enforcement skips it); `--status active` un-parks. A "never do X" rule should be `--kind constraint` — it is never idle-checked at all |
-| `Hook cancelled` on compaction | Fixed in v2.3.2 by moving consolidation to an `async` leg. If you still see it, file an issue with `memory/.last_save.json` |
+| `Hook cancelled` on compaction | Fixed in v2.3.2 by moving consolidation to an `async` leg. If you still see it, file an issue with `.ccm/.last_save.json` |
 | A memory is simply wrong | `/cc-mem archive <id>` — reconciliation handles a *restatement*, `archive` handles a *repudiation* |
 
 ---

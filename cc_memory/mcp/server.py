@@ -424,6 +424,9 @@ def _get_db(project_path=None):
     project whose opt-out status could not be determined.
     """
     from core.db import MemoryDB
+    # Lazy beside the other two, for the reason the docstring gives. Aliased
+    # because this function binds a local named `db_path`.
+    from core.layout import db_path as resolve_db_path
     from core.modes import is_excluded
     if project_path is None:
         project = os.getcwd()          # absent == "this server's cwd"
@@ -480,7 +483,7 @@ def _get_db(project_path=None):
             f"argument {project} names a different project, and cc-memory tools "
             f"cannot read or write across projects. Drop the argument to use "
             f"this project, or run the CLI with --project for another one.")
-    db_path = Path(project) / "memory" / "memory.db"
+    db_path = resolve_db_path(project)
     if not db_path.exists():
         return None, None, f"No memory database found for this project: {project}"
     db = MemoryDB(db_path)

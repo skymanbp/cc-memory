@@ -41,6 +41,7 @@ from core.encoding_setup import enable_utf8_io
 enable_utf8_io()
 
 from core.db import CATEGORIES, MemoryDB
+from core.layout import DB_FILENAME, memory_dir as resolve_memory_dir
 from core.extractor import load_transcript_window, mangle_project_path
 from core.logger import get_logger
 # Shared entry ladder (v2.10.0): stdin parsing + the opt-out→anchor gate,
@@ -1074,7 +1075,7 @@ def retroactive_save(cwd, db, project_id, current_session_id="", deadline=None):
     jsonls = sorted(transcript_dir.glob("*.jsonl"),
                     key=lambda f: f.stat().st_mtime, reverse=True)
 
-    memory_dir = Path(cwd) / "memory"
+    memory_dir = resolve_memory_dir(cwd)
     n_retroactive = 0
     for jsonl in jsonls[:3]:
         if deadline is not None and time.monotonic() >= deadline:
@@ -1223,8 +1224,10 @@ def main():
     cwd = resolved
 
     try:
-        memory_dir = Path(cwd) / "memory"
-        db_path = memory_dir / "memory.db"
+        # Rare hook, so it carries the reporting duty: a pre-v2.13.0
+        # `memory/` migrated (or refused) here is worth one log line.
+        memory_dir = resolve_memory_dir(cwd, log=_log)
+        db_path = memory_dir / DB_FILENAME
         if not db_path.exists():
             _log.info(f"no DB for {cwd}")
             sys.exit(0)

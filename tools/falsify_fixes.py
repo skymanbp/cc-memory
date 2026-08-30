@@ -47,8 +47,13 @@ def _copy_repo():
         # daemon holds `index.db-shm` locked — copying it raised WinError 33
         # and took `--anchors` down with it. A live SQLite side file is never
         # part of the tree under test, whichever tool owns it.
+        # Both state-directory names: `.ccm` since v2.13.0, `memory` for a
+        # checkout whose first post-upgrade session has not migrated it yet.
+        # Copying either drags the maintainer's live memory.db into every
+        # falsification sandbox, and its -wal/-shm are the same WinError 33
+        # the `.ce` note above describes.
         ignore=shutil.ignore_patterns("__pycache__", "*.pyc", ".git",
-                                      "dist", "build", "memory",
+                                      "dist", "build", ".ccm", "memory",
                                       ".ce", "*.db-shm", "*.db-wal"))
     return box, dst
 

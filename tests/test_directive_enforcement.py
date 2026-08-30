@@ -92,6 +92,7 @@ def _cleanup_sandbox():
 sys.path.insert(0, str(REPO / "cc_memory"))
 
 from core.db import MemoryDB          # noqa: E402  -- why: imports must follow the sys.path bootstrap above; repo tests run as plain scripts
+from core.layout import MEMORY_DIRNAME as _MEM  # noqa: E402  -- why: same bootstrap ordering
 from core import plan as plan_mod     # noqa: E402  -- why: same bootstrap ordering
 from core.encoding_setup import enable_utf8_io  # noqa: E402  -- why: same bootstrap ordering
 
@@ -375,7 +376,7 @@ def section_5():
     cli_root = Path(tempfile.mkdtemp(prefix="ccm-enf-cli-"))
     # the CLI refuses a project with no database, so bring one into existence
     # the same way first contact would
-    _seed = MemoryDB(cli_root / "memory" / "memory.db")
+    _seed = MemoryDB(cli_root / _MEM / "memory.db")
     _seed.upsert_project(str(cli_root))
     mem_cli = REPO / "cc_memory" / "cli" / "mem.py"
 
@@ -543,7 +544,7 @@ def section_6():
     import subprocess
     import tempfile as _tf
     cli_root = Path(_tf.mkdtemp(prefix="ccm-enf-edit-"))
-    _seed = MemoryDB(cli_root / "memory" / "memory.db")
+    _seed = MemoryDB(cli_root / _MEM / "memory.db")
     _seed.upsert_project(str(cli_root))
     mem_cli = REPO / "cc_memory" / "cli" / "mem.py"
 

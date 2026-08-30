@@ -77,9 +77,9 @@ SURFACE_MANIFEST = TARGET_DIR / "installed_surfaces.json"
 SUBPACKAGE_FILES = {
     "":      ["__init__.py", "config.json"],
     "core":  ["__init__.py", "atomic.py", "auth.py", "consolidate.py", "db.py",
-              "encoding_setup.py", "extractor.py", "idle.py", "logger.py",
-              "markers.py", "modes.py", "plan.py", "privacy.py",
-              "progress.py", "roots.py", "textsim.py",
+              "encoding_setup.py", "extractor.py", "idle.py", "layout.py",
+              "logger.py", "markers.py", "modes.py", "plan.py",
+              "privacy.py", "progress.py", "roots.py", "textsim.py",
               "version.py"],
     "hooks": ["__init__.py", "_entry.py", "consolidate_async.py",
               "post_tool_use.py", "pre_compact.py", "session_start.py",
@@ -1232,7 +1232,7 @@ def _uninstall_settings_once(log_fn=print):
 
 
 def _init_project(project_path, log_fn=print):
-    """Create memory/ + DB + .gitignore in the given project directory.
+    """Create .ccm/ + DB + .gitignore in the given project directory.
 
     Returns ``("initialized", memory_dir)`` on success or
     ``("refused", notice)`` when the opt-out declines — the GUI used to show
@@ -1259,11 +1259,20 @@ def _init_project(project_path, log_fn=print):
         # why: an installer that cannot load the opt-out check must still be
         # able to install; the hooks and the MCP server enforce it on writes
         pass
+    # The bundled package goes on sys.path HERE (v2.13.0), hoisted from below
+    # the scaffold: the two `from core.…` imports that follow are what anchor
+    # the root and migrate a pre-v2.13.0 state directory, and both used to run
+    # BEFORE this insert — reachable only when the bundle happened to be on the
+    # path already. An import that silently degrades is not a fallback, it is a
+    # feature that works on the developer's machine.
+    src_root = BUNDLE_DIR
+    sys.path.insert(0, str(src_root))
+
     # Anchor the user's pick before creating anything. This is a CREATOR — it
-    # mkdirs memory/ and bootstraps the DB — so browsing to a subdirectory of
-    # an already-initialised project (easy: the folder Explorer last opened)
-    # planted a second, independent database there, and rung 0 (an existing
-    # database is terminal) then pinned every hook to that stray. The
+    # mkdirs the state directory and bootstraps the DB — so browsing to a
+    # subdirectory of an already-initialised project (easy: the folder Explorer
+    # last opened) planted a second, independent database there, and rung 0 (an
+    # existing database is terminal) then pinned every hook to that stray. The
     # standalone/.exe path this button belongs to is the one the README
     # recommends to Windows users, so it is not a rare route.
     try:
@@ -1277,14 +1286,30 @@ def _init_project(project_path, log_fn=print):
         # why: a resolver that will not load must not block the install; the
         # raw pick is exactly the pre-v2.8.0 behaviour
         log_fn(f"[init] root anchoring unavailable ({exc}); using {project}")
-    memory_dir = project / "memory"
+
+    # LITERAL COPY of core.layout.MEMORY_DIRNAME, for the same reason the
+    # .gitignore line list below is one: this installer is a stdlib-only
+    # bootstrap that must keep working when the package cannot be imported at
+    # all. tests/smoke_test.py holds this literal to the canonical value, so
+    # the two cannot drift.
+    _STATE_DIRNAME = ".ccm"
+    memory_dir = project / _STATE_DIRNAME
+    try:
+        # Migrates a pre-v2.13.0 `memory/` when the package IS reachable, and
+        # returns the legacy directory unchanged when the move is refused —
+        # so this never initialises an empty `.ccm/` beside a full `memory/`.
+        from core.layout import memory_dir as _resolve_state_dir
+        memory_dir = _resolve_state_dir(project)
+    except Exception as exc:
+        # why: same contract as the anchoring above — an installer that cannot
+        # import the resolver still installs, into the current default name.
+        log_fn(f"[init] state-directory resolver unavailable ({exc}); "
+               f"using {memory_dir}")
     memory_dir.mkdir(exist_ok=True)
     (memory_dir / "sessions").mkdir(exist_ok=True)
     (memory_dir / "topics").mkdir(exist_ok=True)
 
-    # Bootstrap DB using the bundled db.py
-    src_root = BUNDLE_DIR
-    sys.path.insert(0, str(src_root))
+    # Bootstrap DB using the bundled db.py (src_root is already on sys.path)
     try:
         from core.db import MemoryDB
     except ImportError:

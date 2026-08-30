@@ -37,7 +37,7 @@ count:
   checking, widening a per-subdirectory exclusion away — defeats it.
 - **`<private>` leakage.** Text inside `<private>` tags must never reach the
   Anthropic API or the database.
-- **Writing through a link.** `memory/` and the per-session marker files are
+- **Writing through a link.** `.ccm/` and the per-session marker files are
   fail-closed against symlinks *and* Windows junctions. A path that follows one
   is a vulnerability, not a portability bug.
 - **The web viewer.** It binds to loopback and is guarded by `Origin`, `Host`,
@@ -54,7 +54,7 @@ count:
   boundary.
 - `/cc-mem sql` returning data from the project's own database. It is
   read-only by design, and reading your own project is its purpose.
-- A local user with your filesystem privileges reading `memory/memory.db`. The
+- A local user with your filesystem privileges reading `.ccm/memory.db`. The
   database is deliberately project-local and unencrypted; treat it like the
   rest of your working tree.
 - Anything requiring you to run an attacker's `config.json` or install an
@@ -62,7 +62,7 @@ count:
 
 ## Where the data lives
 
-Everything is under `<project>/memory/`, on your machine. Nothing is uploaded
+Everything is under `<project>/.ccm/`, on your machine. Nothing is uploaded
 anywhere. The only network egress is the extraction/consolidation call to the
 Anthropic API — using the credential Claude Code already holds — or to your own
 Ollama endpoint when `ccl.enabled` is turned on. To stop even that for a

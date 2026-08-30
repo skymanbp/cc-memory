@@ -34,16 +34,38 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional
 
+# Package root on sys.path. Hoisted here from below the constants in v2.13.0:
+# MEMORY_GITIGNORE_LINES now opens with a name imported from `core.layout`, and
+# a module-level constant is built before the import block that used to sit
+# further down. One insert, one place — the guard below it was already
+# idempotent, so the later `from core.X import ...` lines are unaffected.
+_PKG_ROOT = Path(__file__).resolve().parent.parent
+if str(_PKG_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PKG_ROOT))
 
-# ── memory/.gitignore — canonical ignore set ───────────────────────────────
-# Runtime artifacts the plugin writes into a project's memory/ directory. They
+# The state directory's identifying marker line, imported rather than retyped
+# — see MEMORY_GITIGNORE_LINES below. `core/layout.py` is pure stdlib plus
+# markers.py at import time, so this costs a name binding, not a dependency.
+from core.layout import CCM_GITIGNORE_MARKER
+
+
+# ── .ccm/.gitignore — canonical ignore set ─────────────────────────────────
+# Runtime artifacts the plugin writes into a project's state directory. They
 # are machine state, not content: several embed verbatim conversation or plan
 # prose, so leaking them into a user's repo is a privacy problem, not just
 # noise. Keep in sync with the two standalone copies that cannot import this
 # module: cc_memory/ui/installer.py (stdlib-only bootstrap) and
 # skills/ccm-load/SKILL.md (inline script).
+#
+# Every line names an entry INSIDE the directory and none of them names the
+# directory itself, which is why the v2.13.0 rename of `memory/` to `.ccm/`
+# needed no change here and why an already-migrated install keeps its file.
+# The first line is `core/layout.CCM_GITIGNORE_MARKER`, imported rather than
+# retyped: `core/layout.is_ccm_dir` identifies a legacy directory BY that
+# line, so a drift between the writer and the reader would make the migration
+# stop recognising the directories this very list created.
 MEMORY_GITIGNORE_LINES = [
-    "# cc-memory: generated state, not content",
+    CCM_GITIGNORE_MARKER,
     "memory.db",
     "memory.db-wal",
     "memory.db-shm",
@@ -143,10 +165,10 @@ def ensure_memory_dir(memory_dir: Path) -> Path:
     return memory_dir
 
 
-_PKG_ROOT = Path(__file__).resolve().parent.parent
-if str(_PKG_ROOT) not in sys.path:
-    sys.path.insert(0, str(_PKG_ROOT))
-
+# `_PKG_ROOT` is set and inserted at the top of this module (v2.13.0) — the
+# constants above now import from `core.layout`, so the path setup had to move
+# ahead of them. The duplicate that used to stand here was removed rather than
+# left as a second, idempotent copy: two inserts is how they drift.
 from core.atomic import write_atomic, _DERIVED_BUDGET_S
 from core.db import MemoryDB
 from core.logger import get_logger

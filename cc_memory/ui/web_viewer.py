@@ -60,6 +60,7 @@ _PKG_ROOT = _HERE.parent                     # cc_memory/
 sys.path.insert(0, str(_PKG_ROOT))
 
 from core.db import CATEGORIES, MemoryDB
+from core.layout import DB_FILENAME, memory_dir as resolve_memory_dir
 from core.encoding_setup import enable_utf8_io
 from core.logger import get_logger
 from llm.memory_writer import upsert_smart, regenerate_memory_index
@@ -1088,8 +1089,8 @@ def main():
         print(f"[cc-memory] project-root anchoring unavailable ({exc}); "
               f"using {args.project} as given")
         project = str(Path(args.project).resolve())
-    memory_dir = Path(project) / "memory"
-    db_path = memory_dir / "memory.db"
+    memory_dir = resolve_memory_dir(project)
+    db_path = memory_dir / DB_FILENAME
     if not db_path.exists():
         print(f"Error: no memory database at {db_path}")
         sys.exit(1)

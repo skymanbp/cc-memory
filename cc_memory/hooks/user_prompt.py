@@ -41,14 +41,26 @@ from core.markers import marker_path, read_marker, safe_id as _safe_id, write_ma
 # core/extractor.py) but NOT on the progress path this hook feeds — the same tag,
 # in the same session, behaving in opposite ways. See the call site in main().
 from core.privacy import clean_for_storage, strip_harness_blocks
+# The state directory, resolved rather than spelled (v2.13.0). `memory_dir`
+# migrates a pre-v2.13.0 `memory/` to `.ccm/` on the way; `find_db_path` is
+# the read-only twin, for the probes that must not write. `db_path` is
+# deliberately NOT imported: this module has a local of that name.
+from core.layout import DB_FILENAME, find_db_path, memory_dir
 
 _TURN_FILE_PREFIX = "cc_mem_turns_"
 _PROMPT_FILE_PREFIX = "cc_mem_prompt_"
 
 
 def _init_project_if_needed(cwd):
-    """Create memory/ + DB on first contact. Returns True if created."""
-    db_path = Path(cwd) / "memory" / "memory.db"
+    """Create .ccm/ + DB on first contact. Returns True if created.
+
+    `state_dir` is asked for ONCE and reused: it is the migrating resolver
+    (`core/layout.memory_dir`), so calling it again for the database path
+    could answer differently if the rename landed in between — and every
+    artifact of one turn must agree on one directory.
+    """
+    state_dir = memory_dir(cwd)
+    db_path = state_dir / DB_FILENAME
     if db_path.exists():
         return False
     try:
@@ -56,7 +68,11 @@ def _init_project_if_needed(cwd):
         # Raises FileNotFoundError when `cwd` no longer exists, which the
         # handler below turns into "skip this turn" — the project stays gone
         # instead of being reborn as an empty shell on the next message.
-        memory_dir = ensure_memory_dir(Path(cwd) / "memory")
+        # Called for its side effect (the directory, sessions/, topics/ and
+        # the .gitignore); its return value was already bound to an unused
+        # local before v2.13.0, and the name it used now belongs to the
+        # imported resolver.
+        ensure_memory_dir(state_dir)
         from core.db import MemoryDB
         db = MemoryDB(db_path)
         db.upsert_project(cwd)
@@ -89,7 +105,7 @@ def main():
 
     # Opt-out gate + root anchor via the ONE shared gate (hooks/_entry.py),
     # which owns the ordering contract. MUST precede _init_project_if_needed,
-    # the call that mkdir's memory/ in whatever cwd we were handed; placed
+    # the call that mkdir's the state directory in whatever cwd we were handed; placed
     # after the empty-cwd guard so `Path("").resolve()` can never widen the
     # match to the interpreter's own working directory. Deliberately silent
     # (no log passed): this hook fires on every user message.
@@ -101,7 +117,10 @@ def main():
     # gating the turn-1 PROGRESS seeding on it is exactly what made that seeding
     # unreachable for a project's first session (see below).
     _init_project_if_needed(cwd)
-    if not (Path(cwd) / "memory" / "memory.db").exists():
+    # find_db_path, not db_path: init just ran and either created the state
+    # directory or could not. This is the "did it work" check, and a probe
+    # that migrates would be answering its own question.
+    if not find_db_path(cwd).exists():
         sys.exit(0)
 
     safe = _safe_id(session_id)
@@ -184,7 +203,8 @@ def main():
                 try:
                     from core.db import MemoryDB
                     from core.progress import write_progress_md
-                    db = MemoryDB(Path(cwd) / "memory" / "memory.db")
+                    state_dir = memory_dir(cwd)
+                    db = MemoryDB(state_dir / DB_FILENAME)
                     pid = db.upsert_project(cwd)
                     # v5: tag this session BEFORE patching other fields so
                     # PROGRESS.md §0 reflects the new owner. Idempotent — if
@@ -206,7 +226,7 @@ def main():
                     }
                     trigger = "resume_request" if normalized in resume_signals else "user_prompt"
                     db.patch_progress(pid, current_request=prompt, trigger_type=trigger)
-                    write_progress_md(db, pid, Path(cwd) / "memory")
+                    write_progress_md(db, pid, state_dir)
                 except Exception:
                     # why: PROGRESS seeding is best-effort; PreCompact will
                     # overwrite it with a full state anyway

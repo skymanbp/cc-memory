@@ -37,6 +37,7 @@ sys.path.insert(0, str(_PKG_ROOT))
 from core.encoding_setup import enable_utf8_io
 
 from core.db import MemoryDB
+from core.layout import DB_FILENAME, memory_dir as resolve_memory_dir
 
 STATUS_ICONS = {
     "draft": "[ ]", "evaluating": "[~]", "ready": "[*]",
@@ -49,7 +50,7 @@ def _anchor(project):
 
     Until this existed, `plan.py --project <subdir>` built the scaffold in the
     subdirectory — `_get_db` below mkdirs and MemoryDB creates the file, so
-    even the read-only `list` planted `<subdir>/memory/memory.db`. That is the
+    even the read-only `list` planted `<subdir>/.ccm/memory.db`. That is the
     exact stray the hooks have refused to create since v2.6.0, and because an
     existing database is a terminal rung, planting one there pinned all six
     hooks <!--ce:hooks:asof--> to it permanently. Announces through print:
@@ -68,7 +69,7 @@ def _anchor(project):
 
 def _resolve(project):
     p = Path(project).resolve()
-    return p / "memory" / "memory.db", p.name
+    return resolve_memory_dir(p) / DB_FILENAME, p.name
 
 
 def _get_db(project, create=True):
@@ -76,7 +77,7 @@ def _get_db(project, create=True):
 
     `MemoryDB.__init__` mkdirs and creates, so before v2.8.0 the READ-ONLY
     `list` and `status` fabricated a 140 KB empty database (without even the
-    memory/.gitignore that every other creator writes — the omission that let
+    .ccm/.gitignore that every other creator writes — the omission that let
     a stray ride into version control) merely for asking what was in the
     queue. cli/mem.py has always printed "no memory database at X" instead,
     and two halves of one CLI pair must not disagree about that.

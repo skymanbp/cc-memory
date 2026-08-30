@@ -46,9 +46,9 @@ BUILD = ROOT / "build"
 SUBPACKAGE_FILES = {
     "":      ["__init__.py", "config.json"],
     "core":  ["__init__.py", "atomic.py", "auth.py", "consolidate.py", "db.py",
-              "encoding_setup.py", "extractor.py", "idle.py", "logger.py",
-              "markers.py", "modes.py", "plan.py", "privacy.py",
-              "progress.py", "roots.py", "textsim.py",
+              "encoding_setup.py", "extractor.py", "idle.py", "layout.py",
+              "logger.py", "markers.py", "modes.py", "plan.py",
+              "privacy.py", "progress.py", "roots.py", "textsim.py",
               "version.py"],
     "hooks": ["__init__.py", "_entry.py", "consolidate_async.py",
               "post_tool_use.py", "pre_compact.py", "session_start.py",

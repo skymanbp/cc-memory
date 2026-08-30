@@ -17,7 +17,7 @@ in hooks/hooks.json), so even the async worker itself is never killed mid-write
 (see BudgetGate docstring for the deadline proof).
 
 Cadence + safety (this hook fires on EVERY compaction, same as the sync leg):
-  * Interval marker (memory/.last_consolidation.json) records the session count
+  * Interval marker (.ccm/.last_consolidation.json) records the session count
     at the last successful consolidation. The hook path runs when
     ``get_session_count() - last >= AUTO_INTERVAL`` OR when
     ``core.consolidate.consolidation_backlog`` says the write backlog is due
@@ -25,7 +25,7 @@ Cadence + safety (this hook fires on EVERY compaction, same as the sync leg):
     compact). This is race-immune against the sibling sync hook (which
     inserts the session row concurrently): a ±1 drift in the count cannot
     cause a double-run or a miss, and it never inserts its own session row.
-  * Lock file (memory/.consolidation.lock) prevents two overlapping workers
+  * Lock file (.ccm/.consolidation.lock) prevents two overlapping workers
     from churning the same DB when compactions fire close together; a stale lock
     (older than STALE_LOCK_S) is reclaimed.
 
@@ -53,6 +53,7 @@ from core.encoding_setup import enable_utf8_io
 enable_utf8_io()
 
 from core.db import MemoryDB
+from core.layout import DB_FILENAME, memory_dir as resolve_memory_dir
 from core.logger import get_logger
 from core.modes import read_config
 # Shared entry ladder (v2.10.0): stdin parsing + the opt-out→anchor gate,
@@ -196,7 +197,7 @@ def main():
     # Opt-out gate + root anchor via the ONE shared gate (hooks/_entry.py).
     # Consolidation is the heaviest LLM leg in the plugin (semantic de-dup
     # ships memory content to the Anthropic API); an excluded project must
-    # not reach it just because its memory/ predates the exclusion. Rare
+    # not reach it just because its state directory predates the exclusion. Rare
     # hook, so it carries the reporting duty: the exclusion is logged and
     # `project_root` announces any redirection.
     resolved = resolve_project(cwd, log=_log)
@@ -205,8 +206,11 @@ def main():
         sys.exit(0)
     cwd = resolved
 
-    memory_dir = Path(cwd) / "memory"
-    db_path = memory_dir / "memory.db"
+    # A rare hook, so it passes the logger: if a pre-v2.13.0 `memory/` is
+    # migrated here, or could not be, that is exactly the kind of one-off
+    # event this hook's log exists to record.
+    memory_dir = resolve_memory_dir(cwd, log=_log)
+    db_path = memory_dir / DB_FILENAME
     if not db_path.exists():
         # No memory yet for this project — nothing to consolidate.
         sys.exit(0)
@@ -222,7 +226,7 @@ def main():
         # The marker read is path-validated (core.consolidate.
         # read_consolidation_marker): the marker follows the DIRECTORY, but
         # session counts follow the project ROW, which is keyed by path — so
-        # after a rename the same memory/ carried a marker counted against
+        # after a rename the same state directory carried a marker counted against
         # the OLD row while the new row's count restarted at 0, and
         # `n_sessions - last` went negative: consolidation silently stalled
         # for interval+last more sessions (register C4, measured: marker

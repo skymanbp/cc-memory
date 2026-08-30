@@ -9,7 +9,101 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.13.0] — 2026-08-30
+
+### The state directory is `.ccm/`, and a name that lived at 34 call sites now lives at one
+
+Per-project state moved from `memory/` to `.ccm/`. The old name was undotted
+and generic: it sat at the project root beside the user's own code, sorted
+into the middle of their file listing, collided with any project that already
+had a package called `memory`, and had to be ignored by hand — cc-memory
+writes a `.gitignore` INTO the directory precisely because, by name alone, it
+is indistinguishable from content. `.ccm/` is dotted state beside `.git`,
+`.venv` and `.claude`, and it matches the pin marker this plugin already
+owned, `.ccm-root`. The two cannot collide: the pin is a FILE, the state is a
+DIRECTORY.
+
+**Note on this file.** Entries below this one are NOT rewritten. They are
+dated records of what shipped, and in v2.12.2 the directory really was called
+`memory/`; renaming it in them would make the changelog lie about the past to
+agree with the present. Docs that describe CURRENT behaviour — README(.zh),
+`docs/`, `CLAUDE.md`, `skills/`, `commands/`, `agents/` — were swept, because
+a path in an operating manual that no longer exists on disk is not history,
+it is a wrong instruction.
+
+### Added
+
+- **`cc_memory/core/layout.py`** — one module for the state directory's name,
+  its identification, and the one-way move to it. Measured at v2.12.2, the
+  literal `"memory"` was joined onto a path at **34 lines across 15 modules**
+  (both CLIs, the MCP server, the dashboard, the web viewer, the installer,
+  the consolidation worker and all six hooks), plus 167 fixture sites under
+  `tests/` and `demo/`. Every one of them now asks: `memory_dir(root)` on the
+  write side, `find_memory_dir(root)` on the read side. Two literal copies of
+  the name remain and are GATED against the constant — `ui/installer.py` is a
+  stdlib-only bootstrap and `skills/ccm-load/SKILL.md` is an inline script,
+  the same pair that already keeps literal copies of the `.gitignore` list.
+- **Automatic migration, with a fail-safe direction.** The first surface that
+  asks renames `memory/` to `.ccm/` — one `os.rename`, contents untouched,
+  and the generated `.gitignore` needed no edit at all because every line in
+  it names an entry INSIDE the directory. When the move cannot happen the
+  resolver returns the LEGACY directory, never the new name: measured on the
+  primary platform, Windows refuses to rename a directory while a handle
+  inside it is open, so a second session or the dashboard holding `memory.db`
+  blocks it. Returning `.ccm/` there would have the caller create a fresh
+  empty one beside a `memory/` holding everything the user has, and the
+  project would come up looking brand new. It retries for free next turn.
+- **Positive identification, never name-matching.** `memory` is a name real
+  projects use for real content, so `layout.is_ccm_dir` moves a directory
+  only when it carries this plugin's `.gitignore` marker line or a
+  `memory.db` that is a real SQLite file with this schema's tables. A
+  magic-byte pre-filter runs first because `sqlite3.connect` on a
+  non-database CREATES one — a probe that manufactures its own evidence. A
+  Python package called `memory` is left exactly where it is, and the project
+  gets a fresh `.ccm/` beside it.
+- **`smoke_test.py` § *v2.13.0 state directory*** — the name in all three
+  copies, a real legacy directory migrating with its rows intact, a foreign
+  `memory/` and a non-SQLite `memory.db` left alone, `roots._has_db`
+  recognising both names, the read side never migrating, junk input never
+  raising, and a source rule that fails if any module spells the join again.
+
 ### Changed
+
+- **`core/roots.py` recognises BOTH names.** Resolution runs BEFORE anything
+  asks for the state directory, so a project whose rename has not happened
+  yet — or could not — must still resolve as a project root. Had rung 0 and
+  rung 1 known only `.ccm`, the marker rung would have answered for it
+  instead: the stray-database shape that module exists to prevent,
+  reintroduced by the rename. `nested_databases` reports strays under either
+  name, and a directory holding both is reported once.
+- **`.gitignore` gained `!.ccm/` under its `.*/` blanket, then re-anchored
+  `/.ccm/`.** The dotted name walked straight into the wholesale
+  dotted-directory ignore, and a blanket-ignored state directory is exactly
+  the invisibility the anchored `/memory/` rule was written to stop — the
+  file's own comment describes that trap one pattern earlier. Verified with
+  `git status`: the repo's own `.ccm/` is ignored, a stray `.ccm/` under a
+  subdirectory shows as untracked. `/memory/` stays, for a clone whose first
+  post-upgrade session has not run yet.
+- **`ui/installer.py` puts the bundled package on `sys.path` before it
+  anchors.** Both `from core.…` imports in `_init_project` used to run before
+  that insert and were reachable only when the bundle happened to be on the
+  path already. An import that silently degrades is not a fallback.
+- **`core/progress.py` imports the `.gitignore` marker line** from
+  `core/layout.py` rather than retyping it: `is_ccm_dir` identifies a legacy
+  directory BY that line, so a drift between the writer and the reader would
+  make the migration stop recognising the directories that list created.
+
+### Fixed
+
+- **`core/layout.memory_dir` never raises, and it took `_safe_path` to make
+  that true.** The module reproduced the exact defect `core/roots.py`
+  documents from v2.6.0: the handler catching a non-path `project_root`
+  re-raised the TypeError by calling `Path()` on it again on the way out.
+  Measured before the fix: `memory_dir(123)` and `memory_dir([1, 2])` both
+  escaped a function whose docstring promises it never raises — and
+  `{"cwd": 123}` is a real hook payload shape.
+
+### Changed (carried from Unreleased)
 
 - **The demo captures are the v2.12.2 re-run, redacted.** User rulings of
   2026-08-27: the `ccm-*`/`cc-memory-*` test leftovers under `%TEMP%` were
@@ -2167,7 +2261,7 @@ Two of the six turned out to be worse than they were written up as.
 - **Doc citation coverage nearly doubled.** `tools/citation_check.py` could only
   anchor a citation when the symbol was defined in the *cited* file, so the most
   common shape in these docs — a call site, `` `db.tag_progress_session(...)`
-  (`user_prompt.py:193`) `` — went unchecked: 370 of 594, 62 %. It now anchors
+  (`user_prompt.py:213`) `` — went unchecked: 370 of 594, 62 %. It now anchors
   cross-file citations on the text of the cited range, and **341 of 594 are
   checked** (was 224).
 

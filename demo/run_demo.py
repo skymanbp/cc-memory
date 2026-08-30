@@ -47,6 +47,15 @@ REPO = Path(__file__).resolve().parents[1]
 FIXTURE = REPO / "demo" / "tally"
 CAPTURES = REPO / "demo" / "captures"
 MEM_CLI = REPO / "cc_memory" / "cli" / "mem.py"
+
+# The state directory's name, from the module that owns it. Bound here
+# rather than inside one function because four of them need it, and
+# retyped nowhere because a demo that hides the wrong directory from its
+# own tree listing is a demo that lies about the layout.
+sys.path.insert(0, str(REPO / "cc_memory"))
+from core.layout import MEMORY_DIRNAME as _MEM  # noqa: E402 -- why: the package is only importable after the sys.path
+# insert on the line above, which is the same bootstrap ordering every
+# suite in tests/ documents.
 CCM_KEY = "cc-memory@cc-memory"
 CLAUDE = shutil.which("claude") or "claude"   # resolved once; main() refuses if absent
 
@@ -323,8 +332,8 @@ def init_memory(project: Path) -> None:
     # repo-local path above is on sys.path; this script is stdlib otherwise.
     from core.progress import ensure_memory_dir
     from core.db import MemoryDB
-    ensure_memory_dir(project / "memory")
-    MemoryDB(project / "memory" / "memory.db").upsert_project(str(project))
+    ensure_memory_dir(project / _MEM)
+    MemoryDB(project / _MEM / "memory.db").upsert_project(str(project))
 
 
 def fresh_copy(root: Path, name: str) -> Path:
@@ -337,14 +346,14 @@ def save_artifacts(workdir: Path, dst: Path, names: tuple) -> None:
     # Read/redact/write, not copy2: PROGRESS.md carries a transcript pointer
     # into ~/.claude/projects/, which is exactly the path the redaction is for.
     for n in names:
-        src = workdir / "memory" / n
+        src = workdir / _MEM / n
         if src.exists():
             _write(dst / n, src.read_text(encoding="utf-8"))
 
 
 def tree_listing(workdir: Path) -> str:
     return "\n".join(sorted(str(p.relative_to(workdir)).replace("\\", "/") for p in workdir.rglob("*")
-                            if p.is_file() and "memory" not in p.parts
+                            if p.is_file() and _MEM not in p.parts
                             and "__pycache__" not in p.parts)) + "\n"
 
 
@@ -383,11 +392,11 @@ def scenario_handoff(root: Path) -> None:
     save_artifacts(w, out, ("PROGRESS.md", "MEMORY.md"))
     print("[handoff] session B - same path, memory/ moved out, ALL plugins OFF")
     aside = root / "memory-aside"
-    shutil.move(str(w / "memory"), str(aside))
+    shutil.move(str(w / _MEM), str(aside))
     try:
         run_claude(w, PROMPT_B, with_ccm=False, out_stem=out / "B.without-ccm")
     finally:
-        shutil.move(str(aside), str(w / "memory"))
+        shutil.move(str(aside), str(w / _MEM))
     _meta("handoff", init, {"prompts": {"A": PROMPT_A, "B": PROMPT_B},
                             "design": "B runs twice at the SAME path; the only difference is the "
                                       "plugin being enabled and its memory/ directory being present."})

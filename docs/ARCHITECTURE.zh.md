@@ -1,4 +1,4 @@
-<!-- i18n-source: ARCHITECTURE.md | sha256: 7bacb96d8ad14285 | version: 2.12.2 | translated: 2026-08-26 -->
+<!-- i18n-source: ARCHITECTURE.md | sha256: 92de54d56bcb10ee | version: 2.13.0 | translated: 2026-08-30 -->
 > [English](ARCHITECTURE.md) · **简体中文**
 
 # cc-memory — 架构
@@ -37,7 +37,7 @@ cc-memory 是一个 Claude Code 插件，为 Claude 提供**跨压缩、跨会�
 - [4. 数据库 schema](#4-数据库-schema)
 - [5. 数据流](#5-数据流)
 - [6. LLM 后端与认证](#6-llm-后端与认证)
-- [7. 按项目的状态（memory/）](#7-按项目的状态memory)
+- [7. 按项目的状态（.ccm/）](#7-按项目的状态ccm)
 - [8. 安装布局](#8-安装布局)
 - [9. 文档语言约定（i18n）](#9-文档语言约定i18n)
 
@@ -53,7 +53,7 @@ cc-memory 是一个 Claude Code 插件，为 Claude 提供**跨压缩、跨会�
    相似度决定，而不是由调用方决定。不存在“先追加、以后再去重”的路径。
 
 2. **强制交接。** 在每一次 `SessionStart`，插件都会发出一个 `<system-reminder>`
-   块，指示下一个 Claude 在回应之前先 `Read memory/PROGRESS.md`。PROGRESS.md 是
+   块，指示下一个 Claude 在回应之前先 `Read .ccm/PROGRESS.md`。PROGRESS.md 是
    单一真相来源，始终从 `progress` SQLite 表整篇重写——绝不追加。旧的 v2.0
    `SESSION_HANDOFF.md`（它已经漂移成补丁式的污染）会被迁移到一边。
 
@@ -194,12 +194,12 @@ v2.4.3 把原本 5 份的 `docs/` 目录合并为 2 份。全部 79 处仓库内
 
 | 钩子 | 入口 | 超时 | 职责 |
 |------|-------|---------|-----|
-| `PreCompact`（同步） | [`cc_memory/hooks/pre_compact.py`](../cc_memory/hooks/pre_compact.py) | 120s | 读取**有界**的 head+tail transcript 窗口（`extractor.load_transcript_window`）；经 Haiku 用 LLM 抽取记忆；经 `memory_writer.upsert_batch` 路由；**整篇重写** `memory/PROGRESS.md`；归档会话。写入一个起始标记，使被杀死的运行可被检测。 |
+| `PreCompact`（同步） | [`cc_memory/hooks/pre_compact.py`](../cc_memory/hooks/pre_compact.py) | 120s | 读取**有界**的 head+tail transcript 窗口（`extractor.load_transcript_window`）；经 Haiku 用 LLM 抽取记忆；经 `memory_writer.upsert_batch` 路由；**整篇重写** `.ccm/PROGRESS.md`；归档会话。写入一个起始标记，使被杀死的运行可被检测。 |
 | `PreCompact`（异步） | [`cc_memory/hooks/consolidate_async.py`](../cc_memory/hooks/consolidate_async.py) | 300s，`async: true` | LLM 整理，在 v2.3.2 中被移出阻塞式压缩路径（间隔标记 + 锁，受预算门约束）。每 N 次会话到期，**或**写入积压判定到期（v2.12.0）；也可由 Stop 钩子的背压探针以独立进程方式拉起（`--cwd <root>`）。 |
 | `SessionStart` | [`cc_memory/hooks/session_start.py`](../cc_memory/hooks/session_start.py) | 15s | 注入分层上下文（长期指令 / 主题 / 关键项 / 时间线 / PROGRESS 预览 / 页脚——指令账本自 v2.12.2 起是第一层；在此之前没有任何东西注入它）；发出强制的 `<system-reminder>`，要求 Read `PROGRESS.md` + `MEMORY.md`；追溯保存未保存的 JSONL。 |
 | `Stop` | [`cc_memory/hooks/stop.py`](../cc_memory/hooks/stop.py) | 22s | 观察者：经 Haiku 从上一回合的 observations 抽取；每回合 `patch_progress(files_touched, ...)`；每 5 个回合运行 `idle.maybe_run_idle`（清理 + 重新生成 MEMORY.md）；探测整理积压，到期时拉起独立的异步工作者（v2.12.0）；当计划**在活**时，累加其回合计数器并**强制执行**——对未精炼的计划、未做漂移检查的计划或闲置的指令**拒绝收官**（`{"decision": "block"}`），逃生预算见 CONTRACTS.md（v2.11.0；本行从前描述的建议行已不存在）。 |
 | `PostToolUse` | [`cc_memory/hooks/post_tool_use.py`](../cc_memory/hooks/post_tool_use.py) | 8s | **先**做实时计划集成，且所有模式一视同仁：`ExitPlanMode` → `plan_active.raw`，`TodoWrite` → 机械式步骤同步，`Edit`/`Write`/`MultiEdit`/`NotebookEdit` → 漂移计数器 +1，敏感 Bash 调用 → +20。**然后**才为被观测的工具调用向 `observations` 插入一行（模式白名单 / 跳过列表——`core.modes.should_observe`）。不调用 LLM。端到端实测约 180-290 ms，其中约 75-120 ms 是解释器启动。 |
-| `UserPromptSubmit` | [`cc_memory/hooks/user_prompt.py`](../cc_memory/hooks/user_prompt.py) | 8s | 首次接触时自动初始化 `memory/`；跟踪回合数；为 Stop 观察者保存提示；在第 1 回合给会话打标签并为 `progress.current_request` 播种（依据双语恢复信号白名单，把触发类型判定为 `resume_request` 还是 `user_prompt`）。 |
+| `UserPromptSubmit` | [`cc_memory/hooks/user_prompt.py`](../cc_memory/hooks/user_prompt.py) | 8s | 首次接触时自动初始化 `.ccm/`；跟踪回合数；为 Stop 观察者保存提示；在第 1 回合给会话打标签并为 `progress.current_request` 播种（依据双语恢复信号白名单，把触发类型判定为 `resume_request` 还是 `user_prompt`）。 |
 
 ### 钩子 stdout 契约
 
@@ -223,13 +223,13 @@ v2.3.2 把这个事件拆开了：
   `pre_compact.py:5-20`）。
 - **异步支路**在一个 `BudgetGate` 之下运行 `core.consolidate.run_consolidation`，
   其中 `_BUDGET_TOTAL_S = 240.0`、`_BUDGET_SAFETY_S = 8.0`
-  （`consolidate_async.py:70`），因此它启动的最后一次 LLM 调用会在
+  （`consolidate_async.py:71`），因此它启动的最后一次 LLM 调用会在
   `total_s - safety_s` = 232 秒之前完成，小于钩子自身的 300 秒超时——工作者绝不会
   在写入中途被杀。
 - 节奏由**间隔标记 + 锁**决定，而不是脆弱的 `session_count % N` 检查：
-  `memory/.last_consolidation.json` 记录上一次成功运行时的会话计数，
-  `memory/.consolidation.lock` 防止工作者重叠（比 `_STALE_LOCK_S = 360.0`
-  更旧的锁会被回收，见 `consolidate_async.py:74`）。这对并发的同步支路是
+  `.ccm/.last_consolidation.json` 记录上一次成功运行时的会话计数，
+  `.ccm/.consolidation.lock` 防止工作者重叠（比 `_STALE_LOCK_S = 360.0`
+  更旧的锁会被回收，见 `consolidate_async.py:75`）。这对并发的同步支路是
   竞态免疫的——计数上 ±1 的漂移既不会导致重复运行，也不会导致漏跑
   （`consolidate_async.py:19-28`）。
 - **背压是第三个触发器（v2.12.0）。** 会话间隔假设压缩会发生；一个只在短会话里
@@ -275,7 +275,7 @@ PostToolUse 12 对 8、UserPromptSubmit 12 对 8）。现在提高一个超时�
 - `ExitPlanMode` 不在任何模式的 `observe_tools` 里 → `should_observe` 为 False。
 
 于是整个 v2.2 实时计划锚点**经由它自己的钩子是死的**：`PostToolUse` 从未写过
-`plan_active`，从计划模式退出也从未生成 `memory/.plan_raw.md` 与 `memory/PLAN.md`，
+`plan_active`，从计划模式退出也从未生成 `.ccm/.plan_raw.md` 与 `.ccm/PLAN.md`，
 而漂移计数还会随模式静默变化（编辑加分在 `code` 与 `writing` 下会触发，`research`
 下不会；敏感 Bash 加分在 `code` 与 `research` 下会触发，`writing` 下不会）。实时
 计划只能通过 `/cc-mem plan-set` 触达，而 `tests/smoke_test.py` 是直接调用
@@ -302,7 +302,7 @@ Bash `git push`（1 次编辑 + 20）`21/20/1` → `21/21/21`。
 ## 4. 数据库 schema
 
 SQLite 表（定义在 [`cc_memory/core/db.py`](../cc_memory/core/db.py)），按项目位于
-`<project>/memory/memory.db`，WAL 模式：
+`<project>/.ccm/memory.db`，WAL 模式：
 
 | 表 | 用途 |
 |-------|---------|
@@ -314,8 +314,8 @@ SQLite 表（定义在 [`cc_memory/core/db.py`](../cc_memory/core/db.py)），�
 | `plans` | 计划队列（draft → ready → done）（`db.py:90`） |
 | `observations` | 原始 PostToolUse 事件，抽取后清理（`db.py:131`） |
 | `session_summaries` | 每会话 6 字段结构化摘要（request / investigated / learned / completed / next_steps / notes）+ files_read/files_modified（`db.py:144`） |
-| **`progress`** | v2.1 新增——每项目一行。`memory/PROGRESS.md` 的唯一真相来源（`db.py:188`）。 |
-| **`plan_active`** | v2.2 新增——每项目一行。`memory/PLAN.md` 的唯一真相来源（`db.py:212`）。自 `v9_plan_turns_total` 起带有 `turns_total`：一个**单调**轮次计数，任何东西都不会重置它；与之相对的 `turns_since_last_guardian` 会被每次 guardian 检查和计划替换清零 |
+| **`progress`** | v2.1 新增——每项目一行。`.ccm/PROGRESS.md` 的唯一真相来源（`db.py:188`）。 |
+| **`plan_active`** | v2.2 新增——每项目一行。`.ccm/PLAN.md` 的唯一真相来源（`db.py:212`）。自 `v9_plan_turns_total` 起带有 `turns_total`：一个**单调**轮次计数，任何东西都不会重置它；与之相对的 `turns_since_last_guardian` 会被每次 guardian 检查和计划替换清零 |
 | **`directives`** | v2.11.0 新增——用户**意图**账本。`times_stated` 累加在同一 `slug` 的**一行**上；指令的寿命长于任何一份计划，这正是它不能被折叠成计划步骤的原因。自 `v9_directives_turns_at_touch` 起带有 `turns_at_touch`——最后一次写入时的 `turns_total` 值，因此闲置度是两个单调数字相减。自 v2.12.0 起 `status` 还可以是 `blocked`（停在用户那边，闲置豁免），`kind` 还可以是 `constraint`（长期禁令，闲置豁免）——只是词汇扩充，无 schema 变更；只有 `directive-add` 可以累加计数（`directive-edit` 修正字段但不碰它） |
 | `_migrations` | 记录已应用的迁移（`db.py:651`） |
 
@@ -408,13 +408,13 @@ regenerate_memory_index(db, project_id, memory_dir)   ← MEMORY.md 刷新
 
 - `upsert_batch`（`memory_writer.py:200-235`）逐条循环调用 `upsert_smart`，并在最后
   重新生成**一次**，但仅当传入了 `memory_dir` 时才会（`memory_writer.py:200-235`）。
-  所有钩子调用方都会传（`pre_compact.py:435`、`stop.py:166`、
+  所有钩子调用方都会传（`pre_compact.py:435`、`stop.py:253`、
   `session_start.py:1056`）；同步 PreCompact 支路还会在其余状态变更之后再刷一次
-  （`pre_compact.py:782`）。
-- 单发调用方显式调用 `regenerate_memory_index`：`cli/mem.py:1125` 与 `:584`、
-  `mcp/server.py:644`、`ui/dashboard.py:1664`、`ui/web_viewer.py:1034`，外加
+  （`pre_compact.py:783`）。
+- 单发调用方显式调用 `regenerate_memory_index`：`cli/mem.py:1147` 与 `:584`、
+  `mcp/server.py:647`、`ui/dashboard.py:1674`、`ui/web_viewer.py:1035`，外加
   `skills/ccm-load` 的内联脚本（`skills/ccm-load/SKILL.md:308, 318`）。
-  `core/idle.py:96` 与 `hooks/consolidate_async.py:188` 也会在维护之后刷新它。
+  `core/idle.py:96` 与 `hooks/consolidate_async.py:276` 也会在维护之后刷新它。
 
 （合并前的示意图把重新生成画成 `upsert_smart` 的无条件步骤，并省略了 `db` 参数；
 上面已依据 `memory_writer.py:223-258, 190, 199` 对两者做了修正。调用方清单同样是在
@@ -469,7 +469,7 @@ PreCompact（同步）：
     ↓
   db.upsert_progress(...)                   ← 整行覆盖 progress 行
     ↓
-  write_progress_md(db, project_id, memory_dir)   ← 整篇重写 memory/PROGRESS.md
+  write_progress_md(db, project_id, memory_dir)   ← 整篇重写 .ccm/PROGRESS.md
     ↓
   .last_save.json（含 trigger: auto|manual）+ _clear_attempt(memory_dir)
 
@@ -495,7 +495,7 @@ SessionStart：
   页脚可能携带：PreCompact 被杀警告（残留的 .pre_compact_attempt.json，
                  需超过 10 分钟宽限窗口）、OAuth/api-key 警告、各类计数
   发出：<system-reminder>
-          You MUST Read memory/PROGRESS.md and memory/MEMORY.md before
+          You MUST Read .ccm/PROGRESS.md and .ccm/MEMORY.md before
           responding to any user request. Explicitly state in your reply:
           "Read PROGRESS.md — prior progress: <summary>."
           …… 外加 RESUME PROTOCOL（双语 token 白名单 → 自动执行
@@ -504,9 +504,9 @@ SessionStart：
 ```
 
 上面的调用签名都是真实的：`write_progress_md(db, project_id, memory_dir)`
-（`core/progress.py:331-490`；调用点 `pre_compact.py:751`、`stop.py:473`、
+（`core/progress.py:331-490`；调用点 `pre_compact.py:752`、`stop.py:474`、
 `user_prompt.py:133`、`session_start.py:912`、`mcp/server.py:243`、
-`cli/mem.py:1216`）。PROGRESS.md 的结构规格见
+`cli/mem.py:1238`）。PROGRESS.md 的结构规格见
 [docs/CONTRACTS.md](CONTRACTS.md#handoff-contract)。
 
 ### 被杀运行检测（v2.4.2）
@@ -514,7 +514,7 @@ SessionStart：
 被宿主超时杀死的 `PreCompact` 死于 `TerminateProcess`：不走 `except`，也不走
 `finally`，所以 `.last_save.json` 仍然描述着*上一次*成功的运行，失败因此不可见。
 为此，同步支路会在加载 transcript **之前**写入
-`memory/.pre_compact_attempt.json`（`pre_compact.py:359-368`），并且只在运行完整
+`.ccm/.pre_compact_attempt.json`（`pre_compact.py:359-368`），并且只在运行完整
 结束时才移除它（`pre_compact.py:795`）——包括在它自己的错误路径上
 （`pre_compact.py:731`），这样一次*报错*的运行绝不会被报告成一次*被杀*的运行。
 `SessionStart` 会报告残留的标记，但只在它至少已存在 10 分钟之后才报，因此一次仍在
@@ -605,8 +605,8 @@ BudgetGate 来说仍是已知量。候选顺序与传输格式（`core/auth.py:2
 `get_api_key()` 是同一份候选列表的单凭据向后兼容视图（它不重试，
 `core/auth.py:60-93`）；它同时承载 `oauth_expired` 信号，支撑 SessionStart 的
 “[WARNING: OAuth expired — LLM extraction disabled]” 页脚
-（`session_start.py:658`）。钩子调用方用它来*提供*传给 `call_llm` 的凭据：
-`pre_compact.py:80 → :166`、`stop.py:85`、`session_start.py:658`、
+（`session_start.py:659`）。钩子调用方用它来*提供*传给 `call_llm` 的凭据：
+`pre_compact.py:81 → :166`、`stop.py:86`、`session_start.py:659`、
 `core/consolidate.py:425, 549, 724`。
 
 逐级回退是 v2.3.4 为一个具体故障加入的：一个失效的环境变量密钥（例如额度为零 →
@@ -672,12 +672,12 @@ v2.4.2 才成立：`_extract_via_llm` 的 `except` 元组此前不包含 `Runtim
 
 ---
 
-## 7. 按项目的状态（memory/）
+## 7. 按项目的状态（.ccm/）
 
-按项目的状态位于 `<project>/memory/`：
+按项目的状态位于 `<project>/.ccm/`：
 
 ```
-<project>/memory/
+<project>/.ccm/
 ├── memory.db                    SQLite（WAL 模式，所有表）
 ├── MEMORY.md                    自动生成，每次批量写入后刷新
 ├── PROGRESS.md                  每次 Stop+PreCompact 从 `progress` 行整篇重写
@@ -711,7 +711,7 @@ v2.4.2 才成立：`_extract_via_llm` 的 `except` 元组此前不包含 `Runtim
 `pre_compact.py:284-311`。`sessions/` 与 `topics/` 由最先接触该项目的那条路径创建
 ——自动初始化时是 `user_prompt.py:57-63`，否则是 `pre_compact.py:342-343`。
 
-`memory/PROGRESS.md`、`memory/MEMORY.md` 和 `memory/PLAN.md` 都是**生成产物**。请改
+`.ccm/PROGRESS.md`、`.ccm/MEMORY.md` 和 `.ccm/PLAN.md` 都是**生成产物**。请改
 SQL 真相来源（PROGRESS.md 对应 `progress`，PLAN.md 对应 `plan_active`，MEMORY.md
 对应 `memories`/`topics`/`keywords`）。
 
@@ -720,17 +720,17 @@ SQL 真相来源（PROGRESS.md 对应 `progress`，PLAN.md 对应 `plan_active`�
 `<project>` **不是** hook 载荷里的 `cwd`。那个 cwd 是会话的**当前**工作目录，会跟着
 agent 自己的 `cd` 走：一个在仓库根启动、却在 `cli/` 里跑过一条命令的会话，从此上报
 `<root>/cli`，于是 `_init_project_if_needed`（`user_prompt.py:50-78`）就在那里 mkdir
-出了第二个完全独立的数据库。六个 hook<!--ce:hooks--> 里有四个只判断 `memory/memory.db` **存在**，
+出了第二个完全独立的数据库。六个 hook<!--ce:hooks--> 里有四个只判断 `.ccm/memory.db` **存在**，
 所以这个野生库一旦诞生就会持续被写入：实测其中一个有 27 条记忆和自己的 `projects`
 行，而两级之上真正的库里有 161 条。它还没有 `.gitignore`（只有初始化路径亲手创建的
 那个目录才会拿到），于是一个 184 KB 的二进制 `memory.db` 混进了用户仓库的三个提交。
 
 **预防，而不是迁移——这是最吃重的一条决策。**本解析器的初版试图**治愈**已存在的
 野生库：取"拥有数据库的连续祖先段"的最外端，理由是"野生库必然比真正的根更深"。一次
-对抗式设计评审用实地数据把它否掉了：把上报机器上的每一个 `memory/memory.db` 枚举出来，
+对抗式设计评审用实地数据把它否掉了：把上报机器上的每一个 `.ccm/memory.db` 枚举出来，
 共 **20** 个，其中 **4** 个是**合法地嵌套**在另一个项目里的——单是
 `Claude-Code-Local/companion` 就有 3725 条记忆，并且自带 `.git`。野生子库与刻意嵌套的
-子项目在磁盘上**逐字节不可区分**：两者都有 `memory/memory.db`，其 `projects` 行都写着
+子项目在磁盘上**逐字节不可区分**：两者都有 `.ccm/memory.db`，其 `projects` 行都写着
 自己那个目录，因为 `upsert_project`（`core/db.py:1041-1073`）记录的就是别人递给它的 cwd。
 "最外端胜"会把这种歧义无条件地朝毁数据的方向解决——升级后第一次在 `companion` 里开会话，
 3725 条记忆就会悄无声息地失联。
@@ -740,7 +740,7 @@ agent 自己的 `cd` 走：一个在仓库根启动、却在 `cli/` 里跑过一
 意味着合并两个 SQLite 文件——破坏性且不可逆——那属于一条需要用户确认的显式命令，而不属于
 每轮提示都会跑的 hook。
 
-`project_root`（`core/roots.py:530-575`）先解析出根。每个 hook 都在 `is_excluded`
+`project_root`（`core/roots.py:587-632`）先解析出根。每个 hook 都在 `is_excluded`
 **之后**、且绝不在之前把 `cwd` 重新绑定到它：先解析会因为爬到未被排除的父目录，而把
 按子目录设置的排除范围稀释掉。自 v2.10.0 起这一先后顺序不再是每个 hook 各自遵守的
 纪律，而是机制：hook 统一调用 `hooks/_entry.py:resolve_project` 这一个共享闸门——
@@ -749,13 +749,13 @@ agent 自己的 `cd` 走：一个在仓库根启动、却在 `cli/` 里跑过一
 守卫，`tools/falsify_fixes.py --case r10entryorder` 证明顺序反转会翻红。候选祖先链会在任何 home 目录之下、文件系统根之下、
 `.ccm-root` 钉之处以及 25 层处停止（`_chain`，`core/roots.py:267-295`）。先命中者胜：
 
-0. `cwd` 自己有 `memory/memory.db` → 就是 `cwd`。终止档，在其余一切之前。就是这一行
+0. `cwd` 自己有 `.ccm/memory.db` → 就是 `cwd`。终止档，在其余一切之前。就是这一行
    让"永不弃养已有数据库"这条约束对今天存在的每一个库都成立。
-1. **最近**的、拥有 `memory/memory.db` 的祖先（`_nearest`）。**不向外延伸**，理由见上。
+1. **最近**的、拥有 `.ccm/memory.db` 的祖先（`_nearest`）。**不向外延伸**，理由见上。
    这一档修复了所报告的 bug，因为 `CodeEraser/cli` 没有数据库而 `CodeEraser` 有。它不
    需要任何版本控制系统、不需要任何清单文件——对根本不是仓库的项目，这一点是决定性的。
 2. `CLAUDE_PROJECT_DIR`，当它指向链中某个目录时（`_from_env`，
-   `core/roots.py:541-559`）。刻意排在数据库两档**之后**：它记录的是 Claude Code 在
+   `core/roots.py:566-584`）。刻意排在数据库两档**之后**：它记录的是 Claude Code 在
    哪里启动，而这并不构成弃养一个数据库的授权。同样地，"必须在链内"也是要点——别的项目
    残留的值不得改道本项目。
 3. 项目标记——`.git`、`.hg`、`.svn`、`.ccm-root` 以及常见清单文件（`_MARKERS`）——
@@ -766,9 +766,9 @@ agent 自己的 `cd` 走：一个在仓库根启动、却在 `cli/` 里跑过一
 
 **守卫属于候选集合，而不属于任何单独一档（v2.7.0）。** v2.6.0 把守卫只挂在标记档的
 延伸循环上，于是每一个没继承到守卫的档位都变成了一个独立的数据完整性缺陷：数据库档
-什么都不查，所以在项目文件夹里跑过一次会话产生的 `memory/` 会俘获它下面每一个尚未初始化
+什么都不查，所以在项目文件夹里跑过一次会话产生的 `.ccm/` 会俘获它下面每一个尚未初始化
 的项目；标记档从不检查它找到的**第一个**标记，所以往那里丢一个杂散 `package.json` 效果
-相同；而两者都没有"依赖树"这个概念。`_candidates`（`core/roots.py:409-458`）现在在任何
+相同；而两者都没有"依赖树"这个概念。`_candidates`（`core/roots.py:466-515`）现在在任何
 一档读取之前，先把链过滤一次：
 
 - **移除项目容器目录**（`_is_container`）。两个不对称触发器：有两个及以上子目录是版本库根
@@ -801,14 +801,14 @@ home 边界是双份的：环境所声称的（`HOME`/`USERPROFILE`/`Path.home()
 **加上**平台约定的形状——名为 `Users` 或 `home` 的目录的子目录，**且该目录本身位于文件
 系统根之下**（`_is_profile_dir`）。容器、CI、`sudo` 以及本项目自己的测试沙箱都会改写
 前者。实测：把 `HOME` 指向沙箱后，上行走了七层、走出临时夹具、进入真实用户配置目录，并
-命中了某次在 home 里运行的会话留下的 `memory/memory.db`。结构扛得住这种改写，环境扛不住。
+命中了某次在 home 里运行的会话留下的 `.ccm/memory.db`。结构扛得住这种改写，环境扛不住。
 "位于文件系统根之下"这个限定是 v2.7.0 加的，且在**另一个方向**上同样吃重：没有它，任何
 仓库内名为 `users/` 的目录都会被当成用户配置根并截断整条链，于是 `<repo>/users/alice/sub`
 里的会话哪一档都够不到，反而在四层深处种下野生库——防它的守卫亲手制造了它。
 
 **不只 hook，所有入口都锚定（v2.8.0）。** v2.7.0 宣称做到了这一点，实际只对
 `cli/mem.py` 兑现；随后的审计又找出七个把外部字符串变成数据库路径、却完全不锚定的入口。
-它们现在共用同一个实现 `anchor_project`（`core/roots.py:551-612`）：
+它们现在共用同一个实现 `anchor_project`（`core/roots.py:635-688`）：
 
 | 入口 | 会不会**创建**？ | 通过什么announce |
 |---|---|---|
@@ -837,7 +837,7 @@ home 边界是双份的：环境所声称的（`HOME`/`USERPROFILE`/`Path.home()
 
 `cli/plan.py` 另外还停止了让只读命令凭空造库。`MemoryDB.__init__` 会 mkdir 并创建，所以
 `list` 和 `status` 此前仅仅因为你问了一句队列里有什么，就造出一个 140 KB 的空库——而且
-**不写** `memory/.gitignore`，正是这一处遗漏让野生库混进了版本库。`cli/mem.py` 一直是报错
+**不写** `.ccm/.gitignore`，正是这一处遗漏让野生库混进了版本库。`cli/mem.py` 一直是报错
 退出的；同一对 CLI 的两半不该在这件事上互相矛盾。
 
 因此，已存在的野生库会被原地留下——并且被**报告**出来，不至于隐形：`nested_databases`
@@ -851,7 +851,7 @@ home 边界是双份的：环境所声称的（`HOME`/`USERPROFILE`/`Path.home()
 ### .gitignore 会迁移，而不只是创建（v2.4.2）
 
 `core.progress.MEMORY_GITIGNORE_LINES`（`progress.py:42-56`）是规范的忽略集合，
-`ensure_memory_gitignore`（`progress.py:59-80`）**只追加缺失的行**，保留用户自己
+`ensure_memory_gitignore`（`progress.py:85-122`）**只追加缺失的行**，保留用户自己
 添加的任何内容。此前每一版生成器都被 `if not gi.exists()` 守卫着，因此每当插件开始
 写一种新产物，已有安装就会永远保留过期的忽略列表，并开始无声地泄漏它。这些产物中
 有几种会逐字嵌入对话或计划原文，所以那是隐私问题，而不只是噪声。`pre_compact.py:353`
@@ -862,7 +862,7 @@ home 边界是双份的：环境所声称的（`HOME`/`USERPROFILE`/`Path.home()
 
 旧的 v2.0 `SESSION_HANDOFF.md` 文件会在 v2.1 下的首次 PreCompact 时被重命名为
 `SESSION_HANDOFF.md.v2.bak`（一次性迁移 `core.progress.migrate_legacy_handoff`，
-`progress.py:590-608`）。
+`progress.py:628-646`）。
 
 ---
 
@@ -880,7 +880,7 @@ home 边界是双份的：环境所声称的（`HOME`/`USERPROFILE`/`Path.home()
 - **marketplace-cache**——来自 `~/.claude/plugins/installed_plugins.json` 的
   `installPath`（`mem.py:144-174`）。一个已记录但已不存在的 `installPath` 会被
   报告为损坏布局，而不是被跳过（`mem.py:158-170`）。
-- **legacy / 独立安装**——`~/.claude/hooks/cc-memory/`（`mem.py:43`），由
+- **legacy / 独立安装**——`~/.claude/hooks/cc-memory/`（`mem.py:48`），由
   PyInstaller 安装器写入（`ui/installer.py:72` 的 `TARGET_DIR`）。这里的钩子由
   `_merge_into_settings`（`installer.py:1047-1081+`）直接注册进
   `~/.claude/settings.json`，而不是通过插件清单。
@@ -916,8 +916,8 @@ home 边界是双份的：环境所声称的（`HOME`/`USERPROFILE`/`Path.home()
 ├── config.json
 ├── installed_surfaces.json  ← 写进了 ~/.claude 的东西（v2.5）
 ├── core/    atomic.py auth.py consolidate.py db.py encoding_setup.py
-│            extractor.py idle.py logger.py markers.py modes.py plan.py
-│            privacy.py progress.py roots.py textsim.py version.py
+│            extractor.py idle.py layout.py logger.py markers.py modes.py
+│            plan.py privacy.py progress.py roots.py textsim.py version.py
 ├── hooks/   _entry.py consolidate_async.py post_tool_use.py pre_compact.py
 │            session_start.py stop.py user_prompt.py
 ├── llm/     ccl_backend.py memory_writer.py parse.py
@@ -980,7 +980,7 @@ home 边界是双份的：环境所声称的（`HOME`/`USERPROFILE`/`Path.home()
 于是一个健康的扁平安装被报成 22 个文件全缺、打印 `[FAIL]`——而且因为
 `/cc-mem status` 只对「完全可用」的布局跑 API key 检查，那项检查被整个跳过。
 
-它现在只解析一次 `pkg_dir`（`mem.py:441`：若 `root/"cc_memory"` 目录存在则取它，
+它现在只解析一次 `pkg_dir`（`mem.py:539`：若 `root/"cc_memory"` 目录存在则取它，
 否则取 `root`），据此剥去前缀，并且只对 plugin-manifest 安装要求
 `hooks/hooks.json` —— 独立安装器从不复制它，而当钩子来自 `settings.json` 时它也毫无
 意义。报告会打印 `(flat)` / `(nested)` 让形态可见，`cmd_status` 也改为把返回的
@@ -1218,7 +1218,7 @@ STALE/ORPHAN/NO-MARKER，并另外断言 `README.zh.md` 的标记摘要等于实
 - `CLAUDE.md`、`commands/`、`skills/`、`agents/` —— 面向 Claude，且它们的 YAML
   front-matter 归加载器所有；添加未知键有被加载器拒绝的风险。
 - `CHANGELOG.md` —— 只追加的发布流水；不是一份你会从头读到尾的文档。
-- `memory/**` —— 生成产物。
+- `.ccm/**` —— 生成产物。
 - 运行时 UI 字符串（CLI / dashboard）—— 面向 LLM（Tier 1），且没有集中的输出接缝；
   刻意推迟，不属于本约定。
 

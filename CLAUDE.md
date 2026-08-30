@@ -2,7 +2,7 @@
 
 ## Project: cc-memory
 
-**Claude Code persistent memory plugin (v2.12.2)** — anti-patch reconcile-on-write
+**Claude Code persistent memory plugin (v2.13.0)** — anti-patch reconcile-on-write
 + LLM-judged semantic de-duplication with **backpressure-triggered
 consolidation**, forced PROGRESS.md handoff with per-session annotation, live
 PLAN.md anchor with plan-refiner / plan-guardian subagents + mandatory
@@ -11,9 +11,89 @@ injection observability, FTS5 search, AI-judged extraction with Haiku
 (optional local Ollama fallback).
 
 - **Language**: Python 3.8+ (pure stdlib, zero pip dependencies at runtime)
-- **Version**: 2.12.2
+- **Version**: 2.13.0
 - **License**: MIT
 - **Platform**: Windows-primary, cross-platform compatible (Tkinter required for GUI)
+
+## What changed in v2.13.0 (over v2.12.2)
+
+**The state directory is `.ccm/`, and a name that lived at 34 call sites now
+lives at one.** Per-project state moved from `memory/` — an undotted, generic
+name that sat beside the user's own code and collided with any project that
+already had a package called `memory` — to `.ccm/`, dotted state beside `.git`
+and `.venv`, matching the `.ccm-root` pin this plugin already owned. Measured
+at v2.12.2: the literal `"memory"` was joined onto a path at **34 lines across
+15 modules** (both CLIs, the MCP server, the dashboard, the web viewer, the
+installer, the consolidation worker and all six hooks <!--ce:hooks-->), plus
+167 fixture sites in `tests/` and `demo/`. Six rules a future change must not
+break:
+
+1. **The name is `core/layout.MEMORY_DIRNAME`, and nothing else spells it.**
+   `core/layout.py` is the new module: names, identification, migration. Every
+   surface asks `memory_dir(root)` (write side) or `find_memory_dir(root)`
+   (read side) instead of joining. TWO literal copies survive, for the same
+   reason the `.gitignore` line list has two — `ui/installer.py` is a
+   stdlib-only bootstrap and `skills/ccm-load/SKILL.md` is an inline script,
+   and neither can rely on importing the package. Gate: `smoke_test.py`
+   § *v2.13.0 state directory* asserts both literals against the constant AND
+   greps `cc_memory/**.py` for the join returning. A bootstrap that creates
+   the wrong directory initialises a project the hooks then cannot find.
+
+2. **A RENAME is not the MERGE `core/roots.py` refuses.** That module's
+   PREVENTION, NOT MIGRATION rule is about ADOPTING a stray database: two
+   `memory.db` files are byte-for-byte indistinguishable from a deliberate
+   nested sub-project, so choosing one destroys data. Renaming one directory
+   merges nothing, chooses nothing, and leaves the contents untouched — the
+   generated `.gitignore` needed no edit at all, because every line in it
+   names an entry INSIDE the directory. That asymmetry is the whole licence
+   for doing this one automatically.
+
+3. **A refused move returns the LEGACY directory, never the new name.**
+   Measured on the primary platform: Windows refuses to rename a directory
+   while a handle inside it is open, so a second session or the dashboard
+   holding `memory.db` blocks the move. Handing back `.ccm/` there would have
+   the caller create a fresh empty one beside a `memory/` holding everything
+   the user has, and the project would come up looking brand new. The retry
+   costs one stat per turn and converges as soon as the handle closes.
+
+4. **Identification, never name-matching.** `memory` is a name real projects
+   use for real content. `layout.is_ccm_dir` migrates only a directory
+   carrying THIS plugin's `.gitignore` marker line or a `memory.db` that is a
+   real SQLite file with this schema's tables — and the magic-byte pre-filter
+   is load-bearing, because `sqlite3.connect` on a non-database CREATES one,
+   which would be a probe manufacturing its own evidence.
+
+5. **The read side never migrates.** `find_memory_dir` / `find_db_path` exist
+   because migration is a WRITE: `ui/dashboard.py` enumerates every sibling of
+   a project to fill its picker and `cli/mem.py status` scans a whole projects
+   folder. Routing those through the migrating resolver would rename the state
+   directory of every project on the machine because the user opened a list.
+
+6. **`roots._has_db` and `nested_databases` know BOTH names.** Resolution runs
+   BEFORE anything asks for the state directory, so a project whose rename has
+   not happened yet — or could not — must still resolve as a project root. If
+   rung 0 and rung 1 knew only `.ccm`, the marker rung would answer instead:
+   the stray-database shape that whole module exists to prevent, reintroduced
+   by the rename. Same reason `.gitignore` needed the `!.ccm/` re-include
+   under its `.*/` blanket: a blanket-ignored state directory is exactly the
+   invisibility the anchored `/memory/` rule was written to stop, and the
+   dotted name walked straight into it (verified with `git status`: the repo's
+   own `.ccm/` is ignored, a stray one under a subdirectory is untracked).
+
+`core/layout.memory_dir` also carries `_safe_path`, and it is there because
+this module reproduced the exact defect `core/roots.py` documents from v2.6.0:
+the handler that catches a non-path `project_root` re-raised the TypeError by
+calling `Path()` on it again on the way out. Measured before the fix:
+`memory_dir(123)` and `memory_dir([1, 2])` both escaped a function whose
+docstring promises it never raises — and `{"cwd": 123}` is a real hook payload
+shape (`test_surfaces.py` § 7 drives 48 of them).
+
+**CHANGELOG.md is NOT swept to the new name.** Its entries are dated records,
+and in v2.12.2 the directory really was `memory/`. Rewriting them would make
+the file lie about the past to agree with the present. Docs that describe
+CURRENT behaviour — README(.zh), `docs/`, this file, `skills/`, `commands/`,
+`agents/` — are swept, because a path in an operating manual that does not
+exist on disk is not history, it is a wrong instruction.
 
 ## What changed in v2.12.2 (over v2.12.1)
 
@@ -376,8 +456,9 @@ structural duplication worth a mechanism — and confirmed the rest of the
 growth is machinery this file already documents (atomic / textsim / markers /
 roots / snapshot-verdict guards, each line traceable to a measured defect).
 Full register: the complexity data and per-finding dispositions were written to
-`memory/arch-review-2026-08-10.md` — which is **maintainer-local and in no
-clone**, because `/memory/` is git-ignored by design (see `.gitignore`). Cited
+`.ccm/arch-review-2026-08-10.md` — which is **maintainer-local and in no
+clone**, because the state directory is git-ignored by design (see
+`.gitignore`, which anchors BOTH `/memory/` and `/.ccm/`). Cited
 here as provenance for how the round was conducted, NOT as a file a reader can
 open; anything a future change must actually obey is restated below or in
 CHANGELOG.md. The invariant a future change must not break:
@@ -406,8 +487,8 @@ modes, not duplication); `db.py`'s snapshot-verdict cluster and
 `session_start._refresh_progress_row`'s three-tier fill are essential
 complexity (every branch is a distinct measured defect); the dashboard's three
 cx-47..100 functions stay untouched because they have ZERO executable coverage
-(measured into `memory/falsify-coverage.md`, maintainer-local — `/memory/` is
-git-ignored, so no clone has it; re-derive with `python tools/falsify_fixes.py
+(measured into `.ccm/falsify-coverage.md`, maintainer-local — the state
+directory is git-ignored, so no clone has it; re-derive with `python tools/falsify_fixes.py
 --list` rather than looking for the file) and refactoring an untested 2.9k-line
 GUI is the exact越改越错 entry point this round exists to avoid — user-ratified
 deferral, 2026-08-10.
@@ -462,7 +543,7 @@ break:
 7. **Both fail-closed link guards use `core.markers._is_link`.**
    `stat.S_ISLNK` is False for a Windows junction (`mklink /J`, no admin), so
    the `is_symlink()`-only probes in `core/progress.py` and `core/roots.py`
-   were inert on the primary platform — a junctioned `memory/` was written
+   were inert on the primary platform — a junctioned `.ccm/` was written
    into and adopted as a project root.
 
 8. **Hooks read stdin to EOF.** `post_tool_use` was the only one with a prefix
@@ -684,7 +765,7 @@ future change must not break:
 6. **`<private>` is honoured on BOTH progress ingresses** —
    `hooks/user_prompt.py` and `hooks/pre_compact.py:_first_user_request` — and
    cleaning happens **before** the 500-char cut so a span straddling the cut
-   stays a matched pair. PROGRESS.md is not in `memory/.gitignore`, so a leak
+   stays a matched pair. PROGRESS.md is not in `.ccm/.gitignore`, so a leak
    there is a leak into the user's repository.
 
 7. **`tools/citation_check.py` gates doc `file:line` citations** (see § Tests).
@@ -813,8 +894,8 @@ were closed too. Nine things that were silently wrong in shipped code:
    `core.modes.is_excluded(cwd)`, called as each hook's first act after
    resolving `cwd`. Do not re-copy that function into a hook: v2.5.0 shipped it
    as two private copies in `user_prompt.py` + `pre_compact.py` (the only two
-   hooks that CREATE `memory/`), which left a project initialised BEFORE it was
-   listed fully instrumented — the other four gate only on `memory/memory.db`
+   hooks that CREATE `.ccm/`), which left a project initialised BEFORE it was
+   listed fully instrumented — the other four gate only on `.ccm/memory.db`
    existing, so observations, PROGRESS.md and the Stop observer's API calls all
    kept running. `tests/test_surfaces.py` §4 now drives all six.
    Separately, `_inspect_layout` resolved `cc_memory/…`-prefixed paths against
@@ -909,14 +990,14 @@ loaded the ENTIRE `.jsonl` before using ~12 KB of it.
    exhausted the 12k budget after 329 of ~585,000 records, pinning extraction
    to a session's opening hours. Fixed in both `pre_compact` and
    `session_start._summarize_transcript`.
-3. **Killed runs are visible.** `memory/.pre_compact_attempt.json` is written
+3. **Killed runs are visible.** `.ccm/.pre_compact_attempt.json` is written
    at entry and removed only on completion, so a surviving marker proves the
    last attempt died (a timeout kill runs no `except` block, which is why the
    failure used to leave no trace at all). `.last_save.json` gained `trigger`,
    making AUTO compactions distinguishable from "never ran".
 4. **`RuntimeError` added to the extraction `except` tuple** — a total LLM
    outage no longer skips the PROGRESS.md rewrite.
-5. **`memory/.gitignore` migrates existing installs** via
+5. **`.ccm/.gitignore` migrates existing installs** via
    `core.progress.ensure_memory_gitignore`. Three call sites import it
    (`hooks/pre_compact.py`, `hooks/user_prompt.py`, `ui/dashboard.py`); two
    more keep DELIBERATE literal copies because they cannot import the package
@@ -939,7 +1020,7 @@ so the v2.4.0 gate refused a legitimate in-place plan update.
 vanished unaccounted. Replacement now requires each unfinished step to be
 auto-carried (trigram-Jaccard ≥ 0.5) or explicitly dispositioned
 (`{old_title, action, reason}`); `plan-clear` refuses without `--reason`; every
-outgoing plan is archived to `memory/.plan_history/`. **No force flag, by
+outgoing plan is archived to `.ccm/.plan_history/`. **No force flag, by
 design.** See `tests/test_plan_carryover.py`.
 
 ## What changed in v2.3.4 (over v2.3.3)
@@ -997,7 +1078,7 @@ v2.3.2 fixes the root cause:
    timeout 300s) runs consolidation in the background so Claude Code never
    waits on it — a slow run can no longer surface as a compaction failure.
 2. **Consolidation cadence is now an interval marker + lock**, not a fragile
-   `session_count % N` check. `memory/.last_consolidation.json` records the
+   `session_count % N` check. `.ccm/.last_consolidation.json` records the
    count at the last run; a lock file prevents overlapping workers. Race-immune
    against the concurrent sync leg (WAL + busy_timeout make it safe).
 3. **Honest budget cost model.** `consolidate_topics` is now budget-gated (it
@@ -1008,7 +1089,7 @@ v2.3.2 fixes the root cause:
 
 ## What's new in v2.2 (over v2.1)
 
-1. **Live PLAN.md anchor.** `memory/PLAN.md` is a new generated artifact that
+1. **Live PLAN.md anchor.** `.ccm/PLAN.md` is a new generated artifact that
    captures the project's current goal + step status. ExitPlanMode output
    (or user-supplied `/cc-mem plan-set` text) lands in the `plan_active`
    SQL table; TodoWrite events sync step statuses mechanically; sensitive
@@ -1035,9 +1116,9 @@ See `docs/CONTRACTS.md#plan-contract` for the full v2.2 contract.
 2. **Anti-patch writes.** `llm.memory_writer.upsert_smart` is the single
    entry for any save path. It MERGES / SUPERSEDES / INSERTS based on
    similarity — no stacking of duplicates. See `docs/CONTRACTS.md#anti-patch-contract`.
-3. **Forced handoff.** `memory/PROGRESS.md` (new in v2.1) replaces
+3. **Forced handoff.** `.ccm/PROGRESS.md` (new in v2.1) replaces
    `SESSION_HANDOFF.md`. SessionStart emits a `<system-reminder>` block that
-   directs the next Claude to `Read memory/PROGRESS.md` BEFORE responding.
+   directs the next Claude to `Read .ccm/PROGRESS.md` BEFORE responding.
    See `docs/CONTRACTS.md#handoff-contract`.
 4. **Auto-fresh MEMORY.md.** Regenerated after every batch upsert.
 5. **Idle reorg.** Stop hook runs lightweight cleanup every 5 turns (no LLM).
@@ -1082,7 +1163,8 @@ cc-memory/
 │   ├── core/                    db, extractor, consolidate, idle, progress,
 │   │                            plan, privacy, modes, roots, auth, logger,
 │   │                            encoding_setup, version, atomic, markers,
-│   │                            textsim
+│   │                            textsim, layout (the state dir's name +
+│   │                            its one-way migration, v2.13.0)
 │   ├── hooks/                   _entry (shared entry ladder, v2.10.0),
 │   │                            post_tool_use, pre_compact, consolidate_async,
 │   │                            session_start, stop, user_prompt
@@ -1126,7 +1208,7 @@ blocking sync leg + a background `async` leg.
 | `SessionStart` | `cc_memory/hooks/session_start.py` | 15s | Inject layered context (the directive ledger FIRST, v2.12.2) + FORCED `<system-reminder>` to Read PROGRESS.md |
 | `Stop` | `cc_memory/hooks/stop.py` | 22s | Observer (Haiku) + per-turn PROGRESS.md patch + idle reorg every 5 turns + consolidation backpressure probe (v2.12.0) + plan enforcement |
 | `PostToolUse` | `cc_memory/hooks/post_tool_use.py` | 8s | Live plan anchor in EVERY mode (ExitPlanMode capture / TodoWrite step sync / drift counters), THEN an observation row for observed tools only (no LLM) |
-| `UserPromptSubmit` | `cc_memory/hooks/user_prompt.py` | 8s | Auto-init memory/ + turn count + seed `progress.current_request` on turn 1 |
+| `UserPromptSubmit` | `cc_memory/hooks/user_prompt.py` | 8s | Auto-init `.ccm/` (migrating a pre-v2.13.0 `memory/`) + turn count + seed `progress.current_request` on turn 1 |
 
 Hook contract (NEVER violate):
 - Hooks must NEVER write to stderr (Claude Code shows stderr as error UI).
@@ -1180,7 +1262,7 @@ SUPERSEDE implementation, not a caller path.
 
 ## Forced handoff contract
 
-> `memory/PROGRESS.md` is the single source of truth for session handoff.
+> `.ccm/PROGRESS.md` is the single source of truth for session handoff.
 > It is ALWAYS full-rewritten from the `progress` SQL row, never appended.
 > SessionStart emits a `<system-reminder>` requiring the next Claude to Read
 > it BEFORE responding. See `docs/CONTRACTS.md#handoff-contract`.
@@ -1204,7 +1286,7 @@ first PreCompact under v2.1 (one-shot migration in `core/progress.py`).
 
 ## Live plan anchor (v2.2)
 
-> `memory/PLAN.md` is the single source of truth for the current goal +
+> `.ccm/PLAN.md` is the single source of truth for the current goal +
 > step status. Distinct from PROGRESS.md (session handoff) — PLAN.md
 > outlives sessions. See `docs/CONTRACTS.md#plan-contract` for the full spec.
 
@@ -1231,7 +1313,7 @@ The `plan_active` table (one row per project) backs PLAN.md. Lifecycle:
   `ui/installer.py` so an uninstall still sweeps what older installs wrote.)
 
 **All of the `PostToolUse` legs above run in EVERY mode, above the
-`should_observe` gate** (`hooks/post_tool_use.py:188`). They shipped below it
+`should_observe` gate** (`hooks/post_tool_use.py:183`). They shipped below it
 from v2.2 through v2.4.3, which made the entire anchor dead through its own
 hook — `TodoWrite` is in every mode's `skip_tools` and `ExitPlanMode` is in no
 mode's `observe_tools`. Plan control is not observation: mode selects what is
@@ -1298,7 +1380,7 @@ standalone installs.
   store `[]` — do not document a `["llm","auto"]` tag that no code emits. If you
   add an emitter, add it to this list; the four `ui/dashboard.py` Save-Session /
   init shapes were missing from it through v2.5.0.
-- `memory/PROGRESS.md` and `memory/MEMORY.md` are generated artifacts. Edit
+- `.ccm/PROGRESS.md` and `.ccm/MEMORY.md` are generated artifacts. Edit
   the SQL source of truth (`progress` table for PROGRESS.md, `memories`/
   `topics`/`keywords` for MEMORY.md) instead.
 
@@ -1375,7 +1457,7 @@ by none of them while the banner still said "all 6". It is asserted equal to
 the `hooks` set `tools/contracts.py` computes from the manifest.
 
 **§7 is the twin of §4.** It drives the same six hooks <!--ce:hooks--> from a SUBDIRECTORY of
-a seeded project and asserts no second `memory/` appears down there while the
+a seeded project and asserts no second `.ccm/` appears down there while the
 root database receives the writes, walks the resolution ladder over a real
 filesystem, and asserts the source rule that every hook routes cwd through
 `hooks/_entry.py:resolve_project` — the opt-out→anchor ORDER is asserted once,
@@ -1395,7 +1477,7 @@ total here was the prose-enumeration disease one more time.)
   rc **and** stderr **and** that no database appears in the hook's own
   directory. Asserting only rc is precisely how `pre_compact`'s side effect
   survived one round of review: it exited 0, wrote nothing to stderr, and
-  created `memory/memory.db` where the hook process happened to be standing.
+  created `.ccm/memory.db` where the hook process happened to be standing.
 - `_cli_opt_out_gate` — drives the real CLIs as subprocesses against a COPY
   of the package, over five `--project` spellings including the blank ones,
   and asserts all three surfaces route through the one shared gate rather
@@ -1408,7 +1490,7 @@ total here was the prose-enumeration disease one more time.)
   is command substitution. Both are static, so they cost no sandbox.
 
 Two of its 23 ladder cases are the ones that cost a design round, and neither
-may be weakened: **a directory that already owns a `memory/memory.db` is never
+may be weakened: **a directory that already owns a `.ccm/memory.db` is never
 re-rooted** (a stray and a deliberate nested sub-project are byte-for-byte
 identical on disk — this machine has four genuinely nested ones, the largest
 holding 3725 memories, so any rule that "heals" the first orphans the second),
@@ -1554,7 +1636,7 @@ Two limits to know before trusting a green result: a citation whose sentence
 names no resolvable symbol at all is reported **SKIP**, not OK (253 of 594
 today, down from 370 once v2.5.3 taught it to anchor CROSS-FILE citations on the
 text of the cited range — the `` `db.tag_progress_session(...)`
-(`user_prompt.py:193`) `` shape, which is the commonest in these docs). `--fix`
+(`user_prompt.py:213`) `` shape, which is the commonest in these docs). `--fix`
 rewrites a same-file citation to the **definition** site and a cross-file one to
 the occurrence NEAREST the stale number — a stated assumption (it was right when
 written; the file grew above it), not a proof. Ordinary variable
