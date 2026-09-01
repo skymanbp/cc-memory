@@ -1038,30 +1038,169 @@ class MemoryDB:
 
     # ── projects ─────────────────────────────────────────────────────────────
 
+    @staticmethod
+    def _identity_tools():
+        """(`canonical_path`, `database_owner`) from core.layout, or (None, None).
+
+        Lazy and guarded for the reason `_db_warn` imports its logger lazily:
+        `ui/installer.py`'s bootstrap fallback imports this module BARE
+        (`from db import MemoryDB`, with `core/` itself on sys.path), where
+        `core.layout` does not resolve. That path only ever registers the
+        first row of a fresh database, where identity matching has nothing to
+        match against, so degrading to insert-only there costs nothing.
+        """
+        try:
+            from core.layout import canonical_path, database_owner
+            return canonical_path, database_owner
+        except ImportError:
+            return None, None
+
+    @staticmethod
+    def _path_exists(text) -> bool:
+        """`Path(text).exists()` that cannot raise (NUL, unreachable share)."""
+        try:
+            return Path(text).exists()
+        except Exception:
+            return False
+
+    def project_paths(self) -> List[str]:
+        """Every `projects.path` in this file, most recently active first."""
+        with self._connect() as conn:
+            return [r["path"] for r in conn.execute(
+                "SELECT path FROM projects ORDER BY last_active DESC, id DESC"
+            ).fetchall()]
+
+    def _own_project_row(self, conn, path, name):
+        """The row that IS `path`'s project in this database, or None. Never inserts.
+
+        Match by exact stored path first (the common case, one indexed
+        lookup), then by `core.layout.canonical_path` across the handful of
+        rows one file holds — two spellings of one directory are one project
+        (a symlinked checkout, `d:` against `D:`, a WSL mount against a drive
+        letter). Only when neither matches, AND this database sits at
+        `<path>/<state dir>/memory.db` — the file's location being the
+        "declaration of identity" docs/ARCHITECTURE.md §7 states — is a row
+        RE-ATTACHED to `path`: the most recently active row whose recorded
+        directory no longer exists (a moved or renamed project, a WSL mount
+        reached under a drive-letter spelling, or the reverse). A row whose
+        directory still exists elsewhere is another live directory's and is
+        never taken — not even when it is the only row in the file; a
+        database that is not `path`'s own never re-attaches anything. So a
+        sibling project deliberately sharing this file keeps its own row —
+        the shape tests/test_surfaces.py seeds for the cross-project checks.
+
+        Through v2.13.2 every miss INSERTED: `projects.path` was the
+        identity, so renaming or moving a project directory minted a second
+        row, and every memory, session, progress row, plan and directive of
+        the first went dark on every surface — SessionStart injected 0
+        memories, `/cc-mem list` printed (none), `status` reported an empty
+        database — while the rows sat one project_id away. `cli/mem.py`
+        documented the symptom (register C4) and told the user to inspect the
+        old rows by hand; the consolidation marker grew a path check to
+        survive it. The identity is the database now, so the rename is
+        invisible: measured, a project moved to a new directory injects the
+        same memories on its next SessionStart and its `projects` table still
+        holds one row.
+        """
+        row = conn.execute(
+            "SELECT id, path FROM projects WHERE path = ?", (path,)).fetchone()
+        if row is not None:
+            return row
+        canonical_path, database_owner = self._identity_tools()
+        if canonical_path is None:
+            return None
+        canon = canonical_path(path)
+        if not canon:
+            return None
+        rows = conn.execute(
+            "SELECT id, path FROM projects ORDER BY last_active DESC, id DESC"
+        ).fetchall()
+        for r in rows:
+            if canonical_path(r["path"]) == canon:
+                return r
+        owner = database_owner(self.db_path)
+        if owner is None or not rows or canonical_path(owner) != canon:
+            return None
+        # ONLY a row whose recorded directory is GONE. A first draft also
+        # took the lone row of a file regardless, and test_surfaces §9a
+        # caught it re-attaching a sibling's row (its directory alive) to the
+        # project whose file it shared. A copied project therefore starts a
+        # fresh row while its original still exists — conservative, and the
+        # status quo — rather than ever taking a live directory's history.
+        stale = [r for r in rows if not self._path_exists(r["path"])]
+        if not stale:
+            return None
+        chosen = stale[0]
+        conn.execute(
+            "UPDATE projects SET path = ?, name = ? WHERE id = ?",
+            (path, name, chosen["id"]))
+        self._db_warn(f"project row #{chosen['id']} re-attached to its "
+                      f"database: {chosen['path']} -> {path}")
+        return chosen
+
+    def find_project_id(self, cwd) -> Optional[int]:
+        """`projects.id` for `cwd` — match or re-attach, NEVER insert.
+
+        For the surfaces that ask a question (`/cc-mem status`, `stats`,
+        `list`, `sessions`, `keywords`): a question must not create a row.
+        Through v2.13.2 `status` looked the row up through `upsert_project`,
+        so run after a directory rename it minted the second row and reported
+        an empty database, and from then on every read answered 0 with no
+        hint. Re-attaching a moved project's own row is a correction of a
+        stale record, not creation, and it is what makes the answer right the
+        first time the user asks. A database that cannot be written (a
+        read-only mount) still answers by exact or canonical match.
+        """
+        path = str(Path(cwd).resolve())
+        name = Path(path).name
+        try:
+            with self._connect() as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                row = self._own_project_row(conn, path, name)
+                return row["id"] if row is not None else None
+        except sqlite3.OperationalError:
+            # why: the write lock (or the re-attach UPDATE) was refused; a
+            # read-only answer is still owed. Exact and canonical matching
+            # need no lock.
+            canonical_path, _owner = self._identity_tools()
+            canon = canonical_path(path) if canonical_path else ""
+            with self._connect() as conn:
+                for r in conn.execute(
+                        "SELECT id, path FROM projects").fetchall():
+                    if r["path"] == path or (
+                            canon and canonical_path(r["path"]) == canon):
+                        return r["id"]
+            return None
+
     def upsert_project(self, cwd: str) -> int:
         path = str(Path(cwd).resolve())
         name = Path(path).name
         now = self._now()
         with self._connect() as conn:
-            # ONE statement, not check-then-insert. `projects.path` is UNIQUE
-            # and this was a read followed by a write with no lock between:
-            # two first-touchers of the same project both saw no row and both
-            # inserted, and the loser got `IntegrityError: UNIQUE constraint
-            # failed: projects.path` raised out of a method whose contract is
-            # UPSERT. Reproduced against this exact method with two real
-            # connections. `busy_timeout` cannot help — the SELECT takes no
-            # write lock, and by the time the loser inserts the winner has
-            # committed, so this is a constraint violation, not contention.
-            #
-            # This is the identical shape round 6 fixed for `plan_active` (see
-            # `_insert_plan_row`'s ON CONFLICT DO NOTHING); the fix was applied
-            # there and nowhere else, leaving it in the FIRST database call
-            # every hook, the MCP server, the CLI and the dashboard make.
-            #
+            # BEGIN IMMEDIATE: this is a read-decide-write (match a row,
+            # re-attach one, or insert) and two first-touchers of one
+            # directory must not both decide "no row" — the lost-update shape
+            # `patch_progress` and `upsert_progress` already take the same
+            # lock against. Before the identity match existed this was ONE
+            # statement, `INSERT ... ON CONFLICT(path) DO UPDATE`, because a
+            # check-then-insert had let two first-touchers both insert and
+            # the loser raised `IntegrityError: UNIQUE constraint failed:
+            # projects.path` out of a method whose contract is UPSERT
+            # (reproduced with two real connections; `busy_timeout` cannot
+            # help because the SELECT takes no write lock). The ON CONFLICT
+            # clause stays below as the backstop for the same reason.
+            conn.execute("BEGIN IMMEDIATE")
+            row = self._own_project_row(conn, path, name)
+            if row is not None:
+                conn.execute(
+                    "UPDATE projects SET last_active = ? WHERE id = ?",
+                    (now, row["id"]))
+                return row["id"]
             # DO UPDATE, not DO NOTHING, because the `last_active` bump is the
             # point of the call when the row already exists. `name` is
-            # deliberately NOT overwritten: the stored name is whatever the
-            # project was first registered as, exactly as before.
+            # deliberately NOT overwritten on this path: the stored name is
+            # whatever the project was first registered as. (A re-attach
+            # above DOES rename, because the directory itself was renamed.)
             conn.execute(
                 "INSERT INTO projects (path, name, created_at, last_active) "
                 "VALUES (?, ?, ?, ?) "

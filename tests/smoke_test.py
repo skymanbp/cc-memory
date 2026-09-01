@@ -2296,6 +2296,248 @@ def main():
           f"both names, the read side never migrates, and no module spells "
           f"the join by hand")
 
+    # ── identity · the project ROW follows its DATABASE, not its path string ─
+    # Through v2.13.2 `projects.path` WAS the identity: a moved or renamed
+    # project directory minted a second row, and every memory, session,
+    # progress row, plan and directive of the first went dark on every surface
+    # (SessionStart injected 0, `/cc-mem list` printed (none), `status`
+    # reported an empty database) while the rows sat one project_id away.
+    # cli/mem.py documented the symptom (register C4) and told the user to
+    # inspect the old rows by hand; the consolidation marker grew a path check
+    # to survive it; `status` minted the second row itself. ARCHITECTURE §7
+    # had already stated the rule for the resolver — "an existing database is
+    # a declaration of identity" — and this block asserts it for the row
+    # inside the database, plus the ONE comparable spelling every identity
+    # compare in the tree now goes through (`core.layout.canonical_path`).
+    from core.layout import (canonical_path as _pi_canon,
+                             same_path as _pi_same,
+                             database_owner as _pi_owner)
+    from core import consolidate as _pi_C
+    from core.roots import _home_dirs as _pi_home_dirs, _norm as _pi_norm
+    _pi_box = Path(tempfile.mkdtemp(prefix="cc-memory-identity-"))
+
+    # (a) canonical_path: one spelling per directory, per-platform case rule,
+    #     never raises, and a non-path can never equal a real directory
+    _pi_dir = _pi_box / "alpha"
+    (_pi_dir / "sub").mkdir(parents=True)
+    assert _pi_canon(_pi_dir) == _pi_canon(str(_pi_dir / "sub" / "..")), \
+        "two spellings of one directory must canonicalise identically"
+    assert _pi_same(_pi_dir, _pi_dir / "sub" / "..")
+    assert not _pi_same(_pi_dir, _pi_dir / "sub")
+    for _pi_junk in (None, 123, ["a"], {}, 4.5, b"/x", ""):
+        assert _pi_canon(_pi_junk) == "", \
+            f"a non-path must spell as '' (got {_pi_canon(_pi_junk)!r} for {_pi_junk!r})"
+    assert not _pi_same(None, None) and not _pi_same("", ""), \
+        "two non-paths must not be 'the same directory'"
+    # resolve() raises on an embedded NUL on every platform; abspath raises on
+    # Windows only (POSIX joins the cwd). Either way the answer is a string
+    # that still ends in the text, and nothing raised.
+    assert _pi_canon("a\x00b").endswith(os.path.normcase("a\x00b")), \
+        "an embedded NUL degrades to comparable text, never raises"
+    if os.path.normcase("A") == "a":
+        assert _pi_canon(str(_pi_dir).upper()) == _pi_canon(_pi_dir), \
+            "Windows: the filesystem folds case, so must the identity"
+    else:
+        assert _pi_canon(str(_pi_dir).upper()) != _pi_canon(_pi_dir), \
+            "POSIX: a different-case path IS another directory (v2.12.1 rule)"
+    assert _pi_owner(_pi_dir / _MEM / "memory.db") == _pi_dir
+    assert _pi_owner(_pi_dir / _SD_OLD / "memory.db") == _pi_dir, \
+        "a pre-v2.13.0 state directory's database belongs to its project too"
+    assert _pi_owner(_pi_dir / "elsewhere" / "memory.db") is None
+    assert _pi_owner(_pi_dir / _MEM / "other.db") is None
+    assert _pi_owner(123) is None and _pi_owner(None) is None
+
+    # (b) a MOVED project keeps its row: same id, ONE row, everything visible
+    _pi_src = _pi_box / "proj-before"
+    (_pi_src / _MEM).mkdir(parents=True)
+    _pi_db = MemoryDB(_pi_src / _MEM / "memory.db")
+    _pi_pid = _pi_db.upsert_project(str(_pi_src))
+    _pi_db.insert_memory(_pi_pid, None, "decision",
+                         "identity: exporter-sync-7731 stays synchronous", 4)
+    _pi_db.upsert_progress(_pi_pid, current_request="identity test request")
+    del _pi_db
+    _pi_dst = _pi_box / "proj-after"
+    shutil.move(str(_pi_src), str(_pi_dst))
+    _pi_db2 = MemoryDB(_pi_dst / _MEM / "memory.db")
+    assert _pi_db2.find_project_id(str(_pi_dst)) == _pi_pid, \
+        "a moved project's own row must be FOUND, not reported missing"
+    assert _pi_db2.upsert_project(str(_pi_dst)) == _pi_pid, \
+        "a moved project must keep its project_id"
+    assert _pi_db2.project_paths() == [str(_pi_dst.resolve())], \
+        f"the move minted a second row: {_pi_db2.project_paths()}"
+    assert _pi_db2.get_stats(_pi_pid)["n_memories"] == 1
+    assert _pi_db2.get_progress(_pi_pid)["current_request"] == \
+        "identity test request", "the progress row did not follow"
+
+    # (c) a sibling deliberately sharing the file keeps its OWN row: a
+    #     database that is not the caller's own never re-attaches anything
+    #     (the shape test_surfaces seeds for its cross-project checks)
+    _pi_sibling = _pi_box / "sibling"
+    _pi_sibling.mkdir()
+    _pi_sib = _pi_db2.upsert_project(str(_pi_sibling))
+    assert _pi_sib != _pi_pid and len(_pi_db2.project_paths()) == 2, \
+        "a sibling's row was folded into this project's"
+    assert _pi_db2.upsert_project(str(_pi_sibling)) == _pi_sib
+
+    # (d) several rows, one gone: the stale own row is the one re-attached;
+    #     the sibling's directory still exists and is never taken
+    _pi_dst2 = _pi_box / "proj-after-2"
+    shutil.move(str(_pi_dst), str(_pi_dst2))
+    _pi_db3 = MemoryDB(_pi_dst2 / _MEM / "memory.db")
+    assert _pi_db3.upsert_project(str(_pi_dst2)) == _pi_pid, \
+        "with a live sibling row present, the STALE own row is the one re-attached"
+    assert sorted(_pi_db3.project_paths()) == sorted(
+        [str(_pi_dst2.resolve()), str(_pi_sibling.resolve())]), \
+        _pi_db3.project_paths()
+    assert _pi_db3.get_stats(_pi_pid)["n_memories"] == 1
+
+    # (e) a question never creates: a database whose rows are OTHER live
+    #     directories' answers None, and `status` reports rather than mints
+    _pi_foreign = _pi_box / "foreign-owner"
+    (_pi_foreign / _MEM).mkdir(parents=True)
+    _pi_fdb = MemoryDB(_pi_foreign / _MEM / "memory.db")
+    for _pi_live in ("live1", "live2"):
+        (_pi_box / _pi_live).mkdir()
+        _pi_fdb.upsert_project(str(_pi_box / _pi_live))
+    assert _pi_fdb.find_project_id(str(_pi_foreign)) is None, \
+        "rows for OTHER directories that still exist are never taken"
+    assert len(_pi_fdb.project_paths()) == 2, "find_project_id inserted a row"
+    del _pi_fdb
+    _pi_env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
+
+    def _pi_cli(*args, **kw):
+        return subprocess.run(
+            [sys.executable, str(_REPO / "cc_memory" / "cli" / "mem.py"), *args],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            env=_pi_env, timeout=300, **kw)
+    _pi_st = _pi_cli("--project", str(_pi_foreign), "status")
+    assert "holds no row for this directory" in _pi_st.stdout, \
+        f"status must REPORT a foreign database:\n{_pi_st.stdout[-600:]}{_pi_st.stderr[-300:]}"
+    assert len(MemoryDB(_pi_foreign / _MEM / "memory.db").project_paths()) == 2, \
+        "`status` minted a project row — a health check asks, it does not register"
+
+    # (f) the read commands answer from the re-attached row right after a
+    #     rename, before any hook has run here
+    _pi_dst3 = _pi_box / "proj-after-3"
+    shutil.move(str(_pi_dst2), str(_pi_dst3))
+    _pi_ls = _pi_cli("--project", str(_pi_dst3), "list")
+    assert _pi_ls.returncode == 0 and "exporter-sync-7731" in _pi_ls.stdout, \
+        f"list after a rename: rc={_pi_ls.returncode}\n{_pi_ls.stdout[-400:]}{_pi_ls.stderr[-400:]}"
+    assert len(MemoryDB(_pi_dst3 / _MEM / "memory.db").project_paths()) == 2, \
+        "`list` changed the row count"
+
+    # (g) the consolidation marker follows the ROW. Written from the CLI's
+    #     documented `--project .` spelling (commands/cc-mem.md passes exactly
+    #     that), read by a hook with the absolute cwd; and a marker for this
+    #     row is still this row's after the directory moves on. The old check
+    #     normcase'd without resolving, so "." never matched and every manual
+    #     consolidation was followed by a redundant background one.
+    _pi_mem = _pi_dst3 / _MEM
+    _pi_db4 = MemoryDB(_pi_mem / "memory.db")
+    (_pi_dst3 / "sub").mkdir()
+    _pi_written = _pi_C.write_consolidation_marker(
+        _pi_db4, _pi_pid, _pi_mem, str(_pi_dst3 / "sub" / ".."),
+        {"final_active": 1})
+    assert _pi_written["project_id"] == _pi_pid, "the marker must name its row"
+    assert _pi_written["project_path"] == str(_pi_dst3.resolve()), \
+        f"the marker must store the RESOLVED directory: {_pi_written['project_path']!r}"
+    assert _pi_C.read_consolidation_marker(_pi_mem, str(_pi_dst3)) == _pi_written, \
+        "a marker written from an unresolved spelling must be read by the absolute cwd"
+    assert _pi_C.read_consolidation_marker(
+        _pi_mem, str(_pi_dst3 / "sub" / "..")) == _pi_written, \
+        "an unresolved reader spelling must match too (canonical on BOTH sides)"
+    _pi_elsewhere = str(_pi_box / "somewhere-else")
+    assert _pi_C.read_consolidation_marker(_pi_mem, _pi_elsewhere, _pi_pid) \
+        == _pi_written, "the id identifies the row across a rename"
+    assert _pi_C.read_consolidation_marker(_pi_mem, _pi_elsewhere, _pi_pid + 1) \
+        == {}, "another row's id is another row"
+    assert _pi_C.read_consolidation_marker(_pi_mem, _pi_elsewhere) == {}, \
+        "without an id, another path is still foreign (the v2.12.0 rule kept)"
+    del _pi_db4
+    _pi_con = _pi_cli("--project", ".", "consolidate", "--no-llm",
+                      cwd=str(_pi_dst3))
+    assert _pi_con.returncode == 0, \
+        f"consolidate --project .:\n{_pi_con.stdout[-500:]}{_pi_con.stderr[-500:]}"
+    _pi_m = _pi_C.read_consolidation_marker(_pi_mem, str(_pi_dst3), _pi_pid)
+    assert (_pi_m.get("project_id") == _pi_pid
+            and _pi_m.get("project_path") == str(_pi_dst3.resolve())), \
+        f"the CLI's `--project .` marker must name the row and the absolute directory: {_pi_m}"
+
+    # (h) the root resolver's home boundary carries the RESOLVED spelling of
+    #     home too: `project_root` walks a resolved chain, and an unresolved
+    #     boundary let it through a symlinked home to the database a session
+    #     run in `~` had left there. Where a symlink cannot be created (Windows
+    #     without the privilege) the two spellings coincide and the assertion
+    #     still runs — asserted, not skipped.
+    _pi_vol = _pi_box / "vol" / "home" / "alice"
+    _pi_vol.mkdir(parents=True)
+    _pi_link = _pi_box / "home-link"
+    try:
+        _pi_link.symlink_to(_pi_box / "vol" / "home", target_is_directory=True)
+        _pi_home_spelling = _pi_link / "alice"
+    except (OSError, NotImplementedError):
+        _pi_home_spelling = _pi_vol
+    _pi_saved = {k: os.environ.get(k) for k in ("HOME", "USERPROFILE")}
+    try:
+        os.environ["HOME"] = str(_pi_home_spelling)
+        os.environ["USERPROFILE"] = str(_pi_home_spelling)
+        _pi_bounds = _pi_home_dirs()
+    finally:
+        for _pi_k, _pi_v in _pi_saved.items():
+            if _pi_v is None:
+                os.environ.pop(_pi_k, None)
+            else:
+                os.environ[_pi_k] = _pi_v
+    assert _pi_norm(_pi_home_spelling) in _pi_bounds, "the literal home spelling is a boundary"
+    assert _pi_norm(Path(_pi_home_spelling).resolve()) in _pi_bounds, \
+        "the RESOLVED home spelling must be a boundary too, or a resolved chain walks through a symlinked home"
+
+    # (i) the skills ask layout for the state directory. save-memories used to
+    #     join the legacy name itself and, after the rename to .ccm/, wrote
+    #     every memory into a database nothing read; the ONE permitted literal
+    #     is ccm-load's registered copy (checked against the constant above).
+    _pi_sm = (_REPO / "skills" / "save-memories" / "SKILL.md").read_text(encoding="utf-8")
+    assert "from core.layout import memory_dir" in _pi_sm, \
+        "save-memories must resolve the state directory through core.layout"
+    _pi_join = _sd_re.compile(r"/\s*['\"](?:%s|%s)['\"]"
+                              % (_sd_re.escape(_SD_OLD), _sd_re.escape(_SD_NAME)))
+    assert not _pi_join.search(_pi_sm), \
+        "save-memories spells the state-directory join by hand again"
+    _pi_cl = (_REPO / "skills" / "ccm-load" / "SKILL.md").read_text(encoding="utf-8")
+    assert len(_pi_join.findall(_pi_cl)) == 1, \
+        "ccm-load may carry exactly ONE state-directory literal, the registered copy"
+    # ... and the skill really writes where the hooks read: run its body
+    # (the fill slot empty) against a project already initialised under the
+    # new name, and nothing may appear under the legacy one.
+    _pi_lines = _pi_sm.splitlines()
+    _pi_o = next(i for i, ln in enumerate(_pi_lines) if ln.startswith("```bash"))
+    _pi_c = next(i for i in range(_pi_o + 1, len(_pi_lines)) if _pi_lines[i].startswith("```"))
+    assert _pi_lines[_pi_o + 1].strip() == 'python3 -c "' and _pi_lines[_pi_c - 1].strip() == '"', \
+        "save-memories no longer wraps its body in python3 -c — this check rotted"
+    _pi_body = "\n".join(_pi_lines[_pi_o + 2:_pi_c - 1]).replace('\\"', '"')
+    _pi_skproj = _pi_box / "skill-proj"
+    (_pi_skproj / _MEM).mkdir(parents=True)
+    MemoryDB(_pi_skproj / _MEM / "memory.db").upsert_project(str(_pi_skproj))
+    _pi_sk = subprocess.run(
+        [sys.executable, "-c", _pi_body], cwd=str(_pi_skproj),
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        env={**_pi_env, "CLAUDE_PLUGIN_ROOT": str(_REPO)}, timeout=300)
+    assert _pi_sk.returncode == 0 and "inserted=" in _pi_sk.stdout, \
+        f"skill body: rc={_pi_sk.returncode}\n{_pi_sk.stdout[-400:]}{_pi_sk.stderr[-400:]}"
+    assert not (_pi_skproj / _SD_OLD).exists(), \
+        f"the skill created `{_SD_OLD}/` beside an initialised `{_MEM}/`"
+    assert sorted(p.name for p in _pi_skproj.iterdir()) == [_MEM], \
+        sorted(p.name for p in _pi_skproj.iterdir())
+
+    shutil.rmtree(_pi_box, ignore_errors=True)
+    print("[OK] identity: canonical_path is the one spelling; a moved project "
+          "keeps its row (id, memories, progress) with ONE projects row; a "
+          "sibling's row and other live directories' rows are never taken; "
+          "status/list answer without minting; the consolidation marker "
+          "follows the row (id, resolved path, `--project .`); the home "
+          "boundary knows its resolved spelling; both skills ask layout for "
+          "the state directory")
+
     # ── v2.5.2 · MemoryDB._connect must not leak one handle per operation ───
     # It used to: sqlite3's context manager COMMITS BUT DOES NOT CLOSE, and the
     # handle then survived inside its statement-cache reference cycle. Measured

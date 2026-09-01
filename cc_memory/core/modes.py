@@ -124,18 +124,22 @@ def _norm_path(value: str) -> str:
         # why: an unexpandable ~user is still a path. Compare it literally
         # instead of letting one entry decide the fate of the whole list.
         expanded = value
+    # The resolve -> abspath -> raw-text degradation that used to live here
+    # is `core.layout.canonical_path` now: the one spelling every identity
+    # compare in the tree uses, so the opt-out list, the projects table, the
+    # consolidation marker and the dashboard registry cannot disagree about
+    # whether two paths are one directory.
+    from core.layout import canonical_path
+    canon = canonical_path(expanded)
+    if canon:
+        return canon
+    # why: canonical_path spells a non-path as ""; keep this function's own
+    # contract (a comparable STRING for any input) by falling back to the
+    # literal text, which can only ever miss.
     try:
-        return os.path.normcase(str(Path(expanded).resolve()))
+        return os.path.normcase(str(expanded))
     except Exception:
-        # why: resolve() touches the filesystem and can raise on an unreachable
-        # share or an illegal name; abspath below is pure string work.
-        pass
-    try:
-        return os.path.normcase(os.path.abspath(expanded))
-    except Exception:
-        # why: abspath still raises ValueError on an embedded NUL byte. Raw
-        # text can only ever produce a MISS for that one broken entry.
-        return os.path.normcase(expanded)
+        return ""
 
 
 # ── Project opt-out (config.json `excluded_projects`) ──────────────────────

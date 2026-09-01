@@ -110,6 +110,17 @@ sys.path.insert(0, str(PKG.resolve()))
 
 from core.db import MemoryDB
 from llm.memory_writer import upsert_batch
+# The state directory's NAME and its one-way migration live in core.layout
+# (v2.13.0); this script used to spell the join itself and, after the rename
+# to .ccm/, went on writing every memory into a memory/ database nothing else
+# read. Ask the resolver, like every other surface. A package too old to have
+# it is a mixed install (this skill is newer than the code), not a layout to
+# guess at.
+try:
+    from core.layout import memory_dir as _state_dir
+except ImportError:
+    print('[error] core.layout is missing: the installed cc-memory package is older than this skill. Run /ccm-load to re-sync, then retry.')
+    sys.exit(0)
 
 # Anchor before MemoryDB touches the path: MemoryDB CREATES the file and its
 # parent, so run from a subdirectory this planted <subdir>/.ccm/memory.db --
@@ -137,7 +148,8 @@ try:
         sys.exit(0)
 except ImportError:
     print('[warn] opt-out check unavailable; hooks still enforce it on writes')
-db = MemoryDB(Path(project) / 'memory' / 'memory.db')
+mem_dir = _state_dir(project)
+db = MemoryDB(mem_dir / 'memory.db')
 pid = db.upsert_project(project)
 
 memories = [
@@ -165,7 +177,7 @@ memories = [
     # than historical. Enforced by test_surfaces §7 over BOTH skills.
 ]
 
-counts = upsert_batch(db, pid, None, memories, memory_dir=Path(project) / 'memory')
+counts = upsert_batch(db, pid, None, memories, memory_dir=mem_dir)
 print(f\"inserted={counts.get('inserted',0)} \"
       f\"merged={counts.get('merged',0)} \"
       f\"superseded={counts.get('superseded',0)} \"

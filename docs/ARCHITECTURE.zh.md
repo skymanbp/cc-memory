@@ -1,4 +1,4 @@
-<!-- i18n-source: ARCHITECTURE.md | sha256: 92de54d56bcb10ee | version: 2.13.0 | translated: 2026-08-30 -->
+<!-- i18n-source: ARCHITECTURE.md | sha256: 3f54a8053271a507 | version: 2.13.2 | translated: 2026-09-01 -->
 > [English](ARCHITECTURE.md) · **简体中文**
 
 # cc-memory — 架构
@@ -306,7 +306,7 @@ SQLite 表（定义在 [`cc_memory/core/db.py`](../cc_memory/core/db.py)），�
 
 | 表 | 用途 |
 |-------|---------|
-| `projects` | 每个项目路径一行（`db.py:37`）；自迁移 `v2_project_mode` 起带有 `mode`（`db.py:130`），自 `v7_projects_obs_watermark` 起带有持久观察者游标 `obs_watermark` |
+| `projects` | 每个项目一行（`db.py:37`）——身份由它所在的数据库决定，而不是由行里记录的 `path` 字串决定：目录被移动或重命名后，重新挂接自己那一行，而不是再造一行（§7）；自迁移 `v2_project_mode` 起带有 `mode`（`db.py:130`），自 `v7_projects_obs_watermark` 起带有持久观察者游标 `obs_watermark` |
 | `sessions` | 每次压缩事件一行（`db.py:46`）；自 `v7_sessions_complete` 起带有 `complete`（已回填，v7 之前的行读作 complete） |
 | `memories` | 抽取出的事实（category、importance、topic、content_hash、**supersedes_id**、last_referenced_at）（`db.py:57`） |
 | `topics` | 按主题名的整理摘要（带版本）（`db.py:71`） |
@@ -323,18 +323,18 @@ SQLite 表（定义在 [`cc_memory/core/db.py`](../cc_memory/core/db.py)），�
 
 此外还有 `memories_fts`——一个建立在 `memories` 之上的 FTS5 虚拟表
 （`core/db.py:455-458`），由三个触发器保持同步（`core/db.py:459-478`，迁移 `v2_fts5` 在
-`db.py:2906-2940`）。它只在本地 SQLite 构建带 FTS5 时才会创建；否则
-`db.search_fts`（`core/db.py:2906-2940`）回退到 `LIKE ? ESCAPE '\'`
-（`core/db.py:2906-2940`）。FTS5 在 `.claude-plugin/plugin.json:4` 与 `:12` 中被
+`db.py:3063-3097`）。它只在本地 SQLite 构建带 FTS5 时才会创建；否则
+`db.search_fts`（`core/db.py:3063-3097`）回退到 `LIKE ? ESCAPE '\'`
+（`core/db.py:3063-3097`）。FTS5 在 `.claude-plugin/plugin.json:4` 与 `:12` 中被
 宣传，`/cc-mem status` 会报告当前实际走哪条路径（`cli/mem.py` 的 `cmd_status`）。
 
 `memories` 上的 `supersedes_id` 列（迁移 `v3_supersedes`，`db.py:168`）把反补丁的
 取代链显式化：当 `upsert_smart` 判定一条新记忆取代了一条旧记忆时，新行会回链到旧行
-的 ID（旧行被归档）。通过 `db.get_supersede_chain(memory_id)`（`db.py:1468-1483`）走一遍
-链条，就能看到完整的更新历史。`content_hash`（迁移 `v2_content_hash`，`db.py:1468-1483`）
+的 ID（旧行被归档）。通过 `db.get_supersede_chain(memory_id)`（`db.py:1604-1619`）走一遍
+链条，就能看到完整的更新历史。`content_hash`（迁移 `v2_content_hash`，`db.py:1604-1619`）
 是归一化内容的 `sha256[:16]`，用于廉价的精确重复检查
-（`db.compute_content_hash` 在 `db.py:2023-2025`，`db.find_by_hash` 在
-`db.py:2023-2025`）。
+（`db.compute_content_hash` 在 `db.py:2162-2164`，`db.find_by_hash` 在
+`db.py:2162-2164`）。
 
 迁移按 `_MIGRATIONS` 列表（`db.py:121-284`）的顺序应用，并记录在 `_migrations` 中。目前
 已交付的层级：**v1**（topic 列 + 索引）、**v2**（content_hash、observations、
@@ -411,8 +411,8 @@ regenerate_memory_index(db, project_id, memory_dir)   ← MEMORY.md 刷新
   所有钩子调用方都会传（`pre_compact.py:435`、`stop.py:253`、
   `session_start.py:1056`）；同步 PreCompact 支路还会在其余状态变更之后再刷一次
   （`pre_compact.py:783`）。
-- 单发调用方显式调用 `regenerate_memory_index`：`cli/mem.py:1147` 与 `:584`、
-  `mcp/server.py:647`、`ui/dashboard.py:1674`、`ui/web_viewer.py:1035`，外加
+- 单发调用方显式调用 `regenerate_memory_index`：`cli/mem.py:1171` 与 `:584`、
+  `mcp/server.py:647`、`ui/dashboard.py:1688`、`ui/web_viewer.py:1035`，外加
   `skills/ccm-load` 的内联脚本（`skills/ccm-load/SKILL.md:308, 318`）。
   `core/idle.py:96` 与 `hooks/consolidate_async.py:276` 也会在维护之后刷新它。
 
@@ -506,7 +506,7 @@ SessionStart：
 上面的调用签名都是真实的：`write_progress_md(db, project_id, memory_dir)`
 （`core/progress.py:331-490`；调用点 `pre_compact.py:752`、`stop.py:474`、
 `user_prompt.py:133`、`session_start.py:912`、`mcp/server.py:243`、
-`cli/mem.py:1238`）。PROGRESS.md 的结构规格见
+`cli/mem.py:1262`）。PROGRESS.md 的结构规格见
 [docs/CONTRACTS.md](CONTRACTS.md#handoff-contract)。
 
 ### 被杀运行检测（v2.4.2）
@@ -731,7 +731,7 @@ agent 自己的 `cd` 走：一个在仓库根启动、却在 `cli/` 里跑过一
 共 **20** 个，其中 **4** 个是**合法地嵌套**在另一个项目里的——单是
 `Claude-Code-Local/companion` 就有 3725 条记忆，并且自带 `.git`。野生子库与刻意嵌套的
 子项目在磁盘上**逐字节不可区分**：两者都有 `.ccm/memory.db`，其 `projects` 行都写着
-自己那个目录，因为 `upsert_project`（`core/db.py:1041-1073`）记录的就是别人递给它的 cwd。
+自己那个目录，因为 `upsert_project`（`core/db.py:1172-1209`）记录的就是别人递给它的 cwd。
 "最外端胜"会把这种歧义无条件地朝毁数据的方向解决——升级后第一次在 `companion` 里开会话，
 3725 条记忆就会悄无声息地失联。
 
@@ -740,6 +740,23 @@ agent 自己的 `cd` 走：一个在仓库根启动、却在 `cli/` 里跑过一
 意味着合并两个 SQLite 文件——破坏性且不可逆——那属于一条需要用户确认的显式命令，而不属于
 每轮提示都会跑的 hook。
 
+**同一条规则在数据库内部同样成立。**`upsert_project` 把解析后的 cwd 记进 `projects.path`，
+而直到 v2.13.2，这个字串同时也是项目的身份：项目目录被移动或重命名后会多出第二行，第一行
+的所有记忆、会话、进度行、计划和指令在每个表面上都失联——SessionStart 注入 0 条记忆，
+`/cc-mem list` 打印 `(none)`，`status` 自己造出第二行并报告库是空的——而那些行就躺在一个
+`project_id` 之外。`cli/mem.py` 记录了这个症状（register C4），让用户手写 SQL 去看旧行；
+合并标记为了活过它长出了一个路径检查。现在，身份宣告是数据库的位置。
+`MemoryDB.upsert_project` 先按精确路径匹配行，再按 `core.layout.canonical_path`
+匹配——先 resolve 再 `normcase`：整棵树里每一次身份比较都用的这唯一一种可比拼写（合并
+标记、根解析器的 home 边界、仪表盘的项目注册表、`excluded_projects` 排除表）——只有在
+都不匹配、**且**数据库正位于 `<cwd>/.ccm/memory.db`（`core.layout.database_owner`）时，
+才把一行重新挂接到 `cwd`：取最近活跃、且所记录目录已不存在的那一行。所记录目录仍在别处
+存在的行属于另一个活着的目录，永不被拿走——即使它是文件里仅有的一行；不是 `cwd` 自己的
+数据库也永不重新挂接任何行，所以刻意共享同一文件的兄弟项目行保持自己的身份。`MemoryDB.find_project_id` 是提问类表面（`status`、`stats`、`list`、`sessions`、
+`keywords`）用的同一种查找：它会重新挂接，但永不插入。合并标记带着行的 `project_id`，
+所以重命名不再付出路径检查过去收取的"多跑一次合并"的代价；它的 `project_path` 也以解析后
+的形式存储，于是 CLI 文档规定的 `--project .` 能匹配 hook 拿到的绝对 cwd。
+
 `project_root`（`core/roots.py:587-632`）先解析出根。每个 hook 都在 `is_excluded`
 **之后**、且绝不在之前把 `cwd` 重新绑定到它：先解析会因为爬到未被排除的父目录，而把
 按子目录设置的排除范围稀释掉。自 v2.10.0 起这一先后顺序不再是每个 hook 各自遵守的
@@ -747,7 +764,7 @@ agent 自己的 `cd` 走：一个在仓库根启动、却在 `cli/` 里跑过一
 它对原始 cwd 跑 `is_excluded`，然后才锚定（stdin 解析同样经由 `parse_payload` 共享）。
 `tests/test_surfaces.py` 只在闸门内部断言一次顺序、拒绝任何 hook 直接 import 这两个
 守卫，`tools/falsify_fixes.py --case r10entryorder` 证明顺序反转会翻红。候选祖先链会在任何 home 目录之下、文件系统根之下、
-`.ccm-root` 钉之处以及 25 层处停止（`_chain`，`core/roots.py:267-295`）。先命中者胜：
+`.ccm-root` 钉之处以及 25 层处停止（`_chain`，`core/roots.py:315-343`）。先命中者胜：
 
 0. `cwd` 自己有 `.ccm/memory.db` → 就是 `cwd`。终止档，在其余一切之前。就是这一行
    让"永不弃养已有数据库"这条约束对今天存在的每一个库都成立。
@@ -755,7 +772,7 @@ agent 自己的 `cd` 走：一个在仓库根启动、却在 `cli/` 里跑过一
    这一档修复了所报告的 bug，因为 `CodeEraser/cli` 没有数据库而 `CodeEraser` 有。它不
    需要任何版本控制系统、不需要任何清单文件——对根本不是仓库的项目，这一点是决定性的。
 2. `CLAUDE_PROJECT_DIR`，当它指向链中某个目录时（`_from_env`，
-   `core/roots.py:566-584`）。刻意排在数据库两档**之后**：它记录的是 Claude Code 在
+   `core/roots.py:588-606`）。刻意排在数据库两档**之后**：它记录的是 Claude Code 在
    哪里启动，而这并不构成弃养一个数据库的授权。同样地，"必须在链内"也是要点——别的项目
    残留的值不得改道本项目。
 3. 项目标记——`.git`、`.hg`、`.svn`、`.ccm-root` 以及常见清单文件（`_MARKERS`）——
@@ -841,7 +858,7 @@ home 边界是双份的：环境所声称的（`HOME`/`USERPROFILE`/`Path.home()
 退出的；同一对 CLI 的两半不该在这件事上互相矛盾。
 
 因此，已存在的野生库会被原地留下——并且被**报告**出来，不至于隐形：`nested_databases`
-（`core/roots.py:658-709`）支撑着 `cc-mem status` 里的
+（`core/roots.py:724-789`）支撑着 `cc-mem status` 里的
 `[WARN] Separate database below this project` 一行，逐个点名并给出记忆条数。它是显式
 命令而不是 hook，因为它要走一遍目录树。`.ccm-root`——一个空文件——把某个目录钉成独立的
 根，这是"刻意嵌套在另一个项目里的项目"以及"任何被这些启发式读错的布局"的逃生舱。
@@ -973,7 +990,7 @@ home 边界是双份的：环境所声称的（`HOME`/`USERPROFILE`/`Path.home()
 
 ### 布局检测与检查现在一致了（v2.5 已修）
 
-检测同时接受两种形态：`mem.py:457` 测试
+检测同时接受两种形态：`mem.py:522` 测试
 `(legacy / "cc_memory").exists() or (legacy / "core" / "db.py").exists()`。检查此前
 与它自相矛盾：`_inspect_layout`（`mem.py:237-277`）把 `_REQUIRED_PLUGIN_FILES`
 （`mem.py:237-277`）中每一条带 `cc_memory/…` 前缀的条目都以布局**根目录**为基准解析，

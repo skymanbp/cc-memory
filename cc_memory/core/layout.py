@@ -245,6 +245,99 @@ def find_db_path(project_root):
     return find_memory_dir(project_root) / DB_FILENAME
 
 
+# ── identity: ONE comparable spelling of a path, and who owns a database ────
+#
+# Every decision of the form "do these two paths name the SAME directory"
+# goes through `canonical_path`. Before it existed each surface compared with
+# its own arithmetic and each had a blind spot for a legitimate spelling of
+# one directory: `db.upsert_project` resolved one side and stored it, so a
+# renamed project directory got a SECOND row and every memory, session,
+# progress row and directive of the first became invisible to every surface;
+# the consolidation marker `normcase`d without resolving, so the CLI's
+# documented `--project .` never matched a hook's absolute cwd and every
+# manual run was followed by a redundant background one; the root resolver's
+# home boundary held the unresolved `$HOME` against a resolved chain, so a
+# symlinked home was walked into; the dashboard registry `.lower()`ed on
+# every platform. Two spellings, one directory, two identities. This is the
+# join-site disease of v2.13.0 one level up: not the NAME of the state
+# directory spelled at 34 sites, but the IDENTITY of the project computed at
+# each one.
+
+def canonical_path(value):
+    """THE comparable spelling of a path: resolved, then `normcase`d. Never raises.
+
+    `resolve()` follows links, absolutises a relative spelling against the
+    process cwd and — on Windows — canonicalises drive letter and component
+    case from the filesystem; `normcase` then folds what the platform's
+    filesystem folds and nothing more (the v2.12.1 rule: a different-case
+    path IS another directory on POSIX). The degradation order is the one
+    `core/modes._norm_path` proved out for the opt-out list, which now
+    delegates here: an unreachable share or illegal name falls back to
+    `abspath`, an embedded NUL to the raw text, and a value that is not a
+    path at all spells as `""` — which matches nothing, so a broken input can
+    only ever MISS, never capture a neighbour.
+    """
+    if isinstance(value, Path):
+        text = str(value)
+    elif isinstance(value, str):
+        text = value
+    else:
+        try:
+            text = str(_safe_path(value)) if value is not None else ""
+        except Exception:
+            return ""
+        if text == "." and value != ".":
+            # why: _safe_path spells every non-path as Path("."); as an
+            # IDENTITY that would make a garbage value equal to the process
+            # cwd, which is precisely the false match this function exists
+            # to rule out
+            return ""
+    if not text:
+        return ""
+    try:
+        return os.path.normcase(str(Path(text).resolve()))
+    except Exception:
+        pass
+    try:
+        return os.path.normcase(os.path.abspath(text))
+    except Exception:
+        pass
+    try:
+        return os.path.normcase(text)
+    except Exception:
+        return ""
+
+
+def same_path(a, b):
+    """True when `a` and `b` are one directory under `canonical_path`. Never raises."""
+    ca = canonical_path(a)
+    return bool(ca) and ca == canonical_path(b)
+
+
+def database_owner(db_path):
+    """The project directory a `memory.db` belongs to by its LOCATION, or None.
+
+    `<root>/.ccm/memory.db` and the pre-v2.13.0 `<root>/memory/memory.db`
+    both belong to `<root>`. This is the "an existing database is a
+    declaration of identity" rule of docs/ARCHITECTURE.md §7 made callable:
+    the file's place on disk says whose project it is, and the `path` string
+    stored INSIDE it is a record that can go stale when the directory moves.
+    `MemoryDB.upsert_project` uses this to let a moved or renamed project's
+    row follow its database instead of minting a second identity. Anything
+    not shaped like a state directory's database has no owner this function
+    will vouch for — a caller handing in an arbitrary file gets None.
+    """
+    try:
+        p = Path(db_path)
+        if p.name != DB_FILENAME:
+            return None
+        if p.parent.name not in (MEMORY_DIRNAME, LEGACY_MEMORY_DIRNAME):
+            return None
+        return p.parent.parent
+    except Exception:
+        return None
+
+
 def _has_ccm_gitignore(directory):
     """True when `directory/.gitignore` carries this plugin's marker line."""
     gi = directory / ".gitignore"

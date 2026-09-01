@@ -219,8 +219,29 @@ def _home_dirs():
     which degrades to the pre-v2.6.0 behaviour, never to the home database.
     """
     out = set()
+
+    def _add(candidate):
+        # BOTH spellings: as given, and resolved. `project_root` resolves the
+        # cwd before walking (`Path(cwd).resolve()` below), so every chain
+        # entry is a resolved path — while `Path.home()` and the env vars
+        # come back UNRESOLVED. When `/home` is a symlink onto another volume
+        # (or the profile is reached through any link), the unresolved
+        # boundary matched nothing on the resolved chain and the walk went
+        # straight through home to the `memory.db` a session run in `~` had
+        # left there — the exact adoption this set exists to prevent.
+        # Measured: HOME=/tmp/x/home/alice via a link to /tmp/x/vol/home/alice,
+        # project_root(<home>/proj/src) -> <home>. A false entry can only stop
+        # the walk one level early, so adding a spelling is always safe.
+        out.add(_norm(candidate))
+        try:
+            out.add(_norm(Path(candidate).resolve()))
+        except Exception:
+            # why: an unresolvable home spelling (dangling link, unreachable
+            # share) still contributes its literal form above
+            pass
+
     try:
-        out.add(_norm(Path.home()))
+        _add(Path.home())
     except Exception:
         # why: no resolvable home (bare container, no passwd entry). The env
         # vars below may still name one; if none does, `_is_profile_dir` and
@@ -229,7 +250,7 @@ def _home_dirs():
     for var in ("USERPROFILE", "HOME"):
         val = os.environ.get(var, "")
         if val:
-            out.add(_norm(Path(val)))
+            _add(Path(val))
     out.discard("")
     return out
 

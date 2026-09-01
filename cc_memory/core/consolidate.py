@@ -1091,13 +1091,35 @@ BACKLOG_DAYS = 7.0
 _BACKLOG_MIN_ROWS_FOR_DAYS = 10
 
 
-def read_consolidation_marker(memory_dir: Path, cwd: str) -> Dict:
+def _resolved_text(cwd) -> str:
+    """`str(Path(cwd).resolve())`, or the literal text when resolving raises."""
+    try:
+        return str(Path(cwd).resolve())
+    except Exception:
+        return str(cwd)
+
+
+def read_consolidation_marker(memory_dir: Path, cwd: str,
+                              project_id: Optional[int] = None) -> Dict:
     """.ccm/.last_consolidation.json, or {} when absent / corrupt / FOREIGN.
 
-    The path check is the same rule consolidate_async enforces (register C4 /
-    r6-B8): the marker follows the DIRECTORY but its counters describe a
-    project ROW keyed by path, so after a rename the stale marker must read
-    as never-run — the price is one early consolidation, async and budgeted.
+    The marker's counters (`last_session_count`, `last_memory_id`) describe
+    one project ROW, so a marker that describes another row must read as
+    never-run. The row is identified two ways, either of which is enough:
+
+    * `project_id` — stamped by the writer since the identity fix that let a
+      renamed project's row follow its database (`MemoryDB.upsert_project`).
+      A rename keeps the id, so the marker keeps counting for the same row
+      and the "one early consolidation per rename" price (register C4 /
+      r6-B8) is no longer paid at all.
+    * `project_path` — the fallback for markers written before the id was
+      stamped, compared through `core.layout.canonical_path` on BOTH sides.
+      The old check `normcase`d without resolving, so the CLI's documented
+      `--project .` (commands/cc-mem.md passes exactly that) stored "." and
+      never matched the absolute cwd a hook reads with: every manual
+      `/cc-mem consolidate` read as foreign and the Stop probe kicked a
+      redundant background run over the database that had just been cleaned
+      — the very redundant run the shared writer was added to prevent.
     """
     try:
         marker = json.loads((memory_dir / ".last_consolidation.json")
@@ -1106,16 +1128,12 @@ def read_consolidation_marker(memory_dir: Path, cwd: str) -> Dict:
         return {}
     if not isinstance(marker, dict):
         return {}
-    # normcase, not ==: the hook path writes the cwd Claude Code handed it
-    # ("d:\\Projects\\x") while the CLI writes an anchored resolve()
-    # ("D:\\Projects\\x"). Windows paths are case-insensitive; this check
-    # exists to catch RENAMES, and a case-only mismatch reading as "foreign"
-    # would make every manual `/cc-mem consolidate` invisible to the
-    # backpressure probe — the exact redundant-run the shared marker writer
-    # exists to prevent.
-    import os as _os
-    if (_os.path.normcase(str(marker.get("project_path") or ""))
-            != _os.path.normcase(str(cwd))):
+    from core.layout import same_path
+    stamped = marker.get("project_id")
+    if (project_id is not None and isinstance(stamped, int)
+            and not isinstance(stamped, bool) and stamped == project_id):
+        return marker
+    if not same_path(marker.get("project_path") or "", cwd):
         return {}
     return marker
 
@@ -1133,7 +1151,11 @@ def write_consolidation_marker(db, project_id, memory_dir: Path, cwd: str,
     """
     marker = {
         "last_session_count": db.get_session_count(project_id),
-        "project_path": str(cwd),
+        # The row the counters describe, and the directory it lived in when
+        # stamped (resolved, so a relative `--project .` is stored as the
+        # absolute path a hook will compare against).
+        "project_id": project_id,
+        "project_path": _resolved_text(cwd),
         "ts": datetime.now().isoformat(timespec="seconds"),
         "last_memory_id": db.max_memory_id(project_id),
         "final_active": results.get("final_active"),

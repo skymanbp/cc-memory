@@ -9,6 +9,108 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### A project's identity is its database, not the path string inside it
+
+A whole-repository debug pass — six read-only reviewers over disjoint file
+sets, every finding reproduced before it was reported — surfaced 38 defects.
+Eight of them shared one upstream cause, and that cause is what this entry
+fixes: `projects.path`, the resolved cwd, WAS the project's identity, and
+every surface decided "which project is this" with its own path arithmetic —
+`resolve()` on one side and the raw string on the other, `normcase` without
+`resolve`, `.lower()` on every platform, a state-directory join spelled by
+hand. Two spellings of one directory were two identities. `docs/ARCHITECTURE.md`
+§7 had stated the rule for the root resolver since v2.6.0 — "an existing
+database is a declaration of identity" — and the row inside the database
+never got it.
+
+### Fixed
+
+- **Moving or renaming a project directory made its memory vanish.**
+  `MemoryDB.upsert_project` inserted a second `projects` row for the new
+  path, and every memory, session, progress row, plan and directive of the
+  first went dark on every surface — SessionStart injected 0 memories,
+  `/cc-mem list` printed `(none)`, `status` reported an empty database —
+  while the rows sat one `project_id` away. `cli/mem.py` documented the
+  symptom (register C4) and told the user to inspect the old rows by hand.
+  The row now follows its database: a miss is matched by
+  `core.layout.canonical_path`, and only when the database sits at
+  `<cwd>/.ccm/memory.db` (`core.layout.database_owner`) is a row
+  RE-ATTACHED — the most recently active row whose directory no longer
+  exists. A row whose directory still exists is another live directory's
+  and is never taken, not even as the only row in the file (a first draft
+  did, and `tests/test_surfaces.py` §9a caught it taking a sibling's row);
+  a database that is not the caller's own never re-attaches anything, so a
+  sibling row sharing one file keeps its identity. Measured: a project moved to a new directory injects the
+  same memories on its next SessionStart and its `projects` table holds one
+  row.
+- **`/cc-mem status` minted the second row itself.** The health check looked
+  the row up through `upsert_project`, so run after a rename it created the
+  empty row and reported an empty database — and from then on `stats`,
+  `list` and `search` answered 0 with no hint. `status`, `stats`, `list`,
+  `sessions` and `keywords` use `MemoryDB.find_project_id` now: it
+  re-attaches a moved project's own row and NEVER inserts, and a database
+  whose rows all belong to other, still-existing directories is reported as
+  one.
+- **The consolidation marker never matched the CLI's documented
+  `--project .`.** `write_consolidation_marker` stored the cwd verbatim and
+  `read_consolidation_marker` compared with `normcase` alone, so
+  `/cc-mem consolidate` (which `commands/cc-mem.md` invokes with
+  `--project .`) stored `"."`, every hook read the marker as FOREIGN, and
+  the Stop probe kicked a redundant background consolidation — the exact
+  run the v2.12.0 shared writer was added to prevent. The marker now carries
+  the row's `project_id` (so a rename does not cost the "one early
+  consolidation" the path check used to charge either) and stores the
+  resolved path; the fallback path compare is canonical on both sides.
+- **`/save-memories` wrote every memory into a database nothing read.** The
+  skill's inline script still joined the pre-v2.13.0 `memory/` name itself,
+  so on a project already initialised under `.ccm/` it created and filled
+  `memory/memory.db` while hooks, CLI, MCP and consolidation read `.ccm/`.
+  The v2.13.0 sweep registered two deliberate literal copies and missed this
+  third inline script. It asks `core.layout.memory_dir` now, like every
+  other surface; the smoke gate scans BOTH skills for a hand-spelled join.
+- **The root resolver's home boundary held the unresolved `$HOME` against a
+  resolved chain.** `project_root` resolves the cwd before walking, so when
+  `/home` (or the profile) is reached through a symlink the boundary matched
+  nothing and the walk went through home to the `memory.db` a session run in
+  `~` had left there — the adoption the boundary exists to prevent.
+  `_home_dirs` now carries every spelling resolved too.
+- **The dashboard's project registry folded case on every platform.**
+  `.lower()` behind a comment saying "case-insensitive on Windows" collapsed
+  two real POSIX directories `Foo` and `foo` into one entry. The key is
+  `canonical_path` (a `_registry_key` staticmethod, driven headlessly by
+  `tests/test_surfaces.py` §8).
+- **`core.modes._norm_path` was a second copy of the same degradation
+  order.** It delegates to `canonical_path` now, so the opt-out list, the
+  projects table, the marker and the registry cannot disagree about whether
+  two paths are one directory.
+
+### Added
+
+- `core.layout.canonical_path`, `same_path`, `database_owner`;
+  `MemoryDB.find_project_id`, `MemoryDB.project_paths`; the marker's
+  `project_id`; `DashboardApp._registry_key`.
+- `tests/smoke_test.py` § *identity* (a moved project keeps its row, a
+  sibling's row and other live directories' rows are never taken, `status`
+  and `list` answer without minting, the marker follows the row across a
+  rename and matches `--project .`, the home boundary knows its resolved
+  spelling, both skills ask layout for the state directory and the
+  save-memories body is RUN against an initialised project); eight
+  falsification cases `r13*`, each driven RED individually (`r13home` and
+  `r13registry` on POSIX — on Windows without the symlink privilege, or with
+  a case-folding filesystem, the two spellings they distinguish coincide).
+
+### Reported, not fixed here
+
+The other thirty findings of the same pass — among them a `<private>` span
+stripper that is case-sensitive while the authority-marker regex is not, a
+Stop-hook escape budget that never resets and so turns plan enforcement
+advisory for the rest of a session after three resolved refusals, a bare
+`Path.home()` in `core/auth.py` that discards an explicit `ANTHROPIC_API_KEY`
+when no home resolves, and four gate checkers whose necessary conditions are
+treated as sufficient — were reproduced with scripts and handed to the
+maintainer as a report. Each has its own upstream cause; none of them is this
+one.
+
 ## [2.13.2] — 2026-08-30
 
 ### The rename reaches the prose — and one link that was never prose at all

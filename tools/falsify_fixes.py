@@ -1989,6 +1989,86 @@ def _break_r12stepref(root):
            "            elif False:  # BREAKAGE: retargeting is invisible")
 
 
+# ── identity round: the project row follows its database ─────────────────────
+
+@case("r13reattach", ["tests/smoke_test.py"],
+      "never re-attach a moved project's own row -> a rename mints a second row and every memory goes dark")
+def _break_r13reattach(root):
+    _patch(root, f"{PKG}/core/db.py",
+           "        owner = database_owner(self.db_path)\n"
+           "        if owner is None or not rows or canonical_path(owner) != canon:\n"
+           "            return None",
+           "        owner = database_owner(self.db_path)\n"
+           "        if True:  # BREAKAGE: identity is the path string again\n"
+           "            return None")
+
+
+@case("r13statuscreate", ["tests/smoke_test.py"],
+      "let `status` look the row up through upsert_project -> a health check mints a row in a foreign database")
+def _break_r13statuscreate(root):
+    _patch(root, f"{PKG}/cli/mem.py",
+           "    pid = db.find_project_id(project)\n"
+           "    if pid is None:\n"
+           "        others = db.project_paths()",
+           "    pid = db.upsert_project(project)  # BREAKAGE: a question creates\n"
+           "    if pid is None:\n"
+           "        others = db.project_paths()")
+
+
+@case("r13markerid", ["tests/smoke_test.py"],
+      "drop the marker's project_id match -> a rename makes the marker foreign and consolidation re-runs")
+def _break_r13markerid(root):
+    _patch(root, f"{PKG}/core/consolidate.py",
+           "    if (project_id is not None and isinstance(stamped, int)\n"
+           "            and not isinstance(stamped, bool) and stamped == project_id):\n"
+           "        return marker",
+           "    if False:  # BREAKAGE: the id no longer identifies the row\n"
+           "        return marker")
+
+
+@case("r13markerpath", ["tests/smoke_test.py"],
+      "store the marker's cwd unresolved again -> the CLI's `--project .` writes '.' and no hook ever matches it")
+def _break_r13markerpath(root):
+    _patch(root, f"{PKG}/core/consolidate.py",
+           '        "project_path": _resolved_text(cwd),',
+           '        "project_path": str(cwd),  # BREAKAGE: relative spelling stored')
+
+
+@case("r13markersame", ["tests/smoke_test.py"],
+      "compare marker paths with bare normcase again -> an unresolved reader spelling reads as foreign")
+def _break_r13markersame(root):
+    _patch(root, f"{PKG}/core/consolidate.py",
+           '    if not same_path(marker.get("project_path") or "", cwd):',
+           '    if (__import__("os").path.normcase(str(marker.get("project_path") or ""))\n'
+           '            != __import__("os").path.normcase(str(cwd))):  # BREAKAGE')
+
+
+@case("r13home", ["tests/smoke_test.py"],
+      "drop the resolved home spelling from the boundary set -> a symlinked home is walked into (detected on POSIX; on Windows without the symlink privilege the two spellings coincide)")
+def _break_r13home(root):
+    _patch(root, f"{PKG}/core/roots.py",
+           "            out.add(_norm(Path(candidate).resolve()))",
+           "            pass  # BREAKAGE: unresolved spelling only")
+
+
+@case("r13skilldir", ["tests/smoke_test.py"],
+      "make save-memories join the legacy state-directory name again -> memories written where nothing reads")
+def _break_r13skilldir(root):
+    _patch(root, "skills/save-memories/SKILL.md",
+           "mem_dir = _state_dir(project)\n"
+           "db = MemoryDB(mem_dir / 'memory.db')",
+           "mem_dir = Path(project) / 'memory'\n"
+           "db = MemoryDB(mem_dir / 'memory.db')")
+
+
+@case("r13registry", ["tests/test_surfaces.py"],
+      "fold the dashboard registry key with .lower() again -> two POSIX directories collapse into one entry (detected on POSIX)")
+def _break_r13registry(root):
+    _patch(root, f"{PKG}/ui/dashboard.py",
+           "        return canonical_path(path)",
+           "        return str(path).lower()  # BREAKAGE: folds case on every platform")
+
+
 def verify_anchors():
     """Count every registered case's breakage anchors WITHOUT running a gate.
 

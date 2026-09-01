@@ -223,22 +223,25 @@ def main():
 
         n_sessions = db.get_session_count(project_id)
         interval = _auto_interval()
-        # The marker read is path-validated (core.consolidate.
-        # read_consolidation_marker): the marker follows the DIRECTORY, but
-        # session counts follow the project ROW, which is keyed by path — so
-        # after a rename the same state directory carried a marker counted against
-        # the OLD row while the new row's count restarted at 0, and
-        # `n_sessions - last` went negative: consolidation silently stalled
-        # for interval+last more sessions (register C4, measured: marker
-        # last=6, new row sessions=0, next run at session 11). Any marker not
-        # stamped for THIS path — a different path OR no path at all — reads
-        # as never-run (register r6-B8): grandfathering pathless legacy
-        # markers kept the rename residual open, and the price is ONE early
+        # The marker read is row-validated (core.consolidate.
+        # read_consolidation_marker): its counters describe one project ROW,
+        # and it used to be keyed by PATH — so after a directory rename the
+        # same state directory carried a marker counted against the OLD row
+        # while a NEW row's count restarted at 0, and `n_sessions - last`
+        # went negative: consolidation silently stalled for interval+last
+        # more sessions (register C4, measured: marker last=6, new row
+        # sessions=0, next run at session 11). The rename no longer mints a
+        # second row (MemoryDB.upsert_project re-attaches a moved project's
+        # own row), and the marker carries the row's id, so the SAME id keeps
+        # counting across a rename. A marker stamped for another row — a
+        # different id and a different directory, or no stamp at all — still
+        # reads as never-run (register r6-B8): grandfathering unstamped
+        # legacy markers kept the residual open, and the price is ONE early
         # consolidation per project, async and budget-gated.
         from core.consolidate import (consolidation_backlog,
                                       read_consolidation_marker,
                                       write_consolidation_marker)
-        marker = read_consolidation_marker(memory_dir, cwd)
+        marker = read_consolidation_marker(memory_dir, cwd, project_id)
         last = int(marker.get("last_session_count", 0) or 0)
 
         # Cadence gate (race-immune; see module docstring). Two ways to be

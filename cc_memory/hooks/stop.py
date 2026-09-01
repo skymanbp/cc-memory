@@ -415,7 +415,7 @@ def _maybe_kick_consolidation(cwd, memory_dir, db, project_id):
     """
     from core.consolidate import (consolidation_backlog,
                                   read_consolidation_marker)
-    marker = read_consolidation_marker(memory_dir, str(cwd))
+    marker = read_consolidation_marker(memory_dir, str(cwd), project_id)
     reason = consolidation_backlog(db, project_id, marker)
     if reason is None:
         return False

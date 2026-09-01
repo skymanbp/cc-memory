@@ -134,35 +134,44 @@ def _bounded_limit(value):
     return min(n, MemoryDB._MAX_SEARCH_LIMIT)
 
 
-def _require_project_id(conn, project):
-    """The `projects.id` this --project resolves to — or a visible refusal.
-
-    One memory.db can hold SEVERAL project rows (a directory rename creates a
-    second one — register C4 — and nested layouts are real), and `list` /
-    `stats` used to query with no project predicate at all: after a rename,
-    `list` printed the other project's memories and `stats` counted both
-    (register E1). A database whose rows all belong to OTHER paths is a
-    finding to report, not a scope to silently widen.
-    """
+def _foreign_rows_notice(project, others):
+    """The refusal every read command prints for a database that is not
+    this project's own — one text, so the four callers cannot drift."""
     path = str(Path(project).resolve())
-    row = conn.execute("SELECT id FROM projects WHERE path = ?",
-                       (path,)).fetchone()
-    if row:
-        return row["id"]
-    others = [r["path"] for r in conn.execute(
-        "SELECT path FROM projects ORDER BY last_active DESC").fetchall()]
     print(f"Error: this database has no project row for {path}.")
     if others:
         print("  It holds row(s) for: " + ", ".join(others[:5]))
-        # NOT "point --project at the old path" (register r6-C13): after a
-        # rename the old path no longer exists, and `_resolve_db` derives the
-        # database FROM the --project path — so that advice cannot work. The
-        # row is created by the first hook that runs here.
-        print("  A renamed project keeps its rows under the old path. Run one "
-              "Claude session in this directory (any hook creates the new "
-              "row), or inspect the old rows with:")
+        # Those directories still EXIST (a row whose directory is gone would
+        # have been re-attached to this one by MemoryDB.find_project_id), so
+        # this file is not this project's own history: a database copied in
+        # from another project, or a sibling that shares it. Not "run one
+        # Claude session here" (register r6-C13): a hook would now re-attach
+        # only what find_project_id already declined to.
+        print("  Those directories still exist, so this database is another "
+              "project's (copied in, or shared). Inspect its rows with:")
         print(f"    /cc-mem sql \"SELECT * FROM memories WHERE project_id="
               f"(SELECT id FROM projects WHERE path='{others[0]}') LIMIT 20\"")
+
+
+def _require_project_id(conn, project, db_path):
+    """The `projects.id` this --project resolves to — or a visible refusal.
+
+    One memory.db can hold SEVERAL project rows (nested layouts are real, and
+    through v2.13.2 a directory rename minted a second one — register C4),
+    and `list` / `stats` used to query with no project predicate at all:
+    after a rename, `list` printed the other project's memories and `stats`
+    counted both (register E1). The lookup is `MemoryDB.find_project_id`:
+    exact or canonical match, and a moved or renamed project's own row is
+    re-attached rather than reported missing — but it NEVER inserts, because
+    a question does not create state. A database whose rows all belong to
+    OTHER, still-existing directories is a finding to report, not a scope to
+    silently widen.
+    """
+    db = MemoryDB(db_path)
+    pid = db.find_project_id(project)
+    if pid is not None:
+        return pid
+    _foreign_rows_notice(project, db.project_paths())
     sys.exit(1)
 
 
@@ -767,7 +776,22 @@ def cmd_status(args):
         return
 
     db = MemoryDB(db_path)
-    pid = db.upsert_project(project)
+    # A health check asks; it does not register. `upsert_project` here used
+    # to mint a second project row after a directory rename and report the
+    # database as empty — and from then on `stats`/`list`/`search` answered 0
+    # with no hint (the row they scoped to was the new, empty one).
+    # find_project_id matches or re-attaches this project's own row and
+    # never inserts; a database whose rows are other directories' is a
+    # finding, printed as one.
+    pid = db.find_project_id(project)
+    if pid is None:
+        others = db.project_paths()
+        print(f"  [FAIL] Database: holds no row for this directory; its "
+              f"{len(others)} row(s) belong to "
+              f"{', '.join(others[:3]) or '(nothing)'}")
+        print("         Nothing was created. A database copied in from "
+              "another project, or shared with one — see `/cc-mem stats`.")
+        return
     stats = db.get_stats(pid)
     print(f"  [OK]   Database: {stats['n_memories']} memories, "
           f"{stats['n_sessions']} sessions, {stats.get('n_topics', 0)} topics")
@@ -841,7 +865,7 @@ def cmd_stats(args):
     # can hold several project rows, and unscoped counts summed them all.
     _, db_path, name = _resolve_db(args.project)
     conn = _require_db(db_path)
-    pid = _require_project_id(conn, args.project)
+    pid = _require_project_id(conn, args.project, db_path)
     print(f"\n{'='*50}\n  Memory stats: {name}\n{'='*50}")
     s = conn.execute(
         "SELECT COUNT(*) n, MIN(compacted_at) first, MAX(compacted_at) last "
@@ -900,7 +924,7 @@ def cmd_list(args):
     # the same DB holds a second project row, and the unscoped query listed
     # the other project's memories under this one's name. Session recency by
     # id, not the compacted_at string (see core/db.py's ordering note).
-    pid = _require_project_id(conn, args.project)
+    pid = _require_project_id(conn, args.project, db_path)
     cat = args.category
     recent = [r[0] for r in conn.execute(
         "SELECT id FROM sessions WHERE project_id = ? "
@@ -979,7 +1003,7 @@ def cmd_sessions(args):
     # one memory.db can hold several project rows, and an unpredicated query
     # printed the OTHER project's sessions — archive_path basenames included —
     # under this project's heading.
-    pid = _require_project_id(conn, args.project)
+    pid = _require_project_id(conn, args.project, db_path)
     rows = conn.execute(
         """SELECT s.id, s.trigger_type, s.compacted_at, s.msg_count,
                   COUNT(m.id) n_mem, s.archive_path
@@ -1192,7 +1216,7 @@ def cmd_keywords(args):
     conn = _require_db(db_path)
     # Same register-E1 scope defect as cmd_sessions: `keywords.project_id` is
     # NOT NULL and cmd_stats already filters it; this listing did not.
-    pid = _require_project_id(conn, args.project)
+    pid = _require_project_id(conn, args.project, db_path)
     rows = conn.execute(
         "SELECT keyword, frequency, last_seen FROM keywords "
         "WHERE project_id = ? ORDER BY frequency DESC LIMIT 40",

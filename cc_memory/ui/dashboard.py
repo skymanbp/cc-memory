@@ -44,7 +44,7 @@ from core.db import CATEGORIES, MemoryDB
 # The state directory, resolved rather than spelled (v2.13.0).
 # `find_db_path` is the read-only twin: the project SCANS below must
 # never rename the state directory of a project merely being listed.
-from core.layout import (DB_FILENAME, find_db_path,
+from core.layout import (DB_FILENAME, canonical_path, find_db_path,
                          memory_dir as resolve_memory_dir)
 from core.encoding_setup import enable_utf8_io
 from core.extractor import (
@@ -554,13 +554,26 @@ class DashboardApp:
             if hasattr(self, "status_var"):
                 self.status_var.set(f"Could not save project list: {e}")
 
+    @staticmethod
+    def _registry_key(path) -> str:
+        """The spelling two registry entries are compared by.
+
+        `core.layout.canonical_path`, not `.lower()`: the old key folded case
+        on EVERY platform behind a comment saying "case-insensitive on
+        Windows", so on Linux two real directories `Foo` and `foo` collapsed
+        into one entry and the second could never be registered — the
+        v2.12.1 per-platform rule (`normcase` folds only what the filesystem
+        folds) applied to the one identity compare that had not heard of it.
+        A staticmethod so tests/test_surfaces.py §8 can drive it headlessly.
+        """
+        return canonical_path(path)
+
     def _add_to_registry(self, project_path: str):
         """Add a project to the persistent registry (dedup)."""
         projects = self._load_project_registry()
         resolved = str(Path(project_path).resolve())
-        # Dedup (case-insensitive on Windows)
-        existing_lower = {p.lower() for p in projects}
-        if resolved.lower() not in existing_lower:
+        existing = {self._registry_key(p) for p in projects}
+        if self._registry_key(resolved) not in existing:
             projects.append(resolved)
             self._save_project_registry(projects)
         return projects
@@ -570,7 +583,7 @@ class DashboardApp:
         # Start with the FULL saved registry — including paths that are
         # currently unreachable, so they survive this write.
         projects = self._load_project_registry()
-        known_lower = {p.lower() for p in projects}
+        known = {self._registry_key(p) for p in projects}
 
         # Scan common locations for undiscovered projects
         search_dirs = []
@@ -585,9 +598,9 @@ class DashboardApp:
                     db_path = find_db_path(child)
                     if db_path.exists():
                         resolved = str(child.resolve())
-                        if resolved.lower() not in known_lower:
+                        if self._registry_key(resolved) not in known:
                             projects.append(resolved)
-                            known_lower.add(resolved.lower())
+                            known.add(self._registry_key(resolved))
             except PermissionError:
                 # why: an unreadable scan root (permissions, offline share) is
                 # not an error for discovery — the registry still stands
@@ -713,15 +726,16 @@ class DashboardApp:
             if not path:
                 return
             current = list(listbox.get(0, tk.END))
-            current_paths = {c.replace("[no DB] ", "").lower() for c in current}
+            current_paths = {self._registry_key(c.replace("[no DB] ", ""))
+                             for c in current}
             found = 0
             try:
                 for child in Path(path).iterdir():
                     if child.is_dir() and find_db_path(child).exists():
                         resolved = str(child.resolve())
-                        if resolved.lower() not in current_paths:
+                        if self._registry_key(resolved) not in current_paths:
                             listbox.insert(tk.END, resolved)
-                            current_paths.add(resolved.lower())
+                            current_paths.add(self._registry_key(resolved))
                             found += 1
             except PermissionError:
                 pass

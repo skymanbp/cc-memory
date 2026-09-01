@@ -342,7 +342,7 @@ project-local at `<project>/.ccm/memory.db`, WAL mode:
 
 | Table | Purpose |
 |-------|---------|
-| `projects` | One row per project path (`db.py:37`); carries `mode` since migration `v2_project_mode` (`db.py:144`) and the durable observer cursor `obs_watermark` since `v7_projects_obs_watermark` |
+| `projects` | One row per project (`db.py:37`) — identified by the database it sits in, not by the `path` string it records: a moved or renamed directory re-attaches its own row instead of minting a second one (§7); carries `mode` since migration `v2_project_mode` (`db.py:144`) and the durable observer cursor `obs_watermark` since `v7_projects_obs_watermark` |
 | `sessions` | One row per compaction event (`db.py:46`); carries `complete` since `v7_sessions_complete` (backfilled, so pre-v7 rows read as complete) |
 | `memories` | Extracted facts (category, importance, topic, content_hash, **supersedes_id**, last_referenced_at) (`db.py:57`) |
 | `topics` | Consolidated summaries per topic name (versioned) (`db.py:71`) |
@@ -359,9 +359,9 @@ Twelve tables, matching `CLAUDE.md` § "Database schema (12 tables)".
 
 Plus `memories_fts` — an FTS5 virtual table over `memories` (`core/db.py:455-458`),
 kept in sync by three triggers (`core/db.py:459-478`, migration `v2_fts5` at
-`db.py:2906-2940`). It is created only when the local SQLite build has FTS5; otherwise
-`db.search_fts` (`core/db.py:2906-2940`) falls back to `LIKE ? ESCAPE '\'`
-(`core/db.py:2906-2940`). FTS5 is advertised in `.claude-plugin/plugin.json:4`
+`db.py:3063-3097`). It is created only when the local SQLite build has FTS5; otherwise
+`db.search_fts` (`core/db.py:3063-3097`) falls back to `LIKE ? ESCAPE '\'`
+(`core/db.py:3063-3097`). FTS5 is advertised in `.claude-plugin/plugin.json:4`
 and `:12`, and `/cc-mem status` reports which path is live (`cli/mem.py`,
 `cmd_status`).
 
@@ -369,11 +369,11 @@ The `supersedes_id` column on `memories` (migration `v3_supersedes`,
 `db.py:168`) makes the anti-patch chain explicit: when `upsert_smart` decides a
 new memory supersedes an old one, the new row links back to the old row's ID
 (and the old row is archived). Walking the chain via
-`db.get_supersede_chain(memory_id)` (`db.py:1468-1483`) shows the full update
-history. `content_hash` (migration `v2_content_hash`, `db.py:1468-1483`) is
+`db.get_supersede_chain(memory_id)` (`db.py:1604-1619`) shows the full update
+history. `content_hash` (migration `v2_content_hash`, `db.py:1604-1619`) is
 `sha256[:16]` of the normalized content, used for the cheap exact-duplicate
-check (`db.compute_content_hash` at `db.py:2023-2025`, `db.find_by_hash` at
-`db.py:2023-2025`).
+check (`db.compute_content_hash` at `db.py:2162-2164`, `db.find_by_hash` at
+`db.py:2162-2164`).
 
 Migrations are applied in order from the `_MIGRATIONS` list (`db.py:121-284`) and
 recorded in `_migrations`. Levels shipped so far: **v1** (topic column +
@@ -455,7 +455,7 @@ caller's responsibility, and there are exactly two shapes:
   PreCompact leg additionally touches it again after the rest of its state
   changes (`pre_compact.py:783`).
 - Single-shot callers call `regenerate_memory_index` explicitly:
-  `cli/mem.py:1147` and `:584`, `mcp/server.py:647`, `ui/dashboard.py:1674`,
+  `cli/mem.py:1171` and `:584`, `mcp/server.py:647`, `ui/dashboard.py:1688`,
   `ui/web_viewer.py:1034`, plus the `skills/ccm-load` inline script
   (`skills/ccm-load/SKILL.md:308, 318`). `core/idle.py:96` and
   `hooks/consolidate_async.py:276` also refresh it after maintenance.
@@ -558,7 +558,7 @@ SessionStart:
 Call signatures above are the real ones: `write_progress_md(db, project_id,
 memory_dir)` (`core/progress.py:331-490`; call sites `pre_compact.py:752`,
 `stop.py:474`, `user_prompt.py:75`, `session_start.py:937`, `mcp/server.py:243`,
-`cli/mem.py:1238`). See
+`cli/mem.py:1262`). See
 [docs/CONTRACTS.md](CONTRACTS.md#handoff-contract) for the PROGRESS.md
 schema.
 
@@ -817,7 +817,7 @@ inside another one — `Claude-Code-Local/companion` alone holds 3725 memories
 and carries its own `.git`. A stray sub-database and a deliberate nested
 sub-project are **byte-for-byte indistinguishable on disk**: both have
 `.ccm/memory.db` whose `projects` row names their own directory, because
-`upsert_project` (`core/db.py:1041-1073`) records whatever cwd it was handed.
+`upsert_project` (`core/db.py:1172-1209`) records whatever cwd it was handed.
 Outermost-wins resolves that ambiguity unconditionally in the direction that
 destroys data, so the first post-upgrade session in `companion` would have
 moved 3725 memories out of reach, silently.
@@ -828,6 +828,34 @@ before any database exists, so the stray is never born. Adopting one that
 already exists means merging two SQLite files — destructive and irreversible —
 which belongs in an explicit, confirmed command, not in a hook that runs on
 every prompt.
+
+**The same rule holds INSIDE the database.** `upsert_project` records the
+resolved cwd in `projects.path`, and through v2.13.2 that string was also the
+project's identity: a moved or renamed project directory got a second row, and
+every memory, session, progress row, plan and directive of the first went dark
+on every surface — SessionStart injected 0 memories, `/cc-mem list` printed
+`(none)`, `status` minted the second row itself and reported an empty
+database — while the rows sat one `project_id` away. `cli/mem.py` documented
+the symptom (register C4) and told the user to inspect the old rows by hand;
+the consolidation marker grew a path check to survive it. The database's
+location is the declaration now. `MemoryDB.upsert_project` matches a row by
+exact path, then by `core.layout.canonical_path` — resolved, then
+`normcase`d: the ONE comparable spelling every identity compare in the tree
+uses (the consolidation marker, the root resolver's home boundary, the
+dashboard's project registry, the `excluded_projects` opt-out) — and only
+when nothing matches AND the database sits at `<cwd>/.ccm/memory.db`
+(`core.layout.database_owner`) does it re-attach a row to `cwd`: the most
+recently active row whose recorded directory no longer exists. A row whose
+directory still exists elsewhere is another live directory's and is never
+taken — not even when it is the only row in the file — and a database that is
+not `cwd`'s own never re-attaches anything, so a sibling row deliberately
+sharing one file keeps its identity. `MemoryDB.find_project_id` is the same lookup for
+the surfaces that ask a question (`status`, `stats`, `list`, `sessions`,
+`keywords`): it re-attaches, it never inserts. The consolidation marker
+carries the row's `project_id`, so a rename no longer costs the "one early
+consolidation" the path check used to charge, and its `project_path` is
+stored resolved, so the CLI's documented `--project .` matches the absolute
+cwd a hook reads with.
 
 `project_root` (`core/roots.py:587-632`) resolves a root first. Every hook
 rebinds `cwd` to it immediately **after** `is_excluded` and never before:
@@ -840,7 +868,7 @@ same way via `parse_payload`). `tests/test_surfaces.py` asserts the order
 once inside the gate, refuses a direct import in any hook, and
 `tools/falsify_fixes.py --case r10entryorder` proves the inversion goes red. The chain of candidate ancestors stops below any home
 directory, below the filesystem root, at a `.ccm-root` pin, and after 25
-levels (`_chain`, `core/roots.py:267-295`). First hit wins:
+levels (`_chain`, `core/roots.py:315-343`). First hit wins:
 
 0. `cwd` itself has `.ccm/memory.db` → `cwd`. Terminal, before anything else
    is consulted. This single line is what discharges the "never orphan"
@@ -850,7 +878,7 @@ levels (`_chain`, `core/roots.py:267-295`). First hit wins:
    `CodeEraser/cli` has no database while `CodeEraser` does. It needs no VCS
    and no manifest, which matters for projects that are not repositories.
 2. `CLAUDE_PROJECT_DIR`, when it names a directory in the chain (`_from_env`,
-   `core/roots.py:566-584`). Ranked *below* the database rungs deliberately:
+   `core/roots.py:588-606`). Ranked *below* the database rungs deliberately:
    it records where Claude Code was launched, which is not authority to orphan
    a database. Containment is likewise the point — a value left over from
    another project must not redirect this one.
@@ -966,7 +994,7 @@ was in the queue. `cli/mem.py` had always refused instead; two halves of one
 CLI pair must not disagree about that.
 
 A pre-existing stray is therefore left exactly where it is — and *reported*,
-so it is not invisible: `nested_databases` (`core/roots.py:658-709`) backs a
+so it is not invisible: `nested_databases` (`core/roots.py:724-789`) backs a
 `[WARN] Separate database below this project` line in `cc-mem status`, which
 names each one and its memory count. That is an explicit command rather than a
 hook, because it walks the tree. `.ccm-root` — an empty file — pins a
@@ -1119,7 +1147,7 @@ mentions "cc-memory" without running one of this build's six hook scripts <!--ce
 
 ### Layout detection and inspection agree (fixed in v2.5)
 
-Detection accepts both shapes: `mem.py:457` tests
+Detection accepts both shapes: `mem.py:522` tests
 `(legacy / "cc_memory").exists() or (legacy / "core" / "db.py").exists()`.
 Inspection used to disagree with it. `_inspect_layout` (`mem.py:493-562`) resolved
 every `cc_memory/…`-prefixed entry of `_REQUIRED_PLUGIN_FILES` (`mem.py:237-277`)

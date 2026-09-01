@@ -15,6 +15,61 @@ injection observability, FTS5 search, AI-judged extraction with Haiku
 - **License**: MIT
 - **Platform**: Windows-primary, cross-platform compatible (Tkinter required for GUI)
 
+## What changed since v2.13.2 (unreleased)
+
+**A project's identity is its database, not the path string inside it.** A
+whole-repository debug pass (six read-only reviewers over disjoint file sets,
+every finding reproduced before it was reported) found 38 defects; eight
+shared one upstream cause — `projects.path` WAS the identity, and every surface
+decided "which project is this" with its own path arithmetic. Full narrative in
+`CHANGELOG.md` § *Unreleased*; the specification is `docs/ARCHITECTURE.md` §7.
+Four rules a future change must not break:
+
+1. **`core.layout.canonical_path` is THE comparable spelling of a path.**
+   Resolved, then `normcase`d, never raises, and a non-path spells as `""` so
+   it can only ever MISS. Every "are these one directory" decision goes through
+   it or `same_path`: `MemoryDB.upsert_project`, the consolidation marker's
+   fallback compare, `roots._home_dirs` (which now carries every spelling
+   RESOLVED too — `project_root` walks a resolved chain, and an unresolved
+   boundary let it through a symlinked home), the dashboard's `_registry_key`,
+   and `modes._norm_path`, which delegates. Do not compare paths with a fresh
+   `normcase`, `.lower()` or `str ==` anywhere a directory's identity is at
+   stake; that is how a renamed project minted a second row while its
+   memories sat one `project_id` away.
+
+2. **`upsert_project` re-attaches; `find_project_id` never inserts.** A miss on
+   exact and canonical match RE-ATTACHES a row only when the database sits at
+   `<cwd>/.ccm/memory.db` (`layout.database_owner` — the file's location is the
+   declaration of identity ARCHITECTURE §7 already stated for the resolver),
+   and only the most recently active row whose directory no longer exists. A
+   row whose directory still exists elsewhere is another live directory's and
+   is never taken — not even as the only row in the file (a first draft took
+   it, and `tests/test_surfaces.py` §9a caught it taking a sibling's row); a
+   database that is not the caller's own never re-attaches anything (a sibling
+   row sharing one file keeps its identity — the shape §9a seeds). The surfaces that ask a question
+   (`status`, `stats`, `list`, `sessions`, `keywords`) use `find_project_id`:
+   a question never creates a row — `status` used to, and reported the empty
+   row it had just made. Gate: `smoke_test.py` § *identity*; `falsify --case
+   r13reattach` / `r13statuscreate`.
+
+3. **The consolidation marker follows the ROW, by `project_id`.** The path
+   check it grew in v2.12.0 existed only because a rename minted a second row;
+   it stays as the fallback for unstamped markers and compares canonical on
+   BOTH sides, and `project_path` is stored resolved — the CLI's documented
+   `--project .` used to store `"."`, so every manual `/cc-mem consolidate`
+   read as foreign and the Stop probe kicked the redundant run the shared
+   writer was added to prevent. Gate: `falsify --case r13markerid` /
+   `r13markerpath` / `r13markersame`.
+
+4. **Both skills ask `core.layout` where the state directory is.**
+   `skills/save-memories/SKILL.md` still joined `memory/` by hand after the
+   v2.13.0 rename and wrote every memory into a database nothing read; the
+   v2.13.0 sweep had registered TWO deliberate literal copies and this was a
+   third inline script it never listed. `ccm-load`'s registered literal is the
+   ONE permitted spelling in `skills/`, the smoke gate scans both files for a
+   hand-spelled join, and the save-memories body is RUN against an initialised
+   project. Gate: `falsify --case r13skilldir`.
+
 ## What changed in v2.13.2 (over v2.13.1)
 
 **A rename is not finished when the joins are.** v2.13.0 swept path joins and
@@ -972,7 +1027,7 @@ not be imported at all — `cli/plan.py` now has a `main()`.
 
 **Residual limits, recorded rather than papered over:**
 
-- `core/db.py`'s three plan mutators — `update_plan_status` (`db.py:3069-3113`),
+- `core/db.py`'s three plan mutators — `update_plan_status` (`db.py:3226-3270`),
   `delete_plan` (`:1410`) and `update_plan_content` (`:1427`) — all accept
   `project_id`, and `cli/plan.py` + `ui/dashboard.py` pass it at every call
   site, but none of them *requires* it (it defaults to `None`). An unscoped raw
@@ -1222,7 +1277,8 @@ cc-memory/
 │   │                            plan, privacy, modes, roots, auth, logger,
 │   │                            encoding_setup, version, atomic, markers,
 │   │                            textsim, layout (the state dir's name +
-│   │                            its one-way migration, v2.13.0)
+│   │                            its one-way migration, v2.13.0, and the
+│   │                            one comparable path spelling)
 │   ├── hooks/                   _entry (shared entry ladder, v2.10.0),
 │   │                            post_tool_use, pre_compact, consolidate_async,
 │   │                            session_start, stop, user_prompt
