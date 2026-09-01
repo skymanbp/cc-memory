@@ -19,9 +19,12 @@ injection observability, FTS5 search, AI-judged extraction with Haiku
 
 **A project's identity is its database, not the path string inside it.** A
 whole-repository debug pass (six read-only reviewers over disjoint file sets,
-every finding reproduced before it was reported) found 38 defects; eight
+every finding reproduced before it was reported) produced 38 findings; eight
 shared one upstream cause — `projects.path` WAS the identity, and every surface
-decided "which project is this" with its own path arithmetic. Full narrative in
+decided "which project is this" with its own path arithmetic — and seven of
+the eight are closed here (the eighth, a `MemoryDB` that keeps a stale
+`db_path` after another surface renames `memory/` → `.ccm/`, is Windows-only
+and recorded in `CHANGELOG.md` § *Reported*). Full narrative in
 `CHANGELOG.md` § *Unreleased*; the specification is `docs/ARCHITECTURE.md` §7.
 Four rules a future change must not break:
 

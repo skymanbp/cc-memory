@@ -12,9 +12,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### A project's identity is its database, not the path string inside it
 
 A whole-repository debug pass — six read-only reviewers over disjoint file
-sets, every finding reproduced before it was reported — surfaced 38 defects.
+sets, every finding reproduced before it was reported — surfaced 38 findings.
 Eight of them shared one upstream cause, and that cause is what this entry
-fixes: `projects.path`, the resolved cwd, WAS the project's identity, and
+fixes (seven of the eight are closed by it; the eighth is recorded under
+*Reported* below): `projects.path`, the resolved cwd, WAS the project's identity, and
 every surface decided "which project is this" with its own path arithmetic —
 `resolve()` on one side and the raw string on the other, `normcase` without
 `resolve`, `.lower()` on every platform, a state-directory join spelled by
@@ -101,7 +102,11 @@ never got it.
 
 ### Reported, not fixed here
 
-The other thirty findings of the same pass — among them a `<private>` span
+The other thirty-one findings of the same pass — among them the eighth
+instance of this cause (`MemoryDB` keeps the `db_path` it was constructed
+with, so a dashboard or web viewer opened against a legacy `memory/` fails on
+every operation once another surface completes the rename — Windows-only,
+where a held handle can refuse the rename), a `<private>` span
 stripper that is case-sensitive while the authority-marker regex is not, a
 Stop-hook escape budget that never resets and so turns plan enforcement
 advisory for the rest of a session after three resolved refusals, a bare
