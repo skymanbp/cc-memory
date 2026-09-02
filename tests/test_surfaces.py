@@ -2513,6 +2513,13 @@ def _user_prompt_seeds_the_first_real_request():
     """
     box = Path(tempfile.mkdtemp(prefix="ccm-slashseed-"))
 
+    def _progress_row(proj):
+        db = MemoryDB(proj / _MEM / "memory.db")
+        try:
+            return db.get_progress(db.upsert_project(str(proj))) or {}
+        finally:
+            del db
+
     def _sec1(proj):
         md = proj / _MEM / "PROGRESS.md"
         if not md.exists():
@@ -2563,6 +2570,46 @@ def _user_prompt_seeds_the_first_real_request():
             (f"a path-shaped request was treated as a slash command or had "
              f"its leading slash eaten: {_sec1(pathy)!r}")
         n += 3
+        # AT MOST ONCE PER SESSION, and "once" cannot be inferred from what the
+        # PREVIOUS turn stored: the prompt marker is overwritten with "" on a
+        # scaffolding or entirely-private turn (the observer must never get a
+        # stale request), so reading that as "nothing seeded yet" re-seeded §1
+        # mid-session. Measured on the first draft of this fix: real →
+        # `/cc-mem status` → "ok continue" left current_request="ok continue",
+        # and real → `<private>…</private>` → "继续" left ("继续",
+        # "resume_request") — a RESUME PROTOCOL signal SessionStart reads as
+        # the session's opening message. Both sequences are driven here; the
+        # real→real case above cannot see either.
+        opener = "Rewrite the invoice exporter to stream rows"
+        for i, (middle, third) in enumerate((
+                ("/cc-mem status", "ok continue"),
+                ("<private>my api key is sk-live-1</private>", "继续"))):
+            proj = box / f"mid{i}"
+            proj.mkdir()
+            sid = f"mid-{i}"
+            _prompt(proj, sid, opener)
+            assert _sec1(proj) == opener, _sec1(proj)
+            _prompt(proj, sid, middle)
+            _prompt(proj, sid, third)
+            row = _progress_row(proj)
+            assert _sec1(proj) == opener, \
+                (f"a {'scaffolding' if i == 0 else 'private'} turn re-armed the "
+                 f"seeding gate, so a MID-SESSION prompt overwrote the "
+                 f"session's opening request: {_sec1(proj)!r}")
+            assert row.get("current_request") == opener, \
+                f"progress.current_request drifted: {row.get('current_request')!r}"
+            assert row.get("trigger_type") == "user_prompt", \
+                (f"trigger_type is {row.get('trigger_type')!r}: a mid-session "
+                 f"resume token was recorded as the session's opening signal, "
+                 f"which the SessionStart RESUME PROTOCOL auto-executes")
+            n += 1
+        # The new per-session marker must be swept by an uninstall; an
+        # unregistered prefix leaks into %TEMP% forever.
+        inst = (REPO / "cc_memory" / "ui" / "installer.py").read_text(
+            encoding="utf-8")
+        assert '"cc_mem_seeded_"' in inst, \
+            ("hooks/user_prompt.py writes a cc_mem_seeded_ marker that "
+             "ui/installer.py:_TEMP_MARKER_PREFIXES does not sweep")
         # ONE predicate, not two copies: the transcript-side ingress imports
         # the live-side one. Grep, because two correct implementations today
         # is exactly how the two policies diverged in the first place.
@@ -2967,8 +3014,10 @@ def test_project_root_anchoring():
     n_seed = _user_prompt_seeds_the_first_real_request()
     print(f"[OK] current_request ingress: {n_seed} cases (3 slash commands "
           f"seed nothing, the first REAL prompt seeds even on a later turn, a "
-          f"later turn does not overwrite it, a path-shaped request keeps its "
-          f"slash) and BOTH ingresses share ONE predicate")
+          f"path-shaped request keeps its slash, and the seed happens at most "
+          f"ONCE per session \u2014 a later real turn, a scaffolding turn and an "
+          f"entirely-private turn each leave \u00a71 and trigger_type alone); "
+          f"BOTH ingresses share ONE predicate")
     n_spell = _cli_opt_out_gate()
     print(f"[OK] CLI opt-out gate: {n_spell} --project spellings (including "
           f"the blank ones) refused for a listed project on the real CLI, no "

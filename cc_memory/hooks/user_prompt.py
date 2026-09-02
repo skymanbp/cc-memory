@@ -53,6 +53,19 @@ from core.layout import DB_FILENAME, find_db_path, memory_dir
 
 _TURN_FILE_PREFIX = "cc_mem_turns_"
 _PROMPT_FILE_PREFIX = "cc_mem_prompt_"
+# Written once, when the seed below lands. It answers "has this SESSION
+# already seeded progress.current_request?" — a question the prompt marker
+# cannot answer, because that marker is deliberately overwritten with "" on a
+# scaffolding or entirely-private turn (the observer must never be handed the
+# PREVIOUS turn's request), so "empty" there means "the last turn stored
+# nothing", not "nothing has been stored this session". Reading it that way
+# re-seeded §1 after every such turn: measured on this branch, real request
+# → `/cc-mem status` → "ok continue" left current_request="ok continue", and
+# real → `<private>…</private>` → "继续" left ("继续", "resume_request") — a
+# RESUME PROTOCOL signal mid-session, which SessionStart reads as the
+# session's opening message. Registered in ui/installer.py's uninstall sweep;
+# an unregistered prefix leaks forever.
+_SEEDED_FILE_PREFIX = "cc_mem_seeded_"
 
 # A slash command: "/" + a command token, then whitespace or end of line.
 # The token deliberately excludes "/" so a request that OPENS with a path
@@ -204,14 +217,6 @@ def main():
         # should ever be Claude Code's own slash-command scaffolding.
         prompt = clean_for_storage(strip_scaffolding(prompt))[:500]
         prompt_file = marker_path(_PROMPT_FILE_PREFIX, safe)
-        # READ BEFORE THE OVERWRITE BELOW. This marker holds the previous
-        # turn's stored prompt, and an empty one is the session's own record
-        # that no real request has been seen yet — scaffolding and
-        # entirely-private turns both store "". It is what turns the seeding
-        # rule below from "turn 1" into "the first NON-SCAFFOLDING prompt",
-        # with no new marker prefix (a new one would have to be registered in
-        # ui/installer.py's uninstall sweep as well).
-        prev_prompt = read_marker(prompt_file, "").strip()
         try:
             # Written even when cleaning emptied it — AND when the raw prompt
             # was already empty: this marker is per-SESSION and reused every
@@ -233,11 +238,12 @@ def main():
             # with `/ccm-load` (this plugin's own documented activation) spent
             # the one seeding turn on the slash command, and every later turn
             # failed `turn_count != 1`, so the real request was never seeded at
-            # all. `prev_prompt` is empty exactly while no real request has
-            # been stored this session — on turn 1 the marker does not exist
-            # yet, and a scaffolding or entirely-private turn stores "" — so
-            # this reads "first real prompt" for any run of leading
-            # scaffolding turns, not just one.
+            # all. The condition is therefore "this session has not seeded
+            # yet", recorded by its OWN marker when the seed lands — not
+            # inferred from what the previous turn stored, which is "" after
+            # every scaffolding or private turn and so re-seeded §1 in the
+            # MIDDLE of a session (see _SEEDED_FILE_PREFIX for the
+            # measurement). At most once per session, exactly as before.
             #
             # `and not created` used to guard this too and made the branch
             # UNREACHABLE for a project's very first session: on turn 1 of a new
@@ -255,7 +261,8 @@ def main():
             # prompts are unaffected (clean_for_storage returns text with no
             # open tag byte-identical, so "   " stays truthy and still resolves
             # to the "" resume signal exactly as before).
-            if not prev_prompt:
+            seeded_file = marker_path(_SEEDED_FILE_PREFIX, safe)
+            if not read_marker(seeded_file, "").strip():
                 try:
                     from core.db import MemoryDB
                     from core.progress import write_progress_md
@@ -283,6 +290,13 @@ def main():
                     trigger = "resume_request" if normalized in resume_signals else "user_prompt"
                     db.patch_progress(pid, current_request=prompt, trigger_type=trigger)
                     write_progress_md(db, pid, state_dir)
+                    # AFTER the write, so a seed that failed halfway is
+                    # retried on the next real prompt rather than skipped.
+                    # A marker that cannot be written degrades to the OLD
+                    # failure direction (re-seed every real turn), which is
+                    # exactly what an unwritable turn counter already did:
+                    # write_marker never raises, it returns False.
+                    write_marker(seeded_file, "1")
                 except Exception:
                     # why: PROGRESS seeding is best-effort; PreCompact will
                     # overwrite it with a full state anyway

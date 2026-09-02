@@ -1629,13 +1629,10 @@ def _break_r9bigstdin(root):
 @case("r9emptypr", ["tests/test_surfaces.py"],
       "guard the marker write on a truthy prompt -> the previous turn's request survives")
 def _break_r9emptypr(root):
-    # anchor repaired 2026-09-01 (B9): the previous turn's stored prompt is
-    # read between the marker path and the write, so the two lines this case
-    # used to anchor on are no longer adjacent
     _patch(root, f"{PKG}/hooks/user_prompt.py",
-           "        prev_prompt = read_marker(prompt_file, \"\").strip()\n"
+           "        prompt_file = marker_path(_PROMPT_FILE_PREFIX, safe)\n"
            "        try:",
-           "        prev_prompt = read_marker(prompt_file, \"\").strip()\n"
+           "        prompt_file = marker_path(_PROMPT_FILE_PREFIX, safe)\n"
            "        try:\n"
            "            if not prompt:  # BREAKAGE: skip the overwrite\n"
            "                raise OSError(\"skipped\")")
@@ -2137,6 +2134,20 @@ def _break_r14stalelock(root):
            "    # NO LOCK PRE-CHECK HERE, deliberately.")
 
 
+@case("r14seedprev", ["tests/test_surfaces.py"],
+      "decide 'already seeded?' from the PREVIOUS turn's prompt marker -> a scaffolding or entirely-private turn re-arms the gate and a mid-session prompt overwrites the session's opening request (and can stamp trigger_type=resume_request)")
+def _break_r14seedprev(root):
+    _patch(root, f"{PKG}/hooks/user_prompt.py",
+           "        prompt_file = marker_path(_PROMPT_FILE_PREFIX, safe)\n"
+           "        try:",
+           "        prompt_file = marker_path(_PROMPT_FILE_PREFIX, safe)\n"
+           "        prev_prompt = read_marker(prompt_file, \"\").strip()\n"
+           "        try:")
+    _patch(root, f"{PKG}/hooks/user_prompt.py",
+           "            if not read_marker(seeded_file, \"\").strip():",
+           "            if not prev_prompt:  # BREAKAGE: the last turn, not the seed")
+
+
 @case("r14slashseed", ["tests/test_surfaces.py"],
       "stop treating a bare slash command as scaffolding -> /ccm-load becomes progress.current_request and stands until the first compaction")
 def _break_r14slashseed(root):
@@ -2151,7 +2162,7 @@ def _break_r14slashseed(root):
       "restore the turn-1-ONLY seeding rule -> a session opened with a slash command never seeds current_request at all")
 def _break_r14seedturn1(root):
     _patch(root, f"{PKG}/hooks/user_prompt.py",
-           "            if not prev_prompt:",
+           "            if not read_marker(seeded_file, \"\").strip():",
            "            if turn_count == 1:  # BREAKAGE: turn 1 or never")
 
 
