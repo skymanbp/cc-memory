@@ -1,0 +1,80 @@
+Sandbox root: /tmp/cc-memory-surfaces-8poeqg24
+Sandbox home: /tmp/cc-memory-surfaces-8poeqg24/home
+
+--- §1 MCP stdio server -------------------------------------
+[OK] MCP handshake: supported version honoured, unsupported string + non-string negotiated down to 2024-11-05, tools/list == 8 handlers
+[OK] MCP ids: 35 junk-params requests (7 methods x null/[]/str/num/omitted) answered exactly once
+[OK] MCP notifications: id-less messages stay silent, sentinel answered
+[OK] MCP strict JSON: NaN / 1e400 ids -> -32700 (never echoed back)
+[OK] MCP memory_get_details: superseded + archived excluded, reported in 'missing'
+[OK] MCP schema: 7 hostile arguments -> -32602 (importance 99, bogus category, empty query, over-max limit, empty ids, sub-minLength content)
+[OK] MCP session 1: rc=0, stderr empty, 50 frames all strict-JSON parseable
+[OK] MCP survivability: 4301-digit int, 3125-deep nesting and a 2 MiB frame -> rc=0, stderr empty, next frame still served
+[OK] MCP unicode: CJK/emoji/math/Cyrillic byte-identical in BOTH directions under PYTHONIOENCODING=gbk + PYTHONUTF8=0
+[OK] MCP missing DB: all 8 tools set isError, no memory.db conjured
+[OK] MCP constants: _MIN_CONTENT_LEN mirrors the writer, _MAX_LIMIT <= MemoryDB._MAX_SEARCH_LIMIT
+
+--- §2 web viewer (raw sockets) ------------------------------
+[OK] web deadlines finite: stall=5s drain=3s total=15s
+[OK] web liveness: 3 idle + 1 half-header pre-connect, GET /api/stats -> 200 in 0.00s
+[OK] web input: 9 garbage query params -> 400 JSON, unknown route -> 404, nothing dropped
+[OK] web CORS: 4 cross-origin variants + POST -> 403, OPTIONS -> 405+Allow, zero Access-Control-Allow-Origin headers
+[OK] web Host: 4 forged hosts + rebound POST -> 403; 127.0.0.1/localhost/[::1]/bare/no-Host still 200
+[OK] web filters: importance honoured together with q, importance=1 not over-filtered
+[OK] web POST targeting: served MEMORY.md refreshed with the probe topic, bystander cwd project byte-identical
+[OK] web large body: 300016 chars round-trip byte-exact through the bounded read1 loop
+[OK] web truncated body: 400 after 5.01s (idle bound 5s), not a 500 on socket.timeout
+[OK] web drain deadline: rejected POST drip-fed 1 byte/0.4s answered 403 in 3.00s (deadline 3s), was 52.09s pre-fix
+[OK] web body deadline: accepted-path drip answered 400 in 15.00s (deadline 15s) and GET /api/stats stayed 200 mid-attack
+[OK] web teardown: server stopped, stderr traceback-free
+[OK] web admission: 16 permits, returned exactly once per request across 5 failed thread starts, and _ADMIT is bounded so a double-release raises instead of silently raising the ceiling
+
+--- §3 installer settings.json shape matrix ------------------
+[OK] installer matrix: 15 settings.json shapes (11 install+uninstall clean, 4 refused before any copy), zero tracebacks
+[OK] installer user data: cc-memory-mentioning hook + commands/agents/skills files + logs/ + foreign temp files all survive; our surfaces and markers are gone
+
+--- §4 excluded_projects across all six hooks ----------------
+[OK] hook enumeration: _HOOK_ORDER == hooks/hooks.json (6 hooks)
+[OK] excluded_projects: 6 hooks x (excluded root with memory.db ALREADY present + a directory beneath it + a NARROW exclusion inside a live project) -> no memory/, no observations, no progress row, no injection, no turn marker, and nothing leaked into the parent's database; the same hooks against an identical NOT-excluded project produce all five
+
+--- §5 config.json shapes + the MCP opt-out -------------------
+[OK] config.json shapes: BOM'd config, a ~user entry FIRST and an unparseable config all keep the opt-out ON (fail-closed) and the fail-closed case is VISIBLE while a genuine listing stays silent; an ABSENT config keeps the plugin ON; MCP refuses an excluded project for read AND write while serving an identical control
+
+--- §6 settings.json compare-and-swap -----------------------
+[OK] settings.json CAS: a write landing inside the install window is DETECTED and re-merged (the peer's change survives, our hooks still register), and an uncontended install still writes once
+
+--- §7 project-root anchoring --------------------------------
+[OK] shared entry ladder: 2 failure branches survive a logger whose every method raises (hook contract holds at the ONE shared site)
+[OK] opt-out coverage: 6 surfaces consult it in source AND 3 of them, driven in a FRESH subprocess each, create nothing in an opted-out project (grep cannot see reachability)
+[OK] malformed cwd: 48 (hook, junk-value) pairs each exit 0, write no stderr, AND create no database in the hook's own cwd
+[OK] CLI opt-out gate: 5 --project spellings (including the blank ones) refused for a listed project on the real CLI, no database created, and all 3 surfaces route through one gate
+[OK] anchor_project announce: 5 cases (a redirection is announced exactly when one occurred, never for '.', an absolute root, or a trailing '/.')
+[OK] /ccm-load subscripts only defined layout keys: ['name', 'pkg']; 427 body lines free of shell backtick/dollar expansion, and 2/2 skill bodies confirmed PARSEABLE by bash -n
+[OK] deleted project stays deleted: 2 unattended hooks create nothing for a gone directory yet still initialise one that exists; /cc-mem prints a PLANTED authority marker escaped, never live (an all-zero count would be vacuous and is rejected)
+[OK] project-root anchoring: 23 ladder cases (a dir that owns a DB is never re-rooted, nested project keeps its own, marker-only, no-marker, workspace member, VCS ceiling, container refusal, .ccm-root pin, nonexistent cwd, and the ~ boundary in both directions); all 6 hooks run from a SUBDIRECTORY create no second memory/ and write to the root db; a first-ever session in a subdirectory initialises the REPO ROOT; all 6 route cwd through the ONE shared gate (opt-out before anchor, hooks/_entry.py)
+
+--- §8 v2.8.0 surfaces ---------------------------------------
+[OK] web admission shed: a refused connection is answered 'HTTP/1.1 503 Service Unavailable', not closed silently
+[OK] installer Initialize Project: 2 outcomes reported distinctly (a refusal is never 'Success'), and the path shown is the memory/ actually created
+[OK] /cc-mem archive: a wrong memory retires with its lineage recorded, and 2 refusals (a sibling project's id in the SAME database file, and an unknown id)
+[OK] call_llm deadline is WALL-CLOCK: a 1-byte/0.25s drip was bounded at 3.00s against a 3.0s deadline (11.07s pre-fix)
+[OK] pre_compact annotation guard: 4 payloads (3 malformed trigger/session_id + control) all reach .last_save success=true and write PROGRESS.md
+[OK] /ccm-load gate ordering: the opt-out runs BEFORE core.roots and in its own try, and 2 .gitignore read statement(s) across the 2 literal copies decode with errors='replace'
+[OK] doc_claims coverage: 7 shapes that used to slip past it (word-internal numerals, 'N of the hooks', 六条/个 hook) are seen, and an overlapping quantifier claim resolves to the outer number
+[OK] live plan anchor through its OWN hook: ExitPlanMode captures plan_active + memory/.plan_raw.md and TodoWrite syncs in all 3 modes, and _apply_plan_integration is asserted ABOVE the should_observe gate — the rule CLAUDE.md states three times and nothing executed
+[OK] MCP scope gate: 6 memory_add calls over real stdio — a cross-project write is refused as isError with 0 rows reaching the other database, while this project, a subdirectory of it and the omitted argument all land in ONE
+[OK] memory_topics bound: 4 calls over real stdio — the row cap, the body clip with its visible marker, and the truncated counts all hold; an unparseable limit is refused as -32602 by schema validation, never coerced into a table dump
+[OK] dashboard executed headlessly (14 checks): a hostile package.json description reaches the generated CLAUDE.md escaped, never live; the SQL read-only classifier holds both ways; the Progress/Plan renderer escapes stored markers and survives empty rows; the tidy-verdict normaliser survives every live-measured hostile shape (v2.10.1 extractions)
+
+--- §9 v2.9.0 dual-review surfaces ---------------------------
+[OK] CLI project scope: 8 probes — encoding-check --apply leaves a sibling project's rows active, supersedes refuses a foreign id, sessions/keywords list only this project, and status reports instead of crashing on 4 wrong-typed settings.json shapes
+[OK] installer settings.json: a user hook sharing OUR matcher group survives a reinstall (2 Stop entries after), and a settings.json created inside the write window is detected rather than destroyed
+[OK] surface manifest: a run that skips every surface cannot erase the 5 already recorded, so uninstall still removes them
+[OK] PostToolUse stdin: a 600 KiB tool result is parsed, not discarded (2 observation rows), so the live-plan block below it still runs
+[OK] UserPromptSubmit: an empty prompt OVERWRITES the per-session marker instead of leaving the previous turn's request for the Stop observer to ship to Anthropic
+[OK] MCP wire: 3 frames — an absent or non-"2.0" jsonrpc member is refused with -32600 instead of being answered as a valid Request
+[OK] web header phase: 16 drippers cannot hold the admission permits past the 10s absolute header budget; the viewer recovers on its own
+[OK] sandbox teardown: every sqlite handle closed, sandbox removed
+
+===== ALL SURFACE TESTS PASSED (59.1s) =====
+exit=0

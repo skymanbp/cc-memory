@@ -1,0 +1,438 @@
+<title>cc-memory 根因审计</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Condensed:wght@600&family=IBM+Plex+Sans:wght@400;600&family=IBM+Plex+Mono:wght@400;500&family=Noto+Sans+SC:wght@400;600&display=swap">
+<style>
+  :root {
+    --ground: #F3F5F7;
+    --surface: #FFFFFF;
+    --ink: #17202A;
+    --muted: #5B6572;
+    --rule: #D5DAE0;
+    --rule-soft: #E6EAEE;
+    --accent: #0E7C7B;
+    --accent-ink: #FFFFFF;
+    --accent-soft: #E3F2F1;
+    --sev-security: #B42318;
+    --sev-security-bg: #FBEAE8;
+    --sev-loss: #8A2C0F;
+    --sev-loss-bg: #F9E9E1;
+    --sev-wrong: #A16207;
+    --sev-wrong-bg: #F8F0DD;
+    --sev-crash: #7C3AED;
+    --sev-crash-bg: #EFE8FB;
+    --sev-perf: #1D4ED8;
+    --sev-perf-bg: #E4EBFB;
+    --sev-platform: #0F766E;
+    --sev-platform-bg: #E0F2F0;
+    --sev-gate: #4B5563;
+    --sev-gate-bg: #E9ECEF;
+    --code-bg: #EDF0F3;
+    --pre-bg: #1C242C;
+    --pre-ink: #D8DEE4;
+    --pre-ok: #7FD6C2;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ground: #10161C;
+      --surface: #171F27;
+      --ink: #E6EAEE;
+      --muted: #99A3AE;
+      --rule: #2B3540;
+      --rule-soft: #212A33;
+      --accent: #3FBFB2;
+      --accent-ink: #0B1B1A;
+      --accent-soft: #163330;
+      --sev-security: #F29A91;
+      --sev-security-bg: #3A1F1D;
+      --sev-loss: #F0B08A;
+      --sev-loss-bg: #3A2417;
+      --sev-wrong: #E5C46B;
+      --sev-wrong-bg: #362D14;
+      --sev-crash: #C4A8F5;
+      --sev-crash-bg: #2C2140;
+      --sev-perf: #9DB8F5;
+      --sev-perf-bg: #1C2740;
+      --sev-platform: #7FD6C2;
+      --sev-platform-bg: #14312D;
+      --sev-gate: #B0B8C1;
+      --sev-gate-bg: #262E37;
+      --code-bg: #212A33;
+      --pre-bg: #0B1015;
+      --pre-ink: #CBD3DB;
+      --pre-ok: #7FD6C2;
+    }
+  }
+  :root[data-theme="dark"] {
+    --ground: #10161C;
+    --surface: #171F27;
+    --ink: #E6EAEE;
+    --muted: #99A3AE;
+    --rule: #2B3540;
+    --rule-soft: #212A33;
+    --accent: #3FBFB2;
+    --accent-ink: #0B1B1A;
+    --accent-soft: #163330;
+    --sev-security: #F29A91;
+    --sev-security-bg: #3A1F1D;
+    --sev-loss: #F0B08A;
+    --sev-loss-bg: #3A2417;
+    --sev-wrong: #E5C46B;
+    --sev-wrong-bg: #362D14;
+    --sev-crash: #C4A8F5;
+    --sev-crash-bg: #2C2140;
+    --sev-perf: #9DB8F5;
+    --sev-perf-bg: #1C2740;
+    --sev-platform: #7FD6C2;
+    --sev-platform-bg: #14312D;
+    --sev-gate: #B0B8C1;
+    --sev-gate-bg: #262E37;
+    --code-bg: #212A33;
+    --pre-bg: #0B1015;
+    --pre-ink: #CBD3DB;
+    --pre-ok: #7FD6C2;
+  }
+
+  body {
+    background: var(--ground);
+    color: var(--ink);
+    font-family: "IBM Plex Sans", "Noto Sans SC", "PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", system-ui, sans-serif;
+    font-size: 15px;
+    line-height: 1.65;
+    -webkit-font-smoothing: antialiased;
+  }
+  .page { max-width: 1120px; margin: 0 auto; padding: 40px 28px 72px; }
+  .measure { max-width: 74ch; }
+
+  h1, h2, h3 {
+    font-family: "IBM Plex Sans Condensed", "IBM Plex Sans", "Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif;
+    font-weight: 600;
+    letter-spacing: -0.005em;
+    text-wrap: balance;
+    margin: 0;
+  }
+  h1 { font-size: 34px; line-height: 1.15; }
+  h2 { font-size: 22px; line-height: 1.25; margin-top: 56px; padding-top: 18px; border-top: 1px solid var(--rule); }
+  h3 { font-size: 16px; line-height: 1.3; margin-top: 28px; }
+  p { margin: 12px 0; }
+  .eyebrow {
+    font-family: "IBM Plex Mono", ui-monospace, Menlo, Consolas, monospace;
+    font-size: 12px;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--muted);
+  }
+  header .eyebrow { margin-bottom: 10px; }
+  header .sub { color: var(--muted); margin-top: 10px; font-size: 15px; }
+  header .meta {
+    font-family: "IBM Plex Mono", ui-monospace, Menlo, Consolas, monospace;
+    font-size: 12.5px; color: var(--muted); margin-top: 14px;
+    display: flex; flex-wrap: wrap; gap: 6px 22px;
+  }
+
+  code, .mono {
+    font-family: "IBM Plex Mono", ui-monospace, Menlo, Consolas, monospace;
+    font-size: 0.92em;
+  }
+  p code, li code, td code {
+    background: var(--code-bg);
+    padding: 1px 5px;
+    border-radius: 3px;
+  }
+  pre {
+    background: var(--pre-bg);
+    color: var(--pre-ink);
+    font-family: "IBM Plex Mono", ui-monospace, Menlo, Consolas, monospace;
+    font-size: 12.5px;
+    line-height: 1.55;
+    padding: 16px 18px;
+    border-radius: 6px;
+    overflow-x: auto;
+    margin: 14px 0;
+  }
+  pre .ok { color: var(--pre-ok); }
+  pre .dim { color: #8A96A3; }
+
+  .stats {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: 1px;
+    background: var(--rule);
+    border: 1px solid var(--rule);
+    border-radius: 6px;
+    overflow: hidden;
+    margin: 30px 0 8px;
+  }
+  .stat { background: var(--surface); padding: 14px 16px 12px; }
+  .stat .n {
+    font-family: "IBM Plex Sans Condensed", "IBM Plex Sans", sans-serif;
+    font-size: 30px; font-weight: 600; line-height: 1; letter-spacing: -0.01em;
+    font-variant-numeric: tabular-nums;
+  }
+  .stat .n small { font-size: 16px; color: var(--muted); font-weight: 600; margin-left: 2px; }
+  .stat .l { color: var(--muted); font-size: 12.5px; margin-top: 6px; line-height: 1.35; }
+  .stat.fixed .n { color: var(--accent); }
+
+  .lead { font-size: 17px; line-height: 1.6; }
+  .chain { list-style: none; padding: 0; margin: 16px 0; border-left: 2px solid var(--accent); }
+  .chain li { padding: 6px 0 6px 18px; position: relative; }
+  .chain li::before {
+    content: ""; position: absolute; left: -6px; top: 15px; width: 10px; height: 10px;
+    border-radius: 50%; background: var(--ground); border: 2px solid var(--accent);
+  }
+  .chain .where { display: block; color: var(--muted); font-size: 12.5px; }
+
+  .before-after {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 14px; margin: 16px 0;
+  }
+  .ba { background: var(--surface); border: 1px solid var(--rule); border-radius: 6px; padding: 14px 16px; }
+  .ba .eyebrow { margin-bottom: 6px; }
+  .ba ul { margin: 6px 0 0; padding-left: 18px; }
+  .ba li { margin: 4px 0; }
+
+  ul.plain { padding-left: 20px; }
+  ul.plain li { margin: 6px 0; }
+  ul.plain li strong { font-weight: 600; }
+
+  .pill, .chip {
+    display: inline-block; white-space: nowrap;
+    font-family: "IBM Plex Sans", "Noto Sans SC", sans-serif;
+    font-size: 11.5px; font-weight: 600; line-height: 1;
+    padding: 4px 8px; border-radius: 999px; letter-spacing: 0.02em;
+  }
+  .pill.security { color: var(--sev-security); background: var(--sev-security-bg); }
+  .pill.loss { color: var(--sev-loss); background: var(--sev-loss-bg); }
+  .pill.wrong { color: var(--sev-wrong); background: var(--sev-wrong-bg); }
+  .pill.crash { color: var(--sev-crash); background: var(--sev-crash-bg); }
+  .pill.perf { color: var(--sev-perf); background: var(--sev-perf-bg); }
+  .pill.platform { color: var(--sev-platform); background: var(--sev-platform-bg); }
+  .pill.gate { color: var(--sev-gate); background: var(--sev-gate-bg); }
+  .chip.fixed { color: var(--accent-ink); background: var(--accent); }
+  .chip.open { color: var(--muted); background: transparent; border: 1px solid var(--rule); }
+
+  .tablewrap { overflow-x: auto; margin: 14px 0 6px; border: 1px solid var(--rule); border-radius: 6px; background: var(--surface); }
+  table { border-collapse: collapse; width: 100%; min-width: 760px; font-size: 14px; }
+  th {
+    text-align: left; font-weight: 600; color: var(--muted);
+    font-size: 11.5px; letter-spacing: 0.05em; text-transform: uppercase;
+    padding: 10px 12px; border-bottom: 1px solid var(--rule); background: var(--surface);
+    font-family: "IBM Plex Mono", ui-monospace, monospace;
+  }
+  td { padding: 10px 12px; border-bottom: 1px solid var(--rule-soft); vertical-align: top; }
+  tr:last-child td { border-bottom: 0; }
+  td.id { font-family: "IBM Plex Mono", ui-monospace, monospace; font-size: 13px; font-weight: 500; white-space: nowrap; width: 56px; }
+  td.loc { font-family: "IBM Plex Mono", ui-monospace, monospace; font-size: 12px; color: var(--muted); width: 220px; word-break: break-all; }
+  td.what { min-width: 320px; }
+  td.sev, td.st { white-space: nowrap; }
+  .cluster-note { color: var(--muted); font-size: 14px; margin: 4px 0 0; }
+
+  ol.order { padding-left: 22px; }
+  ol.order li { margin: 8px 0; }
+
+  footer { margin-top: 56px; padding-top: 18px; border-top: 1px solid var(--rule); color: var(--muted); font-size: 13.5px; }
+  a { color: var(--accent); }
+  a:focus-visible, :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+  @media (max-width: 640px) {
+    .page { padding: 28px 16px 56px; }
+    h1 { font-size: 28px; }
+  }
+</style>
+
+<div class="page">
+<header>
+  <div class="eyebrow">cc-memory · 全仓 debug · 2026-09-01</div>
+  <h1>一个项目的身份是它的数据库，不是库里那串路径</h1>
+  <p class="sub measure">六组只读审查覆盖全部源码，每项发现先复现再上报；聚类后，八项症状指向同一个最上游根因，已在唯一的实现点统一修复。其余发现按各自根因分簇登记在下，供排期。</p>
+  <div class="meta">
+    <span>branch <b>claude/codebase-debug-root-cause-8y09u2</b></span>
+    <span>commits <b>c3089fa</b> fix · <b>80fec7b</b> docs</span>
+    <span>version 2.13.2（未 bump）</span>
+  </div>
+</header>
+
+<section class="stats" aria-label="总览">
+  <div class="stat"><div class="n">39</div><div class="l">复现的发现<br>38 项来自 A–F 六组审查，1 项来自协调者</div></div>
+  <div class="stat fixed"><div class="n">8</div><div class="l">共享同一上游根因<br>其中 7 项本次关闭，第 8 项（A4）已登记</div></div>
+  <div class="stat"><div class="n">32</div><div class="l">待修<br>31 项缺陷 + 1 项覆盖缺口，按 8 个根因簇分组</div></div>
+  <div class="stat fixed"><div class="n">11<small>/11</small></div><div class="l">release gate 全绿<br>tkinter 套件在 python3.12 下运行</div></div>
+  <div class="stat fixed"><div class="n">8<small>/8</small></div><div class="l">新增 falsify 用例逐个 RED<br>锚点 180/180 完好</div></div>
+</section>
+
+<h2 id="root">最上游根因</h2>
+<p class="lead measure"><code>projects.path</code>——即解析后的 cwd 字串——在 v2.13.2 之前就是项目的身份，而每个表面都用自己的一套路径算术回答“这是哪个项目”：一边 <code>resolve()</code> 一边裸字串、<code>normcase</code> 却不 <code>resolve</code>、在所有平台上 <code>.lower()</code>、手拼状态目录名。同一个目录的两种拼写，就是两个身份。</p>
+<p class="measure">ARCHITECTURE §7 早在 v2.6.0 就为根解析器写下了规则——“已存在的数据库就是身份声明”——但数据库<em>内部</em>那一行从未得到这条规则。这是 v2.13.0“状态目录名散落在 34 个 join 点”那个病的上一层：散落的不是目录的<strong>名字</strong>，而是项目的<strong>身份</strong>。</p>
+
+<h3>症状链：一个根因如何长出四层补丁</h3>
+<ol class="chain">
+  <li><strong>移动或重命名项目目录 → 记忆“消失”。</strong><span class="where">core/db.py · upsert_project（协调者发现 M1，与 D3 同源）</span>`upsert_project` 为新路径插入第二行 project；旧行的全部记忆、会话、进度行、计划、指令在每个表面失联。实测：移动后 SessionStart 注入 <b>0</b> 条记忆，<code>list</code> 打印 <code>(none)</code>，<code>status</code> 报告空库。</li>
+  <li><strong>于是给每条查询加 <code>WHERE project_id = ?</code>（register E1），并让 CLI 打印“请手写 SQL 看旧行”。</strong><span class="where">cli/mem.py · _require_project_id（register C4 注释）</span>修的是串项目的症状，根因留在原地。</li>
+  <li><strong><code>status</code> 却仍经 <code>upsert_project</code> 查行，rename 后自己造出第二行并报告空库，此后 <code>stats</code>/<code>list</code>/<code>search</code> 一律答 0 且无提示。</strong><span class="where">cli/mem.py:770（D3）</span></li>
+  <li><strong>合并标记为了活过 rename 长出路径检查；检查只 <code>normcase</code> 不 <code>resolve</code>，于是文档规定的 <code>--project .</code> 存成 <code>"."</code>，hook 永远视为外来，每次手动 <code>/cc-mem consolidate</code> 后都多跑一次后台 LLM 合并——正是 v2.12.0 共享写入器要防的那次冗余运行。</strong><span class="where">core/consolidate.py:1094-1140 · cli/mem.py:1270（C1 / D2）· hooks/consolidate_async.py（C4 残留）</span></li>
+  <li><strong>同一类拼写盲区散在别处：</strong>根解析器的 home 边界拿未解析的 <code>$HOME</code> 去比已解析的链，软链接 home 被走入并采用 home 目录下的库（A1）；仪表盘注册表在所有平台 <code>.lower()</code>，POSIX 上 <code>Foo</code>/<code>foo</code> 折叠成一条（E8）；<code>/save-memories</code> 自己拼 <code>memory/</code>，在已迁移到 <code>.ccm/</code> 的项目里把每条记忆写进无人读的库（D1）。<span class="where">core/roots.py:212 · ui/dashboard.py:562 · skills/save-memories/SKILL.md:140</span></li>
+</ol>
+
+<h3>修在唯一的点上</h3>
+<ul class="plain measure">
+  <li><strong><code>core.layout.canonical_path</code> / <code>same_path</code> / <code>database_owner</code></strong>：全树唯一的“可比拼写”（先 resolve 再 normcase，永不抛错，非路径拼为空串只会 miss），以及“这个 <code>memory.db</code> 按位置属于谁”。<code>modes._norm_path</code> 改为委托，消掉第二份同样的降级序列。</li>
+  <li><strong><code>MemoryDB.upsert_project</code></strong>：先精确匹配，再按 canonical 匹配；都不中<em>且</em>库正位于 <code>&lt;cwd&gt;/.ccm/memory.db</code> 时，把“最近活跃、且所记录目录已不存在”的那一行重新挂接到 cwd。所记录目录仍存在的行永不被拿走（即使是文件里唯一的一行——初版拿了，被 test_surfaces §9a 抓住）；不是 cwd 自己的库永不重新挂接。整个读-决-写在 <code>BEGIN IMMEDIATE</code> 里。</li>
+  <li><strong><code>MemoryDB.find_project_id</code></strong>：提问类命令（<code>status</code>/<code>stats</code>/<code>list</code>/<code>sessions</code>/<code>keywords</code>）用的同一查找：会重新挂接，永不插入；库属于别的仍存在目录时如实报告。</li>
+  <li><strong>合并标记带 <code>project_id</code></strong>，路径以解析后形式存储，回退比较两侧都走 canonical；两个读 marker 的 hook 传入 <code>project_id</code>。rename 不再付“多跑一次合并”的代价。</li>
+  <li><strong><code>roots._home_dirs</code></strong> 同时收录每个 home 拼写的解析形式；<strong><code>DashboardApp._registry_key</code></strong> = canonical_path；<strong>save-memories</strong> 改问 <code>core.layout.memory_dir</code>。</li>
+</ul>
+
+<div class="before-after">
+  <div class="ba"><div class="eyebrow">修复前 · 目录 alpha → alpha-renamed</div>
+    <ul><li>SessionStart：Injected <b>0</b> memories</li><li><code>list</code>：(none) · <code>status</code>：0 memories</li><li><code>projects</code> 表：<b>2</b> 行，2 条记忆挂在旧行</li></ul></div>
+  <div class="ba"><div class="eyebrow">修复后 · 同一操作</div>
+    <ul><li>SessionStart：Injected <b>2</b> memories</li><li><code>list</code>/<code>status</code>/<code>stats</code> 在任何 hook 之前就正确</li><li><code>projects</code> 表：<b>1</b> 行，路径与名字随目录更新</li></ul></div>
+</div>
+
+<h3>验证</h3>
+<p class="measure">全部 11 个 gate 在带 tkinter 的 python3.12 下运行（沙箱默认的 python3 3.11 没有 <code>_tkinter</code>，surfaces 套件会在导入 dashboard 时退出——这是环境问题，CI 的 Linux lane 装了 <code>python3-tk</code>）。CI 才跑的 <code>falsify --anchors</code> 也已本地跑过。</p>
+<pre>GATE       RESULT       TIME   DETAIL
+compile    <span class="ok">PASS</span>         0.2s   (no output)
+pyproject  <span class="ok">PASS</span>         0.0s   pyproject.toml parses (project.name='cc-memory')
+versions   <span class="ok">PASS</span>         0.0s   all 5 version sites agree on 2.13.2
+smoke      <span class="ok">PASS</span>        12.8s   ===== ALL SMOKE TESTS PASSED =====
+carryover  <span class="ok">PASS</span>         0.4s   RESULT: 20 passed, 0 failed
+surfaces   <span class="ok">PASS</span>        58.4s   ===== ALL SURFACE TESTS PASSED (58.3s) =====
+directive  <span class="ok">PASS</span>         1.4s   ALL CHECKS PASSED
+i18n       <span class="ok">PASS</span>         0.0s   Result: OK (no drift)
+citations  <span class="ok">PASS</span>         1.5s   Result: OK (no rot detectable)
+claims     <span class="ok">PASS</span>         2.4s   Result: OK (every bound claim matches the code)
+coverage   <span class="ok">PASS</span>         0.0s   Result: OK (every enumerated surface is named)
+<span class="dim">[OK] all 11 gates green · 180/180 anchors intact</span>
+
+<span class="dim">$ python tools/falsify_fixes.py --case &lt;id&gt;   (each reverts ONE fix on a copy; the gate must go red)</span>
+<span class="ok">[ok ]</span> r13reattach     RED (detected)   never re-attach -> a rename mints a second row again
+<span class="ok">[ok ]</span> r13statuscreate RED (detected)   status looks up via upsert_project -> a health check mints a row
+<span class="ok">[ok ]</span> r13markerid     RED (detected)   drop the marker's project_id match
+<span class="ok">[ok ]</span> r13markerpath   RED (detected)   store the marker cwd unresolved ('.')
+<span class="ok">[ok ]</span> r13markersame   RED (detected)   bare normcase compare again
+<span class="ok">[ok ]</span> r13home         RED (detected)   drop the resolved home spelling (POSIX)
+<span class="ok">[ok ]</span> r13skilldir     RED (detected)   save-memories joins memory/ again
+<span class="ok">[ok ]</span> r13registry     RED (detected)   registry key .lower() again (POSIX)</pre>
+<p class="measure">新增门：<code>tests/smoke_test.py</code> § <em>identity</em>（移动后保行、兄弟行与仍存在目录的行永不被拿、status/list 不造行、marker 跨 rename 跟随行并匹配 <code>--project .</code>、解析后的 home 边界、两份技能都问 layout 且 save-memories 脚本体被真实运行）；<code>tests/test_surfaces.py</code> §8 注册表键的按平台断言；文档：ARCHITECTURE §4/§7（英/中）、CHANGELOG <code>[Unreleased]</code>、CLAUDE.md 新小节。</p>
+
+<h2 id="register">全部发现登记表</h2>
+<p class="measure">39 条，按各自的根因簇分组。ID 前缀是审查员分区（A core/db·layout·roots，B hooks·progress·plan，C llm·consolidate·extractor·privacy，D cli·mcp·surfaces，E ui·scripts，F 小模块·gate 工具），M 是协调者。每条在复现包里有对应脚本。</p>
+
+<h3>簇 1 · 身份与位置由各表面自算路径决定 <span class="chip fixed">本次统一修复</span></h3>
+<p class="cluster-note">修复点见上；A4 同簇但需要 <code>MemoryDB</code> 在连接时经 layout 重新解析 <code>db_path</code>，仅 Windows 可达，本次未动。</p>
+<div class="tablewrap"><table>
+<thead><tr><th>ID</th><th>位置</th><th>问题</th><th>严重度</th><th>状态</th></tr></thead>
+<tbody>
+<tr><td class="id">M1</td><td class="loc">core/db.py · upsert_project</td><td class="what">项目身份 = 解析后路径字串；目录移动/重命名后第二行 project 出现，全部记忆、会话、进度、计划、指令对所有表面不可见。</td><td class="sev"><span class="pill loss">数据丢失（可见性）</span></td><td class="st"><span class="chip fixed">已修</span></td></tr>
+<tr><td class="id">D3</td><td class="loc">cli/mem.py:770 及 12 处</td><td class="what">只读命令经 <code>upsert_project</code> 查行；rename 后 <code>status</code> 造出空行并报告空库，掩盖 <code>_require_project_id</code> 的诊断。</td><td class="sev"><span class="pill wrong">结果错误</span></td><td class="st"><span class="chip fixed">已修</span></td></tr>
+<tr><td class="id">C1</td><td class="loc">core/consolidate.py:1094-1140</td><td class="what">marker 的 <code>project_path</code> 存未解析值、读侧只 normcase；CLI 的 <code>--project .</code> 永远匹配不上 hook 的绝对 cwd → 每次手动合并后冗余后台 LLM 合并。</td><td class="sev"><span class="pill perf">性能</span></td><td class="st"><span class="chip fixed">已修</span></td></tr>
+<tr><td class="id">D2</td><td class="loc">cli/mem.py:1270</td><td class="what">同一缺陷从 CLI 侧看：<code>write_consolidation_marker(..., str(args.project))</code> 写入 <code>"."</code>；Stop 探针读为外来并 kick。</td><td class="sev"><span class="pill perf">性能</span></td><td class="st"><span class="chip fixed">已修</span></td></tr>
+<tr><td class="id">A1</td><td class="loc">core/roots.py:212-234</td><td class="what">home 边界只有未解析拼写；<code>/home</code> 为软链接时已解析的链穿过 home，采用 home 下的 <code>memory.db</code>。</td><td class="sev"><span class="pill platform">跨平台</span></td><td class="st"><span class="chip fixed">已修</span></td></tr>
+<tr><td class="id">E8</td><td class="loc">ui/dashboard.py:562</td><td class="what">注册表去重在所有平台 <code>.lower()</code>；POSIX 上两个真实目录 <code>Foo</code>/<code>foo</code> 折叠，第二个永远注册不上。</td><td class="sev"><span class="pill platform">跨平台</span></td><td class="st"><span class="chip fixed">已修</span></td></tr>
+<tr><td class="id">D1</td><td class="loc">skills/save-memories/SKILL.md:140,168</td><td class="what">技能脚本自拼 <code>memory/</code>；已初始化为 <code>.ccm/</code> 的项目里，记忆写入无人读的库，<code>inserted=1</code> 却搜不到。v2.13.0 登记了两份字面拷贝，漏了这第三份。</td><td class="sev"><span class="pill loss">数据丢失</span></td><td class="st"><span class="chip fixed">已修</span></td></tr>
+<tr><td class="id">A4</td><td class="loc">core/db.py:601 · layout.py:365-374</td><td class="what"><code>MemoryDB.db_path</code> 在构造时定死；另一表面完成 <code>memory/</code>→<code>.ccm/</code> 迁移后，长驻的仪表盘/web viewer 每次操作都 <code>unable to open database file</code>。仅 Windows（句柄可拒绝重命名）。</td><td class="sev"><span class="pill crash">崩溃</span></td><td class="st"><span class="chip open">待修</span></td></tr>
+</tbody></table></div>
+
+<h3>簇 2 · 守卫挂在单个调用点，而不在谓词上</h3>
+<p class="cluster-note">仓库自己反复记录的病：修了实例没修类，恢复路径/第二条入口/另一个渲染面各自漏掉那条守卫。</p>
+<div class="tablewrap"><table>
+<thead><tr><th>ID</th><th>位置</th><th>问题</th><th>严重度</th><th>状态</th></tr></thead>
+<tbody>
+<tr><td class="id">F1</td><td class="loc">core/auth.py:40,78</td><td class="what">裸 <code>Path.home()</code> 在 try 之外；无 home 时抛 <code>RuntimeError</code>，显式设置的 <code>ANTHROPIC_API_KEY</code> 被丢弃，pre_compact 丢掉 PROGRESS.md 交接。logger/roots 已守，auth 没守。</td><td class="sev"><span class="pill loss">数据丢失</span></td><td class="st"><span class="chip open">待修</span></td></tr>
+<tr><td class="id">B1</td><td class="loc">hooks/pre_compact.py:845-861</td><td class="what">主路径拒绝软链接 <code>.ccm/</code> 后，兜底处理器重新解析路径并穿过链接写 <code>.last_save.json</code>、删 attempt 标记。根因：<code>layout.migrate_legacy_dir</code> 把链接当作状态目录返回。</td><td class="sev"><span class="pill security">安全</span></td><td class="st"><span class="chip open">待修</span></td></tr>
+<tr><td class="id">B5</td><td class="loc">hooks/stop.py:595 · core/plan.py:530</td><td class="what">advisory 行把 directive <code>slug</code> 原样插进 Claude 读的 stdout（block 路径有 neutralize，advisory 没有）；<code>render_block_reason</code> 单行槽里 CR 存活，可伪造条目。</td><td class="sev"><span class="pill security">安全</span></td><td class="st"><span class="chip open">待修</span></td></tr>
+<tr><td class="id">B6</td><td class="loc">hooks/session_start.py:849,1124</td><td class="what">回溯提取空结果返回 <code>None</code> 而非 <code>[]</code> → 没有 sessions 行 → 每次 SessionStart 都把同一份 transcript 再送 LLM（最多 3 段 ×10s，接近 15s 超时）。register C1 只修了 pre_compact 一侧。</td><td class="sev"><span class="pill perf">性能</span></td><td class="st"><span class="chip open">待修</span></td></tr>
+<tr><td class="id">B8</td><td class="loc">hooks/stop.py:422</td><td class="what">背压探针见 <code>.consolidation.lock</code> 存在即放弃，不看年龄；worker 崩溃留下的陈旧锁让背压永久失效，回到 v2.12.0 修的饥饿。锁策略的第二份拷贝没有 stale 规则。</td><td class="sev"><span class="pill wrong">结果错误</span></td><td class="st"><span class="chip open">待修</span></td></tr>
+<tr><td class="id">B9</td><td class="loc">hooks/user_prompt.py:148,202-228</td><td class="what">首轮是斜杠命令（如文档规定的 <code>/ccm-load</code>）时，去掉斜杠的残文成为 <code>progress.current_request</code>，真正的第 2 轮请求不再种入；pre_compact 的同名入口会跳过脚手架，两入口策略不一。</td><td class="sev"><span class="pill wrong">结果错误</span></td><td class="st"><span class="chip open">待修</span></td></tr>
+<tr><td class="id">A2</td><td class="loc">core/roots.py:504-516</td><td class="what">依赖目录名裁剪作用于项目自身、忽略 <code>.ccm-root</code> 与已有库：名为 <code>external</code>/<code>vendor</code>/<code>deps</code> 的项目（或 <code>~/work/external/&lt;client&gt;</code>）每个子目录都种野生 <code>.ccm/</code>。pin 豁免只挂在另两条规则上。</td><td class="sev"><span class="pill wrong">结果错误</span></td><td class="st"><span class="chip open">待修</span></td></tr>
+<tr><td class="id">D5</td><td class="loc">cli/mem.py:2469-2481</td><td class="what">CLI 边界只捕 <code>FileNotFoundError</code>；id ≥ 2^63（OverflowError）、UTF-16/GBK 的 <code>--raw-file</code>（UnicodeDecodeError）、损坏或非 SQLite 的 memory.db、<code>.ccm</code> 是普通文件，均原样 traceback。</td><td class="sev"><span class="pill crash">崩溃</span></td><td class="st"><span class="chip open">待修</span></td></tr>
+<tr><td class="id">E1</td><td class="loc">ui/installer.py:1591</td><td class="what">打包 exe 的“Open Dashboard”用 <code>sys.executable</code> 拉起 dashboard.py，在 PyInstaller 里那就是安装器自身 → 未知参数拒绝，exit 2，按钮无效。“运行 exe”规则只覆盖了 <code>--cli</code>/<code>--uninstall</code>。</td><td class="sev"><span class="pill wrong">结果错误</span></td><td class="st"><span class="chip open">待修</span></td></tr>
+<tr><td class="id">E3</td><td class="loc">ui/dashboard.py:1320-1336</td><td class="what">SQL 控制台把含 delete/update/create 等词的 SELECT 判为写语句后，写分支只打印 “Rows affected: n/a”，结果集丢失。</td><td class="sev"><span class="pill wrong">结果错误</span></td><td class="st"><span class="chip open">待修</span></td></tr>
+<tr><td class="id">E4</td><td class="loc">ui/dashboard.py:2277,2293</td><td class="what">Save Session 给 <code>insert_session</code> 传了 <code>archive_path</code> 却从不调用 <code>write_session_archive</code>；Sessions 页、<code>/api/sessions</code>、<code>/cc-mem sessions</code> 三处显示不存在的归档文件。</td><td class="sev"><span class="pill wrong">结果错误</span></td><td class="st"><span class="chip open">待修</span></td></tr>
+<tr><td class="id">E5</td><td class="loc">ui/dashboard.py:2851,2697</td><td class="what">生成 CLAUDE.md 时 <code>package.json</code> 的 <code>description</code> 不压平、不限长（README 路径有 200 字上限）；含 <code>\n## Rules</code> 的描述成为生成文件的顶级章节，每个会话作为权威加载。</td><td class="sev"><span class="pill security">安全</span></td><td class="st"><span class="chip open">待修</span></td></tr>
+<tr><td class="id">E6</td><td class="loc">ui/dashboard.py:2800</td><td class="what"><code>package.json</code> 的 <code>name</code> 为 list/dict 时，守卫块外的 <code>result["keywords"][pkg_name]</code> 抛 <code>TypeError</code>，<code>--windowed</code> exe 里“Init New”静默无效。</td><td class="sev"><span class="pill crash">崩溃</span></td><td class="st"><span class="chip open">待修</span></td></tr>
+<tr><td class="id">E7</td><td class="loc">ui/installer.py:1607,1622,1698</td><td class="what">卸载输出与 GUI 对话框仍说 “Project memory/ data … preserved”；v2.13.2 的扫描规则覆盖 print/对话框字串，安装器不在其范围内。</td><td class="sev"><span class="pill wrong">结果错误（低）</span></td><td class="st"><span class="chip open">待修</span></td></tr>
+</tbody></table></div>
+
+<h3>簇 3 · 否定性判定 / 瞬态失败的“失败关闭”方向反了</h3>
+<div class="tablewrap"><table>
+<thead><tr><th>ID</th><th>位置</th><th>问题</th><th>严重度</th><th>状态</th></tr></thead>
+<tbody>
+<tr><td class="id">A3</td><td class="loc">core/layout.py:248-318,343-347</td><td class="what">识别旧版 <code>memory/</code> 的探针遇到瞬态失败（锁、AV 占用、CANTOPEN）时答 False，与“不是我们的”无法区分 → 创建空 <code>.ccm/</code>，此后 outcome 1 永久返回 <code>.ccm</code>：25 条旧记忆被永久孤立，无任何表面报告。</td><td class="sev"><span class="pill loss">数据丢失（低频）</span></td><td class="st"><span class="chip open">待修</span></td></tr>
+<tr><td class="id">F2</td><td class="loc">core/markers.py:95</td><td class="what">系统临时目录不可用时 <code>tempfile.gettempdir()</code> 回退到 <code>os.getcwd()</code>——hook 下即用户仓库——标记（含 500 字用户 prompt）写进仓库，未被任何 .gitignore 覆盖。</td><td class="sev"><span class="pill security">安全（低频）</span></td><td class="st"><span class="chip open">待修</span></td></tr>
+<tr><td class="id">E2</td><td class="loc">ui/installer.py:998</td><td class="what"><code>tmp.replace(SETTINGS_PATH)</code> 覆盖的是符号链接本身而非目标；dotfiles 管理的 <code>settings.json</code> 失去链接，hooks 落在工具下次同步就会抹掉的文件里。</td><td class="sev"><span class="pill loss">数据丢失</span></td><td class="st"><span class="chip open">待修</span></td></tr>
+</tbody></table></div>
+
+<h3>簇 4 · “空”与“从未写过”混为一谈</h3>
+<div class="tablewrap"><table>
+<thead><tr><th>ID</th><th>位置</th><th>问题</th><th>严重度</th><th>状态</th></tr></thead>
+<tbody>
+<tr><td class="id">B3</td><td class="loc">hooks/session_start.py:938-1011 · core/extractor.py:600</td><td class="what">fill-only-empty 以真值判断，PreCompact 写下的 <code>open_todos=[]</code> 在每次 compact/resume 的 SessionStart 被陈旧来源重填（其他会话的最后一次 TodoWrite、或 LLM 任务记忆拆出的 next_steps）；RESUME PROTOCOL 随后命令自动执行 <code>todos[0]</code>。</td><td class="sev"><span class="pill wrong">结果错误</span></td><td class="st"><span class="chip open">待修</span></td></tr>
+<tr><td class="id">C3</td><td class="loc">llm/memory_writer.py:162</td><td class="what">精确哈希命中的 SKIP 丢弃更高的 importance 与新 tags，而近似重复的 MERGE 分支会取 max 并合并——完全相同的重述是更强的信号，却保留陈旧的低重要度。</td><td class="sev"><span class="pill wrong">结果错误（次要）</span></td><td class="st"><span class="chip open">待修</span></td></tr>
+</tbody></table></div>
+
+<h3>簇 5 · 读-决-写跨连接（丢失更新）</h3>
+<div class="tablewrap"><table>
+<thead><tr><th>ID</th><th>位置</th><th>问题</th><th>严重度</th><th>状态</th></tr></thead>
+<tbody>
+<tr><td class="id">B4</td><td class="loc">hooks/session_start.py:892→1011</td><td class="what"><code>get_progress()</code> 在一个连接上读、<code>patch_progress()</code> 秒级之后在另一连接上无条件写；期间并发 PreCompact 的完整重写被启发式填充覆盖（status_done/in_flight/plan/open_todos 四字段实测被改写）。db.py 已两次修过同形状，这里高一层复现。</td><td class="sev"><span class="pill loss">数据丢失</span></td><td class="st"><span class="chip open">待修</span></td></tr>
+</tbody></table></div>
+
+<h3>簇 6 · 规范化不一致（大小写）</h3>
+<div class="tablewrap"><table>
+<thead><tr><th>ID</th><th>位置</th><th>问题</th><th>严重度</th><th>状态</th></tr></thead>
+<tbody>
+<tr><td class="id">C2</td><td class="loc">core/privacy.py:89,156,321</td><td class="what"><code>&lt;private&gt;</code> 剥离用 <code>str.find</code> 区分大小写，<code>&lt;PRIVATE&gt;</code>/<code>&lt;Private&gt;</code> 内容原样入库并送 LLM，<code>has_private</code> 返回 False；权威标记正则却是 IGNORECASE。</td><td class="sev"><span class="pill security">安全</span></td><td class="st"><span class="chip open">待修</span></td></tr>
+</tbody></table></div>
+
+<h3>簇 7 · 计数器不重置 / 封顶次序</h3>
+<div class="tablewrap"><table>
+<thead><tr><th>ID</th><th>位置</th><th>问题</th><th>严重度</th><th>状态</th></tr></thead>
+<tbody>
+<tr><td class="id">B2</td><td class="loc">hooks/stop.py:154-191,588-600</td><td class="what">逃逸预算按 digest 计数但从不重置；通过的 Stop 不清零，<code>plan-drift</code> 每 8 轮设计性复发，三次<em>已解决</em>的拒绝后整个会话余下时间都只剩 advisory，且打印“still unresolved after 3 refusals”（不实）。</td><td class="sev"><span class="pill wrong">结果错误</span></td><td class="st"><span class="chip open">待修</span></td></tr>
+<tr><td class="id">C4</td><td class="loc">llm/memory_writer.py:107-109</td><td class="what"><code>MAX_TAGS</code> 封顶在追加 <code>merged</code>/<code>supersedes</code> 之后应用；已有 32 个标签的行合并后丢失溯源标记。</td><td class="sev"><span class="pill wrong">结果错误（次要）</span></td><td class="st"><span class="chip open">待修</span></td></tr>
+</tbody></table></div>
+
+<h3>簇 8 · 必要条件被当作充分条件（门可以空洞）</h3>
+<p class="cluster-note">“不能变红的门是在说谎”——这四条是门自己的盲区，且没有阴性对照。</p>
+<div class="tablewrap"><table>
+<thead><tr><th>ID</th><th>位置</th><th>问题</th><th>严重度</th><th>状态</th></tr></thead>
+<tbody>
+<tr><td class="id">F6</td><td class="loc">tools/falsify_fixes.py:2027-2058</td><td class="what"><code>run_case</code> 仅凭破坏副本上 gate 的退出码判 RED，从不建立“未动树上同一 gate 是绿的”这条基线；本机 surfaces 因缺 tkinter 本就红，三个以它为 gate 的用例仍报 “RED (detected)”。</td><td class="sev"><span class="pill gate">门空洞</span></td><td class="st"><span class="chip open">待修</span></td></tr>
+<tr><td class="id">F3</td><td class="loc">tools/doc_coverage.py:88</td><td class="what">MCP 工具枚举是前缀白名单 <code>(memory|progress)_\w+</code>；名字不在前缀里的新工具对覆盖门不可见（实测加 <code>plan_status</code> 不写文档 → OK）。</td><td class="sev"><span class="pill gate">门空洞</span></td><td class="st"><span class="chip open">待修</span></td></tr>
+<tr><td class="id">F4</td><td class="loc">tools/doc_coverage.py:133-134</td><td class="what">覆盖判定是叶名子串匹配；名为常用词的成员被无关散文“记录”（新表 <code>users</code>、新键 <code>ccl.model</code> 均 OK）。</td><td class="sev"><span class="pill gate">门空洞</span></td><td class="st"><span class="chip open">待修</span></td></tr>
+<tr><td class="id">F5</td><td class="loc">tools/citation_check.py:196-209</td><td class="what">verbatim 区域按 <code>[…]</code> 切段后只查“每段在捕获中出现过”，不查顺序与相邻；把引文首尾两行对调仍 VERBATIM。</td><td class="sev"><span class="pill gate">门空洞（部分）</span></td><td class="st"><span class="chip open">待修</span></td></tr>
+<tr><td class="id">F7</td><td class="loc">tools/falsify_fixes.py（注册表）</td><td class="what">v2.13.0 的六条规则与 v2.13.2、v2.12.1 的按平台断言此前没有任何 falsify 用例（0 个 r13*）。本次为身份修复新增 8 个 r13 用例；v2.13.0 原有规则仍缺。</td><td class="sev"><span class="pill gate">覆盖缺口</span></td><td class="st"><span class="chip open">部分</span></td></tr>
+</tbody></table></div>
+
+<h3>簇 9 · 各自独立的单例</h3>
+<div class="tablewrap"><table>
+<thead><tr><th>ID</th><th>位置</th><th>问题</th><th>严重度</th><th>状态</th></tr></thead>
+<tbody>
+<tr><td class="id">A1b</td><td class="loc">core/roots.py:253-291</td><td class="what">A1 的另一半：<code>_is_profile_dir</code> 只认 <code>&lt;fsroot&gt;/{Users,home}/&lt;name&gt;</code> 形状；WSL 下的 <code>/mnt/c/Users/bob</code> 不被识别为 profile，其下未初始化项目会采用 profile 里的库。结构启发式问题，非拼写问题，本次未动。</td><td class="sev"><span class="pill platform">跨平台</span></td><td class="st"><span class="chip open">待修</span></td></tr>
+<tr><td class="id">B7</td><td class="loc">hooks/session_start.py:1106 vs 815</td><td class="what">回溯保存先解码最多 3 段 32 MiB 的 transcript，再发现没有 API key；无 key 时每次启动白付 ~1.5s 且不留日志。把 <code>get_api_key()</code> 提到循环外即可。</td><td class="sev"><span class="pill perf">性能</span></td><td class="st"><span class="chip open">待修</span></td></tr>
+<tr><td class="id">D4</td><td class="loc">cli/mem.py:1685 · core/plan.py unmatched_criteria</td><td class="what"><code>plan-set --from-refiner</code> 先落库，随后在<em>未规范化</em>的原始 dict 上跑 advisory，<code>success_criteria</code> 为 int/bool 时 <code>TypeError</code>，rc=1 谎报未写入；重试被 carryover 门拒绝。</td><td class="sev"><span class="pill crash">崩溃</span></td><td class="st"><span class="chip open">待修</span></td></tr>
+<tr><td class="id">D6</td><td class="loc">cli/mem.py:1665</td><td class="what"><code>--from-refiner</code> 读 stdin 用 <code>json.loads</code>，带 BOM 的输入（PowerShell 5.1 的 <code>&gt;</code>/<code>Out-File</code> 默认）被拒；CLI 里其他每一处读取都是 <code>utf-8-sig</code>。</td><td class="sev"><span class="pill platform">跨平台</span></td><td class="st"><span class="chip open">待修</span></td></tr>
+</tbody></table></div>
+
+<h2 id="next">建议的修复顺序</h2>
+<p class="measure">按“严重且便宜”排序；每条都已有复现脚本可直接改成断言。多数是几行改动，但按仓库惯例每条都要配 falsify 用例与文档更新，所以没有并入本次的统一修复。</p>
+<ol class="order measure">
+  <li><strong>C2</strong> <code>privacy.py</code>：<code>&lt;private&gt;</code> 族匹配改为不区分大小写（与 <code>_MARKER_TAG_RE</code> 一致）。隐私控制，改动最小。</li>
+  <li><strong>F1</strong> <code>auth.py</code>：<code>Path.home()</code> 进 try，或抽出 core 级 “home or None” 助手供 logger/roots/auth 共用（三处三种写法本身就是簇 2 的病）。</li>
+  <li><strong>B2</strong> <code>stop.py</code>：通过的 Stop 清零该 digest 的计数；<code>attempt is None</code> 时不要打印“after 3 refusals”。</li>
+  <li><strong>B4 + B3</strong> <code>session_start.py</code>：fill-only-empty 改为单事务的条件 <code>UPDATE … SET col = CASE WHEN col IN ('', '[]') THEN ? ELSE col END</code>；<code>trigger_type</code> 表明 PreCompact 刚写过时跳过 tier 3/2B。</li>
+  <li><strong>B1 + B5</strong>：<code>layout.migrate_legacy_dir</code> 像 <code>_has_db</code> 一样拒绝链接；advisory 行与 <code>render_block_reason</code> 单行槽走 <code>neutralize_inline</code>。</li>
+  <li><strong>B8</strong> <code>stop.py</code>：探针不预检锁，或套用 worker 的 <code>_STALE_LOCK_S</code>。</li>
+  <li><strong>E5 + E6</strong> <code>dashboard.py</code>：<code>description</code> 压平并限长，<code>name</code> 类型守卫延伸到使用处。</li>
+  <li><strong>F6</strong> <code>falsify_fixes.py</code>：<code>run_case</code> 先在未动副本上跑一次 gate 建立绿基线，否则报 “UNSOUND” 而非 RED。</li>
+  <li><strong>D5 / D6 / D4</strong> <code>mem.py</code>：边界扩为 <code>(OSError, sqlite3.DatabaseError, UnicodeDecodeError, OverflowError)</code>；stdin <code>lstrip("﻿")</code>；advisory 用规范化后的 <code>result</code>。</li>
+  <li><strong>A2 / A3 / A4 / E1 / E2 / F3–F5 / 其余</strong>：各需一点设计（探针三态、pin 豁免统一、<code>MemoryDB</code> 惰性重解析、frozen 判定、覆盖门的阴性对照）。</li>
+</ol>
+
+<h2 id="repro">如何复现</h2>
+<p class="measure">复现包 <code>cc-memory-debug-repros-2026-09-01.tar.gz</code>（已随报告发送）：目录 <code>A</code>–<code>F</code> 对应六组审查员，<code>life/</code> 是协调者的端到端驱动（<code>lifecycle.py</code> 六 hook 全生命周期、<code>concurrency.py</code> 20 路并发、<code>migrate_move.py</code> 旧目录迁移 + 项目移动）。每个脚本先把 <code>HOME/USERPROFILE/TMPDIR/TEMP/TMP</code> 重定向到 <code>tempfile.mkdtemp()</code> 沙箱、再 <code>sys.path.insert(0, "&lt;repo&gt;/cc_memory")</code> 导入包，结束时 <code>finally</code> 删除沙箱，不触碰真实 <code>~/.claude</code>。脚本里写死的仓库路径是 <code>/home/user/cc-memory</code>，换机器需替换。<code>E/dashboard_*.py</code> 需要带 tkinter 的解释器。</p>
+<p class="measure">本次修复的验证：<code>python tests/run_gates.py</code>（Linux 需 <code>python3-tk</code>），<code>python tools/falsify_fixes.py --anchors</code>，以及 <code>--case r13reattach</code> 等 8 个用例逐个应为 RED (detected)。</p>
+
+<footer>
+  <div>cc-memory 2.13.2 · 分支 <span class="mono">claude/codebase-debug-root-cause-8y09u2</span> · 两个提交：<span class="mono">c3089fa</span>（修复 + 门 + 文档）、<span class="mono">80fec7b</span>（计数更正）。版本号未 bump，CHANGELOG 记在 <span class="mono">[Unreleased]</span>。</div>
+</footer>
+</div>

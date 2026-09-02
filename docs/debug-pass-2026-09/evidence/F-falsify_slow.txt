@@ -1,0 +1,16 @@
+Falsifying 6 fix(es) against a temporary copy of /home/user/cc-memory
+
+[ok ] markerid    RED (detected)
+          truncate the session id again -> two sessions share every marker
+[ok ] r7dirpriv   RED (detected)
+          trust any directory -> the marker fallback lands in shared /tmp
+[ok ] r10lograise RED (detected)
+          unguard the shared ladder's log call -> a broken logger crashes every hook at once
+[ok ] claimword   RED (detected)
+          un-bound the back-scan -> 'done' binds as 1 and 'often' as 10
+[ok ] symlink     RED (detected)
+          drop the portable link check -> read_marker follows a planted symlink
+[ok ] r12scancap  RED (detected)
+          remove the _is_container scan cap -> proving 'not a container' reads every subdirectory of every ancestor again (3.5-4.4 s per call under a 6,366-entry %TEMP%)
+
+Summary: 6/6 breakages detected

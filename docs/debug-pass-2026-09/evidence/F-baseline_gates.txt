@@ -1,0 +1,60 @@
+[..] compile    byte-compile the whole tree
+[..] pyproject  pyproject.toml parses (PEP 517)
+[..] versions   every version site agrees
+[..] smoke      end-to-end + the three doc gates
+[..] carryover  the plan carryover gate
+[..] surfaces   installer · MCP · viewer · opt-out · anchoring
+[..] directive  directive ledger + Stop enforcement
+[..] i18n       translation drift
+[..] citations  every file.py:LINE citation in the tracked docs
+[..] claims     prose counts vs the sets computed from the tree
+[..] coverage   every public surface is named by the doc that owns it
+
+==============================================================================
+GATE       RESULT       TIME   DETAIL
+------------------------------------------------------------------------------
+compile    PASS         0.0s   (no output)
+pyproject  PASS         0.0s   pyproject.toml parses (project.name='cc-memo
+versions   PASS         0.0s   all 5 version sites agree on 2.13.2
+smoke      PASS        12.0s   ===== ALL SMOKE TESTS PASSED =====
+carryover  PASS         0.4s   ============================================
+surfaces   FAIL        46.4s   Traceback (most recent call last):
+directive  PASS         1.3s   ALL CHECKS PASSED
+i18n       PASS         0.0s   Result: OK (no drift)
+citations  PASS         1.2s   Result: OK (no rot detectable)
+claims     PASS         2.5s   Result: OK (every bound claim matches the co
+coverage   PASS         0.0s   Result: OK (every enumerated surface is name
+==============================================================================
+[FAIL] 1 of 11 gates RED: surfaces
+
+──── surfaces ──── Traceback (most recent call last):
+  | [OK] web admission shed: a refused connection is answered 'HTTP/1.1 503 Service Unavailable', not closed silently
+  | [OK] installer Initialize Project: 2 outcomes reported distinctly (a refusal is never 'Success'), and the path shown is the memory/ actually created
+  | [OK] /cc-mem archive: a wrong memory retires with its lineage recorded, and 2 refusals (a sibling project's id in the SAME database file, and an unknown id)
+  | [OK] call_llm deadline is WALL-CLOCK: a 1-byte/0.25s drip was bounded at 3.00s against a 3.0s deadline (11.07s pre-fix)
+  | [OK] pre_compact annotation guard: 4 payloads (3 malformed trigger/session_id + control) all reach .last_save success=true and write PROGRESS.md
+  | [OK] /ccm-load gate ordering: the opt-out runs BEFORE core.roots and in its own try, and 2 .gitignore read statement(s) across the 2 literal copies decode with errors='replace'
+  | [OK] doc_claims coverage: 7 shapes that used to slip past it (word-internal numerals, 'N of the hooks', 六条/个 hook) are seen, and an overlapping quantifier claim resolves to the outer number
+  | [OK] live plan anchor through its OWN hook: ExitPlanMode captures plan_active + memory/.plan_raw.md and TodoWrite syncs in all 3 modes, and _apply_plan_integration is asserted ABOVE the should_observe gate — the rule CLAUDE.md states three times and nothing executed
+  | [OK] MCP scope gate: 6 memory_add calls over real stdio — a cross-project write is refused as isError with 0 rows reaching the other database, while this project, a subdirectory of it and the omitted argument all land in ONE
+  | [OK] memory_topics bound: 4 calls over real stdio — the row cap, the body clip with its visible marker, and the truncated counts all hold; an unparseable limit is refused as -32602 by schema validation, never coerced into a table dump
+  | Error: tkinter is not available. Install python3-tk.
+  | ===== SURFACE TESTS FAILED (sandbox kept at /tmp/cc-memory-surfaces-6m85xtiq) =====
+  | Traceback (most recent call last):
+  |   File "/home/user/cc-memory/cc_memory/ui/dashboard.py", line 59, in <module>
+  |     import tkinter as tk
+  | ModuleNotFoundError: No module named 'tkinter'
+  | During handling of the above exception, another exception occurred:
+  | Traceback (most recent call last):
+  |   File "/home/user/cc-memory/tests/test_surfaces.py", line 4111, in <module>
+  |     main()
+  |   File "/home/user/cc-memory/tests/test_surfaces.py", line 4099, in main
+  |     test_late_surfaces()
+  |   File "/home/user/cc-memory/tests/test_surfaces.py", line 4078, in test_late_surfaces
+  |     n_dash = _dashboard_generates_a_swept_claude_md()
+  |              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |   File "/home/user/cc-memory/tests/test_surfaces.py", line 3459, in _dashboard_generates_a_swept_claude_md
+  |     from ui import dashboard as dash
+  |   File "/home/user/cc-memory/cc_memory/ui/dashboard.py", line 63, in <module>
+  |     sys.exit(1)
+  | SystemExit: 1

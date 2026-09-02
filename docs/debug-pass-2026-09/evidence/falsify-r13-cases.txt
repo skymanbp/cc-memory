@@ -1,0 +1,9 @@
+[ok ] r13reattach RED (detected)
+[ok ] r13statuscreate RED (detected)
+[ok ] r13markerid RED (detected)
+[ok ] r13markerpath RED (detected)
+[ok ] r13markersame RED (detected)
+[ok ] r13home     RED (detected)
+[ok ] r13skilldir RED (detected)
+[ok ] r13registry RED (detected)
+done

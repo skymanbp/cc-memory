@@ -101,7 +101,31 @@ TRACKED = ["README.md", "README.zh.md", "CLAUDE.md", "CHANGELOG.md",
 # verbatim region, never a claim about this tree. smoke_test.py leaves these
 # prefixes out of its "every tracked markdown file is in TRACKED" assertion.
 # Nothing else may be listed here: a document that is not evidence is gated.
-EVIDENCE_PREFIXES = ("demo/captures/",)
+#
+# docs/debug-pass-2026-09.md and its directory are the second kind of
+# evidence: the record of a whole-repository debug pass. The document quotes
+# six reviewers' findings VERBATIM, and every `file:line` in them is a
+# statement about the tree they reviewed (v2.13.2, commit 7ea9030) — rewriting
+# those numbers to keep a gate green would falsify the record, which is the
+# one thing a record must not do. The directory beside it holds the
+# reviewers' reproduction scripts and the gate outputs: evidence that the
+# findings were real, not source of this plugin. Both halves matter to THIS
+# tool for a second reason — `_global_defs` and the bare-filename resolvers
+# below skip evidence too, because a repro script's `def project()` or
+# `PLAN = ...` is a symbol of the EVIDENCE, and letting it into the index
+# made the plain words "project" and "plan" in the tracked docs anchor as
+# symbols: 24 correct citations reported as rot the first time the scripts
+# were committed (measured 2026-09-01).
+EVIDENCE_PREFIXES = ("demo/captures/", "docs/debug-pass-2026-09")
+
+
+def _is_evidence(root: Path, path: Path) -> bool:
+    """True for a file under one of EVIDENCE_PREFIXES; never raises."""
+    try:
+        rel = path.relative_to(root).as_posix()
+    except ValueError:
+        return False
+    return rel.startswith(EVIDENCE_PREFIXES)
 
 # `cc_memory/core/db.py:1349`, `db.py:188-201`, `tests/smoke_test.py:266-278`,
 # `hooks/hooks.json:9`, `skills/ccm-load/SKILL.md:137`, `plugin.json:4`.
@@ -282,7 +306,8 @@ def _resolve_path(root: Path, cited: str):
         return direct, None
     matches = [p for p in root.rglob(cited.split("/")[-1])
                if "__pycache__" not in p.parts and p.is_file()
-               and p.as_posix().endswith(cited)]
+               and p.as_posix().endswith(cited)
+               and not _is_evidence(root, p)]
     if len(matches) == 1:
         return matches[0], None
     if matches:
@@ -307,7 +332,10 @@ def _global_defs(root: Path):
     if _GLOBAL_DEFS is None:
         names = set()
         for py in root.rglob("*.py"):
-            if "__pycache__" in py.parts:
+            if "__pycache__" in py.parts or _is_evidence(root, py):
+                # why: a symbol defined in an evidence script (an audit's
+                # reproduction) is not a symbol of this tree; see
+                # EVIDENCE_PREFIXES for the 24 false STALE verdicts it caused
                 continue
             d = _defs_in(py)
             if d:
@@ -408,7 +436,8 @@ def classify(root: Path):
                     # symbol that exists in exactly one of them.
                     cands = [p for p in root.rglob(cited.split("/")[-1])
                              if "__pycache__" not in p.parts and p.is_file()
-                             and p.as_posix().endswith(cited)]
+                             and p.as_posix().endswith(cited)
+                             and not _is_evidence(root, p)]
                     ctx_all = "\n".join(doc_lines[max(0, n - 2):n + 1])
                     names = {s.split(".")[-1]
                              for s in SYMBOL_RE.findall(ctx_all)}

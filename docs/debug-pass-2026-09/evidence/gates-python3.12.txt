@@ -1,0 +1,29 @@
+[..] compile    byte-compile the whole tree
+[..] pyproject  pyproject.toml parses (PEP 517)
+[..] versions   every version site agrees
+[..] smoke      end-to-end + the three doc gates
+[..] carryover  the plan carryover gate
+[..] surfaces   installer · MCP · viewer · opt-out · anchoring
+[..] directive  directive ledger + Stop enforcement
+[..] i18n       translation drift
+[..] citations  every file.py:LINE citation in the tracked docs
+[..] claims     prose counts vs the sets computed from the tree
+[..] coverage   every public surface is named by the doc that owns it
+
+==============================================================================
+GATE       RESULT       TIME   DETAIL
+------------------------------------------------------------------------------
+compile    PASS         0.3s   (no output)
+pyproject  PASS         0.0s   pyproject.toml parses (project.name='cc-memo
+versions   PASS         0.0s   all 5 version sites agree on 2.13.2
+smoke      PASS        12.3s   ===== ALL SMOKE TESTS PASSED =====
+carryover  PASS         0.4s   ============================================
+surfaces   PASS        58.5s   ===== ALL SURFACE TESTS PASSED (58.3s) =====
+directive  PASS         1.4s   ALL CHECKS PASSED
+i18n       PASS         0.0s   Result: OK (no drift)
+citations  PASS         1.5s   Result: OK (no rot detectable)
+claims     PASS         2.5s   Result: OK (every bound claim matches the co
+coverage   PASS         0.0s   Result: OK (every enumerated surface is name
+==============================================================================
+[OK] all 11 gates green
+exit=0
