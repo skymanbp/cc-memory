@@ -9,7 +9,7 @@ Your project's decisions, results, bugs and plans survive compaction, session
 boundaries, and closed terminals — the next session is *forced* to read them
 before it does anything, and what is stored is *reconciled*, never stacked.
 
-[![version](https://img.shields.io/badge/version-2.12.2-blue.svg)](CHANGELOG.md)
+[![version](https://img.shields.io/badge/version-2.14.0-blue.svg)](CHANGELOG.md)
 [![license](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![python](https://img.shields.io/badge/python-3.8%2B-blue.svg)](pyproject.toml)
 [![dependencies](https://img.shields.io/badge/runtime%20deps-0-brightgreen.svg)](#requirements)
@@ -44,7 +44,7 @@ before it does anything, and what is stored is *reconciled*, never stacked.
 - [Development](#development)
 - [Troubleshooting](#troubleshooting)
 - [Roadmap and known limits](#roadmap-and-known-limits)
-- [What's new in v2.12.0](#whats-new-in-v2120)
+- [What's new in v2.14.0](#whats-new-in-v2140)
 - [Documentation map](#documentation-map)
 - [License](#license)
 
@@ -963,46 +963,53 @@ has to rediscover:
   cores were extracted into pure functions and tested headlessly (v2.10.1);
   refactoring the remaining 2.9k-line GUI without tests was deliberately
   deferred.
+- **Gate limits recorded, not designed away (v2.14.0).** A citation whose
+  sentence names no symbol is only bounds-checked (inside the file, non-blank)
+  and can rot without going red; a count whose noun is not in `doc_claims`'
+  trigger list is not a claim the gate sees; a `verbatim` quote is verified
+  segment by segment, so a reordering of true segments passes.
 - **Candidate future work:** surfacing `inject-usage` signals in the Stop
   status line; a `directive-*` surface in the dashboard; richer `paths`-style
   diagnostics for multi-database machines.
 
 ---
 
-## What's new in v2.12.0
+## What's new in v2.14.0
 
-**Consolidation that actually runs, and a ledger you can maintain.** Driven by
-two measurements: this repository's own database (349 memories in one month
-against a 17-day-old consolidation marker) and a seven-finding field report
-from a real consuming project.
+**A project's identity is its database, not the path string inside it.** A
+whole-repository debug pass (six read-only reviewers, every finding reproduced
+before it was reported) found that `projects.path` *was* the identity, and
+every surface decided "which project is this" with its own path arithmetic.
+Moving or renaming a project directory minted a second row, and every memory,
+session, progress row, plan and directive went dark on every surface.
 
-- **Backpressure-triggered consolidation** — due at 50 unconsolidated rows or
-  7 stale days, probed by the Stop hook every turn, executed by the same
-  budget-gated background worker; plus `consolidate --deep`, which loops the
-  semantic-dedup judge until it runs dry. The manual path now stamps the same
-  cadence marker as the hook path, through one shared writer.
-- **`directive-edit`** — correct a directive without bumping its repetition
-  count (the count is the ledger's importance signal; repairs were inflating
-  it). `--status blocked` parks work that waits on the user; `--kind
-  constraint` marks prohibitions that are never idle-checked.
-- **Plan replacements audit directive step references** — every `step #N` in
-  active directive text is checked against the outgoing and incoming step
-  tables and reported as `DEAD` or `SILENTLY RETARGETED`. The documented rule:
-  reference steps by title, never by number.
-- **`paths`, `--json`, `--full`** — find your artifacts, read them
-  untruncated, and get output no capture codec can garble.
+- **One comparable spelling of a path** — `core.layout.canonical_path`. A
+  moved project keeps its row, a sibling's row is never taken, and `status` /
+  `list` never create a row just to answer a question.
+- **The consolidation marker follows the row**, so a manual `/cc-mem
+  consolidate --project .` is no longer followed by a redundant background run.
+- **A handle opened on a pre-v2.13.0 `memory/` follows the rename to
+  `.ccm/`** — one way, and only after a connect has failed — instead of
+  failing on every operation once another surface completes the move
+  (Windows, where an open handle refuses the rename).
+- **Four more findings closed at their own root:** `<PRIVATE>…</PRIVATE>`
+  is stripped and escaped like its lowercase form; the Stop hook's escape
+  budget resets when a refused condition is resolved, instead of turning
+  enforcement advisory for the rest of the session after three refusals; a
+  missing home directory no longer discards an explicit `ANTHROPIC_API_KEY`;
+  `/save-memories` writes to the database the hooks read.
+- **Four gate checkers stopped certifying what they had not checked** — a
+  documentation surface must be *named*, not merely contained; a count with
+  two modifier words is still a count; a citation the checker could only
+  bounds-check is reported in those words; and `--emit-marker` refuses to
+  re-stamp a translation nobody translated (`--translation-unchanged "<why>"`
+  for an English-only edit).
 
-v2.12.1 (same day) is the first CI-built release — its first run failed on
-the exe-verification step, and the Linux gate lanes then caught a
-Windows-only test assumption and, behind it, a real one: `/cc-mem sql` and
-the dashboard's SQL console had never worked on Linux or macOS (a malformed
-read-only URI since v2.8.0). Fixed, and now tested for every path shape on
-every platform.
-
-v2.12.2 (same day) adds the [Before and after](#before-and-after) section
-and fixes what its own captures found: the directive ledger had never been
-put in front of the model. It is now the first SessionStart injection layer
-and a `## Standing directives` section of `PLAN.md`.
+v2.13.0 moved per-project state from `memory/` to `.ccm/` — dotted state
+beside `.git`, migrated one way on first write and identified by content,
+never by name. v2.12.x brought backpressure-triggered consolidation,
+`directive-edit`, the step-reference audit, `paths` / `--json` / `--full`,
+CI-built releases and the [Before and after](#before-and-after) captures.
 
 Every earlier release is in **[CHANGELOG.md](CHANGELOG.md)**, which is the
 single history of this project — this README documents what the software *is*,
@@ -1041,7 +1048,9 @@ has.
 
 English is the canonical skeleton; each `*.zh.md` is a drift-tracked sibling
 bound to a normalised hash of its English source, and `tools/i18n_check.py`
-turns the suite red when one drifts. Memory **content** is language-agnostic —
+turns the suite red when one drifts. Since v2.14.0 the marker also carries a
+hash of the translation's own body, so `--emit-marker` refuses to re-stamp a
+translation nobody translated. Memory **content** is language-agnostic —
 only the project's own documentation follows this convention.
 
 ---

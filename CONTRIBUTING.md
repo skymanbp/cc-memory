@@ -112,6 +112,12 @@ marker:
 python tools/i18n_check.py --emit-marker README.md
 ```
 
+The emitter records a hash of the translation's body in the marker and, when
+the English digest has changed since the previous marker but the translation
+has not, refuses (exit 2) rather than certify a translation nobody
+translated. An English-only change that needs no translation — a typo, a
+renumbered citation — passes with `--translation-unchanged "<why>"`.
+
 ## Proving a check is not vacuous
 
 `tools/falsify_fixes.py` reverts each registered fix **on a temporary copy** and

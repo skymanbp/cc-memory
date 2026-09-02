@@ -43,4 +43,5 @@ $ python tests/run_gates.py
 - [ ] Docs co-updated: a counted claim carries its `<!--ce:*-->` binding, and
       new `file:line` citations pass `python tools/citation_check.py`
 - [ ] If an English doc changed, its `.zh.md` sibling was refreshed and
-      re-markered (`python tools/i18n_check.py --emit-marker <doc>`)
+      re-markered (`python tools/i18n_check.py --emit-marker <doc>`; an
+      English-only change carries `--translation-unchanged "<why>"`)
