@@ -260,6 +260,15 @@ def _home_dirs():
 # fixed OS conventions, not machine paths: no user name, no drive letter.
 _PROFILE_PARENTS = ("users", "home")
 
+# Directories holding one entry per MOUNTED VOLUME, named for the volume:
+# `/mnt/c` (WSL), `/cygdrive/c` (Cygwin), `/host_mnt/c` (Docker Desktop) and
+# `/c` (Git-Bash) are all `C:\`. Fixed OS conventions, no machine specifics.
+_MOUNT_CONTAINERS = ("mnt", "cygdrive", "host_mnt")
+
+# A volume entry's name is ONE ASCII letter — spelled out because
+# `str.isalpha` is Unicode-aware and would accept `é` as a drive.
+_DRIVE_LETTERS = frozenset("abcdefghijklmnopqrstuvwxyz")
+
 
 def _is_fs_root(path):
     """True for `C:\\`, `/`, `\\\\server\\share` — a path that is its own parent."""
@@ -271,14 +280,49 @@ def _is_fs_root(path):
         return False
 
 
+def _is_volume_root(path):
+    """True when `path` is the root of a VOLUME: `/`, `C:\\`, `/mnt/c`, `/c`.
+
+    A mounted volume's entry point IS a filesystem root seen from another
+    namespace, and `_is_profile_dir` needs both spellings. Through v2.13.2 it
+    could say "at the filesystem root" only, so a Windows profile reached from
+    WSL was not a profile at all: measured on that tree,
+    `_is_profile_dir(/mnt/c/Users/bob)` was False, `_chain` walked through the
+    profile, and `project_root(/mnt/c/Users/bob/Projects/foo/src)` returned
+    `/mnt/c/Users/bob` — adopting the home database the module docstring names
+    (`C:\\Users\\<user>\\memory\\memory.db`, 495 KB on the reporting machine).
+
+    Deliberately NARROW: the name must be ONE letter, so `/mnt/data` is not a
+    volume root, and the container must itself sit at the filesystem root, so
+    an in-repo `mnt/c/` is not one. A residual false positive costs one level
+    of upward walk — the pre-v2.6.0 behaviour, never the home database.
+    """
+    try:
+        if _is_fs_root(path):
+            return True
+        if len(path.name) != 1 or path.name.lower() not in _DRIVE_LETTERS:
+            return False
+        parent = path.parent
+        return _is_fs_root(parent) or (
+            parent.name.lower() in _MOUNT_CONTAINERS
+            and _is_fs_root(parent.parent))
+    except Exception:
+        # why: an undecomposable path is not a volume root; the env boundary
+        # and the depth cap still apply.
+        return False
+
+
 def _is_profile_dir(path):
     """True when `path` is a per-user profile root by platform convention.
 
     That is: a direct child of a directory named `Users` or `home` **that
-    itself sits at the filesystem root** — `C:\\Users\\alice`, `/home/alice`,
-    `/Users/alice`. Nothing machine-specific is encoded; only the shape is.
+    itself sits at a VOLUME root** — `C:\\Users\\alice`, `/home/alice`,
+    `/Users/alice`, and `/mnt/c/Users/bob`, which is the first of those seen
+    from WSL. Nothing machine-specific is encoded; only the shape is. The
+    volume qualifier is `_is_volume_root`, which carries the WSL measurement;
+    until v2.14.0 it was `_is_fs_root` and that mounted spelling was missed.
 
-    The filesystem-root qualifier is load-bearing and was missing in v2.6.0.
+    The volume-root qualifier is load-bearing and was missing in v2.6.0.
     Without it any in-repo directory named `users` or `home` looked like a
     profile: measured, a session in `<repo>/users/alice/sub` had its chain
     truncated to `[cwd]`, so no rung could reach the repo and the next
@@ -305,7 +349,7 @@ def _is_profile_dir(path):
         parent = path.parent
         return (parent != path and bool(path.name)
                 and parent.name.lower() in _PROFILE_PARENTS
-                and _is_fs_root(parent.parent))
+                and _is_volume_root(parent.parent))
     except Exception:
         # why: an exotic path that cannot be decomposed is simply not a
         # profile dir; the env boundary and the depth cap still apply.
@@ -427,12 +471,9 @@ def _is_container(directory):
     which carries its own `.git` plus three nested project databases — would
     be refused and a new subdirectory of it could no longer resolve to it.
 
-    A `.ccm-root` pin is exempt for the same reason, only more so: it is the
-    documented escape hatch for precisely the case where the heuristics get it
-    wrong, so letting a heuristic overrule it is self-defeating. Measured
-    before this clause: a pinned directory with three repository children was
-    judged a container, dropped from the candidate set, and a plain
-    subdirectory under it resolved to ITSELF — the pin silently did nothing.
+    A `.ccm-root` pin is exempt too, but NOT here: `_candidates` short-circuits
+    on it before this function is reached (v2.14.0), because the exemption was
+    the thing that kept being forgotten by whichever rule was written last.
 
     Owning a `memory/` is deliberately NOT such a statement. A container that
     has acquired a stray database is exactly the damage shape being guarded
@@ -451,7 +492,7 @@ def _is_container(directory):
     a container. The read is BOUNDED by `_CONTAINER_SCAN_CAP` subdirectories
     (v2.12.2): past the cap the verdict falls through to what was seen.
     """
-    if _is_vcs_root(directory) or _exists(directory / PIN_MARKER):
+    if _is_vcs_root(directory):
         return False
     vcs_children = 0
     db_children = 0
@@ -485,56 +526,103 @@ def _is_container(directory):
     return db_children >= _CONTAINER_CHILDREN and not _has_db(directory)
 
 
-def _candidates(chain):
-    """The entries of `chain` that may legitimately BE a project root.
+def _is_pinned(directory):
+    """The user's `.ccm-root` declaration. The escape hatch, tested ONCE."""
+    return _exists(directory / PIN_MARKER)
 
-    Two exclusions, applied once so that every rung inherits them. v2.6.0
-    attached its guards to one rung's inner loop instead, and each rung that
-    did not inherit them became its own defect.
 
-    1. Anything at or inside a DEPENDENCY directory. Reading a file under
-       `node_modules/`, `vendor/` or `site-packages/` must anchor memory on
-       the project that DEPENDS on the package, not on the package: measured,
-       a cwd of `<repo>/node_modules/left-pad` resolved to `left-pad` itself
-       (it has a `package.json`, so the marker rung accepted it) and planted
-       a database inside the dependency tree — where `nested_databases` does
-       not look, so it could never even be reported. The cut is by outermost
-       occurrence: everything nearer the cwd than a dependency directory is
-       that dependency's internals.
-    2. Containers of projects — see `_is_container`.
-    3. The FILESYSTEM ROOT itself. `_chain` documents that it stops "below the
-       filesystem root" and never did: it appends each parent and only breaks
-       once the parent equals the child, so `D:\\` was the last element of
-       every chain on that drive. It is not a container either (a drive root
-       rarely holds two VCS-root or two database-owning children), so it
-       survived every rung — and a single `D:\\memory\\memory.db`, which any
-       one mis-anchored session could have created, would then have been the
-       nearest-database answer for EVERY project on the drive. A drive root is
-       never a project; excluding it here is the contract the docstring
-       already promised. TWO exemptions: `start` itself (a session genuinely
-       opened at `D:\\` still resolves to itself through the unresolved rung),
-       and a root carrying `.ccm-root`. Without the second, this rule silently
-       overruled the pin exemption added to `_is_container` in the same
-       change — a repository living AT a volume root (a dedicated drive, a
-       `net use` share, a USB stick) could not be pinned at all, so a cwd one
-       level down lost every upward rung and resolved to itself.
+def _dependency_cut(chain):
+    """Outermost index in `chain` that is somebody ELSE'S code, or -1.
 
-    Filtering rather than truncating is deliberate: the walk must continue
-    PAST a dependency directory to reach the project that owns it.
+    A dependency directory is recognised by NAME, and a name is a guess. It is
+    overruled by either declaration this module already honours — a `.ccm-root`
+    pin, or the directory's own database. Without that, a project CALLED
+    `external` (or living under `~/work/external/`) had itself and everything
+    below the cut dropped, `_nearest` never saw its own `.ccm/memory.db`, and
+    EVERY subdirectory cwd resolved to itself: measured on all four of
+    `external` / `vendor` / `deps` / `third_party`, and on the own-name layout
+    even when pinned AND already initialised. That is the stray-database shape
+    this module exists to prevent, produced by one of its own guards.
     """
-    dep_cut = -1
+    cut = -1
     for i, directory in enumerate(chain):
         try:
-            if directory.name.lower() in _DEPENDENCY_DIRS:
-                dep_cut = i
+            dep = directory.name.lower() in _DEPENDENCY_DIRS
         except Exception:
             # why: an undecomposable name is not a dependency marker; the
             # remaining exclusions still apply to it
             continue
-    return [d for i, d in enumerate(chain)
-            if i > dep_cut
-            and (i == 0 or not _is_fs_root(d) or _exists(d / PIN_MARKER))
-            and not _is_container(d)]
+        if dep and not (_is_pinned(directory) or _has_db(directory)):
+            cut = i
+    return cut
+
+
+def _candidates(chain):
+    """The entries of `chain` that may legitimately BE a project root.
+
+    Exclusions applied ONCE so that every rung inherits them — v2.6.0 attached
+    its guards to one rung's inner loop and each rung that did not inherit them
+    became its own defect. The PIN EXEMPTION is the same disease one level up:
+    it was bolted onto `_is_container` and onto the volume-root rule
+    individually, and the dependency-name rule never got one at all, so the
+    documented escape hatch could not rescue a project whose own name was in
+    `_DEPENDENCY_DIRS`. A `.ccm-root` is the user overruling the heuristics; it
+    short-circuits ALL of them here, and nothing below re-tests it.
+
+    1. Anything at or inside a DEPENDENCY directory — see `_dependency_cut`.
+       Reading a file under `node_modules/` must anchor memory on the project
+       that DEPENDS on the package, not on the package: measured, a cwd of
+       `<repo>/node_modules/left-pad` resolved to `left-pad` itself (it has a
+       `package.json`, so the marker rung accepted it) and planted a database
+       where `nested_databases` does not look, so it could never even be
+       reported. A directory owning a database survives the cut regardless,
+       and that is a DELIBERATE verdict, not a side effect: when a dependency
+       directory (or something inside one) owns a database, the DATABASE wins
+       and the host repository does not. Two reasons. First, rung 0 already
+       decides it that way and always has — `project_root` returns `cwd`
+       whenever `cwd` itself owns a database, before this function is even
+       called — so through v2.13.2 a cwd of `<repo>/node_modules/left-pad`
+       resolved to `left-pad` while `<repo>/node_modules/left-pad/lib`
+       resolved to `<repo>`, and one `cd` flipped which database the session
+       wrote to. Second, the alternative is the one thing the module docstring
+       refuses in capitals: overriding an existing database orphans whatever
+       is in it, and a stray is byte-for-byte indistinguishable from a
+       deliberate nested project. Nothing is lost by preferring it — no new
+       stray is planted, and `nested_databases` reports it (v2.13.0 removed
+       `vendor` and `node_modules` from that walker's skip set for exactly
+       this case). What the cut still prevents is the case it was written for:
+       a dependency that declares NOTHING is dependency internals, and a
+       database is never CREATED down there.
+    2. Containers of projects — see `_is_container`.
+    3. A VOLUME ROOT itself. `_chain` documents that it stops "below the
+       filesystem root" and never did: it appends each parent and only breaks
+       once the parent equals the child, so `D:\\` was the last element of
+       every chain on that drive. It is not a container either (a drive root
+       rarely holds two VCS-root or two database-owning children), so it
+       survived every rung — and a single `D:\\memory\\memory.db`, which any one
+       mis-anchored session could have created, would then have been the
+       nearest-database answer for EVERY project on the drive. `_is_volume_root`
+       rather than `_is_fs_root` so `/mnt/c` is refused on the same terms as
+       the `C:\\` it projects. ONE exemption beyond the pin: `start` itself, so
+       a session genuinely opened at `D:\\` still resolves to itself through the
+       unresolved rung.
+
+    Filtering rather than truncating is deliberate: the walk must continue
+    PAST a dependency directory to reach the project that owns it.
+    """
+    cut = _dependency_cut(chain)
+    out = []
+    for i, directory in enumerate(chain):
+        if _is_pinned(directory):
+            out.append(directory)     # the escape hatch overrules rules 1-3
+            continue
+        if i <= cut and not _has_db(directory):
+            continue
+        if i != 0 and _is_volume_root(directory):
+            continue
+        if not _is_container(directory):
+            out.append(directory)
+    return out
 
 
 def _nearest(chain, predicate):
