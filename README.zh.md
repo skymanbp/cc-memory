@@ -1,4 +1,4 @@
-<!-- i18n-source: README.md | sha256: bdf06332d3e8d500 | version: 2.14.0 | translated: 2026-09-02 | translation: 77037eab9857185b -->
+<!-- i18n-source: README.md | sha256: b5fd234f3606eaf8 | version: 2.14.0 | translated: 2026-09-02 | translation: 13b6e12372c430ed -->
 > [English](README.md) · **简体中文**
 
 <div align="center">
@@ -428,7 +428,9 @@ Windows 上也可以从 [Releases](https://github.com/skymanbp/cc-memory/release
 ## 实战实录
 
 真实输出，不是摆拍。下面是反补丁 writer 拒绝堆叠的样子，以及一次深度整理收敛的
-样子——2026-08-26 从一个 v2.12.0 演示项目里逐字截取。
+样子——2026-08-26 从一个 v2.12.0 演示项目里逐字截取。提示符里的 `cc-mem` 是
+`cc-memory --project .` 的 shell 别名：装出来的控制台脚本叫 `cc-memory`，
+且 `--project` 是必填的。
 
 **写入时调和。** 同一事实的重述不会新增行 —— 不带新信息时被跳过（如下，两次调用用的是同一套默认值），带着更高 importance 或新 tags 时则被强化；数值变了的事实取代前任，历史仍然可走：
 
@@ -805,7 +807,7 @@ Release，附上两个 exe，并以对应的 CHANGELOG 段落作为正文。与 
   证明它们需要按项目调整再说。提高阈值意味着编辑 `core/consolidate.py`，并且
   知道自己为什么这么做。
 - **Tkinter 看板的外壳没有可执行覆盖。** 其逻辑核心已被抽成纯函数并做了无头
-  测试（v2.10.1）；在没有测试的前提下重构剩下的 2.9k 行 GUI 被刻意推迟。
+  测试（v2.10.1）；在没有测试的前提下重构剩下的 3.1k 行 GUI 被刻意推迟。
 - **闸门的限制被记录下来，而不是被设计掉（v2.14.0）。** 所在句子没有点名任何
   符号的引文只做边界检查（在文件内、非空行），烂掉了也不会变红；名词不在
   `doc_claims` 触发词表里的计数句不是闸门看得见的断言。（`verbatim` 引用自

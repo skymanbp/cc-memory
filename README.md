@@ -457,7 +457,9 @@ To opt a directory out completely, list it in `excluded_projects` — see
 
 Real output, not mockups. Below: the anti-patch writer refusing to stack, then
 a deep consolidation run converging — captured verbatim from a v2.12.0 demo
-project on 2026-08-26.
+project on 2026-08-26. The `cc-mem` prompt is a shell alias for
+`cc-memory --project .`: `cc-memory` is the installed console script, and
+`--project` is required.
 
 **Write-time reconciliation.** The same fact restated adds no row — skipped
 when it carries nothing new (as below, where both calls take the same
@@ -868,7 +870,7 @@ has to rediscover:
   Raising a threshold means editing `core/consolidate.py` and knowing why.
 - **The Tkinter dashboard's shells have no executable coverage.** Their logic
   cores were extracted into pure functions and tested headlessly (v2.10.1);
-  refactoring the remaining 2.9k-line GUI without tests was deliberately
+  refactoring the remaining 3.1k-line GUI without tests was deliberately
   deferred.
 - **Gate limits recorded, not designed away (v2.14.0).** A citation whose
   sentence names no symbol is only bounds-checked (inside the file, non-blank)

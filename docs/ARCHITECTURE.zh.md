@@ -1,4 +1,4 @@
-<!-- i18n-source: ARCHITECTURE.md | sha256: e8b90d8b97ecf0bb | version: 2.14.0 | translated: 2026-09-02 | translation: 425a0419bd8c7d71 -->
+<!-- i18n-source: ARCHITECTURE.md | sha256: 6bc6a9f4ee6771f2 | version: 2.14.0 | translated: 2026-09-02 | translation: 867433103158e3ea -->
 > [English](ARCHITECTURE.md) · **简体中文**
 
 # cc-memory — 架构
@@ -319,13 +319,15 @@ SQLite 表（定义在 [`cc_memory/core/db.py`](../cc_memory/core/db.py)），�
 | **`progress`** | v2.1 新增——每项目一行。`.ccm/PROGRESS.md` 的唯一真相来源（`db.py:188`）。 |
 | **`plan_active`** | v2.2 新增——每项目一行。`.ccm/PLAN.md` 的唯一真相来源（`db.py:212`）。自 `v9_plan_turns_total` 起带有 `turns_total`：一个**单调**轮次计数，任何东西都不会重置它；与之相对的 `turns_since_last_guardian` 会被每次 guardian 检查和计划替换清零 |
 | **`directives`** | v2.11.0 新增——用户**意图**账本。`times_stated` 累加在同一 `slug` 的**一行**上；指令的寿命长于任何一份计划，这正是它不能被折叠成计划步骤的原因。自 `v9_directives_turns_at_touch` 起带有 `turns_at_touch`——最后一次写入时的 `turns_total` 值，因此闲置度是两个单调数字相减。自 v2.12.0 起 `status` 还可以是 `blocked`（停在用户那边，闲置豁免），`kind` 还可以是 `constraint`（长期禁令，闲置豁免）——只是词汇扩充，无 schema 变更；只有 `directive-add` 可以累加计数（`directive-edit` 修正字段但不碰它） |
-| `_migrations` | 记录已应用的迁移（`db.py:651`） |
+| `_migrations` | 记录已应用的迁移（`db.py:732`） |
 
 共十二张表，与 `CLAUDE.md` 的 §“Database schema (12 tables)” 一致。
 
 此外还有 `memories_fts`——一个建立在 `memories` 之上的 FTS5 虚拟表
-（`core/db.py:455-458`），由三个触发器保持同步（`core/db.py:459-478`，迁移 `v2_fts5` 在
-`db.py:3178-3212`）。它只在本地 SQLite 构建带 FTS5 时才会创建；否则
+（`core/db.py:835-836`），由 `db._setup_fts5` 与它一并建出的三个触发器
+保持同步（`core/db.py:839-856`）；
+它的 `_MIGRATIONS` 条目是 `v2_fts5`（`db.py:163`）。
+它只在本地 SQLite 构建带 FTS5 时才会创建；否则
 `db.search_fts`（`core/db.py:3178-3212`）回退到 `LIKE ? ESCAPE '\'`
 （`core/db.py:3178-3212`）。FTS5 在 `.claude-plugin/plugin.json:4` 与 `:12` 中被
 宣传，`/cc-mem status` 会报告当前实际走哪条路径（`cli/mem.py` 的 `cmd_status`）。
@@ -333,10 +335,10 @@ SQLite 表（定义在 [`cc_memory/core/db.py`](../cc_memory/core/db.py)），�
 `memories` 上的 `supersedes_id` 列（迁移 `v3_supersedes`，`db.py:168`）把反补丁的
 取代链显式化：当 `upsert_smart` 判定一条新记忆取代了一条旧记忆时，新行会回链到旧行
 的 ID（旧行被归档）。通过 `db.get_supersede_chain(memory_id)`（`db.py:1667-1682`）走一遍
-链条，就能看到完整的更新历史。`content_hash`（迁移 `v2_content_hash`，`db.py:1667-1682`）
-是归一化内容的 `sha256[:16]`，用于廉价的精确重复检查
-（`db.compute_content_hash` 在 `db.py:2222-2224`，`db.find_by_hash` 在
-`db.py:2222-2224`）。
+链条，就能看到完整的更新历史。`content_hash`（迁移 `v2_content_hash`，位于
+`_MIGRATIONS`，`db.py:126`）是归一化内容的 `sha256[:16]`，用于廉价的精确重复检查
+（`db.compute_content_hash` 在 `db.py:2222-2224`，
+`db.find_by_hash` 在 `db.py:2235-2243`）。
 
 迁移按 `_MIGRATIONS` 列表（`db.py:121-284`）的顺序应用，并记录在 `_migrations` 中。目前
 已交付的层级：**v1**（`topic` 列 + 索引）、**v2**（content_hash、observations、
@@ -449,7 +451,7 @@ Anthropic 请求**和** `memories` 表。
 | 20000 个格式良好标签（996.1 KiB） | 6.0 ms | 5.1 ms |
 | 16000 个未闭合标签（140.6 KiB） | **9517.4 ms**，尾部泄漏 | 0.0 ms，尾部丢弃 |
 
-`_strip_tagged_spans` 是一次从左到右、无回溯的 `str.find` 扫描，因此根本不需要任何
+`_strip_spans` 是一次从左到右、无回溯的 `str.find` 扫描，因此根本不需要任何
 上限——而且悬空的开标签现在**失败闭合**：从它到文本末尾的一切都会被丢弃而不是发出
 去。配对语义未变（每个开标签绑定其后第一个闭标签），并在 20000 个随机标签汤输入上
 验证：全部 13328 个格式良好输入零行为差异。

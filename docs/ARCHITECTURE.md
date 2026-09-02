@@ -355,13 +355,14 @@ project-local at `<project>/.ccm/memory.db`, WAL mode:
 | **`progress`** | NEW in v2.1 — single row per project. SOT for `.ccm/PROGRESS.md` (`db.py:188`). |
 | **`plan_active`** | NEW in v2.2 — single row per project. SOT for `.ccm/PLAN.md` (`db.py:212`). Carries `turns_total` since `v9_plan_turns_total`: a MONOTONIC turn count that nothing resets, distinct from `turns_since_last_guardian`, which every guardian check and plan replacement zeroes |
 | **`directives`** | NEW in v2.11.0 — the user-INTENT ledger. `times_stated` accumulates on ONE row per `slug`; a directive outlives every plan, which is why it is not plan steps. Carries `turns_at_touch` since `v9_directives_turns_at_touch` — the value of `turns_total` when it was last written, so idleness is subtraction between two monotonic numbers. Since v2.12.0 `status` may also be `blocked` (parked on the user, idle-exempt) and `kind` may be `constraint` (a standing prohibition, idle-exempt) — vocabulary additions, no schema change; only `directive-add` may bump the count (`directive-edit` corrects fields without touching it) |
-| `_migrations` | Tracks applied migrations (`db.py:651`) |
+| `_migrations` | Tracks applied migrations (`db.py:732`) |
 
 Twelve tables, matching `CLAUDE.md` § "Database schema (12 tables)".
 
-Plus `memories_fts` — an FTS5 virtual table over `memories` (`core/db.py:455-458`),
-kept in sync by three triggers (`core/db.py:459-478`, migration `v2_fts5` at
-`db.py:3178-3212`). It is created only when the local SQLite build has FTS5; otherwise
+Plus `memories_fts` — an FTS5 virtual table over `memories` (`core/db.py:835-836`),
+kept in sync by three triggers that `db._setup_fts5` creates with it
+(`core/db.py:839-856`); its `_MIGRATIONS` entry is `v2_fts5` (`db.py:163`).
+It is created only when the local SQLite build has FTS5; otherwise
 `db.search_fts` (`core/db.py:3178-3212`) falls back to `LIKE ? ESCAPE '\'`
 (`core/db.py:3178-3212`). FTS5 is advertised in `.claude-plugin/plugin.json:4`
 and `:12`, and `/cc-mem status` reports which path is live (`cli/mem.py`,
@@ -372,10 +373,11 @@ The `supersedes_id` column on `memories` (migration `v3_supersedes`,
 new memory supersedes an old one, the new row links back to the old row's ID
 (and the old row is archived). Walking the chain via
 `db.get_supersede_chain(memory_id)` (`db.py:1667-1682`) shows the full update
-history. `content_hash` (migration `v2_content_hash`, `db.py:1667-1682`) is
-`sha256[:16]` of the normalized content, used for the cheap exact-duplicate
-check (`db.compute_content_hash` at `db.py:2222-2224`, `db.find_by_hash` at
-`db.py:2222-2224`).
+history. `content_hash` (migration `v2_content_hash` in
+`_MIGRATIONS`, `db.py:126`) is `sha256[:16]` of the normalized content, used
+for the cheap exact-duplicate check
+(`db.compute_content_hash` at `db.py:2222-2224`,
+`db.find_by_hash` at `db.py:2235-2243`).
 
 Migrations are applied in order from the `_MIGRATIONS` list (`db.py:121-284`) and
 recorded in `_migrations`. Levels shipped so far: **v1** (`topic` column +
@@ -498,7 +500,7 @@ not there (measured, CPython 3.13):
 | 20,000 well-formed tags (996.1 KiB) | 6.0 ms | 5.1 ms |
 | 16,000 unterminated tags (140.6 KiB) | **9,517.4 ms**, tail leaked | 0.0 ms, tail dropped |
 
-`_strip_tagged_spans` is a single left-to-right `str.find` pass with no
+`_strip_spans` is a single left-to-right `str.find` pass with no
 backtracking, so no cap is needed at all — and a dangling open tag now fails
 **CLOSED**: everything from it to the end of the text is dropped rather than
 emitted. Pairing semantics are unchanged (each open tag binds to the first

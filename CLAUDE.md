@@ -132,9 +132,8 @@ Twenty rules a future change must not break:
    re-pasted, README.zh.md untouched: `IN-SYNC`) — the marker records the
    translation body's hash and the emitter refuses an untranslated re-stamp
    (`--translation-unchanged "<why>"` for an English-only change). Recorded,
-   not redesigned: a bounds-only citation still cannot rot LOUDLY, a count
-   whose noun is not in the trigger list is still not a claim, and a
-   verbatim region is checked segment by segment, not in order. Gates:
+   not redesigned: a bounds-only citation still cannot rot LOUDLY, and a
+   count whose noun is not in the trigger list is still not a claim. Gates:
    `smoke_test.py` § *v2.14.0 gate checkers*; `falsify --case
    r13i18nrestamp` / `r13coveragename` / `r13coverageenum` /
    `r13coveragetools` / `r13claimsgap`.
@@ -663,8 +662,8 @@ approximated rather than fixed.** Invariants a future change must not break:
    CASE with a stated reason; do not silently shrink the job back to `--fast`.
 
 Also: the stray `.pytest_cache/` is gone from a project that documents "no
-pytest", and `tests/test_directive_enforcement.py` is 53 checks (the v2.11.0
-entry's "27" is historical and correct for that release).
+pytest", and `tests/test_directive_enforcement.py` was 53 checks at v2.11.2
+(the v2.11.0 entry's "27" is historical and correct for that release).
 
 ## What changed in v2.11.1 (over v2.11.0)
 
@@ -1098,7 +1097,7 @@ future change must not break:
 
 5. **`MemoryDB._connect` is a context manager that CLOSES.** It commits /
    rolls back exactly as `sqlite3.Connection.__exit__` does; the `close()` in
-   the `finally` is the only new behaviour. All 81 call sites keep
+   the `finally` is the only new behaviour. Every call site keeps
    `with self._connect() as conn:`. Cost is real and measured: +340 % per
    operation (WAL checkpoint on last-close), +0.6 s on a 120 s PreCompact
    budget. Do not "optimise" it back into a factory.
@@ -1155,7 +1154,7 @@ were closed too. Nine things that were silently wrong in shipped code:
    the `memories` table. The cap was calibrated on the wrong signal too: 20,000
    well-formed tags cost `re.sub` 6.0 ms, but 16,000 **unterminated** ones
    (140.6 KiB) cost 9,517.4 ms. Replaced by a single left-to-right `str.find`
-   scan (`_strip_tagged_spans`): no cap, 0.0 ms on that input, and a dangling
+   scan (`_strip_spans`): no cap, 0.0 ms on that input, and a dangling
    open tag now fails **CLOSED** (remainder dropped). Equivalence proved on
    20,000 random inputs — 0 differences on all 13,328 well-formed ones.
    Relatedly, `hooks/post_tool_use.py` classified `is_private` **after**
@@ -1439,7 +1438,7 @@ v2.3.2 fixes the root cause:
    raw plan into a structured JSON schema; `agents/plan-guardian.md` does a
    read-only ≤150-word drift check on demand. Stop hook emits an advisory
    status line when guardian thresholds trip (default: 8 turns OR 12 edits).
-3. **`/cc-mem dashboard` + 7 new `/cc-mem plan-*` subcommands.** The GUI
+3. **`/cc-mem dashboard` + 6 new `/cc-mem plan-*` subcommands.** The GUI
    launcher auto-resolves its path under both marketplace and standalone
    installs. Plan CLI:  `plan-status`, `plan-show`, `plan-set
    (--raw|--raw-file|--from-refiner)`, `plan-check`, `plan-replan`,
@@ -1480,12 +1479,15 @@ cc-memory/
 │   ├── plan-refiner.md          (raw plan → structured JSON, one-shot)
 │   └── plan-guardian.md         (drift check, read-only, ≤150 words)
 ├── commands/cc-mem.md           ← /cc-mem slash command
-├── docs/                        ← TWO English docs since v2.4.3, each with a
-│   │                              drift-tracked .zh.md sibling
+├── docs/                        ← TWO English specifications since v2.4.3,
+│   │                              each with a drift-tracked .zh.md sibling,
+│   │                              plus the v2.14.0 evidence record
 │   ├── ARCHITECTURE.md          ← overview + install layouts + i18n convention (§9)
 │   ├── ARCHITECTURE.zh.md
 │   ├── CONTRACTS.md             ← anti-patch + forced handoff + live plan anchor
-│   └── CONTRACTS.zh.md
+│   ├── CONTRACTS.zh.md
+│   ├── debug-pass-2026-09.md    ← the v2.14.0 debug pass report (English only)
+│   └── debug-pass-2026-09/      its evidence files, repros and report.html
 ├── README.md / README.zh.md     ← drift-tracked pair
 ├── .github/                     ← CI + community health (v2.11.1)
 │   ├── workflows/gates.yml      the release gates, as an executable
@@ -1496,6 +1498,7 @@ cc-memory/
 │   ├── i18n_check.py            translation drift
 │   ├── citation_check.py        every file.py:LINE citation in tracked docs
 │   ├── doc_claims.py            prose counts vs the computed sets
+│   ├── doc_coverage.py          every public surface is named by its doc
 │   ├── contracts.py             computes each set from the tree (not a gate)
 │   └── falsify_fixes.py         reverts each fix on a COPY (not a gate)
 ├── cc_memory/
@@ -1757,7 +1760,7 @@ directive ledger added three CLI subcommands and `commands/cc-mem.md` was not
 updated), and because `main()` is one sequential function, that first failing
 assert also hid the `12 tables` assert below it. A gate list that is prose is
 a gate list that does not run. `.github/workflows/gates.yml` runs the full set
-on Windows and the platform-independent subset on Linux.
+on Windows (3.13) and on Linux (3.11 and 3.13).
 
 (This paragraph said EIGHT, then NINE, each time by hand. It is now derived:
 `run_gates.py:GATES` is the single list, and the count above is asserted
@@ -1877,12 +1880,13 @@ minus a probe table the file itself drops.
 Deliberately NOT checked, measured rather than assumed: migration KEYS
 against `CHANGELOG.md` (27 of 29 are absent, and the only remedy would be
 rewriting history entries). `tools/citation_check.py`
-resolves every `file.py:LINE` citation in **all 13** tracked markdown files —
+resolves every `file.py:LINE` citation in **every** tracked markdown file
+(the list is `tools/citation_check.py:TRACKED`) —
 symbol-anchored where a symbol can be resolved, bounds-checked (inside the
 file, non-blank) where it cannot — and no citation may be unchecked. A second
 block asserts hand-picked doc facts: that `commands/cc-mem.md` names every
 subcommand `cli/mem.py` defines, that this section names every gate script,
-and that the "11 tables" claim matches `core/db.py`. Prose facts rot exactly
+and that the "12 tables" claim matches `core/db.py`. Prose facts rot exactly
 like line numbers do; nothing checked them until v2.5.5, and three had already
 drifted.
 
