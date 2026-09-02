@@ -100,6 +100,15 @@ never got it.
   `r13registry` on POSIX — on Windows without the symlink privilege, or with
   a case-folding filesystem, the two spellings they distinguish coincide).
 
+- `docs/debug-pass-2026-09.md` — the record of the debug pass: six
+  reviewers' findings quoted verbatim with their reproduction scripts
+  (`docs/debug-pass-2026-09/repros/`), the gate outputs
+  (`docs/debug-pass-2026-09/evidence/`), the coordinator's verdict on each,
+  and the suggested fix order. Listed in `tools/citation_check.py:
+  EVIDENCE_PREFIXES` beside `demo/captures/`: its `file:line` citations are
+  statements about the reviewed tree, and its scripts' symbols are not this
+  plugin's, so neither the citation gate nor the symbol index reads them.
+
 ### Reported, not fixed here
 
 The other thirty-one findings of the same pass — among them the eighth
