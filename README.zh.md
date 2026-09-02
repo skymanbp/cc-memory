@@ -1,4 +1,4 @@
-<!-- i18n-source: README.md | sha256: 6f7d064ef7da98fb | version: 2.14.0 | translated: 2026-09-01 | translation: edda6de6b2b22683 -->
+<!-- i18n-source: README.md | sha256: 673279cc99f2366c | version: 2.14.0 | translated: 2026-09-01 | translation: c0e0ee09a8c917f8 -->
 > [English](README.md) · **简体中文**
 
 <div align="center">
@@ -287,7 +287,9 @@ observation）、压缩时（有界的 head+tail transcript 窗口，2 GiB 的 t
 无关的正则兜底。中英文都是一等公民。
 
 **能力二——写入即调和（反补丁契约）。** 每条保存路径都经由同一个 writer，由它
-决定 **SKIP**（完全重复）、**MERGE**（近似重述，就地改写）、**SUPERSEDE**
+决定 **SKIP**（完全重复且不带任何新信息）、**REINFORCE**（完全重复，但带着更高的
+importance 或新的 tags —— 不新增行，只把它们合入命中的那条行）、
+**MERGE**（近似重述，就地改写）、**SUPERSEDE**
 （事实变了——归档旧行，新行链回它）还是 **INSERT**（真正的新事实）。任何东西都
 不会被删除；被取代的历史始终可以走链回溯。相似度是 CJK 感知的（中文连续段内用
 字符 bigram——纯 trigram 会把一个十字中文事实的一字修正打到 0.45 分，于是每次
@@ -426,7 +428,7 @@ Windows 上也可以从 [Releases](https://github.com/skymanbp/cc-memory/release
 真实输出，不是摆拍。下面是反补丁 writer 拒绝堆叠的样子，以及一次深度整理收敛的
 样子——2026-08-26 从一个 v2.12.0 演示项目里逐字截取。
 
-**写入时调和。** 同一事实的重述被跳过；数值变了的事实取代前任，历史仍然可走：
+**写入时调和。** 同一事实的重述不会新增行 —— 不带新信息时被跳过（如下，两次调用用的是同一套默认值），带着更高 importance 或新 tags 时则被强化；数值变了的事实取代前任，历史仍然可走：
 
 ```text
 $ cc-mem add decision "Use SQLite WAL mode for the memory store"

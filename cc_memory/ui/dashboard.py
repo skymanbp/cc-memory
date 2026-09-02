@@ -2341,6 +2341,10 @@ Output ONLY valid JSON array."""
             mem_count = counts.get("inserted", 0)
             merged = counts.get("merged", 0)
             superseded = counts.get("superseded", 0)
+            # An exact-hash restatement whose importance or tags were
+            # folded into the row it matched (register C3): a write,
+            # not a skip, so it gets its own line below.
+            reinforced = counts.get("reinforced", 0)
             skipped = counts.get("skipped", 0)
 
             self._set_busy(False)
@@ -2351,6 +2355,8 @@ Output ONLY valid JSON array."""
                 f"  Inserted:    {mem_count}\n"
                 f"  Merged:      {merged}  (overwrote existing high-similarity)\n"
                 f"  Superseded:  {superseded} (archived older + linked new)\n"
+                f"  Reinforced:  {reinforced} (exact duplicate; new "
+                f"importance/tags folded in)\n"
                 f"  Skipped:     {skipped} (exact duplicates)\n\n"
                 f"Source:  {transcript_dir}\n"
                 f"Session: {latest.stem[:8]}...")

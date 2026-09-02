@@ -1,4 +1,4 @@
-<!-- i18n-source: ARCHITECTURE.md | sha256: 88b24e7c45ef2642 | version: 2.14.0 | translated: 2026-09-01 | translation: e6f0aa1a0355b5d3 -->
+<!-- i18n-source: ARCHITECTURE.md | sha256: cb90f77dee5c08ea | version: 2.14.0 | translated: 2026-09-01 | translation: 71346357a892f48b -->
 > [English](ARCHITECTURE.md) · **简体中文**
 
 # cc-memory — 架构
@@ -49,7 +49,9 @@ cc-memory 是一个 Claude Code 插件，为 Claude 提供**跨压缩、跨会�
 
 1. **反补丁写入。** 每一次记忆保存都经由同一个入口
    （`llm.memory_writer.upsert_smart`），它要么把新内容**归并**进一条已存在的相似
-   记忆，要么**取代**一个旧版本（并保留取代链），要么作为一条新事实**插入**——由
+   记忆，要么**取代**一个旧版本（并保留取代链），要么**强化**一条完全重复的
+   事实（不新增行 —— 只把它更高的 importance 和新的 tags 合入它命中的那条行），
+   要么作为一条新事实**插入**——由
    相似度决定，而不是由调用方决定。不存在“先追加、以后再去重”的路径。
 
 2. **强制交接。** 在每一次 `SessionStart`，插件都会发出一个 `<system-reminder>`
@@ -381,7 +383,10 @@ llm.memory_writer.upsert_smart(db, project_id, session_id, category, content,
   ├─ 0. clean_for_storage + 拒绝短于 10 字符的内容（"too_short"）；把未知类别
   │      强制为 "note"；把 importance 钳制到 1..5
   │
-  ├─ 1. compute_content_hash → find_by_hash → 精确命中则 SKIP
+  ├─ 1. compute_content_hash → 精确命中（事务内的 SQL）
+  │      → 不新增行、也不重写正文；importance = max(new, old)，
+  │        tags 取并集 —— 两者都不参与哈希
+  │      → 确实改变了该行则为 "reinforced"，否则为 "skipped"
   │
   ├─ 2. 找出最相似的 ACTIVE 记忆（字符三元组上的 Jaccard）。
   │      范围：当设置了 topic 且该扫描能给出候选时，取同一 topic 内的记忆；
@@ -409,8 +414,8 @@ regenerate_memory_index(db, project_id, memory_dir)   ← MEMORY.md 刷新
 - `upsert_batch`（`memory_writer.py:318-360`）逐条循环调用 `upsert_smart`，并在最后
   重新生成**一次**，但仅当传入了 `memory_dir` 时才会（`memory_writer.py:318-360`）。
   所有钩子调用方都会传（`pre_compact.py:435`、`stop.py:279`、
-  `session_start.py:1056`）；同步 PreCompact 支路还会在其余状态变更之后再刷一次
-  （`pre_compact.py:783`）。
+  `session_start.py:1144`）；同步 PreCompact 支路还会在其余状态变更之后再刷一次
+  （`pre_compact.py:789`）。
 - 单发调用方显式调用 `regenerate_memory_index`：`cli/mem.py:1171` 与 `:584`、
   `mcp/server.py:647`、`ui/dashboard.py:1688`、`ui/web_viewer.py:1035`，外加
   `skills/ccm-load` 的内联脚本（`skills/ccm-load/SKILL.md:308, 318`）。
@@ -504,7 +509,7 @@ SessionStart：
 ```
 
 上面的调用签名都是真实的：`write_progress_md(db, project_id, memory_dir)`
-（`core/progress.py:331-490`；调用点 `pre_compact.py:752`、`stop.py:500`、
+（`core/progress.py:331-490`；调用点 `pre_compact.py:758`、`stop.py:500`、
 `user_prompt.py:133`、`session_start.py:912`、`mcp/server.py:243`、
 `cli/mem.py:1262`）。PROGRESS.md 的结构规格见
 [docs/CONTRACTS.md](CONTRACTS.md#handoff-contract)。
@@ -605,8 +610,8 @@ BudgetGate 来说仍是已知量。候选顺序与传输格式（`core/auth.py:2
 `get_api_key()` 是同一份候选列表的单凭据向后兼容视图（它不重试，
 `core/auth.py:60-93`）；它同时承载 `oauth_expired` 信号，支撑 SessionStart 的
 “[WARNING: OAuth expired — LLM extraction disabled]” 页脚
-（`session_start.py:659`）。钩子调用方用它来*提供*传给 `call_llm` 的凭据：
-`pre_compact.py:81 → :166`、`stop.py:86`、`session_start.py:659`、
+（`session_start.py:665`）。钩子调用方用它来*提供*传给 `call_llm` 的凭据：
+`pre_compact.py:81 → :166`、`stop.py:86`、`session_start.py:665`、
 `core/consolidate.py:425, 549, 724`。
 
 逐级回退是 v2.3.4 为一个具体故障加入的：一个失效的环境变量密钥（例如额度为零 →
