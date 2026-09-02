@@ -1,4 +1,4 @@
-<!-- i18n-source: CONTRACTS.md | sha256: 93f6432f0dcb0d06 | version: 2.14.0 | translated: 2026-09-01 | translation: 31def881733339dd -->
+<!-- i18n-source: CONTRACTS.md | sha256: 8a832457c3f0200b | version: 2.14.0 | translated: 2026-09-01 | translation: 63aa48972d7d31b4 -->
 > [English](CONTRACTS.md) · **简体中文**
 
 # cc-memory — 契约（Contracts）
@@ -73,7 +73,7 @@ v2.0 有四条互相独立的保存路径（`pre_compact`、`stop` 观察者、`
 （`llm/memory_writer.py:95-158`）。
 
 ```
-0. content = clean_for_storage(content.strip()).           (memory_writer.py:66)
+0. content = clean_for_storage(content.strip()).           (memory_writer.py:68)
    若 len < MIN_CONTENT_LEN (10) 则 SKIP（reason: too_short）。   (:110-111)
    把 {decision,result,config,bug,task,arch,note} 之外的 category
      强制为 "note"。                                             (:113-114)
@@ -131,19 +131,19 @@ v2.0 有四条互相独立的保存路径（`pre_compact`、`stop` 观察者、`
 6. 循环结束后，`upsert_batch` 会调用
    regenerate_memory_index(db, project_id, memory_dir) 让 .ccm/MEMORY.md 保持
    同步 —— 无条件执行（即便每一条都被跳过），但仅当传入了 `memory_dir` 时才会
-   (memory_writer.py:106-169)。单独调用 `upsert_smart` 绝不会重新生成。
+   (memory_writer.py:236-315)。单独调用 `upsert_smart` 绝不会重新生成。
    绝不允许 MEMORY.md 漂移。
 ```
 
 `upsert_smart` 返回
 `{"action": "skipped"|"merged"|"superseded"|"inserted", "id": ..., "similarity": ..., "old_id": ...}`
-（`memory_writer.py:200-235`）；跳过路径会额外带上 `"reason"`，取值为 `too_short` 或
+（`memory_writer.py:318-360`）；跳过路径会额外带上 `"reason"`，取值为 `too_short` 或
 `hash_match`。`upsert_batch` 把这些聚合成按动作分类的计数，外加一个 `results` 列表
-（`memory_writer.py:200-235`）。
+（`memory_writer.py:318-360`）。
 
 ### 阈值与常量
 
-`HIGH_SIM` / `MID_SIM` 是 `cc_memory/llm/memory_writer.py:64` 中的模块常量
+`HIGH_SIM` / `MID_SIM` 是 `cc_memory/llm/memory_writer.py:66` 中的模块常量
 （0.80 / 0.50），与之并列的还有 `MIN_CONTENT_LEN`（10）、
 `MAX_CANDIDATES_TO_SCAN`（500）和 `MAX_TAGS`（32）。`cc_memory/config.json`
 里**没有** `writer.*` 键——它们与其他 34 个惰性键一起在 v2.5.0 被删除
@@ -271,11 +271,11 @@ v2.0 有四条互相独立的保存路径（`pre_compact`、`stop` 观察者、`
   装载，但不用于日常写入——`core/db.py:1397-1412`。）
 - 不要自己撸一套 `"SELECT content FROM memories ..."` 去重。那正是
   `db.find_by_hash`（`core/db.py:2235-2243`）和写入器的 `_find_similar`
-  （`llm/memory_writer.py:179`）的职责。（并不存在 `db.find_similar`；匹配器就住在
+  （`llm/memory_writer.py:272`）的职责。（并不存在 `db.find_similar`；匹配器就住在
   写入器里，按设计是私有的。）
 - 不要手工“打补丁”改 MEMORY.md，也不要指望别的路径去刷新它。任何非平凡的状态变更
   之后都要调用 `regenerate_memory_index`。生成出的文件自带一条 DO-NOT-EDIT 横幅，
-  列出了每一条会覆盖它的路径（`llm/memory_writer.py:238-333`）。
+  列出了每一条会覆盖它的路径（`llm/memory_writer.py:366-403`）。
 
 ### 验证
 

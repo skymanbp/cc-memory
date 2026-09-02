@@ -2099,6 +2099,40 @@ def _break_r13authhome(root):
            "    if False:")
 
 
+@case("r14hashfold", ["tests/smoke_test.py"],
+      "drop the exact-hash fold -> an identical restatement's higher "
+      "importance and new tags are discarded again")
+def _break_r14hashfold(root):
+    _patch(root, f"{PKG}/llm/memory_writer.py",
+           '    if result["action"] == "skipped" and '
+           'result.get("reason") == "hash_match":',
+           '    if False:  # BREAKAGE: perfect duplicate == nothing to update')
+
+
+@case("r14foldnoop", ["tests/smoke_test.py"],
+      "fold unconditionally -> a restatement that adds nothing still writes "
+      "and reports `reinforced`")
+def _break_r14foldnoop(root):
+    # The other direction of the same fix: `skipped` must keep meaning
+    # NOTHING WAS WRITTEN, so the no-op early return is load-bearing too.
+    _patch(root, f"{PKG}/llm/memory_writer.py",
+           "    if new_importance == current and new_tags == row_tags:\n"
+           "        return result\n",
+           "    if False:  # BREAKAGE: a no-op restatement writes anyway\n"
+           "        return result\n")
+
+
+@case("r14tagcap", ["tests/smoke_test.py"],
+      "cap the tag list AFTER the marker again -> a MAX_TAGS row loses the "
+      "`merged`/`supersedes` provenance of every reconcile")
+def _break_r14tagcap(root):
+    _patch(root, f"{PKG}/llm/memory_writer.py",
+           "        marks = [t for t in out if t in _ACTION_TAGS]\n"
+           "        keep = [t for t in out if t not in _ACTION_TAGS]\n",
+           "        marks = []  # BREAKAGE: the marker is droppable excess\n"
+           "        keep = list(out)\n")
+
+
 @case("r13budgetreset", ["tests/test_directive_enforcement.py"],
       "stop resetting the refusal streak when a turn may close -> the budget is per session, and enforcement is advisory after three resolved refusals")
 def _break_r13budgetreset(root):

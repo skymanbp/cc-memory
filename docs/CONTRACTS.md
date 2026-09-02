@@ -83,7 +83,7 @@ Inputs: `content`, `topic`, `category`, `importance`, `tags`, `session_id`
 (`llm/memory_writer.py:95-158`).
 
 ```
-0. content = clean_for_storage(content.strip()).           (memory_writer.py:66)
+0. content = clean_for_storage(content.strip()).           (memory_writer.py:68)
    SKIP (reason: too_short) if len < MIN_CONTENT_LEN (10).      (:110-111)
    Coerce category outside {decision,result,config,bug,task,arch,note}
      → "note".                                                  (:113-114)
@@ -146,19 +146,19 @@ Inputs: `content`, `topic`, `category`, `importance`, `tags`, `session_id`
 6. After the loop, `upsert_batch` calls
    regenerate_memory_index(db, project_id, memory_dir) to keep .ccm/MEMORY.md
    in sync — unconditionally (even if every item was skipped), but ONLY when a
-   `memory_dir` was passed (memory_writer.py:106-169). `upsert_smart` called on
+   `memory_dir` was passed (memory_writer.py:236-315). `upsert_smart` called on
    its own never regenerates. NEVER let MEMORY.md drift.
 ```
 
 `upsert_smart` returns
 `{"action": "skipped"|"merged"|"superseded"|"inserted", "id": ..., "similarity": ..., "old_id": ...}`
-(`memory_writer.py:200-235`); the skip paths add a `"reason"` of `too_short` or
+(`memory_writer.py:318-360`); the skip paths add a `"reason"` of `too_short` or
 `hash_match`. `upsert_batch` aggregates those into per-action counts plus a
-`results` list (`memory_writer.py:200-235`).
+`results` list (`memory_writer.py:318-360`).
 
 ### Thresholds and constants
 
-`HIGH_SIM` / `MID_SIM` are module constants in `cc_memory/llm/memory_writer.py:64`
+`HIGH_SIM` / `MID_SIM` are module constants in `cc_memory/llm/memory_writer.py:66`
 (0.80 / 0.50), alongside `MIN_CONTENT_LEN` (10), `MAX_CANDIDATES_TO_SCAN` (500)
 and `MAX_TAGS` (32). There are no `writer.*` keys in `cc_memory/config.json` —
 they were deleted in v2.5.0 with the other 34 inert keys (`config.json`'s
@@ -315,7 +315,7 @@ predicate and one marker behind all of them:
   `core/db.py:1144-1159`.)
 - Don't roll your own `"SELECT content FROM memories ..."` dedup. That's
   what `db.find_by_hash` (`core/db.py:2235-2243`) and the writer's `_find_similar`
-  (`llm/memory_writer.py:179`) are for. (There is no `db.find_similar`; the
+  (`llm/memory_writer.py:272`) are for. (There is no `db.find_similar`; the
   matcher lives in the writer, private by design.)
 - Don't "patch" MEMORY.md by hand or expect another path to refresh it. Call
   `regenerate_memory_index` after any non-trivial state change. The generated

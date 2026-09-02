@@ -1,4 +1,4 @@
-<!-- i18n-source: ARCHITECTURE.md | sha256: de953795539300c5 | version: 2.14.0 | translated: 2026-09-01 | translation: 473e21f0d8561813 -->
+<!-- i18n-source: ARCHITECTURE.md | sha256: 88b24e7c45ef2642 | version: 2.14.0 | translated: 2026-09-01 | translation: e6f0aa1a0355b5d3 -->
 > [English](ARCHITECTURE.md) · **简体中文**
 
 # cc-memory — 架构
@@ -406,8 +406,8 @@ regenerate_memory_index(db, project_id, memory_dir)   ← MEMORY.md 刷新
 `upsert_smart` 本身**不会**重新生成 `MEMORY.md`。刷新是调用方的责任，且只有两种
 形态：
 
-- `upsert_batch`（`memory_writer.py:200-235`）逐条循环调用 `upsert_smart`，并在最后
-  重新生成**一次**，但仅当传入了 `memory_dir` 时才会（`memory_writer.py:200-235`）。
+- `upsert_batch`（`memory_writer.py:318-360`）逐条循环调用 `upsert_smart`，并在最后
+  重新生成**一次**，但仅当传入了 `memory_dir` 时才会（`memory_writer.py:318-360`）。
   所有钩子调用方都会传（`pre_compact.py:435`、`stop.py:279`、
   `session_start.py:1056`）；同步 PreCompact 支路还会在其余状态变更之后再刷一次
   （`pre_compact.py:783`）。
@@ -417,7 +417,7 @@ regenerate_memory_index(db, project_id, memory_dir)   ← MEMORY.md 刷新
   `core/idle.py:96` 与 `hooks/consolidate_async.py:276` 也会在维护之后刷新它。
 
 （合并前的示意图把重新生成画成 `upsert_smart` 的无条件步骤，并省略了 `db` 参数；
-上面已依据 `memory_writer.py:223-258, 190, 199` 对两者做了修正。调用方清单同样是在
+上面已依据 `memory_writer.py:318-360, 190, 199` 对两者做了修正。调用方清单同样是在
 `cc_memory/` 内 grep `upsert_smart|upsert_batch` 得到的完整集合。）
 
 阈值只存在于一个地方——`memory_writer.HIGH_SIM = 0.80`、`MID_SIM = 0.50`、

@@ -185,6 +185,103 @@ def main():
                      4, topic="auth")
     print(f"[OK] Test 5 (variant): {r5}")
 
+    # === v2.14.0 · the exact-hash branch folds, and the tag cap never eats
+    # ===            the writer's own provenance marker (register C3 / C4) ===
+    import json as _c34_json
+    from llm.memory_writer import (_merged_tags as _c34_merged_tags,
+                                   _ACTION_TAGS as _c34_action_tags,
+                                   MAX_TAGS as _c34_max_tags)
+
+    # (C3) An IDENTICAL restatement is the STRONGEST signal a fact can get, and
+    # it was the only one that lost: compute_content_hash folds case and
+    # surrounding whitespace, so the reconcile answered `skipped` and wrote
+    # nothing, while a fact reworded just enough to MERGE/SUPERSEDE had its
+    # importance maxed and its tags unioned. Measured on the old tree: stored
+    # importance stayed 2 and the incoming tags were dropped.
+    _c34_text = "The staging deploy key rotates monthly on the first"
+    _c34_a = upsert_smart(db, pid, None, "config", _c34_text,
+                          importance=2, tags=["alpha"], topic="c34")
+    assert _c34_a["action"] == "inserted", _c34_a
+    _c34_b = upsert_smart(db, pid, None, "config",
+                          "  " + _c34_text.upper() + "   ",
+                          importance=5, tags=["beta"], topic="c34")
+    assert _c34_b["action"] == "reinforced", (
+        f"an exact-hash restatement returned {_c34_b}; the branch that folds "
+        f"NEW importance/tags into the matched row must say so, because "
+        f"`skipped` is also what a write that changed nothing returns")
+    assert _c34_b["id"] == _c34_a["id"] and _c34_b.get("reason") == "hash_match", \
+        _c34_b
+    _c34_row = db.get_memory(_c34_a["id"])
+    assert _c34_row["importance"] == 5, (
+        f"the identical restatement at importance 5 left the row at "
+        f"{_c34_row['importance']}: importance is the writer's ONE ranking "
+        f"signal (it orders the candidate scan and the SessionStart "
+        f"injection), and the near-duplicate branches already do "
+        f"max(incoming, row) - the perfect duplicate must not be the only "
+        f"restatement that loses the bump")
+    _c34_tags = _c34_json.loads(_c34_row["tags"])
+    assert _c34_tags == ["alpha", "beta"], (
+        f"tags after the exact-hash fold: {_c34_tags}; the row's own tags "
+        f"come first and the incoming ones are unioned on, exactly as the "
+        f"MERGE branch does")
+    # ...and it folds ONLY that: no new row, no content rewrite, no topic move,
+    # no provenance marker (nothing was merged or superseded).
+    assert _c34_row["content"] == _c34_text and _c34_row["topic"] == "c34", _c34_row
+    assert not [x for x in _c34_tags if x in _c34_action_tags], _c34_tags
+    with db._connect() as _c34_conn:
+        _c34_n = _c34_conn.execute(
+            "SELECT COUNT(*) FROM memories WHERE project_id = ? AND "
+            "content_hash = ? AND is_active = 1",
+            (pid, MemoryDB.compute_content_hash(_c34_text))).fetchone()[0]
+    assert _c34_n == 1, f"the fold inserted a row: {_c34_n} active for one hash"
+    # A restatement that adds NOTHING is still a plain SKIP, and still writes
+    # nothing at all - `updated_at` may not move on a no-op.
+    _c34_stamp = _c34_row["updated_at"]
+    _c34_c = upsert_smart(db, pid, None, "config", _c34_text,
+                          importance=1, tags=["beta"], topic="c34")
+    assert _c34_c["action"] == "skipped", (
+        f"a restatement carrying no new importance and no new tag reported "
+        f"{_c34_c}; `skipped` must keep meaning nothing was written")
+    assert db.get_memory(_c34_a["id"])["updated_at"] == _c34_stamp, \
+        "the no-op fold still wrote to the row"
+
+    # (C4) The cap may drop the newest CALLER-supplied excess and nothing
+    # else. It used to run AFTER the marker was appended, so a row already
+    # holding MAX_TAGS tags lost the `merged`/`supersedes` marker of every
+    # reconcile - measured: the MERGE landed, `merged` was absent.
+    _c34_base = [f"c34t{i}" for i in range(_c34_max_tags)]
+    _c34_full = _c34_merged_tags(_c34_base, ["merged"])
+    assert "merged" in _c34_full, (
+        f"_merged_tags dropped the writer's own provenance marker off a "
+        f"{_c34_max_tags}-tag row ({len(_c34_full)} out): the marker is the "
+        f"only record that a reconcile happened, and CLAUDE.md states the "
+        f"writer appends it ON TOP of whatever the caller passed")
+    assert _c34_full[:_c34_max_tags] == _c34_base, (
+        "the cap dropped one of the row's ORIGINAL tags to make room for the "
+        "marker; the droppable region is the newest caller-supplied excess")
+    # The ceiling still bounds the CALLER's list - the marker rides above it,
+    # a model-supplied list does not.
+    _c34_over = _c34_merged_tags(_c34_base, ["c34extra1", "c34extra2"],
+                                 ["supersedes"])
+    assert _c34_over == _c34_base + ["supersedes"], (
+        f"caller excess past MAX_TAGS survived the cap, or the marker did "
+        f"not: {_c34_over[-4:]}")
+    # ...and end to end through a real MERGE, which is where it was measured.
+    _c34_big = upsert_smart(db, pid, None, "note",
+                            "the c34 exporter scrapes metrics on port 9100",
+                            3, tags=_c34_base, topic="c34cap")
+    assert _c34_big["action"] == "inserted", _c34_big
+    _c34_m = upsert_smart(db, pid, None, "note",
+                          "the c34 exporter scrapes metrics on port 9100!",
+                          3, tags=[], topic="c34cap")
+    assert _c34_m["action"] == "merged", _c34_m
+    _c34_mt = _c34_json.loads(db.get_memory(_c34_big["id"])["tags"])
+    assert "merged" in _c34_mt and _c34_mt[:_c34_max_tags] == _c34_base, (
+        f"a MERGE into a {_c34_max_tags}-tag row left no trace in its tags: "
+        f"{_c34_mt[-3:]}")
+    print("[OK] C3/C4: exact-hash restatement folds importance+tags "
+          "(reinforced), no-op stays skipped, tag cap spares the marker")
+
     # Confirm DB state
     active = db.get_all_active_memories(pid)
     print(f"\n[OK] Active memories: {len(active)}")
