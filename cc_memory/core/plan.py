@@ -151,15 +151,40 @@ def normalize_structured(plan: Dict) -> Dict:
     is a realistic LLM failure mode) yields an empty — and therefore invalid —
     plan instead of raising `AttributeError: 'list' object has no attribute
     'get'`. apply_refined_plan turns that into a ValueError the CLI can print.
+
+    **`goal` and `context` are TEXT.** The rule, the same for both: a string
+    is used as-is; a list/tuple whose items are ALL strings is joined with a
+    space (a refiner wrapping one sentence across lines is "mostly right");
+    anything else is UNRECOVERABLE and becomes ''. That is a refusal for
+    `goal`, which `is_valid_structured` requires — and it has to be, because
+    the blanket `_s()` this replaced ran `str()` over any object at all, so
+    `{"goal": ["list goal"]}` was STORED as the literal Python repr
+    `"['list goal']"` and rendered that way into PLAN.md, while the schema
+    check that exists to catch a wrong-typed goal saw a perfectly good `str`
+    and passed. `context` is optional, so an unrecoverable value is dropped
+    rather than refused — the same disposition a non-list `success_criteria`
+    already gets below. Nothing here introduces a newline: `goal` renders
+    into a single `Goal: …` line.
     """
     if not isinstance(plan, dict):
         plan = {}
+
+    def _text(x):
+        if isinstance(x, str):
+            return x.strip()
+        if isinstance(x, (list, tuple)) and all(isinstance(i, str) for i in x):
+            return " ".join(i.strip() for i in x if i.strip()).strip()
+        # why: a bool/int/dict/nested list carries no recoverable prose. ''
+        # refuses the plan through is_valid_structured for `goal` and drops
+        # the field for `context`; str() would have written a repr instead.
+        return ""
+
     out = {
         "version": 1,
-        "goal": _s(plan.get("goal")).strip(),
+        "goal": _text(plan.get("goal")),
         "success_criteria": [],
         "steps": [],
-        "context": _s(plan.get("context")).strip(),
+        "context": _text(plan.get("context")),
         "refined_at": plan.get("refined_at") or datetime.now().isoformat(timespec="seconds"),
         "refined_by": _s(plan.get("refined_by")) or "plan-refiner",
     }
@@ -1411,13 +1436,26 @@ def unmatched_criteria(old_structured: Optional[Dict],
     """
     if not is_valid_structured(old_structured):
         return []
-    olds = [c for c in (old_structured.get("success_criteria") or [])
+    # `success_criteria` is read for its TYPE first, exactly like the
+    # `goal` / `context` reads below. `x or []` is not a type guard: every
+    # non-empty non-list passes it and then fails to iterate — `7` and `true`
+    # raised `TypeError: 'int' object is not iterable` out of an ADVISORY,
+    # after apply_refined_plan had already committed the plan, so the CLI's
+    # exit 1 named a write that had landed (register D4). A dict was worse
+    # than a crash: it iterated its KEYS and silently judged the criteria
+    # against them. The caller passes the normalised plan now, and this guard
+    # is the second half — a core function must not depend on its callers
+    # having normalised for it.
+    _old_sc = old_structured.get("success_criteria")
+    olds = [c for c in (_old_sc if isinstance(_old_sc, list) else [])
             if isinstance(c, str) and c.strip()]
     if not olds:
         return []
-    candidates = [c for c in (new_plan.get("success_criteria") or [])
+    _new_sc = new_plan.get("success_criteria") if isinstance(new_plan, dict) else None
+    candidates = [c for c in (_new_sc if isinstance(_new_sc, list) else [])
                   if isinstance(c, str) and c.strip()]
-    for extra in (new_plan.get("goal"), new_plan.get("context")):
+    for extra in ((new_plan.get("goal"), new_plan.get("context"))
+                  if isinstance(new_plan, dict) else ()):
         if isinstance(extra, str) and extra.strip():
             candidates.append(extra)
     return [c for c in olds

@@ -118,6 +118,42 @@ def _require_db(db_path):
     return conn
 
 
+# SQLite stores an INTEGER in 64 bits; `sqlite3` raises OverflowError when a
+# bound parameter does not fit. Row ids are `INTEGER PRIMARY KEY`, so nothing
+# outside this range can ever match a row.
+_SQLITE_INT_MAX = 2 ** 63 - 1
+
+
+def _row_id(value):
+    """argparse type for any id/count bound into SQL: an int SQLite can hold.
+
+    `supersedes 99999999999999999999` (and `archive`, `archive --supersedes`,
+    `list --sessions`, `directive-add --times`) reached the driver and raised
+    `OverflowError: Python int too large to convert to SQLite INTEGER` — a
+    traceback for a typo. Refused at the boundary the user can see, exactly
+    like `_bounded_limit` below; the negative and zero cases are deliberately
+    left alone, because they already answer "No memory with id -1" and that
+    is the right answer.
+    """
+    n = int(value)
+    if not (-_SQLITE_INT_MAX - 1 <= n <= _SQLITE_INT_MAX):
+        raise argparse.ArgumentTypeError(
+            f"{n} is outside the range SQLite stores an integer in "
+            f"(-2**63 .. 2**63-1), so it cannot name a row")
+    return n
+
+
+def _strip_bom(text):
+    """Drop a leading U+FEFF from already-decoded text.
+
+    A BOM survives `utf-8` decoding as a character and then breaks whatever
+    parses the text — `json.loads` refuses it outright. Reads that own their
+    own decode use `encoding="utf-8-sig"`; this is for the ones that do not,
+    which is stdin.
+    """
+    return text.lstrip("\ufeff") if isinstance(text, str) else text
+
+
 def _bounded_limit(value):
     """argparse type for --limit: [1, MemoryDB._MAX_SEARCH_LIMIT].
 
@@ -1685,9 +1721,28 @@ def cmd_plan_set(args):
 
     if args.from_refiner:
         try:
-            structured = json.loads(sys.stdin.read())
+            # The BOM is STRIPPED, not decoded around: `sys.stdin.read()` has
+            # already decoded (enable_utf8_io fixes the codec), so what arrives
+            # is the U+FEFF character, and `json.loads` refuses it with
+            # "Unexpected UTF-8 BOM (decode using utf-8-sig)". PowerShell 5.1
+            # writes one from `>`, `Out-File` and `Set-Content` alike, which is
+            # the documented way to run this command on the primary platform
+            # (`plan-set --from-refiner < refiner.json`). Every other read in
+            # this CLI is already utf-8-sig for exactly this reason —
+            # `_read_user_settings`, `_resolve_version`, `core.modes
+            # .read_config` — and stdin was simply not on that list.
+            structured = json.loads(_strip_bom(sys.stdin.read()))
         except (json.JSONDecodeError, UnicodeDecodeError) as e:
             print(f"[FAIL] stdin is not valid JSON: {e}")
+            sys.exit(1)
+        except RecursionError:
+            # why: `json.loads` recurses per nesting level, so a deeply nested
+            # payload exhausts the stack INSIDE the decoder — a RuntimeError,
+            # which the tuple above cannot reach however many decode classes
+            # are added to it. The subject is still "these bytes are wrong",
+            # which is the one thing this parse is allowed to conclude.
+            print("[FAIL] stdin is not valid JSON: nested too deeply to parse "
+                  "(the refiner emitted a pathological payload).")
             sys.exit(1)
         # why: the R610 gate guards `steps` only. Snapshot the outgoing plan
         # BEFORE the replacement so the advisory below can name the criteria
@@ -1706,7 +1761,12 @@ def cmd_plan_set(args):
         print(f"[OK] Plan stored — goal: {result['goal']!r}")
         print(f"     {len(result['steps'])} steps · PLAN.md regenerated at "
               f"{memory_dir / 'PLAN.md'}")
-        lost = plan_mod.unmatched_criteria(outgoing, structured)
+        # `result`, NOT `structured`: apply_refined_plan normalises before it
+        # writes, so the raw payload is not what landed — a non-list
+        # `success_criteria` is dropped on the way in, and reading it back
+        # here made an ADVISORY crash on a plan that had already committed
+        # (register D4). Judge the replacement that exists.
+        lost = plan_mod.unmatched_criteria(outgoing, result)
         if lost:
             total = len([c for c in (outgoing.get("success_criteria") or [])
                          if isinstance(c, str) and c.strip()])
@@ -1753,9 +1813,22 @@ def cmd_plan_set(args):
 
     if args.raw_file:
         try:
-            raw = Path(args.raw_file).read_text(encoding="utf-8")
+            # utf-8-sig, like every other read in this CLI: a BOM is a byte
+            # order mark, not plan text, and it used to be stored as the first
+            # character of the goal.
+            raw = Path(args.raw_file).read_text(encoding="utf-8-sig")
         except OSError as e:
             print(f"[FAIL] cannot read --raw-file {args.raw_file}: {e}")
+            sys.exit(1)
+        except UnicodeDecodeError as e:
+            # why: OSError was the only class caught, and the file the user
+            # points at is one THEY saved — Notepad's default on the primary
+            # platform is UTF-16 LE, and a Chinese Windows box writes GBK.
+            # Both reached the user as a traceback out of a hook-safe CLI.
+            print(f"[FAIL] --raw-file {args.raw_file} is not UTF-8 text "
+                  f"({e.encoding} codec failed at byte {e.start}: {e.reason}).")
+            print("       Re-save it as UTF-8 (Notepad: Save As -> Encoding: "
+                  "UTF-8), or pass the text inline with --raw.")
             sys.exit(1)
     elif args.raw is not None:
         raw = args.raw
@@ -2250,7 +2323,7 @@ def make_parser():
     pl.add_argument("category", nargs="?", default="all",
                     choices=["all"] + list(CATEGORIES))
     pl.add_argument("--limit", type=_bounded_limit, default=20)
-    pl.add_argument("--sessions", type=int, default=5)
+    pl.add_argument("--sessions", type=_row_id, default=5)
 
     ps = sub.add_parser("search", help="Search memories")
     ps.add_argument("query")
@@ -2295,14 +2368,14 @@ def make_parser():
     sub.add_parser("progress", help="Regenerate .ccm/PROGRESS.md from DB")
 
     psup = sub.add_parser("supersedes", help="Show supersede chain for a memory ID")
-    psup.add_argument("memory_id", type=int)
+    psup.add_argument("memory_id", type=_row_id)
 
     par = sub.add_parser(
         "archive",
         help="Retire memories by id (is_active=0, recoverable — never DELETE)")
-    par.add_argument("memory_ids", type=int, nargs="+",
+    par.add_argument("memory_ids", type=_row_id, nargs="+",
                      help="Memory ids to archive")
-    par.add_argument("--supersedes", type=int, default=None, metavar="ID",
+    par.add_argument("--supersedes", type=_row_id, default=None, metavar="ID",
                      help="Record that this memory replaces the archived ones "
                           "(sets supersedes_id, keeping the chain walkable)")
 
@@ -2378,7 +2451,7 @@ def make_parser():
     # a genuinely new directive still lands as standing.
     pda.add_argument("--kind", default=None, choices=_DIRECTIVE_KINDS,
                      help="Directive kind (default on creation: standing)")
-    pda.add_argument("--times", type=int, default=None,
+    pda.add_argument("--times", type=_row_id, default=None,
                      help="Set the repetition count outright (transcript audit)")
     pde = sub.add_parser(
         "directive-edit",
@@ -2458,6 +2531,94 @@ def _refuse_if_excluded(project):
     return False
 
 
+# What EXTERNAL input can raise on the way through a subcommand. Deliberately
+# not a bare `ValueError`: `UnicodeError` and `JSONDecodeError` are its only
+# subclasses here that mean "the bytes we were handed are wrong", and a
+# boundary that swallowed the rest would turn our own bugs into one tidy line.
+_BOUNDARY_ERRORS = (OSError, sqlite3.Error, UnicodeError, OverflowError,
+                    json.JSONDecodeError)
+
+# The sqlite3 messages MEASURED for an ENVIRONMENT fault, each with the remedy
+# that fixes THAT fault. Keyed on the MESSAGE because the class is not
+# sufficient and cannot be made sufficient: `OperationalError` is
+# "unable to open database file" (the state directory is wrong), "database is
+# locked" (another process), "attempt to write a readonly database"
+# (permissions) AND "no such column: frequency" (a typo in this file). Driven
+# first-party on 2026-09-01, SQLite 3.49.1 — a class-keyed remedy answered a
+# renamed `keywords.frequency` with "Check that the .ccm/memory.db path is a
+# writable FILE", which is a confident wrong diagnosis of a schema bug. A
+# message this table does not carry is NOT demonstrably external, so
+# `_boundary_report` returns None and `main` re-raises: a bug keeps its
+# traceback. A swallowed bug is a tidy lie; a misdiagnosed one is a tidier.
+_SQLITE_ENV_FAULTS = (
+    ("file is not a database",
+     "the memory database is not a SQLite file",
+     "       Something else was written over it. Move it aside and "
+     "re-initialise with /ccm-load; the old file is still readable as "
+     "whatever it actually is."),
+    ("unable to open database file",
+     "the memory database could not be opened",
+     "       Check that the .ccm/memory.db path is a writable FILE (a "
+     "directory of that name gives exactly this error)."),
+    ("database is locked",
+     "the memory database is locked by another process",
+     "       A hook, the dashboard or a second /cc-mem is mid-write. Retry "
+     "in a moment; if it persists, close the dashboard."),
+    ("attempt to write a readonly database",
+     "the memory database is read-only",
+     "       Check the file permissions on .ccm/memory.db and its "
+     "directory."),
+)
+
+
+def _boundary_report(exc, project):
+    """One actionable [FAIL] line (plus a remedy) per MEASURED failure shape,
+    or None when the shape was not measured and the caller must re-raise.
+
+    `Error: <repr>` is what a boundary prints when it does not know what it
+    caught. Each shape below has a different remedy, and naming the remedy is
+    the whole difference between a refusal and a traceback with the frames
+    filed off — but only while the remedy is RIGHT. Returning None for an
+    unrecognised sqlite3 message is what keeps that true: see
+    `_SQLITE_ENV_FAULTS`.
+    """
+    hint = (f"       Run `/cc-mem --project {project} paths` to see which "
+            f"files those are." if project is not None else "")
+    if isinstance(exc, sqlite3.Error):
+        msg = str(exc)
+        for needle, headline, remedy in _SQLITE_ENV_FAULTS:
+            if needle in msg:
+                return [f"[FAIL] {headline}: {exc}", remedy, hint]
+        return None
+    if isinstance(exc, FileExistsError):
+        return [f"[FAIL] cannot create the state directory: {exc}",
+                "       A regular file is sitting where .ccm/ has to be. "
+                "Rename or remove it, then retry.", hint]
+    if isinstance(exc, UnicodeDecodeError):
+        return [f"[FAIL] a file this command read is not UTF-8 text "
+                f"({exc.encoding} codec failed at byte {exc.start}: "
+                f"{exc.reason}).",
+                "       Re-save it as UTF-8 (Notepad: Save As -> Encoding: "
+                "UTF-8)."]
+    if isinstance(exc, UnicodeError):
+        return [f"[FAIL] text encoding error: {type(exc).__name__}: {exc}"]
+    if isinstance(exc, OverflowError):
+        return [f"[FAIL] a number in this command is too large for the "
+                f"database: {exc}",
+                "       Ids and counts must fit in 64 bits "
+                "(-2**63 .. 2**63-1)."]
+    if isinstance(exc, json.JSONDecodeError):
+        return [f"[FAIL] a JSON file this command read is malformed: {exc}",
+                "       It is a generated artifact under .ccm/; deleting it "
+                "makes the next hook write a fresh one.", hint]
+    # Every remaining OSError is a real filesystem fault, but only
+    # FileExistsError above was measured to have a remedy. State what the OS
+    # said and name the path it said it about — a restatement cannot be the
+    # wrong diagnosis, which a borrowed remedy can.
+    where = f" ({exc.filename})" if getattr(exc, "filename", None) else ""
+    return [f"[FAIL] {type(exc).__name__}: {exc}{where}"]
+
+
 def main():
     args = make_parser().parse_args()
     # `is not None`, NOT truthiness: `--project ""` is falsy, so the old guard
@@ -2502,6 +2663,30 @@ def main():
         # to have been noticed: thirteen `MemoryDB(...)` sites in this file
         # alone can raise it, and a fourteenth would have been missed.
         print(f"Error: {exc}")
+        sys.exit(1)
+    except _BOUNDARY_ERRORS as exc:
+        # why: the handler above said "a fourteenth site would have been
+        # missed" and then enumerated ONE exception class — the same shape,
+        # one level up. Four more were reachable from ordinary input
+        # (register D5): a `memory.db` that is a directory or not SQLite, a
+        # `.ccm` that is a regular file, a UTF-16 `--raw-file`, an id past
+        # 2**63. The rule that replaces the enumeration: this boundary
+        # catches what EXTERNAL INPUT can raise — the filesystem, the SQLite
+        # driver, a decoder, an integer too wide for a column — and nothing
+        # our own arithmetic can. That is why it is not a bare `ValueError`:
+        # only the two ValueError subclasses that mean "the bytes we were
+        # handed are wrong" are listed, so a genuine bug in this file still
+        # surfaces as a traceback instead of a tidy lie.
+        report = _boundary_report(exc, getattr(args, "project", None))
+        if report is None:
+            # why: the class was caught but the MESSAGE is not one external
+            # input was measured to produce, so this is most likely a bug in
+            # this file — and a bug needs its traceback, not a remedy for a
+            # fault it does not have.
+            raise
+        for line in report:
+            if line:
+                print(line)
         sys.exit(1)
 
 

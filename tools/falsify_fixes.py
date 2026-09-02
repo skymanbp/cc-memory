@@ -2357,6 +2357,94 @@ def _break_r13i18nrestamp(root):
            "    return False  # BREAKAGE: any re-stamp certifies the translation")
 
 
+# ── CLI boundaries: the advisory, the exception class, the codec ─────────────
+
+@case("r14criteriacore", ["tests/test_surfaces.py"],
+      "read success_criteria as `x or []` again -> a truthy non-list is not iterable, and the carryover ADVISORY raises TypeError after the plan has committed")
+def _break_r14criteriacore(root):
+    _patch(root, f"{PKG}/core/plan.py",
+           "    _new_sc = new_plan.get(\"success_criteria\") if isinstance(new_plan, dict) else None\n"
+           "    candidates = [c for c in (_new_sc if isinstance(_new_sc, list) else [])\n"
+           "                  if isinstance(c, str) and c.strip()]",
+           "    candidates = [c for c in (new_plan.get(\"success_criteria\") or [])\n"
+           "                  if isinstance(c, str) and c.strip()]")
+
+
+@case("r14criteriaraw", ["tests/test_surfaces.py"],
+      "judge the carryover advisory on the RAW payload again -> a criterion absorbed into a list-shaped goal is reported vanished, because the raw goal is not a str")
+def _break_r14criteriaraw(root):
+    _patch(root, f"{PKG}/cli/mem.py",
+           "        lost = plan_mod.unmatched_criteria(outgoing, result)",
+           "        lost = plan_mod.unmatched_criteria(outgoing, structured)")
+
+
+@case("r14goalrepr", ["tests/test_surfaces.py"],
+      "run str() over goal/context again -> a list goal is STORED as the Python repr \"['list goal']\" and passes the schema check that exists to refuse it")
+def _break_r14goalrepr(root):
+    _patch(root, f"{PKG}/core/plan.py",
+           "        \"goal\": _text(plan.get(\"goal\")),",
+           "        \"goal\": _s(plan.get(\"goal\")).strip(),")
+    _patch(root, f"{PKG}/core/plan.py",
+           "        \"context\": _text(plan.get(\"context\")),",
+           "        \"context\": _s(plan.get(\"context\")).strip(),")
+
+
+@case("r14cliboundary", ["tests/test_surfaces.py"],
+      "narrow both dispatch boundaries back to FileNotFoundError -> a non-SQLite or directory memory.db, a .ccm that is a file and a UTF-16 --raw-file each traceback again")
+def _break_r14cliboundary(root):
+    _patch(root, f"{PKG}/cli/mem.py",
+           "    except _BOUNDARY_ERRORS as exc:",
+           "    except () as exc:  # BREAKAGE: the class shrinks to the incident")
+    _patch(root, f"{PKG}/cli/mem.py",
+           "        except UnicodeDecodeError as e:\n"
+           "            # why: OSError was the only class caught",
+           "        except () as e:  # BREAKAGE: only OSError again\n"
+           "            # why: OSError was the only class caught")
+    _patch(root, f"{PKG}/cli/plan.py",
+           "    except _BOUNDARY_ERRORS as exc:",
+           "    except () as exc:  # BREAKAGE: this CLI has no boundary again")
+
+
+@case("r14sqlremedy", ["tests/test_surfaces.py"],
+      "key the sqlite remedy on the CLASS again -> `no such column: frequency`, a bug in the CLI's own SQL, is answered with \"check that memory.db is a writable FILE\"")
+def _break_r14sqlremedy(root):
+    _patch(root, f"{PKG}/cli/mem.py",
+           "    if isinstance(exc, sqlite3.Error):\n"
+           "        msg = str(exc)\n"
+           "        for needle, headline, remedy in _SQLITE_ENV_FAULTS:\n"
+           "            if needle in msg:\n"
+           "                return [f\"[FAIL] {headline}: {exc}\", remedy, hint]\n"
+           "        return None",
+           "    if isinstance(exc, sqlite3.Error):  # BREAKAGE: class, not message\n"
+           "        return [f\"[FAIL] the memory database could not be opened: \"\n"
+           "                f\"{type(exc).__name__}: {exc}\",\n"
+           "                \"       Check that the .ccm/memory.db path is a writable \"\n"
+           "                \"FILE (a directory of that name gives exactly this \"\n"
+           "                \"error).\", hint]")
+
+
+@case("r14rowid", ["tests/test_surfaces.py"],
+      "let an id past 2**63 through argparse again -> OverflowError out of the sqlite3 driver instead of a usage refusal the user can read")
+def _break_r14rowid(root):
+    _patch(root, f"{PKG}/cli/mem.py",
+           "    psup.add_argument(\"memory_id\", type=_row_id)",
+           "    psup.add_argument(\"memory_id\", type=int)")
+    _patch(root, f"{PKG}/cli/mem.py",
+           "    par.add_argument(\"memory_ids\", type=_row_id, nargs=\"+\",",
+           "    par.add_argument(\"memory_ids\", type=int, nargs=\"+\",")
+    _patch(root, f"{PKG}/cli/plan.py",
+           "    pa.add_argument(\"--start-order\", type=_plan_int, default=0,",
+           "    pa.add_argument(\"--start-order\", type=int, default=0,")
+
+
+@case("r14stdinbom", ["tests/test_surfaces.py"],
+      "stop stripping the BOM from --from-refiner stdin -> `plan-set --from-refiner < refiner.json` refuses every payload PowerShell 5.1 wrote")
+def _break_r14stdinbom(root):
+    _patch(root, f"{PKG}/cli/mem.py",
+           "            structured = json.loads(_strip_bom(sys.stdin.read()))",
+           "            structured = json.loads(sys.stdin.read())")
+
+
 @case("r13coveragename", ["tests/smoke_test.py"],
       "count a bare substring as documentation again -> a column named `source` is satisfied by the i18n marker")
 def _break_r13coveragename(root):
