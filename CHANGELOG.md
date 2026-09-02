@@ -160,6 +160,21 @@ never got it.
   refuses, exit 2, when the English digest changed and the translation did
   not; `--translation-unchanged "<why>"` passes an English-only change, and
   a marker stamped before the field existed is accepted once.
+- **The citation checker walked every directory under the root, and one of
+  them held seven more copies of the tree.** `_resolve_path`'s bare-filename
+  search and `_global_defs`'s symbol index used `rglob` from the repository
+  root, so agent worktrees under `.claude/worktrees/` (a `.venv/` would do
+  the same) made every bare citation match eight files — measured: 570 of
+  624 citations UNCHECKED, `smoke` red, the standalone checker at 260 s.
+  `_tree_files` walks with `os.walk` and never enters a dotted directory or
+  a bytecode cache — a dotted directory is per-user tool state, the rule
+  this repository's own `.gitignore` states — and the falsify sandbox no
+  longer copies `.claude/`. The same pass found `CITATION_RE` dropping a
+  leading dot, so `.claude-plugin/plugin.json:4` had only ever resolved
+  through the walk it was right to lose; the regex keeps the dot. Gate:
+  `smoke_test.py` § citations (a fixture with `pkg/db.py` beside
+  `.venv/lib/db.py` and `.claude/worktrees/…/db.py`); `falsify --case
+  r14dotdirs`.
 
 ### Added
 

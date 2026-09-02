@@ -1174,6 +1174,34 @@ def main():
         f"tools/citation_check.py to cover them:\n  "
         + "\n  ".join(f"{r.doc}:{r.docline} -> {r.cited}:{r.start} ({r.detail})"
                       for r in _cit_skip[:8]))
+    # v2.14.0: the tree the checker walks is THIS tree. A dotted directory is
+    # per-user tool state (a venv, an editor's state, an agent's worktree),
+    # and one can hold a whole extra copy of the source: seven worktrees
+    # under `.claude/worktrees/` made every bare-filename citation match
+    # eight files and reported 570 of 624 as UNCHECKED (2026-09-02).
+    _cw_root = Path(tempfile.mkdtemp(prefix="cc-memory-citewalk-"))
+    try:
+        for _cw_rel in ("pkg/db.py", ".venv/lib/db.py",
+                        ".claude/worktrees/agent-x/pkg/db.py",
+                        "pkg/__pycache__/db.py", "docs/other.py"):
+            (_cw_root / _cw_rel).parent.mkdir(parents=True, exist_ok=True)
+            (_cw_root / _cw_rel).write_text("def f():\n    pass\n",
+                                            encoding="utf-8")
+        _cw_hit, _cw_note = citation_check._resolve_path(_cw_root, "db.py")
+        assert _cw_hit == _cw_root / "pkg" / "db.py", (
+            f"a bare filename must resolve to the one copy in THIS tree, "
+            f"not to every copy under a dotted directory: {_cw_hit!r} {_cw_note}")
+        _cw_all = sorted(p.relative_to(_cw_root).as_posix()
+                         for p in citation_check._tree_files(_cw_root, "*.py"))
+        assert _cw_all == ["docs/other.py", "pkg/db.py"], _cw_all
+        # the two product dot-directories are cited repo-relative, so the
+        # regex must keep the dot: `.claude-plugin/plugin.json:4` used to be
+        # captured as `claude-plugin/plugin.json` and found only by the walk
+        _cw_m = citation_check.CITATION_RE.search("see `.claude-plugin/plugin.json:4`")
+        assert _cw_m and _cw_m.group("path") == ".claude-plugin/plugin.json", (
+            _cw_m and _cw_m.group("path"))
+    finally:
+        shutil.rmtree(_cw_root, ignore_errors=True)
     _cit_ok = sum(1 for r in _cit if r.verdict == "OK")
     _cit_bnd = sum(1 for r in _cit if r.verdict == "BOUNDS")
     # v2.5.5: and EVERY markdown document is in scope, not a hand-picked seven.

@@ -63,6 +63,8 @@ _REQUIRED_PLUGIN_FILES.
 """
 import argparse
 import ast
+import fnmatch
+import os
 import re
 import sys
 from pathlib import Path
@@ -139,7 +141,11 @@ def _is_evidence(root: Path, path: Path) -> bool:
 # verdict than the symbol anchor, and infinitely stronger than none.
 _CITED_EXTS = ("py", "json", "md", "toml", "cfg", "ini", "txt", "yml", "yaml")
 CITATION_RE = re.compile(
-    r"(?P<path>[A-Za-z0-9_][A-Za-z0-9_./-]*\.(?:" + "|".join(_CITED_EXTS) + r"))"
+    # A leading dot is part of the path: `.claude-plugin/plugin.json:4` is a
+    # repo-relative citation, and dropping the dot turned it into a bare name
+    # that only the tree walk could find — one dotted directory the walk is
+    # right to skip (v2.14.0).
+    r"(?P<path>\.?[A-Za-z0-9_][A-Za-z0-9_./-]*\.(?:" + "|".join(_CITED_EXTS) + r"))"
     r":(?P<start>\d+)(?:\s*[-–]\s*(?P<end>\d+))?")
 
 # An identifier, optionally dotted: `core.plan.raw_pending_refinement`,
@@ -292,6 +298,35 @@ def _defs_in(path: Path):
     return out
 
 
+def _tree_files(root: Path, pattern: str):
+    """Every file under `root` matching `pattern` that is source of THIS tree.
+
+    A dotted directory is per-user tool state, never source — this repo's
+    own `.gitignore` blankets `.*/` for that reason — and one can hold a
+    whole extra copy of the tree: seven agent worktrees under
+    `.claude/worktrees/` (measured 2026-09-02) made every bare-filename
+    citation match eight files and reported 570 of 624 as UNCHECKED, and a
+    `.venv/` would put every stdlib symbol into the cross-file index and
+    anchor prose words on them. The two dotted directories that ARE the
+    product (`.github/`, `.claude-plugin/`) hold no Python and are cited
+    repo-relative, which `_resolve_path` answers before ever walking.
+    Bytecode caches and the evidence prefixes are skipped as well; a repro
+    script's `def project()` is a symbol of the EVIDENCE, not of this tree
+    (see EVIDENCE_PREFIXES). Walks with `os.walk` so a pruned directory is
+    never entered — `rglob` would still read all eight trees to discard
+    seven of them.
+    """
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames
+                       if not d.startswith(".") and d != "__pycache__"]
+        base = Path(dirpath)
+        for name in filenames:
+            if fnmatch.fnmatch(name, pattern):
+                p = base / name
+                if not _is_evidence(root, p):
+                    yield p
+
+
 def _resolve_path(root: Path, cited: str):
     """Resolve a cited path. Returns ``(path, note)``.
 
@@ -304,10 +339,8 @@ def _resolve_path(root: Path, cited: str):
     direct = root / cited
     if direct.is_file():
         return direct, None
-    matches = [p for p in root.rglob(cited.split("/")[-1])
-               if "__pycache__" not in p.parts and p.is_file()
-               and p.as_posix().endswith(cited)
-               and not _is_evidence(root, p)]
+    matches = [p for p in _tree_files(root, cited.split("/")[-1])
+               if p.as_posix().endswith(cited)]
     if len(matches) == 1:
         return matches[0], None
     if matches:
@@ -331,12 +364,10 @@ def _global_defs(root: Path):
     global _GLOBAL_DEFS
     if _GLOBAL_DEFS is None:
         names = set()
-        for py in root.rglob("*.py"):
-            if "__pycache__" in py.parts or _is_evidence(root, py):
-                # why: a symbol defined in an evidence script (an audit's
-                # reproduction) is not a symbol of this tree; see
-                # EVIDENCE_PREFIXES for the 24 false STALE verdicts it caused
-                continue
+        # _tree_files leaves out evidence scripts (an audit's reproduction
+        # defines `project()` and `PLAN`, symbols of the EVIDENCE — indexed,
+        # they caused 24 false STALE verdicts) and every dotted directory.
+        for py in _tree_files(root, "*.py"):
             d = _defs_in(py)
             if d:
                 names |= {k for k in d if "." not in k}
@@ -434,10 +465,8 @@ def classify(root: Path):
                     # has both cli/plan.py and core/plan.py, and 13 citations
                     # said only `plan.py`; the sentence around each names a
                     # symbol that exists in exactly one of them.
-                    cands = [p for p in root.rglob(cited.split("/")[-1])
-                             if "__pycache__" not in p.parts and p.is_file()
-                             and p.as_posix().endswith(cited)
-                             and not _is_evidence(root, p)]
+                    cands = [p for p in _tree_files(root, cited.split("/")[-1])
+                             if p.as_posix().endswith(cited)]
                     ctx_all = "\n".join(doc_lines[max(0, n - 2):n + 1])
                     names = {s.split(".")[-1]
                              for s in SYMBOL_RE.findall(ctx_all)}

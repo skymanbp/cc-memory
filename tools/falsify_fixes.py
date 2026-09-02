@@ -52,9 +52,13 @@ def _copy_repo():
         # Copying either drags the maintainer's live memory.db into every
         # falsification sandbox, and its -wal/-shm are the same WinError 33
         # the `.ce` note above describes.
+        # `.claude` is the maintainer's local Claude Code state (settings,
+        # skills — and agent WORKTREES: seven full copies of this tree sat
+        # under `.claude/worktrees/` on 2026-09-02, so every sandbox copied
+        # eight trees to test one).
         ignore=shutil.ignore_patterns("__pycache__", "*.pyc", ".git",
                                       "dist", "build", ".ccm", "memory",
-                                      ".ce", "*.db-shm", "*.db-wal"))
+                                      ".ce", ".claude", "*.db-shm", "*.db-wal"))
     return box, dst
 
 
@@ -2143,6 +2147,16 @@ def _break_r13coveragetools(root):
     _patch(root, "tools/doc_coverage.py",
            "    return sorted(set(re.findall(r'\"name\":\\s*\"(\\w+)\"', src[start:end])))",
            "    return sorted(set(re.findall(r'\"name\":\\s*\"((?:memory|progress)_\\w+)\"', src[start:end])))  # BREAKAGE")
+
+
+@case("r14dotdirs", ["tests/smoke_test.py"],
+      "walk dotted directories again -> an agent worktree or a venv under the root makes every bare-filename citation ambiguous and indexes foreign symbols")
+def _break_r14dotdirs(root):
+    _patch(root, "tools/citation_check.py",
+           "        dirnames[:] = [d for d in dirnames\n"
+           "                       if not d.startswith(\".\") and d != \"__pycache__\"]",
+           "        dirnames[:] = [d for d in dirnames\n"
+           "                       if d != \"__pycache__\"]  # BREAKAGE: dotted dirs walked")
 
 
 @case("r13claimsgap", ["tests/smoke_test.py"],
