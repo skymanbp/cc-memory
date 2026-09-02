@@ -2719,6 +2719,308 @@ def main():
           "the state directory; a legacy-path handle follows the rename, "
           "one way")
 
+    # ── v2.14.0 · boundaries, declarations, tri-state probes, a linked .ccm ─
+    # Four findings of the 2026-09 whole-repository debug pass (A1b, A2, A3,
+    # B1-layout), each reproduced on this tree before it was fixed. They share
+    # one shape: a decision that answers NO when the honest answer is "not by
+    # THAT SPELLING of home" (A1b), "not by that NAME" (A2) or "nobody could
+    # LOOK" (A3) — plus a guard a LINK walks straight around (B1).
+    from core.roots import (PIN_MARKER as _BD_PIN,
+                            _is_profile_dir as _bd_profile,
+                            _is_volume_root as _bd_volume,
+                            _chain as _bd_chain,
+                            _is_container as _bd_container,
+                            project_root as _bd_root)
+    from core.layout import (UNKNOWN as _BD_UNKNOWN,
+                             is_ccm_dir as _bd_is_ccm,
+                             memory_dir as _bd_resolve,
+                             find_memory_dir as _bd_find,
+                             CCM_GITIGNORE_MARKER as _BD_MARKER,
+                             _SQLITE_MAGIC as _BD_MAGIC)
+    from core.progress import ensure_memory_dir as _bd_ensure
+
+    _bd_box = Path(tempfile.mkdtemp(prefix="cc-memory-boundaries-"))
+
+    def _bd_same(a, b):
+        return os.path.normcase(str(Path(a).resolve())) == \
+            os.path.normcase(str(Path(b).resolve()))
+
+    # (a) A1b — a MOUNTED user profile is a profile. The spellings below are
+    #     SAMPLE forms of fixed OS conventions built from the platform's own
+    #     anchor, never machine paths: no user name and no drive letter is
+    #     hardcoded, only the shape. `/mnt/c/Users/bob` is that profile seen
+    #     from WSL, `/cygdrive/c/...` from Cygwin, `/host_mnt/c/...` from
+    #     Docker Desktop, `/c/...` from Git-Bash. Through v2.13.2 the shape
+    #     test could say only "the profile's parent sits at the FILESYSTEM
+    #     root", so none of them was a profile: measured, `_chain` walked
+    #     through the home directory and `project_root` returned it, adopting
+    #     the database one session run in `~` leaves there — the exact capture
+    #     roots.py exists to prevent. Asserted on the PREDICATE and on
+    #     `_chain`, because no temp directory can sit at a filesystem root;
+    #     that is why tests/test_surfaces.py §7 asserts the pre-existing
+    #     shapes the same way. These sample spellings answer identically on
+    #     BOTH platforms — the ancestor chain of `Path("/mnt")` ends at the
+    #     anchor on Windows too — so this is asserted everywhere, skipped
+    #     nowhere.
+    for _bd_p in ("/mnt/c/Users/bob", "/cygdrive/c/Users/bob",
+                  "/host_mnt/c/Users/alice", "/c/Users/bob",
+                  "/mnt/c/home/bob"):
+        assert _bd_profile(Path(_bd_p)), (
+            f"{_bd_p} is a user profile reached through a volume mount; the "
+            f"walk must stop BELOW it, never adopt the database inside it")
+    # ...and nothing is widened. A mount-container entry that is not a drive
+    # letter is not a volume root, and an in-repo `mnt/c/Users/` never was.
+    for _bd_p in ("/mnt/data/Users/bob", "/mnt/wsl/Users/bob"):
+        assert not _bd_profile(Path(_bd_p)), \
+            f"{_bd_p} is an ordinary directory, not a per-user profile root"
+    for _bd_q in (_bd_box / "mnt" / "c" / "Users" / "alice",
+                  _bd_box / "repo" / "users" / "alice"):
+        assert not _bd_profile(_bd_q), \
+            f"{_bd_q} is a project's own directory, not a profile root"
+    assert _bd_volume(Path("/mnt/c")) and _bd_volume(Path("/c")) \
+        and not _bd_volume(Path("/mnt/data")) \
+        and not _bd_volume(_bd_box / "mnt" / "c"), \
+        "a volume root is the filesystem root or a one-letter mount entry"
+    _bd_names = [p.name for p in
+                 _bd_chain(Path("/mnt/c/Users/bob/Projects/foo/src"))]
+    assert _bd_names == ["src", "foo", "Projects"], (
+        f"the chain climbed into a mounted home directory: {_bd_names}")
+
+    # (b) A2 — the dependency-NAME cut is a guess, and a declaration beats it.
+    #     It dropped the project itself and everything below the cut, so a
+    #     project CALLED `external` (or living under a folder of that name)
+    #     had `_nearest` never see its own database and every subdirectory cwd
+    #     resolved to ITSELF — one stray state directory per directory the
+    #     agent entered. Measured on all four of external / vendor / deps /
+    #     third_party, and on the own-name layout even when pinned AND
+    #     already initialised.
+    _bd_ext = _bd_box / "Projects" / "external"
+    (_bd_ext / ".git").mkdir(parents=True)
+    (_bd_ext / _BD_PIN).write_text("", encoding="utf-8")
+    (_bd_ext / _MEM).mkdir()
+    (_bd_ext / _MEM / "memory.db").write_bytes(b"")
+    _bd_extcwd = _bd_ext / "src" / "pkg"
+    _bd_extcwd.mkdir(parents=True)
+    assert _bd_same(_bd_root(str(_bd_extcwd)), _bd_ext), (
+        f"a pinned, initialised project named `external` resolved to "
+        f"{_bd_root(str(_bd_extcwd))}, not to itself")
+    _bd_client = _bd_box / "work" / "external" / "clientproj"
+    (_bd_client / ".git").mkdir(parents=True)
+    (_bd_client / _MEM).mkdir()
+    (_bd_client / _MEM / "memory.db").write_bytes(b"")
+    _bd_clientcwd = _bd_client / "src"
+    _bd_clientcwd.mkdir()
+    assert _bd_same(_bd_root(str(_bd_clientcwd)), _bd_client), (
+        f"an UNPINNED project under work/external/ resolved to "
+        f"{_bd_root(str(_bd_clientcwd))}, not to the project that owns the db")
+    # The cut still does its own job: a dependency that declares NOTHING is
+    # still dependency internals, and the repository depending on it wins.
+    _bd_repo = _bd_box / "repo"
+    (_bd_repo / ".git").mkdir(parents=True)
+    _bd_dep = _bd_repo / "node_modules" / "left-pad"
+    (_bd_dep / "lib").mkdir(parents=True)
+    (_bd_dep / "package.json").write_text("{}", encoding="utf-8")
+    assert _bd_same(_bd_root(str(_bd_dep / "lib")), _bd_repo), (
+        f"a cwd inside node_modules must anchor on the DEPENDING project; got "
+        f"{_bd_root(str(_bd_dep / 'lib'))}")
+    # ...and the sibling of that ladder case, with the verdict named: WHEN A
+    # DEPENDENCY DIRECTORY ITSELF OWNS A DATABASE, THE DATABASE WINS AND THE
+    # HOST REPOSITORY DOES NOT. This is a behaviour change on
+    # tests/test_surfaces.py §7's "a cwd inside node_modules anchors on the
+    # host repo" case, stated here rather than left implicit. It is what rung
+    # 0 has always answered for the dependency directory ITSELF (an existing
+    # database is terminal, before `_candidates` is reached), so through
+    # v2.13.2 `<repo>/node_modules/left-pad` resolved to left-pad while
+    # `<repo>/node_modules/left-pad/lib` resolved to the repo -- one `cd`
+    # flipping which database the session wrote to. The two agree now, in the
+    # direction the module docstring refuses to give up: an existing database
+    # is a declaration of identity and is never overridden, because a stray
+    # and a deliberate nested project are byte-for-byte identical on disk.
+    # Nothing is lost either way -- no NEW database is created down there, and
+    # `nested_databases` reports this one.
+    _bd_planted = _bd_repo / "node_modules" / "planted"
+    (_bd_planted / "lib").mkdir(parents=True)
+    (_bd_planted / "package.json").write_text("{}", encoding="utf-8")
+    (_bd_planted / _MEM).mkdir()
+    (_bd_planted / _MEM / "memory.db").write_bytes(b"")
+    assert _bd_same(_bd_root(str(_bd_planted)), _bd_planted), \
+        "rung 0: a directory that owns a database is never re-rooted"
+    assert _bd_same(_bd_root(str(_bd_planted / "lib")), _bd_planted), (
+        f"a dependency directory that OWNS a database keeps its own project "
+        f"identity at every depth; one level deeper resolved to "
+        f"{_bd_root(str(_bd_planted / 'lib'))} instead")
+    assert not (_bd_planted / "lib" / _MEM).exists(), \
+        "resolution must never CREATE a database inside a dependency tree"
+
+    # ...and the first-session order still lands on the new name. The v2.14.0
+    # outcome-1 test is `.ccm/memory.db` with content, not `.ccm/` existing,
+    # so the window between `ensure_memory_dir` creating the directory and
+    # MemoryDB creating the file must not fall through to anything else.
+    _bd_first = _bd_box / "first-session"
+    _bd_first.mkdir()
+    _bd_ensure(_bd_first / _MEM)
+    assert not (_bd_first / _MEM / "memory.db").exists(), \
+        "fixture: the database must not exist yet for this window to be real"
+    assert _bd_resolve(_bd_first).name == _MEM, (
+        f"a first session between ensure_memory_dir and MemoryDB resolved to "
+        f"{_bd_resolve(_bd_first).name}")
+    assert not (_bd_first / _OLDMEM).exists(), \
+        "resolution created a legacy directory in a brand-new project"
+    # ...and the pin exemption now lives in ONE place. `_is_container` no
+    # longer carries its own copy — that duplication is exactly why the rule
+    # written last (the dependency-name cut) never got one.
+    _bd_pin = _bd_box / "pinned"
+    _bd_pin.mkdir()
+    (_bd_pin / _BD_PIN).write_text("", encoding="utf-8")
+    for _bd_kid in ("k0", "k1"):
+        (_bd_pin / _bd_kid / ".git").mkdir(parents=True)
+    assert _bd_container(_bd_pin) is True, (
+        "the pin exemption must be applied ONCE by _candidates, not re-tested "
+        "inside _is_container -- a second copy is how the next rule loses it")
+    (_bd_pin / "sub").mkdir()
+    assert _bd_same(_bd_root(str(_bd_pin / "sub")), _bd_pin), \
+        "moving the pin exemption must not stop the pin working"
+
+    # (c) A3 — "the probe said no" is not "the probe could not run".
+    #     `_has_ccm_database` returned a plain False for a lock timeout, an AV
+    #     hold or CANTOPEN, and `migrate_legacy_dir` read that as "not ours"
+    #     and took the irreversible branch. Measured: a legacy database in
+    #     rollback-journal mode under a one-second `BEGIN EXCLUSIVE` — the
+    #     first hook of the session created the new directory, opened an empty
+    #     database into it, and outcome 1 answered the new name for ever after
+    #     while the whole history sat one directory away, reported by nothing.
+    _bd_a3 = _bd_box / "transient"
+    (_bd_a3 / _OLDMEM).mkdir(parents=True)
+    _bd_a3db = MemoryDB(_bd_a3 / _OLDMEM / "memory.db")
+    _bd_a3pid = _bd_a3db.upsert_project(str(_bd_a3))
+    _bd_a3db.insert_memory(_bd_a3pid, None, "decision",
+                           "A3: the history that used to be orphaned", 4)
+    del _bd_a3db
+    _bd_a3gi = _bd_a3 / _OLDMEM / ".gitignore"
+    if _bd_a3gi.exists():
+        _bd_a3gi.unlink()      # identification now rests on the db probe alone
+    _bd_hold = sqlite3.connect(str(_bd_a3 / _OLDMEM / "memory.db"),
+                               isolation_level=None)
+    try:
+        _bd_hold.execute("PRAGMA journal_mode=DELETE")
+        _bd_hold.execute("BEGIN EXCLUSIVE")
+        assert _bd_is_ccm(_bd_a3 / _OLDMEM) is _BD_UNKNOWN, (
+            f"a locked legacy database must identify as UNKNOWN, not "
+            f"{_bd_is_ccm(_bd_a3 / _OLDMEM)!r}")
+        assert _bd_resolve(_bd_a3).name == _OLDMEM, \
+            "a probe that could not run must keep the LEGACY directory live"
+        assert not (_bd_a3 / _MEM).exists(), (
+            "a transient probe failure created the directory that orphans "
+            "the history")
+    finally:
+        _bd_hold.execute("COMMIT")
+        _bd_hold.close()
+    assert _bd_is_ccm(_bd_a3 / _OLDMEM) is True
+    assert _bd_resolve(_bd_a3).name == _MEM, \
+        "the retry after the lock cleared must complete the migration"
+    _bd_a3moved = MemoryDB(_bd_a3 / _MEM / "memory.db")
+    assert _bd_a3moved.get_stats(
+        _bd_a3moved.upsert_project(str(_bd_a3)))["n_memories"] == 1, \
+        "the deferred migration lost the rows it was deferred to protect"
+    del _bd_a3moved
+    # Recorded, not redesigned into paralysis: a PERMANENT negative stays one.
+    # Through a `mode=ro` URI, sqlite3 raises DatabaseError ("file is not a
+    # database") for a corrupt file and OperationalError for a locked or
+    # unopenable one; only the second is transient, and that split is
+    # measured rather than guessed.
+    _bd_bad = _bd_box / "corrupt"
+    (_bd_bad / _OLDMEM).mkdir(parents=True)
+    (_bd_bad / _OLDMEM / "memory.db").write_bytes(_BD_MAGIC + b"\xff" * 4096)
+    assert _bd_is_ccm(_bd_bad / _OLDMEM) is False, \
+        "a file that is provably not a database must stay a definite negative"
+    assert _bd_resolve(_bd_bad).name == _MEM
+    # ...and outcome 1 is no longer unconditional: an empty new directory
+    # beside a legacy one that IS ours is the state a failed probe leaves
+    # behind, and answering with the new name there made it permanent.
+    _bd_empty = _bd_box / "empty-new"
+    (_bd_empty / _OLDMEM).mkdir(parents=True)
+    (_bd_empty / _OLDMEM / ".gitignore").write_text(_BD_MARKER + "\n",
+                                                    encoding="utf-8")
+    (_bd_empty / _MEM).mkdir()
+    assert _bd_resolve(_bd_empty).name == _OLDMEM, \
+        "an empty new directory outranked a legacy one holding everything"
+    # ...decided by a BRANCH, never by letting os.rename fail: renaming onto
+    # an existing directory raises, and a fail-safe that depends on an
+    # exception is one platform away from not being one. Both directories are
+    # still here, so no rename was attempted.
+    assert (_bd_empty / _OLDMEM).is_dir() and (_bd_empty / _MEM).is_dir(), (
+        f"the legacy directory was renamed onto an existing one: "
+        f"{sorted(p.name for p in _bd_empty.iterdir())}")
+
+    # (d) B1, the layout half — a state directory that is a LINK is not one.
+    #     `is_dir()` follows a symlink and a junction, so `migrate_legacy_dir`
+    #     handed the link back as "the" directory and any caller re-deriving
+    #     its path through this module wrote into the link TARGET — the write
+    #     `core/progress.ensure_memory_dir` refuses on the primary path. A
+    #     cloned repository can commit the state directory as a symlink.
+    _bd_linked = _bd_box / "linked"
+    (_bd_linked / _OLDMEM).mkdir(parents=True)
+    (_bd_linked / _OLDMEM / ".gitignore").write_text(_BD_MARKER + "\n",
+                                                     encoding="utf-8")
+    (_bd_linked / _OLDMEM / "memory.db").write_bytes(_BD_MAGIC)
+    _bd_victim = _bd_box / "victim"
+    _bd_victim.mkdir()
+    (_bd_victim / "memory.db").write_bytes(_BD_MAGIC)
+    _bd_kind = None
+    try:
+        (_bd_linked / _MEM).symlink_to(_bd_victim, target_is_directory=True)
+        _bd_kind = "symlink"
+    except (OSError, NotImplementedError):
+        # why: a Windows symlink needs SeCreateSymbolicLinkPrivilege or
+        # developer mode. A directory junction needs neither and IS the
+        # commonest planted link on the primary platform, so fall through to
+        # it -- and if that fails too, FAIL below rather than skip.
+        _bd_kind = None
+    if _bd_kind is None and os.name == "nt":
+        _bd_mk = subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(_bd_linked / _MEM),
+             str(_bd_victim)], capture_output=True, encoding="utf-8",
+            errors="replace")
+        if _bd_mk.returncode == 0 and (_bd_linked / _MEM).exists():
+            _bd_kind = "junction"
+    assert _bd_kind is not None, (
+        "neither a symlink nor a directory junction could be created, so the "
+        "linked state-directory refusal cannot be measured -- FAILING rather "
+        "than skipping, because this is the guard a planted link walks around")
+    assert _bd_is_ccm(_bd_linked / _MEM) is False, \
+        "a linked state directory was identified as one of ours"
+    assert _bd_resolve(_bd_linked).name == _OLDMEM, (
+        f"migrate_legacy_dir followed a {_bd_kind} state directory instead of "
+        f"using the real legacy directory beside it")
+    assert _bd_find(_bd_linked).name == _OLDMEM, \
+        "the READ side followed the link too, so the two surfaces disagreed"
+    assert (_bd_linked / _OLDMEM).is_dir(), \
+        "the legacy directory was renamed onto a link"
+    assert sorted(p.name for p in _bd_victim.iterdir()) == ["memory.db"], (
+        f"resolution wrote through the link into "
+        f"{sorted(p.name for p in _bd_victim.iterdir())}")
+    for _bd_rm in (os.rmdir, os.unlink):
+        try:
+            _bd_rm(str(_bd_linked / _MEM))
+            break
+        except OSError:
+            # why: a directory symlink and a junction are removed by different
+            # calls depending on platform; try both, and let the sandbox
+            # teardown's own leak assertion report a genuine failure.
+            continue
+
+    shutil.rmtree(_bd_box, ignore_errors=True)
+    print(f"[OK] v2.14.0 boundaries: a profile reached through a volume mount "
+          f"(WSL/Cygwin/Docker/Git-Bash) bounds the walk while an in-repo "
+          f"`Users/` still does not; a pin or an owned database overrules the "
+          f"dependency-NAME cut (own-name, under-a-dep-folder, and the "
+          f"node_modules case the cut exists for), with the pin exemption "
+          f"applied ONCE; an unprobeable legacy directory is UNKNOWN and "
+          f"keeps the legacy name until the retry, while a corrupt one stays "
+          f"a definite negative; an empty new directory no longer outranks "
+          f"it; and a {_bd_kind} state directory is neither followed, "
+          f"migrated into, nor written through")
+
     # ── v2.5.2 · MemoryDB._connect must not leak one handle per operation ───
     # It used to: sqlite3's context manager COMMITS BUT DOES NOT CLOSE, and the
     # handle then survived inside its statement-cache reference cycle. Measured
