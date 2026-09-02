@@ -811,6 +811,18 @@ from core.extractor import summarize_transcript as _summarize_transcript
 
 
 def _retroactive_extract(messages, total_records=None, deadline=None):
+    """Returns a (possibly EMPTY) list when extraction RAN, None when it
+    did not — no key, nothing to summarise, or a failed call.
+
+    The same distinction register C1 drew for
+    `pre_compact._extract_via_llm`, missing here: `valid if valid else
+    None` collapsed "the model read this transcript and found nothing
+    worth keeping" into "extraction never happened", so `retroactive_save`
+    wrote no `sessions` row and the SAME transcript was decoded and
+    re-sent to Haiku at EVERY SessionStart — up to three legs of a 13 s
+    budget for a verdict already known. An empty list is a RESULT, and
+    the caller records the session as seen.
+    """
     from core.auth import get_api_key
     api_key, _ = get_api_key()
     if not api_key:
@@ -846,14 +858,87 @@ def _retroactive_extract(messages, total_records=None, deadline=None):
                 "importance": max(1, min(int(imp), 5)),
                 "topic": topic if isinstance(topic, str) else "",
             })
-        return valid if valid else None
+        # An empty list is a RESULT: the model ran and found nothing worth
+        # saving. Only None means "no answer" (see the docstring).
+        return valid
     except Exception:
         # why: retroactive save is best-effort; any LLM/JSON failure
         # should be silent — the rest of the hook still works
         return None
 
 
-def _refresh_progress_row(db, project_id, memory_dir, current_session_id=None):
+# `progress.trigger_type` values written by a PATCH — a writer that names
+# the columns it touches and says nothing about the rest. Every OTHER value
+# on that column was written by `db.upsert_progress`, the full rewrite that
+# settles EVERY column in one write (docs/CONTRACTS.md#handoff-contract
+# enumerates the values this column takes), so a row carrying any other
+# value has had its work lists DECIDED — the empty list included.
+#
+# Enumerated in the PATCH direction on purpose. PreCompact passes the
+# host's own trigger string straight through ("auto" / "manual" today, and
+# whatever Claude Code adds tomorrow), so a whitelist of full-rewrite
+# values would silently lose a new one and go back to re-filling a
+# deliberately empty field; the patch-only writers all live in this
+# package and are countable — hooks/stop.py, hooks/user_prompt.py and this
+# refresh — with "" the schema default a bootstrap row carries.
+_PATCH_ONLY_TRIGGERS = frozenset({
+    "", "stop", "user_prompt", "resume_request", "session_start_refresh",
+})
+
+# SessionStart start reasons that CONTINUE the session that wrote the
+# transcript, rather than opening a new one.
+_CONTINUING_SOURCES = frozenset({"compact", "resume"})
+
+
+def progress_was_fully_written(cur):
+    """True when a full rewrite (`db.upsert_progress`) settled this row.
+
+    The fill-only-empty contract is stated on TRUTHINESS and `[]` is
+    falsy, so an `open_todos` PreCompact wrote empty because nothing was
+    pending read as "never filled": every compact/resume SessionStart
+    re-mined todos from elsewhere and PROGRESS.md §3 came back holding
+    another session's work — which the forced reminder's RESUME PROTOCOL
+    then orders the next Claude to execute. EMPTY and NEVER WRITTEN are
+    different facts, and the row records which one it is.
+
+    Named, not inlined: a test can only re-implement an inline condition,
+    and a re-implementation is a tautology.
+
+    LIMIT, recorded rather than left to be discovered: `trigger_type` is
+    the row's LAST writer, and `hooks/stop.py` stamps it "stop" on every
+    turn's files_touched patch. The fact therefore survives a PreCompact
+    rewrite only until the first Stop of the continued session — which is
+    exactly the window it must cover, because the compact/resume
+    SessionStart runs BEFORE any Stop of that session. A LATER start (a
+    new session, or a resume after Stop has run) reads "stop", judges the
+    row unsettled, and may mine open_todos again. Making the fact durable
+    needs either a patch writer that leaves a settled row's trigger_type
+    alone or a column of its own; neither is free, and the second widens
+    the schema.
+    """
+    return str((cur or {}).get("trigger_type") or "") not in _PATCH_ONLY_TRIGGERS
+
+
+def tier3_exclusion(current_session_id, source):
+    """The session id tier 3 must SKIP when picking a transcript to mine.
+
+    `find_latest_transcript(exclude_session_id=...)` exists to step over
+    the freshly-opened, still-empty transcript of a session that has just
+    started. On `source="compact"` / `"resume"` the session id is the SAME
+    one and its transcript is the FULL history — excluding it handed the
+    mine to the newest OTHER session on disk, whose pending TodoWrite
+    items were then written into this project's PROGRESS.md §3 as if they
+    were this session's own (measured: a 30-day-old "DROP the legacy users
+    table"). The exclusion is therefore keyed on the START REASON, not on
+    the session id alone.
+    """
+    if str(source or "") in _CONTINUING_SOURCES:
+        return None
+    return current_session_id
+
+
+def _refresh_progress_row(db, project_id, memory_dir, current_session_id=None,
+                          source=""):
     """Fill EMPTY progress fields from authoritative sources before injection.
 
     Three-tier fallback (run in order; each only fills currently-empty fields):
@@ -870,16 +955,28 @@ def _refresh_progress_row(db, project_id, memory_dir, current_session_id=None):
         - open_todos        ← split next_steps by ';' (heuristic)
         - files_touched     ← recent observations table
 
-      Tier 3 (transcript JSONL of the PREVIOUS session):
-        - open_todos     ← extract_latest_todo_state on the prior .jsonl
-        - files_touched  ← extract_file_changes on the prior .jsonl
-        - transcript_ptr ← absolute path to the prior .jsonl
+      Tier 3 (the transcript JSONL holding this project's history —
+      the PREVIOUS session's, or on compact/resume this session's own;
+      see tier3_exclusion):
+        - open_todos     ← extract_latest_todo_state on that .jsonl
+        - files_touched  ← extract_file_changes on that .jsonl
+        - transcript_ptr ← absolute path to that .jsonl
         (Last resort — only fires when DB sources are also empty, e.g. very
          short prior session, or PreCompact never ran for that session.)
 
     Fill-only-empty contract: a non-empty value written by upsert_progress()
     or patch_progress() upstream is NEVER overwritten. This guarantees the
-    PreCompact full-rewrite remains authoritative.
+    PreCompact full-rewrite remains authoritative. The emptiness test is
+    made by `db.fill_empty_progress` INSIDE the write transaction, never by
+    the `get_progress` read below: the read decides what to OFFER, and a
+    PreCompact rewrite committing between the two used to be overwritten by
+    whatever that stale verdict had authorised.
+
+    EMPTY is not NEVER WRITTEN. Where the row itself says a full rewrite
+    settled it (`progress_was_fully_written`), the mined work lists —
+    open_todos and files_touched — are left exactly as that rewrite left
+    them, empty included. `source` selects tier 3's transcript the same
+    way (`tier3_exclusion`).
     """
     # v5: tag the session BEFORE reading `cur` so the fill-only-empty checks
     # below see the same row a downstream patch_progress would. If this
@@ -891,6 +988,9 @@ def _refresh_progress_row(db, project_id, memory_dir, current_session_id=None):
 
     cur = db.get_progress(project_id) or {}
     patch = {}
+    # A full rewrite settles EVERY column, so an empty work list on such a
+    # row is a decision and not a gap (see progress_was_fully_written).
+    settled = progress_was_fully_written(cur)
 
     # ── Tier 2A: critical_context from DB ──────────────────────────────────
     if not cur.get("critical_context"):
@@ -919,7 +1019,7 @@ def _refresh_progress_row(db, project_id, memory_dir, current_session_id=None):
             patch["plan"] = next_steps_text
 
     # ── Tier 2C: files_touched from recent observations ────────────────────
-    if not cur.get("files_touched"):
+    if not settled and not cur.get("files_touched"):
         obs = db.get_recent_observations(project_id, limit=40)
         from core.extractor import files_from_observations
         files_read, files_modified = files_from_observations(obs, cap=15)
@@ -935,8 +1035,9 @@ def _refresh_progress_row(db, project_id, memory_dir, current_session_id=None):
     # structured data, far more reliable than splitting next_steps text by
     # semicolons. Reads IO only when there are still empty fields to fill.
     cwd = str(memory_dir.parent.resolve())
-    needs_todos = not cur.get("open_todos")
-    needs_files = "files_touched" not in patch and not cur.get("files_touched")
+    needs_todos = not settled and not cur.get("open_todos")
+    needs_files = (not settled and "files_touched" not in patch
+                   and not cur.get("files_touched"))
     needs_ptr   = not cur.get("transcript_ptr")
     todos_from_transcript = None
 
@@ -946,7 +1047,9 @@ def _refresh_progress_row(db, project_id, memory_dir, current_session_id=None):
                 find_latest_transcript, load_transcript_window,
                 extract_latest_todo_state, extract_file_changes,
             )
-            prior_jsonl = find_latest_transcript(cwd, exclude_session_id=current_session_id)
+            prior_jsonl = find_latest_transcript(
+                cwd,
+                exclude_session_id=tier3_exclusion(current_session_id, source))
             if prior_jsonl and prior_jsonl.stat().st_size > 200:
                 # Bounded: SessionStart has a 15s budget — an EIGHTH of what
                 # PreCompact gets — and a long-lived project's transcript can
@@ -1007,8 +1110,13 @@ def _refresh_progress_row(db, project_id, memory_dir, current_session_id=None):
             ]
 
     if patch:
+        # trigger_type goes through the SAME conditional fill as every other
+        # column. Stamping it unconditionally replaced "a full rewrite
+        # settled this row" with "SessionStart touched it" — erasing, at the
+        # first refresh that filled anything at all, the one fact
+        # progress_was_fully_written reads.
         patch["trigger_type"] = "session_start_refresh"
-        db.patch_progress(project_id, **patch)
+        db.fill_empty_progress(project_id, **patch)
         try:
             write_progress_md(db, project_id, memory_dir)
         except Exception as e:
@@ -1067,6 +1175,21 @@ def retroactive_save(cwd, db, project_id, current_session_id="", deadline=None):
     again immediately after that load. Each file is committed as it completes,
     so stopping keeps everything already saved; only the rest are skipped.
     """
+    from core.auth import get_api_key
+    api_key, key_source = get_api_key()
+    if not api_key:
+        # HOISTED above the loop. This check used to sit inside
+        # _retroactive_extract, i.e. AFTER load_transcript_window had
+        # decoded a 32 MiB window and raw-scanned the whole file — for up
+        # to three files, on every SessionStart, forever, since a file that
+        # yields nothing wrote no `sessions` row. core.auth is the ONE
+        # resolver; never read a credential here directly.
+        reason = ("OAuth token expired" if key_source == "oauth_expired"
+                  else "no API key found")
+        _log.info(f"retroactive save: {reason} — skipped before any "
+                  f"transcript was read")
+        return
+
     transcript_dir = _find_transcript_dir(cwd)
     if not transcript_dir:
         _log.info(f"retroactive save: no exact transcript dir for {cwd} — skipped")
@@ -1124,7 +1247,12 @@ def retroactive_save(cwd, db, project_id, current_session_id="", deadline=None):
             memories = _retroactive_extract(messages,
                                             total_records=window.total_records,
                                             deadline=deadline)
-            if not memories:
+            # `is None`, because an EMPTY list is a RESULT (register C1 and
+            # _retroactive_extract's docstring). `not memories` read "the
+            # model found nothing worth keeping" as "extraction never ran",
+            # so no `sessions` row was written and this transcript was
+            # re-decoded and re-sent to Haiku at every future SessionStart.
+            if memories is None:
                 continue
 
             sid = db.insert_session(
@@ -1135,7 +1263,9 @@ def retroactive_save(cwd, db, project_id, current_session_id="", deadline=None):
                 archive_path="",
                 brief_summary=f"Retroactive save at {datetime.now().strftime('%Y-%m-%d %H:%M')}",
             )
-            counts = upsert_batch(db, project_id, sid, memories, memory_dir=memory_dir)
+            counts = (upsert_batch(db, project_id, sid, memories,
+                                   memory_dir=memory_dir)
+                      if memories else {})
             # Receipt after the memories landed (register X6) — a kill between
             # insert_session and here leaves the row incomplete and the NEXT
             # retroactive pass retries this transcript instead of skipping it.
@@ -1186,10 +1316,15 @@ def main():
     # with the recovery.
     cwd = data.get("cwd", "")
     session_id = data.get("session_id", "")
+    # The START REASON — "startup" | "resume" | "clear" | "compact". Tier 3
+    # of the progress refresh turns on it (see tier3_exclusion).
+    source = data.get("source", "")
     if not isinstance(cwd, str) or not cwd:
         sys.exit(0)
     if not isinstance(session_id, str):
         session_id = ""
+    if not isinstance(source, str):
+        source = ""
 
     # Opt-out gate + root anchor via the ONE shared gate (hooks/_entry.py) —
     # BEFORE the DB is opened. Gating on .ccm/memory.db existing is not an
@@ -1241,7 +1376,8 @@ def main():
         # docstring for the source priority and fill-only-empty contract.
         try:
             _refresh_progress_row(db, project_id, memory_dir,
-                                  current_session_id=session_id)
+                                  current_session_id=session_id,
+                                  source=source)
         except Exception as e:
             _log.error(f"progress refresh failed: {e}")
 

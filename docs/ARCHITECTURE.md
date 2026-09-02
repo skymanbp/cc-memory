@@ -359,9 +359,9 @@ Twelve tables, matching `CLAUDE.md` § "Database schema (12 tables)".
 
 Plus `memories_fts` — an FTS5 virtual table over `memories` (`core/db.py:455-458`),
 kept in sync by three triggers (`core/db.py:459-478`, migration `v2_fts5` at
-`db.py:3126-3160`). It is created only when the local SQLite build has FTS5; otherwise
-`db.search_fts` (`core/db.py:3126-3160`) falls back to `LIKE ? ESCAPE '\'`
-(`core/db.py:3126-3160`). FTS5 is advertised in `.claude-plugin/plugin.json:4`
+`db.py:3178-3212`). It is created only when the local SQLite build has FTS5; otherwise
+`db.search_fts` (`core/db.py:3178-3212`) falls back to `LIKE ? ESCAPE '\'`
+(`core/db.py:3178-3212`). FTS5 is advertised in `.claude-plugin/plugin.json:4`
 and `:12`, and `/cc-mem status` reports which path is live (`cli/mem.py`,
 `cmd_status`).
 
@@ -557,7 +557,7 @@ SessionStart:
 
 Call signatures above are the real ones: `write_progress_md(db, project_id,
 memory_dir)` (`core/progress.py:331-490`; call sites `pre_compact.py:752`,
-`stop.py:486`, `user_prompt.py:75`, `session_start.py:937`, `mcp/server.py:243`,
+`stop.py:486`, `user_prompt.py:75`, `session_start.py:940`, `mcp/server.py:243`,
 `cli/mem.py:1262`). See
 [docs/CONTRACTS.md](CONTRACTS.md#handoff-contract) for the PROGRESS.md
 schema.

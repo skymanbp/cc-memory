@@ -2586,6 +2586,58 @@ class MemoryDB:
                 params
             )
 
+    def fill_empty_progress(self, project_id, **fields):
+        """Write each field ONLY where the column is still empty. One transaction.
+
+        The fill-only-empty contract (docs/CONTRACTS.md#handoff-contract)
+        belongs to SessionStart's refresh, and it used to be enforced ACROSS
+        TWO CONNECTIONS: `get_progress()` decided which columns were empty and
+        then committed and closed, and `patch_progress()` wrote what that
+        verdict had authorised -- seconds later, with the tier-3 transcript
+        load sitting between them. A PreCompact full rewrite landing in that
+        window was overwritten by heuristics the stale read authorised
+        (measured: status_done, status_in_flight, plan and open_todos, all
+        four replaced). That is the same lost-update class `upsert_progress`
+        and `patch_progress` each took BEGIN IMMEDIATE to close, recurring one
+        layer up, so the EMPTINESS TEST moves into the UPDATE itself: the
+        caller still decides what to OFFER, SQLite decides whether the column
+        is still empty when the write actually lands.
+
+        "Empty" is the column's schema DEFAULT -- `''` for the text columns
+        and `'[]'` for the three JSON ones -- with COALESCE covering a legacy
+        NULL. A text column holding the literal `[]` is therefore refillable;
+        that is the same ambiguity `get_progress` already resolves in that
+        direction, and no writer in this package produces it.
+
+        Bootstrap and fill are ONE transaction, by the same INSERT OR IGNORE
+        discipline, and for the same reason, as patch_progress above.
+        """
+        if not fields:
+            return
+        now = self._now()
+        serialized = {}
+        for k, v in fields.items():
+            if isinstance(v, (list, dict)):
+                serialized[k] = json.dumps(v, ensure_ascii=False)
+            else:
+                serialized[k] = v
+        set_clause = ", ".join(
+            f"{c} = CASE WHEN COALESCE({c}, '') IN ('', '[]') THEN ? ELSE {c} END"
+            for c in serialized.keys()
+        ) + ", updated_at = ?"
+        params = list(serialized.values()) + [now, project_id]
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute(
+                "INSERT OR IGNORE INTO progress (project_id, updated_at) "
+                "VALUES (?, ?)",
+                (project_id, now)
+            )
+            conn.execute(
+                f"UPDATE progress SET {set_clause} WHERE project_id = ?",
+                params
+            )
+
     def tag_progress_session(self, project_id, claude_session_id):
         """Mark `progress.current_session_id` with the active Claude session.
 

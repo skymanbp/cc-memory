@@ -435,6 +435,235 @@ def main():
         "fill-only-empty violated: open_todos was overwritten"
     print("[OK] fill-only-empty contract: non-empty fields preserved")
 
+    # === v2.14.x B4: the fill-only-empty VERDICT is made inside the WRITE ===
+    # The verdict used to be a get_progress() read on one connection and the
+    # write an unconditional patch_progress() on another, with the tier-3
+    # transcript load between them: a PreCompact full rewrite committing in
+    # that window was replaced by the heuristics the stale read authorised.
+    tmp5 = Path(tempfile.mkdtemp(prefix="cc-memory-fillrace-"))
+    mem5 = tmp5 / _MEM; mem5.mkdir(parents=True, exist_ok=True)
+    db5 = MemoryDB(mem5 / "memory.db")
+    pid5 = db5.upsert_project(str(tmp5))
+    sid5 = db5.insert_session(pid5, "s5", "auto", 7, "", "")
+    db5.insert_session_summary(sid5, pid5, {
+        "completed": "OLD tier-2 completed", "learned": "OLD tier-2 learned",
+        "next_steps": "OLD step a; OLD step b",
+        "files_read": [], "files_modified": [],
+    })
+    db5.mark_session_complete(sid5)
+    db5.upsert_progress(pid5)                       # row exists, every field empty
+    _real_get5 = db5.get_progress
+
+    def _racing_get5(project_id):
+        """The refresh's own fill-only-empty read, raced ONCE.
+
+        Hooked on the READ, not on the write, so the drive is independent of
+        which write method the refresh uses — a race injected on the method
+        the fix replaces cannot fire after the fix and proves nothing.
+        """
+        cur = _real_get5(project_id)
+        db5.get_progress = _real_get5               # race exactly once
+        db5.upsert_progress(project_id,
+                            current_request="NEW request",
+                            status_done="NEW done (PreCompact)",
+                            status_in_flight="NEW in flight",
+                            plan="NEW plan",
+                            open_todos=[{"content": "NEW todo",
+                                         "priority": "high",
+                                         "status": "pending"}],
+                            trigger_type="auto")
+        return cur
+
+    db5.get_progress = _racing_get5
+    # No current_session_id: tag_progress_session reads the row too, and would
+    # spend the race before the refresh ever looks.
+    _refresh_progress_row(db5, pid5, mem5)
+    db5.get_progress = _real_get5
+    post5 = _real_get5(pid5)
+    for _f5 in ("status_done", "status_in_flight", "plan"):
+        assert post5[_f5].startswith("NEW"), (
+            f"lost update: {_f5} came back {post5[_f5]!r} — a PreCompact "
+            f"rewrite committing between the refresh's read and its write "
+            f"must survive")
+    assert (len(post5["open_todos"]) == 1
+            and post5["open_todos"][0]["content"] == "NEW todo"), \
+        f"lost update: open_todos came back {post5['open_todos']!r}"
+    assert post5["trigger_type"] == "auto", \
+        (f"the refresh must not stamp over a full rewrite's provenance, got "
+         f"{post5['trigger_type']!r}")
+    print("[OK] B4 fill-only-empty is decided inside the write transaction: "
+          "a concurrent PreCompact rewrite survives the refresh")
+
+    # === v2.14.x B3a: EMPTY is not NEVER WRITTEN ===========================
+    # open_todos = [] written by a PreCompact full rewrite means "nothing is
+    # pending", and used to read as "never filled": every compact/resume start
+    # re-filled it by splitting another session's next_steps on ';'.
+    tmp6 = Path(tempfile.mkdtemp(prefix="cc-memory-emptyontoday-"))
+    mem6 = tmp6 / _MEM; mem6.mkdir(parents=True, exist_ok=True)
+    db6 = MemoryDB(mem6 / "memory.db")
+    pid6 = db6.upsert_project(str(tmp6))
+    db6.insert_memory(pid6, None, "decision",
+                      "Critical row the refresh may still fill (never written)",
+                      importance=5, tags=["critical"], topic="t6")
+    sid6 = db6.insert_session(pid6, "s6", "auto", 9, "", "")
+    db6.insert_session_summary(sid6, pid6, {
+        "completed": "c6", "learned": "l6",
+        "next_steps": "consider caching later; maybe add metrics",
+        "files_read": [], "files_modified": [],
+    })
+    db6.mark_session_complete(sid6)
+    db6.upsert_progress(pid6, current_request="r6", status_done="d6",
+                        status_in_flight="i6", open_todos=[], plan="p6",
+                        critical_context=[],
+                        files_touched=[{"path": "f6", "action": "edit"}],
+                        transcript_ptr="/t6", trigger_type="auto")
+    _refresh_progress_row(db6, pid6, mem6)
+    post6 = db6.get_progress(pid6)
+    assert post6["open_todos"] == [], (
+        "empty-on-purpose violated: an open_todos a full rewrite wrote [] was "
+        f"re-filled from next_steps -> {post6['open_todos']!r}")
+    assert post6["critical_context"], \
+        "the refresh must still fill a field nothing ever wrote"
+    assert post6["trigger_type"] == "auto", \
+        f"provenance overwritten by the refresh: {post6['trigger_type']!r}"
+    from hooks.session_start import progress_was_fully_written, tier3_exclusion
+    assert progress_was_fully_written({"trigger_type": "auto"})
+    assert progress_was_fully_written({"trigger_type": "manual"})
+    assert progress_was_fully_written({"trigger_type": "precompact"})
+    # "stop" is the LIMIT, not an oversight: the Stop hook stamps it every
+    # turn, so a settled row stops reading as settled after the first Stop
+    # of the continued session. The window the predicate protects is the
+    # compact/resume start that follows the rewrite, which runs first.
+    for _pt6 in ("", "stop", "user_prompt", "resume_request",
+                 "session_start_refresh"):
+        assert not progress_was_fully_written({"trigger_type": _pt6}), \
+            f"{_pt6!r} names a PATCH, which settles nothing but its own columns"
+    assert not progress_was_fully_written({}) and not progress_was_fully_written(None)
+    print("[OK] B3a empty-on-purpose: a full rewrite's [] survives the refresh, "
+          "a never-written field is still filled")
+
+    # === v2.14.x B3b: compact/resume must mine the CURRENT transcript ======
+    # exclude_session_id exists to step over the empty transcript of a session
+    # that just STARTED. On compact/resume the session id is unchanged and its
+    # transcript IS the history; excluding it handed the mine to the newest
+    # OTHER session, whose pending todos landed in this project's PROGRESS.md.
+    assert tier3_exclusion("S", "compact") is None
+    assert tier3_exclusion("S", "resume") is None
+    assert tier3_exclusion("S", "startup") == "S"
+    assert tier3_exclusion("S", "clear") == "S"
+    assert tier3_exclusion("S", "") == "S"
+    tmp7 = Path(tempfile.mkdtemp(prefix="cc-memory-tier3src-"))
+    mem7 = tmp7 / _MEM; mem7.mkdir(parents=True, exist_ok=True)
+    db7 = MemoryDB(mem7 / "memory.db")
+    pid7 = db7.upsert_project(str(tmp7))
+    from core.extractor import mangle_project_path as _mangle7
+    _tdir7 = Path.home() / ".claude" / "projects" / _mangle7(str(tmp7.resolve()))
+    _tdir7.mkdir(parents=True, exist_ok=True)
+
+    def _todo_jsonl(path, content, filler):
+        recs = [
+            _json.dumps({"cwd": str(tmp7.resolve()), "type": "user",
+                         "message": {"role": "user", "content": filler * 40}}),
+            _json.dumps({"cwd": str(tmp7.resolve()), "type": "assistant",
+                         "message": {"role": "assistant", "content": [
+                             {"type": "tool_use", "name": "TodoWrite",
+                              "input": {"todos": [{"content": content,
+                                                   "status": "pending",
+                                                   "priority": "high"}]}}]}}),
+        ]
+        path.write_text("\n".join(recs) + "\n", encoding="utf-8")
+
+    _todo_jsonl(_tdir7 / "OTHER-session.jsonl",
+                "STALE todo owned by another session", "other ")
+    _todo_jsonl(_tdir7 / "THIS-session.jsonl",
+                "CURRENT session pending todo", "this ")
+    os.utime(_tdir7 / "OTHER-session.jsonl", (time.time() - 30 * 86400,) * 2)
+    db7.upsert_progress(pid7)                       # empty row: tier 3 may run
+    _refresh_progress_row(db7, pid7, mem7,
+                          current_session_id="THIS-session", source="compact")
+    post7 = db7.get_progress(pid7)
+    assert [t["content"] for t in post7["open_todos"]] == \
+        ["CURRENT session pending todo"], (
+            "tier 3 on source=compact must mine the CURRENT transcript (it IS "
+            f"the history), got {post7['open_todos']!r}")
+    assert post7["transcript_ptr"] == str((_tdir7 / "THIS-session.jsonl").resolve())
+    print("[OK] B3b tier 3 on compact/resume mines the current transcript, "
+          "not the newest other session's")
+
+    # === v2.14.x B6: an EMPTY retroactive result is a RESULT ===============
+    # `valid if valid else None` wrote no `sessions` row, so the SAME
+    # transcript was re-decoded and re-sent to Haiku at every SessionStart.
+    tmp8 = Path(tempfile.mkdtemp(prefix="cc-memory-retroempty-"))
+    mem8 = tmp8 / _MEM; mem8.mkdir(parents=True, exist_ok=True)
+    db8 = MemoryDB(mem8 / "memory.db")
+    pid8 = db8.upsert_project(str(tmp8))
+    from core.extractor import mangle_project_path as _mangle8
+    _tdir8 = Path.home() / ".claude" / "projects" / _mangle8(str(tmp8.resolve()))
+    _tdir8.mkdir(parents=True, exist_ok=True)
+    _recs8 = [_json.dumps({"cwd": str(tmp8.resolve()), "type": "user",
+                           "message": {"role": "user",
+                                       "content": "a question about x " * 30}})]
+    _recs8 += [_json.dumps({"cwd": str(tmp8.resolve()), "type": "assistant",
+                            "message": {"role": "assistant", "content": [
+                                {"type": "text", "text": "an answer about x " * 60}]}})
+               for _ in range(8)]
+    (_tdir8 / "retro-empty.jsonl").write_text("\n".join(_recs8) + "\n",
+                                              encoding="utf-8")
+
+    import llm.ccl_backend as _be8
+    import core.auth as _auth8
+    from hooks.session_start import retroactive_save as _retro
+    _calls8 = []
+    _saved8 = (_be8.call_llm, _auth8.get_api_candidates)
+    try:
+        # Hermetic: no ANTHROPIC_API_KEY and no ~/.claude/.credentials.json is
+        # read, and no network leg is possible — the model "ran" and returned
+        # an empty array, which is the state under test.
+        _auth8.get_api_candidates = lambda: [
+            ("sk-ant-api03-EXAMPLE-smoke-placeholder", "env", "api_key")]
+        _be8.call_llm = lambda *a, **kw: (_calls8.append(1), "[]")[1]
+        _retro(str(tmp8), db8, pid8, current_session_id="live", deadline=None)
+        _first8 = len(_calls8)
+        _retro(str(tmp8), db8, pid8, current_session_id="live", deadline=None)
+        _second8 = len(_calls8) - _first8
+    finally:
+        _be8.call_llm, _auth8.get_api_candidates = _saved8
+    assert _first8 == 1, f"expected one extraction leg, got {_first8}"
+    assert db8.get_session_count(pid8) == 1, (
+        "an empty extraction result must still record the session as seen, got "
+        f"{db8.get_session_count(pid8)} rows")
+    assert _second8 == 0, (
+        f"the transcript was re-sent to the model {_second8} more time(s): an "
+        f"empty list is a RESULT, not 'extraction never ran'")
+    print("[OK] B6 an empty retroactive result records the session: 0 repeat "
+          "LLM legs on the second start")
+
+    # === v2.14.x B7: no credential => no transcript is decoded at all ======
+    tmp9 = Path(tempfile.mkdtemp(prefix="cc-memory-retrokey-"))
+    mem9 = tmp9 / _MEM; mem9.mkdir(parents=True, exist_ok=True)
+    db9 = MemoryDB(mem9 / "memory.db")
+    pid9 = db9.upsert_project(str(tmp9))
+    _tdir9 = Path.home() / ".claude" / "projects" / _mangle8(str(tmp9.resolve()))
+    _tdir9.mkdir(parents=True, exist_ok=True)
+    (_tdir9 / "unsaved.jsonl").write_text("\n".join(_recs8) + "\n",
+                                          encoding="utf-8")
+    import hooks.session_start as _ss9
+    _loads9 = []
+    _saved9 = (_ss9.load_transcript_window, _auth8.get_api_candidates)
+    try:
+        _auth8.get_api_candidates = lambda: []      # no key anywhere
+        _ss9.load_transcript_window = lambda *a, **kw: (
+            _loads9.append(1), _saved9[0](*a, **kw))[1]
+        _retro(str(tmp9), db9, pid9, current_session_id="live", deadline=None)
+    finally:
+        _ss9.load_transcript_window, _auth8.get_api_candidates = _saved9
+    assert _loads9 == [], (
+        f"{len(_loads9)} transcript window(s) decoded with no API key — the "
+        f"credential check belongs ABOVE the loop, not inside the extractor "
+        f"it feeds")
+    print("[OK] B7 no credential: 0 transcript windows decoded before the "
+          "hook gives up")
+
     # === v2.2 features: enable_utf8_io is callable + idempotent ============
     from core.encoding_setup import enable_utf8_io
     enable_utf8_io()
