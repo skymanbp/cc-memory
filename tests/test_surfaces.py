@@ -2401,6 +2401,188 @@ def _hooks_never_plant_on_junk_cwd():
     return len(_HOOK_ORDER) * len(junk)
 
 
+
+def _make_dir_link(link, target):
+    """Create `link` -> `target` as a symlink, else a Windows junction.
+
+    Returns the kind that worked, or None. A junction is the one a Windows
+    user can make with no admin rights and no developer mode (`mklink /J`),
+    which is exactly why core.markers._is_link probes for it as well.
+    """
+    try:
+        os.symlink(str(target), str(link), target_is_directory=True)
+        return "symlink"
+    except (OSError, NotImplementedError, AttributeError):
+        # why: symlink creation is a PRIVILEGE on Windows, not a bug; fall
+        # through to the junction, which needs none
+        pass
+    if sys.platform == "win32":
+        proc = subprocess.run(["cmd", "/c", "mklink", "/J", str(link),
+                               str(target)], capture_output=True, text=True,
+                              encoding="utf-8", errors="replace")
+        if proc.returncode == 0 and link.exists():
+            return "junction"
+    return None
+
+
+def _pre_compact_recovery_refuses_a_linked_state_dir():
+    """(c5) the LAST-RESORT handler must not write through a linked .ccm/.
+
+    `ensure_memory_dir` fails closed on a symlinked or junctioned state
+    directory (privacy, register Y1) by raising OSError — and that OSError
+    lands in `pre_compact.main`'s `except Exception`, which re-derived the
+    same directory with `core.layout.memory_dir` (whose `is_dir()` FOLLOWS
+    the link) and wrote `.last_save.json` into the link TARGET, then unlinked
+    `.pre_compact_attempt.json` there. Measured before the fix: the victim
+    directory outside the project held `.last_save.json` and had lost its
+    own file, with the hook reporting rc 0 and an empty stderr — a guard
+    that covered only the happy path. The class is "a recovery branch
+    re-derives a path without the guard the primary path applied".
+    """
+    box = Path(tempfile.mkdtemp(prefix="ccm-linkrecover-"))
+    try:
+        proj = box / "proj"
+        proj.mkdir()
+        victim = box / "victim"
+        victim.mkdir()
+        # A file at the target: the recovery path's `_clear_attempt` unlinks
+        # by FIXED NAME, so an unguarded run deletes this one.
+        (victim / ".pre_compact_attempt.json").write_text("{}", encoding="utf-8")
+        kind = _make_dir_link(proj / _MEM, victim)
+        assert kind is not None, (
+            "could not create a symlink OR a junction for the state "
+            "directory, so the fail-closed link guard cannot be measured on "
+            "this machine. This check must not be skipped: enable Windows "
+            "developer mode (symlink) or ensure `mklink /J` is available.")
+        tp = box / "t.jsonl"
+        tp.write_text(json.dumps(
+            {"type": "user", "cwd": str(proj),
+             "message": {"role": "user", "content": "hi"}}) + "\n",
+            encoding="utf-8")
+        payload = {"session_id": "linkrecover", "cwd": str(proj),
+                   "transcript_path": str(tp), "trigger": "manual",
+                   "hook_event_name": "PreCompact"}
+        proc = subprocess.run(
+            [sys.executable, str(REPO / "cc_memory" / "hooks" / "pre_compact.py")],
+            input=json.dumps(payload), cwd=str(box), capture_output=True,
+            text=True, encoding="utf-8", timeout=180)
+        assert proc.returncode == 0, \
+            f"pre_compact exited {proc.returncode} on a linked state dir"
+        assert not proc.stderr, \
+            f"pre_compact wrote stderr: {proc.stderr[:200]!r}"
+        assert not (victim / ".last_save.json").exists(), \
+            (f"the last-resort handler wrote .last_save.json THROUGH the "
+             f"{kind} into {victim} — the fail-closed guard the primary path "
+             f"applied is bypassed on the recovery path")
+        assert (victim / ".pre_compact_attempt.json").exists(), \
+            (f"the last-resort handler unlinked a file in {victim} THROUGH "
+             f"the {kind}")
+        left = sorted(p.name for p in victim.iterdir())
+        assert left == [".pre_compact_attempt.json"], \
+            f"the link target gained files: {left}"
+        return kind
+    finally:
+        # The link itself must go before the tree: rmtree on Windows would
+        # otherwise recurse INTO a junction and delete the victim's contents.
+        for name in (_MEM, _OLDMEM):
+            link = box / "proj" / name
+            try:
+                if link.is_symlink():
+                    link.unlink()
+                elif link.exists():
+                    os.rmdir(str(link))
+            except OSError:
+                # why: teardown only; the ignore_errors rmtree below is the
+                # backstop, and a leaked temp dir is reported by the suite's
+                # own sandbox check
+                pass
+        shutil.rmtree(box, ignore_errors=True)
+
+
+def _user_prompt_seeds_the_first_real_request():
+    """(c6) a slash command is scaffolding, on BOTH current_request ingresses.
+
+    `user_prompt` stripped the leading "/" and seeded the remainder on turn 1,
+    so a session opened with this plugin's own documented activation wrote
+    PROGRESS.md §1 = "ccm-load" — and `session_start._refresh_progress_row`
+    is fill-only-empty by contract, so a wrong non-empty value stood until the
+    first compaction, with the Stop observer receiving the same text as "User
+    request:". `pre_compact._first_user_request` skipped exactly this
+    scaffolding: two ingresses to one field with two policies. The rule is now
+    "the first NON-SCAFFOLDING prompt", through ONE shared predicate.
+    """
+    box = Path(tempfile.mkdtemp(prefix="ccm-slashseed-"))
+
+    def _sec1(proj):
+        md = proj / _MEM / "PROGRESS.md"
+        if not md.exists():
+            return None
+        body = md.read_text(encoding="utf-8")
+        return body.split("## 1. Current Request")[1].split("## 2.")[0].strip()
+
+    def _prompt(proj, sid, text):
+        proc = subprocess.run(
+            [sys.executable, str(REPO / "cc_memory" / "hooks" / "user_prompt.py")],
+            input=json.dumps({"session_id": sid, "cwd": str(proj),
+                              "prompt": text,
+                              "hook_event_name": "UserPromptSubmit"}),
+            cwd=str(box), capture_output=True, text=True, encoding="utf-8",
+            timeout=60)
+        assert proc.returncode == 0 and not proc.stderr, \
+            f"user_prompt rc={proc.returncode} stderr={proc.stderr[:200]!r}"
+
+    try:
+        n = 0
+        for i, scaffold in enumerate(("/ccm-load", "/cc-mem status", "/compact")):
+            proj = box / f"p{i}"
+            proj.mkdir()
+            _prompt(proj, f"slash-{i}", scaffold)
+            got = _sec1(proj)
+            assert got in (None, ""), \
+                (f"the scaffolding {scaffold!r} became PROGRESS.md §1 "
+                 f"({got!r}); the harness's own words are not the user's "
+                 f"request")
+            n += 1
+        # …and the FIRST REAL prompt still seeds, on a later turn.
+        proj = box / "p0"
+        real = "Refactor the billing module to use decimal math"
+        _prompt(proj, "slash-0", real)
+        assert _sec1(proj) == real, \
+            (f"the first real request was not seeded after a scaffolding "
+             f"turn: {_sec1(proj)!r}. The turn-1-only rule must become 'the "
+             f"first non-scaffolding prompt', or the request is never seeded "
+             f"at all")
+        _prompt(proj, "slash-0", "and also add a CHANGELOG entry")
+        assert _sec1(proj) == real, \
+            f"a later turn overwrote the session's opening request: {_sec1(proj)!r}"
+        # A request that merely OPENS with a slash is a request, not a command.
+        pathy = box / "ppath"
+        pathy.mkdir()
+        _prompt(pathy, "pathy", "/usr/bin/env is missing on the box")
+        assert _sec1(pathy) == "/usr/bin/env is missing on the box", \
+            (f"a path-shaped request was treated as a slash command or had "
+             f"its leading slash eaten: {_sec1(pathy)!r}")
+        n += 3
+        # ONE predicate, not two copies: the transcript-side ingress imports
+        # the live-side one. Grep, because two correct implementations today
+        # is exactly how the two policies diverged in the first place.
+        pc = (REPO / "cc_memory" / "hooks" / "pre_compact.py").read_text(
+            encoding="utf-8")
+        up = (REPO / "cc_memory" / "hooks" / "user_prompt.py").read_text(
+            encoding="utf-8")
+        assert "from hooks.user_prompt import strip_scaffolding" in pc, \
+            ("pre_compact must reach the scaffolding predicate through the "
+             "shared definition, not a private copy")
+        assert "strip_scaffolding(candidate)" in pc, \
+            "pre_compact._first_user_request no longer calls the shared predicate"
+        assert up.count("def strip_scaffolding") == 1 and \
+            pc.count("def strip_scaffolding") == 0, \
+            "the scaffolding predicate is defined more than once"
+        return n
+    finally:
+        shutil.rmtree(box, ignore_errors=True)
+
+
 def _cli_opt_out_gate():
     """(c3) a BLANK --project must not walk past the opt-out on any CLI.
 
@@ -2778,6 +2960,15 @@ def test_project_root_anchoring():
     n_junk = _hooks_never_plant_on_junk_cwd()
     print(f"[OK] malformed cwd: {n_junk} (hook, junk-value) pairs each exit 0, "
           f"write no stderr, AND create no database in the hook's own cwd")
+    link_kind = _pre_compact_recovery_refuses_a_linked_state_dir()
+    print(f"[OK] linked state dir ({link_kind}): pre_compact's LAST-RESORT "
+          f"handler writes nothing and unlinks nothing through it, and still "
+          f"exits 0 with an empty stderr")
+    n_seed = _user_prompt_seeds_the_first_real_request()
+    print(f"[OK] current_request ingress: {n_seed} cases (3 slash commands "
+          f"seed nothing, the first REAL prompt seeds even on a later turn, a "
+          f"later turn does not overwrite it, a path-shaped request keeps its "
+          f"slash) and BOTH ingresses share ONE predicate")
     n_spell = _cli_opt_out_gate()
     print(f"[OK] CLI opt-out gate: {n_spell} --project spellings (including "
           f"the blank ones) refused for a listed project on the real CLI, no "

@@ -1081,8 +1081,10 @@ def _break_r7obsread(root):
 @case("r7harness", ["tests/smoke_test.py"],
       "take the first user record -> the harness caveat becomes the request")
 def _break_r7harness(root):
+    # anchor repaired 2026-09-01 (B9): _first_user_request now calls the ONE
+    # shared scaffolding predicate, which wraps strip_harness_blocks
     _patch(root, f"{PKG}/hooks/pre_compact.py",
-           "        candidate = strip_harness_blocks(candidate)",
+           "        candidate = strip_scaffolding(candidate)",
            "        pass  # BREAKAGE")
 
 
@@ -1627,10 +1629,13 @@ def _break_r9bigstdin(root):
 @case("r9emptypr", ["tests/test_surfaces.py"],
       "guard the marker write on a truthy prompt -> the previous turn's request survives")
 def _break_r9emptypr(root):
+    # anchor repaired 2026-09-01 (B9): the previous turn's stored prompt is
+    # read between the marker path and the write, so the two lines this case
+    # used to anchor on are no longer adjacent
     _patch(root, f"{PKG}/hooks/user_prompt.py",
-           "        prompt_file = marker_path(_PROMPT_FILE_PREFIX, safe)\n"
+           "        prev_prompt = read_marker(prompt_file, \"\").strip()\n"
            "        try:",
-           "        prompt_file = marker_path(_PROMPT_FILE_PREFIX, safe)\n"
+           "        prev_prompt = read_marker(prompt_file, \"\").strip()\n"
            "        try:\n"
            "            if not prompt:  # BREAKAGE: skip the overwrite\n"
            "                raise OSError(\"skipped\")")
@@ -2085,6 +2090,69 @@ def _break_r13privatecase(root):
     _patch(root, f"{PKG}/core/privacy.py",
            "        r = _TOKEN_RES[tok] = re.compile(re.escape(tok), re.IGNORECASE)",
            "        r = _TOKEN_RES[tok] = re.compile(re.escape(tok))  # BREAKAGE: case-sensitive")
+
+
+# -- reviewer B, 2026-09 debug pass: recovery paths, render paths, one policy --
+
+@case("r14linkrecover", ["tests/test_surfaces.py"],
+      "let the LAST-RESORT handler re-derive the state dir without the link guard -> pre_compact writes and unlinks through a symlinked/junctioned .ccm the primary path just refused")
+def _break_r14linkrecover(root):
+    _patch(root, f"{PKG}/hooks/pre_compact.py",
+           "            if _markers_is_link(memory_dir):\n"
+           "                _log.error(",
+           "            if False:  # BREAKAGE: the recovery path follows links\n"
+           "                _log.error(")
+
+
+@case("r14advisoryslug", ["tests/test_directive_enforcement.py"],
+      "interpolate the directive slug raw into the advisory line again -> a stored authority marker reaches Claude LIVE on the turn the escape budget is spent")
+def _break_r14advisoryslug(root):
+    _patch(root, f"{PKG}/hooks/stop.py",
+           "                from core.privacy import neutralize_inline\n"
+           "                advisory = (\"\\n[cc-memory.plan] \"\n"
+           "                            + neutralize_inline(\n"
+           "                                \"; \".join(str(r[0]) for r in reasons))",
+           "                advisory = (\"\\n[cc-memory.plan] \"\n"
+           "                            + \"; \".join(str(r[0]) for r in reasons)  # BREAKAGE")
+
+
+@case("r14blockinline", ["tests/test_directive_enforcement.py"],
+      "escape the refusal's one-line slots with a document sweep only -> a CR/LF in a slug or demand forges extra [key]/what/fix entries in the plugin's own voice")
+def _break_r14blockinline(root):
+    _patch(root, f"{PKG}/core/plan.py",
+           "        lines += [f\"  [{neutralize_inline(str(key))}]\",\n"
+           "                  f\"    what : {neutralize_inline(str(what))}\",\n"
+           "                  f\"    fix  : {neutralize_inline(str(how))}\", \"\"]",
+           "        lines += [f\"  [{key}]\", f\"    what : {what}\",\n"
+           "                  f\"    fix  : {how}\", \"\"]  # BREAKAGE")
+
+
+@case("r14stalelock", ["tests/test_directive_enforcement.py"],
+      "give the backpressure probe its own lock check again -> a lock left by a killed worker vetoes every spawn forever, and only the spawn can reclaim it")
+def _break_r14stalelock(root):
+    _patch(root, f"{PKG}/hooks/stop.py",
+           "    # NO LOCK PRE-CHECK HERE, deliberately.",
+           "    if (memory_dir / \".consolidation.lock\").exists():\n"
+           "        return False  # BREAKAGE: no age check, so a stale lock wedges it\n"
+           "    # NO LOCK PRE-CHECK HERE, deliberately.")
+
+
+@case("r14slashseed", ["tests/test_surfaces.py"],
+      "stop treating a bare slash command as scaffolding -> /ccm-load becomes progress.current_request and stands until the first compaction")
+def _break_r14slashseed(root):
+    _patch(root, f"{PKG}/hooks/user_prompt.py",
+           "    if _SLASH_COMMAND_RE.match(body.lstrip()):\n"
+           "        return \"\"",
+           "    if False:  # BREAKAGE: a slash command is a request again\n"
+           "        return \"\"")
+
+
+@case("r14seedturn1", ["tests/test_surfaces.py"],
+      "restore the turn-1-ONLY seeding rule -> a session opened with a slash command never seeds current_request at all")
+def _break_r14seedturn1(root):
+    _patch(root, f"{PKG}/hooks/user_prompt.py",
+           "            if not prev_prompt:",
+           "            if turn_count == 1:  # BREAKAGE: turn 1 or never")
 
 
 @case("r13authhome", ["tests/smoke_test.py"],

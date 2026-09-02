@@ -66,7 +66,20 @@ from hooks._entry import parse_payload, resolve_project
 # Privacy filter for the PROGRESS ingress below. The observation and memory
 # write paths honoured <private> from v2.5.0; this hook's progress ingress
 # never did (see _first_user_request).
-from core.privacy import clean_for_storage, strip_harness_blocks
+from core.privacy import clean_for_storage
+# THE shared "is this the user's request or Claude Code's scaffolding?"
+# predicate, which wraps strip_harness_blocks. It lives beside the LIVE
+# ingress (hooks/user_prompt.py, which runs every turn) because that hook is
+# small and this one is not: importing this module from there would drag
+# llm/memory_writer + core/extractor into an 8s budget, while the reverse
+# costs nothing this module has not already imported. Two ingresses to one
+# field, ONE policy.
+from hooks.user_prompt import strip_scaffolding
+# The PORTABLE link probe (symlink OR Windows junction), the same one
+# core/progress.ensure_memory_dir fails closed on. Imported here because the
+# LAST-RESORT handler at the bottom of main() re-derives the state directory
+# and writes into it — a SECOND write path, which needs the SAME guard.
+from core.markers import _is_link as _markers_is_link
 from core.layout import DB_FILENAME, memory_dir as resolve_memory_dir
 from core.progress import (write_progress_md, write_session_archive, collect_progress_state,
                            migrate_legacy_handoff, ensure_memory_dir)
@@ -341,7 +354,11 @@ def _first_user_request(messages, max_scan=200):
         # fill-only-empty by contract, so a wrong non-empty value is final.
         # A record that is ENTIRELY scaffolding strips to "" and we keep
         # scanning; a real request that merely FOLLOWS one keeps its words.
-        candidate = strip_harness_blocks(candidate)
+        # `strip_scaffolding`, shared with hooks/user_prompt.py: it adds the
+        # BARE form (`/ccm-load` recorded with no wrapper) to the wrapped one
+        # this call already handled, so both ingresses to current_request now
+        # answer "scaffolding?" the same way.
+        candidate = strip_scaffolding(candidate)
         if candidate.strip():
             return clean_for_storage(candidate)[:500]
     return ""
@@ -843,22 +860,41 @@ def main():
             # resolve_memory_dir never raises, unlike the bare join this
             # replaced — load-bearing in a LAST-RESORT handler.
             memory_dir = resolve_memory_dir(cwd)
-            (memory_dir / ".last_save.json").write_text(
-                json.dumps({
-                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    "trigger": trigger,
-                    "success": False,
-                    "error": "see logs",
-                }, ensure_ascii=False),
-                encoding="utf-8",
-            )
-            # This run FAILED but it did not get killed — it reached its own
-            # handler and recorded success:false above. Leaving the start marker
-            # behind would make SessionStart report "killed before save" on
-            # every start until the next fully successful compaction, i.e. a
-            # confidently wrong cause. Retire it; .last_save.json carries the
-            # real story.
-            _clear_attempt(memory_dir)
+            # THE SAME FAIL-CLOSED GUARD THE PRIMARY PATH APPLIED.
+            # `ensure_memory_dir` refuses a linked state directory (privacy,
+            # register Y1) by raising OSError — which lands HERE, in the
+            # handler that then re-derived the very directory that was just
+            # refused and wrote through it anyway: `resolve_memory_dir` hands
+            # back the link, because `is_dir()` follows it. Measured on a
+            # project whose `.ccm` was a symlink to a directory outside it (a
+            # shape a clone can carry, since git stores symlinks): this handler
+            # wrote `.last_save.json` into the link TARGET and unlinked
+            # `.pre_compact_attempt.json` there. A recovery branch that
+            # re-derives a path must re-apply the guard the primary path
+            # applied, or the guard only ever covered the happy path.
+            # `_is_link`, not `is_symlink()`: S_ISLNK is False for a Windows
+            # junction, which needs no admin rights to create.
+            if _markers_is_link(memory_dir):
+                _log.error(
+                    f"state directory {memory_dir} is a symlink or junction; "
+                    f"refusing to record this failed run through it")
+            else:
+                (memory_dir / ".last_save.json").write_text(
+                    json.dumps({
+                        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        "trigger": trigger,
+                        "success": False,
+                        "error": "see logs",
+                    }, ensure_ascii=False),
+                    encoding="utf-8",
+                )
+                # This run FAILED but it did not get killed — it reached its
+                # own handler and recorded success:false above. Leaving the
+                # start marker behind would make SessionStart report "killed
+                # before save" on every start until the next fully successful
+                # compaction, i.e. a confidently wrong cause. Retire it;
+                # .last_save.json carries the real story.
+                _clear_attempt(memory_dir)
         except Exception:
             # why: this is the LAST-RESORT handler, and a last-resort handler
             # that can itself raise is not one. It runs on the same `cwd` that

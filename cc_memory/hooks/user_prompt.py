@@ -7,10 +7,14 @@ Three jobs:
   2. Track turn count per session (temp file used by Stop hook).
   3. Save user prompt text so the Stop observer has "what the user wants" context.
 
-If this is the FIRST user message of a session AND PROGRESS.md exists,
-also seed `progress.current_request` so PROGRESS.md captures the goal
-right away (don't wait for PreCompact).
+On the session's FIRST NON-SCAFFOLDING user message it also seeds
+`progress.current_request`, so PROGRESS.md captures the goal right away
+(don't wait for PreCompact). Scaffolding -- a slash command such as
+`/ccm-load` or `/compact` -- is skipped by `strip_scaffolding` below, the
+predicate `pre_compact._first_user_request` shares: seeding it wrote a
+PROGRESS.md whose "Current Request" was the harness's own words.
 """
+import re
 import sys
 from pathlib import Path
 
@@ -49,6 +53,41 @@ from core.layout import DB_FILENAME, find_db_path, memory_dir
 
 _TURN_FILE_PREFIX = "cc_mem_turns_"
 _PROMPT_FILE_PREFIX = "cc_mem_prompt_"
+
+# A slash command: "/" + a command token, then whitespace or end of line.
+# The token deliberately excludes "/" so a request that OPENS with a path
+# ("/usr/bin/env is missing") is a request, not scaffolding — the blanket
+# `startswith("/")` this replaces mangled that one into "usr/bin/env is
+# missing" before storing it. Plugin commands are `plugin:command`, hence the
+# colon.
+_SLASH_COMMAND_RE = re.compile(r"^/[A-Za-z0-9][A-Za-z0-9_:.-]*(?:\s|$)")
+
+
+def strip_scaffolding(text: str) -> str:
+    """The user's own words in `text`, or "" when it is ALL harness scaffolding.
+
+    ONE predicate for BOTH `progress.current_request` ingresses — this hook
+    (live, every turn) and `pre_compact._first_user_request` (reconstructed
+    from the transcript). They disagreed: pre_compact skipped Claude Code's
+    slash-command scaffolding on purpose, while this hook merely stripped the
+    leading "/" and stored the rest, so the documented activation `/ccm-load`
+    as the first message wrote PROGRESS.md §1 = "ccm-load" — and
+    `session_start._refresh_progress_row` is fill-only-empty by contract, so a
+    wrong non-empty value stood until the first compaction. The same text also
+    reached the Stop observer's Anthropic request as "User request:".
+    Two ingresses to one field with two policies is the disease
+    `strip_harness_blocks` was unified to end; this is the second half of it.
+
+    `strip_harness_blocks` covers the WRAPPED form a transcript records
+    (`<command-name>…`); the regex covers the BARE form the harness hands
+    UserPromptSubmit (`/ccm-load`, `/cc-mem status`, `/compact`). Returning
+    the text rather than a bool is what lets both callers share it: one stores
+    the result, the other keeps scanning when it is empty.
+    """
+    body = strip_harness_blocks(text or "")
+    if _SLASH_COMMAND_RE.match(body.lstrip()):
+        return ""
+    return body
 
 
 def _init_project_if_needed(cwd):
@@ -145,8 +184,6 @@ def main():
         prompt = data.get("prompt", "")
         if not isinstance(prompt, str):
             prompt = ""
-        if prompt.startswith("/"):
-            prompt = prompt[1:]
         # PRIVACY GATE (v2.5.2). BOTH consumers of this variable ship the
         # text somewhere it cannot be taken back, and neither used to clean
         # it — while the observation and memory paths always did:
@@ -160,13 +197,21 @@ def main():
         # still seen as a matched pair; clean_for_storage fails CLOSED on a
         # dangling open tag, so a cut landing mid-span drops the remainder
         # instead of emitting it.
-        # strip_harness_blocks first, same primitive and same reason as
-        # pre_compact._first_user_request: whatever ends up here is
-        # stored as `progress.current_request` and spliced into the
-        # Stop observer's Anthropic request, and neither should ever
-        # be Claude Code's own slash-command scaffolding.
-        prompt = clean_for_storage(strip_harness_blocks(prompt))[:500]
+        # strip_scaffolding first, THE shared primitive and the same reason
+        # as pre_compact._first_user_request (which now calls it too):
+        # whatever ends up here is stored as `progress.current_request` and
+        # spliced into the Stop observer's Anthropic request, and neither
+        # should ever be Claude Code's own slash-command scaffolding.
+        prompt = clean_for_storage(strip_scaffolding(prompt))[:500]
         prompt_file = marker_path(_PROMPT_FILE_PREFIX, safe)
+        # READ BEFORE THE OVERWRITE BELOW. This marker holds the previous
+        # turn's stored prompt, and an empty one is the session's own record
+        # that no real request has been seen yet — scaffolding and
+        # entirely-private turns both store "". It is what turns the seeding
+        # rule below from "turn 1" into "the first NON-SCAFFOLDING prompt",
+        # with no new marker prefix (a new one would have to be registered in
+        # ui/installer.py's uninstall sweep as well).
+        prev_prompt = read_marker(prompt_file, "").strip()
         try:
             # Written even when cleaning emptied it — AND when the raw prompt
             # was already empty: this marker is per-SESSION and reused every
@@ -182,8 +227,19 @@ def main():
             pass
 
         if prompt:
-            # First turn of a session: also seed PROGRESS.md current_request.
-            # `and not created` used to guard this and made the branch
+            # The session's FIRST NON-SCAFFOLDING prompt seeds PROGRESS.md
+            # current_request. It used to be `turn_count == 1`, which is the
+            # same thing only when turn 1 is a real request: a session opened
+            # with `/ccm-load` (this plugin's own documented activation) spent
+            # the one seeding turn on the slash command, and every later turn
+            # failed `turn_count != 1`, so the real request was never seeded at
+            # all. `prev_prompt` is empty exactly while no real request has
+            # been stored this session — on turn 1 the marker does not exist
+            # yet, and a scaffolding or entirely-private turn stores "" — so
+            # this reads "first real prompt" for any run of leading
+            # scaffolding turns, not just one.
+            #
+            # `and not created` used to guard this too and made the branch
             # UNREACHABLE for a project's very first session: on turn 1 of a new
             # project _init_project_if_needed had just created the DB so
             # `created` was True, and on turn 2+ `turn_count != 1`. A brand-new
@@ -192,14 +248,14 @@ def main():
             # (one INSERT OR IGNORE + UPDATE transaction, core/db.py), so
             # running on a just-created DB is safe.
             #
-            # `and prompt` is the privacy gate's second half: a prompt that was
+            # `if prompt` is the privacy gate's second half: a prompt that was
             # ENTIRELY private redacts to "" and must not be stored — and must
             # not fall through to the resume-signal whitelist below, which
             # contains "" and would mislabel it a resume_request. Whitespace-only
             # prompts are unaffected (clean_for_storage returns text with no
             # open tag byte-identical, so "   " stays truthy and still resolves
             # to the "" resume signal exactly as before).
-            if turn_count == 1 and prompt:
+            if not prev_prompt:
                 try:
                     from core.db import MemoryDB
                     from core.progress import write_progress_md

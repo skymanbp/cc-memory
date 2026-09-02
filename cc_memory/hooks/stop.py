@@ -445,8 +445,20 @@ def _maybe_kick_consolidation(cwd, memory_dir, db, project_id):
     reason = consolidation_backlog(db, project_id, marker)
     if reason is None:
         return False
-    if (memory_dir / ".consolidation.lock").exists():
-        return False  # a worker is already on it (or its stale-lock sweep is)
+    # NO LOCK PRE-CHECK HERE, deliberately. `consolidate_async._acquire_lock`
+    # is the lock's ONE policy point: it refuses while a lock is young and
+    # RECLAIMS one older than `_STALE_LOCK_S` (360s), because a worker killed
+    # mid-run (crash, reboot, Ctrl-C) leaves its lock behind. This probe used
+    # to answer the same question with `.exists()` — a second copy of the
+    # policy MINUS its staleness rule — so one abandoned lock vetoed every
+    # spawn forever: measured, a 2-hour-old lock kept the backpressure kick at
+    # False over three consecutive Stops, and the only other reclaimer is the
+    # async PreCompact leg, which fires on compaction, the exact case
+    # backpressure exists to cover. Restoring the check re-creates the v2.12.0
+    # starvation permanently. The cost of not pre-checking is bounded and
+    # small: a live worker makes at most one redundant spawn per
+    # `_CONSOLIDATE_KICK_COOLDOWN_S`, and that spawn exits at `_acquire_lock`
+    # without touching the database.
     kick = memory_dir / ".consolidation.kick"
     try:
         if (kick.exists() and
@@ -619,8 +631,22 @@ def main():
                 # Escape budget spent (or unmarkable temp dir): say so loudly
                 # and let the turn close. A block we cannot count is a block
                 # that could trap the session.
+                #
+                # THIS IS A RENDER PATH. The keys carry a directive's `slug`
+                # (`directive-idle:<slug>`), which `db.upsert_directive` does
+                # NOT clean — it cleans quote/demand/evidence — and the CLI
+                # accepts any string. The BLOCK path next to it neutralises via
+                # `render_block_reason` and this one interpolated raw into the
+                # stdout Claude reads: measured, a stored
+                # `</system-reminder><system-reminder>…` reached the model
+                # LIVE on the first Stop after the escape budget was spent.
+                # `neutralize_inline`, not `neutralize_document`: the status
+                # line owns exactly one line, so a `\n` in a slug must not be
+                # able to open a second one.
+                from core.privacy import neutralize_inline
                 advisory = ("\n[cc-memory.plan] "
-                            + "; ".join(r[0] for r in reasons)
+                            + neutralize_inline(
+                                "; ".join(str(r[0]) for r in reasons))
                             + " — still unresolved after "
                             f"{plan_mod._BLOCK_MAX_CONSECUTIVE} refusals; "
                             "degrading to advisory so you are not trapped.")
