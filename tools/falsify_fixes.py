@@ -2129,6 +2129,75 @@ def _break_r13coveragename(root):
            "    return needle in text  # BREAKAGE: containment, not naming")
 
 
+# -- register E: ui/installer.py + ui/dashboard.py (2026-09 debug pass) -------
+
+@case("r14frozendash", ["tests/test_surfaces.py"],
+      "spawn the dashboard with sys.executable again -> in the frozen exe the click re-enters the installer, which refuses the argument and exits 2")
+def _break_r14frozendash(root):
+    _patch(root, f"{PKG}/ui/installer.py",
+           "            cmd = [_python_for_script(), str(dashboard_path)]",
+           "            cmd = [sys.executable, str(dashboard_path)]  # BREAKAGE")
+
+
+@case("r14settingslink", ["tests/test_surfaces.py"],
+      "rename over a symlinked settings.json again -> a dotfiles-managed link is replaced by a regular file and the versioned copy loses the hooks")
+def _break_r14settingslink(root):
+    _patch(root, f"{PKG}/ui/installer.py",
+           "    try:\n"
+           "        if SETTINGS_PATH.is_symlink():\n"
+           "            return SETTINGS_PATH.resolve()",
+           "    if False:  # BREAKAGE: the link is renamed over, not followed\n"
+           "        if SETTINGS_PATH.is_symlink():\n"
+           "            return SETTINGS_PATH.resolve()")
+
+
+@case("r14installerprose", ["tests/test_surfaces.py"],
+      "say `memory/` in a user-read installer string again -> the uninstall receipt names a directory that has not existed since v2.13.0")
+def _break_r14installerprose(root):
+    _patch(root, f"{PKG}/ui/installer.py",
+           '    print("\\n[OK] cc-memory uninstalled. Project .ccm/ data and logs/ preserved.")',
+           '    print("\\n[OK] cc-memory uninstalled. Project memory/ data and logs/ preserved.")')
+
+
+@case("r14sqlrows", ["tests/test_surfaces.py"],
+      "drop the result rows on the SQL console's write branch again -> a SELECT containing a write keyword is confirmed and then answered with no rows")
+def _break_r14sqlrows(root):
+    _patch(root, f"{PKG}/ui/dashboard.py",
+           "        if not rows:\n"
+           "            return head or \"(no rows returned)\"",
+           "        if not rows or head:  # BREAKAGE: a receipt, never the rows\n"
+           "            return head or \"(no rows returned)\"")
+
+
+@case("r14archivestamp", ["tests/test_surfaces.py"],
+      "stamp an archive_path from Save Session again -> the Sessions tab, /api/sessions and `cc-mem sessions` all name a file nothing writes")
+def _break_r14archivestamp(root):
+    _patch(root, f"{PKG}/ui/dashboard.py",
+           '                    msg_count=ext["msg_count"],\n'
+           '                    archive_path="",  # register E4 \u2014 see the note above',
+           '                    msg_count=ext["msg_count"],\n'
+           '                    archive_path="sessions/2026/09/session_x.md",  # BREAKAGE')
+
+
+@case("r14pkgdesc", ["tests/test_surfaces.py"],
+      "interpolate a manifest description unflattened again -> a cloned repo's package.json adds a `## Rules` section to the generated CLAUDE.md")
+def _break_r14pkgdesc(root):
+    _patch(root, f"{PKG}/ui/dashboard.py",
+           '    flat = " ".join(value.split())[:limit]',
+           '    return value  # BREAKAGE: raw, unflattened, unbounded\n'
+           '    flat = value')
+
+
+@case("r14pkgname", ["tests/test_surfaces.py"],
+      "guard only the PARSE of package.json again -> a list/dict `name` raises TypeError out of an unguarded Tk callback")
+def _break_r14pkgname(root):
+    _patch(root, f"{PKG}/ui/dashboard.py",
+           "            pkg_name = _manifest_slot(pkg.get(\"name\"), 80)\n"
+           "            pkg_desc = _manifest_slot(pkg.get(\"description\"))",
+           "            pkg_name = pkg.get(\"name\")  # BREAKAGE: guarded parse,\n"
+           "            pkg_desc = pkg.get(\"description\")  # unguarded USE")
+
+
 @case("r13coverageenum", ["tests/smoke_test.py"],
       "enumerate only plain CREATE TABLE again -> the FTS5 index is not a surface the docs must name")
 def _break_r13coverageenum(root):
