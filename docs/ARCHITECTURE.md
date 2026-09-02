@@ -56,7 +56,9 @@ Three design constraints drive everything else:
 1. **Anti-patch writes.** Every memory save goes through one entry
    (`llm.memory_writer.upsert_smart`) which either **merges** the new content
    into an existing similar memory, **supersedes** an older version (preserving
-   a chain), or **inserts** as a new fact — chosen by similarity, not by the
+   a chain), **reinforces** an exact duplicate (no new row — only its higher
+   importance and any new tags are folded into the row it matched), or
+   **inserts** as a new fact — chosen by similarity, not by the
    caller. There is no "append + dedup later" path.
 
 2. **Forced handoff.** At every `SessionStart`, the plugin emits a
@@ -423,7 +425,10 @@ llm.memory_writer.upsert_smart(db, project_id, session_id, category, content,
   ├─ 0. clean_for_storage + reject content < 10 chars ("too_short"); coerce an
   │      unknown category to "note"; clamp importance to 1..5
   │
-  ├─ 1. compute_content_hash → find_by_hash → SKIP if exact match
+  ├─ 1. compute_content_hash → exact match (SQL, inside the transaction)
+  │      → no new row and no content rewrite; importance = max(new, old)
+  │        and tags are unioned, since neither is part of the hash
+  │      → "reinforced" when that changed the row, "skipped" when it did not
   │
   ├─ 2. find the most similar ACTIVE memory (Jaccard on character trigrams).
   │      Scope: memories in the same topic when a topic is set AND that scan
@@ -448,12 +453,12 @@ regenerate_memory_index(db, project_id, memory_dir)   ← MEMORY.md refresh
 `upsert_smart` itself does **not** regenerate `MEMORY.md`. The refresh is the
 caller's responsibility, and there are exactly two shapes:
 
-- `upsert_batch` (`memory_writer.py:200-235`) loops `upsert_smart` per item and
+- `upsert_batch` (`memory_writer.py:318-360`) loops `upsert_smart` per item and
   regenerates ONCE at the end, but only when a `memory_dir` is passed
-  (`memory_writer.py:221`). All hook callers pass it
-  (`pre_compact.py:435`, `stop.py:166`, `session_start.py:1056`); the sync
+  (`memory_writer.py:322`). All hook callers pass it
+  (`pre_compact.py:435`, `stop.py:166`, `session_start.py:1144`); the sync
   PreCompact leg additionally touches it again after the rest of its state
-  changes (`pre_compact.py:783`).
+  changes (`pre_compact.py:789`).
 - Single-shot callers call `regenerate_memory_index` explicitly:
   `cli/mem.py:1171` and `:584`, `mcp/server.py:647`, `ui/dashboard.py:1688`,
   `ui/web_viewer.py:1034`, plus the `skills/ccm-load` inline script
@@ -462,12 +467,12 @@ caller's responsibility, and there are exactly two shapes:
 
 (The pre-merge diagram showed regeneration as an unconditional step of
 `upsert_smart` and elided the `db` argument; both are corrected above against
-`memory_writer.py:223-258, 190, 199`. The caller list is likewise the full set found
+`memory_writer.py:318-360, 190, 199`. The caller list is likewise the full set found
 by grepping `upsert_smart|upsert_batch` across `cc_memory/`.)
 
 Thresholds live in ONE place — `memory_writer.HIGH_SIM = 0.80`,
 `MID_SIM = 0.50`, `MIN_CONTENT_LEN = 10`, `MAX_CANDIDATES_TO_SCAN = 50`
-(`memory_writer.py:73`). They are no longer mirrored in `config.json`: that
+(`memory_writer.py:75`). They are no longer mirrored in `config.json`: that
 `writer` block was read by nothing and was deleted in v2.5, because an inert
 tunable is worse than no tunable. See
 [docs/CONTRACTS.md](CONTRACTS.md#anti-patch-contract) for the full contract.
@@ -673,9 +678,9 @@ while the same token via Bearer + beta gets HTTP 200 (`core/auth.py:14-15`).
 `get_api_key()` is the single-credential back-compat view of that same list (it
 does not retry, `core/auth.py:60-93`); it also carries the `oauth_expired`
 signal behind SessionStart's "[WARNING: OAuth expired — LLM extraction
-disabled]" footer (`session_start.py:659`). Hook callers use it to *supply*
+disabled]" footer (`session_start.py:665`). Hook callers use it to *supply*
 the credential passed into `call_llm`: `pre_compact.py:81 → :166`,
-`stop.py:86`, `session_start.py:659`, `core/consolidate.py:426, 549, 724`.
+`stop.py:86`, `session_start.py:665`, `core/consolidate.py:426, 549, 724`.
 
 Fall-through was added in v2.3.4 for a concrete failure: a dead env key (e.g.
 zero credit → HTTP 400) used to blackhole the healthy subscription token behind

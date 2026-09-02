@@ -674,6 +674,12 @@ def main():
         n_inserted = counts.get("inserted", 0)
         n_merged   = counts.get("merged", 0)
         n_super    = counts.get("superseded", 0)
+        # A "reinforced" item is an exact-hash restatement whose importance or
+        # tags were folded into the matched row (register C3) — a write DID
+        # land, so it may not be reported as a skip and may not go unreported
+        # either: these four numbers are the only account of the batch, and a
+        # number missing from them is work the next session cannot see.
+        n_reinf    = counts.get("reinforced", 0)
         n_skipped  = counts.get("skipped", 0)
 
         # Update keyword vocabulary
@@ -804,6 +810,7 @@ def main():
             "n_inserted": n_inserted,
             "n_merged": n_merged,
             "n_superseded": n_super,
+            "n_reinforced": n_reinf,
             "n_skipped": n_skipped,
             "n_observations": len(observations),
             "msg_count": ext["msg_count"],
@@ -826,14 +833,16 @@ def main():
         # Consolidation runs in the sibling async hook (consolidate_async.py),
         # NOT here — see module docstring. This sync leg is done.
         _log.info(
-            f"pre_compact OK: ins={n_inserted} mrg={n_merged} sup={n_super} skp={n_skipped} "
+            f"pre_compact OK: ins={n_inserted} mrg={n_merged} sup={n_super} "
+            f"rnf={n_reinf} skp={n_skipped} "
             f"obs={len(observations)} archive={archive_rel or '(none)'}"
         )
         # One-line visible status for the next session
         print(
             f"[cc-memory] Pre-compact: "
             f"+{n_inserted} new, ~{n_merged} merged, ↻{n_super} superseded, "
-            f"={n_skipped} skipped  ({ext['msg_count']} msgs, via {method}). "
+            f"^{n_reinf} reinforced, ={n_skipped} skipped  "
+            f"({ext['msg_count']} msgs, via {method}). "
             f"PROGRESS.md regenerated."
         )
 

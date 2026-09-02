@@ -181,6 +181,7 @@ counts = upsert_batch(db, pid, None, memories, memory_dir=mem_dir)
 print(f\"inserted={counts.get('inserted',0)} \"
       f\"merged={counts.get('merged',0)} \"
       f\"superseded={counts.get('superseded',0)} \"
+      f\"reinforced={counts.get('reinforced',0)} \"
       f\"skipped={counts.get('skipped',0)}\")
 "
 ```
@@ -191,7 +192,8 @@ Tell the user the breakdown:
 - **Inserted**: brand-new facts
 - **Merged**: refined an existing high-similarity memory in place
 - **Superseded**: replaced an older version of the same fact (preserved as chain)
-- **Skipped**: exact duplicates already present
+- **Reinforced**: an exact duplicate that carried a HIGHER importance or new tags — no new row, but those were folded into the row it matched
+- **Skipped**: exact duplicates already present that added nothing
 
 The merged/superseded counts are *good*: they mean the writer is preventing the
 patch-style stacking the v2.1 anti-patch contract was designed to stop. See

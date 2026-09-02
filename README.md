@@ -292,8 +292,10 @@ records, with a project-neutral regex fallback when no credential is
 available. English and Chinese are both first-class.
 
 **Capability 2 — reconcile-on-write (the anti-patch contract).** Every save
-path routes through one writer that decides **SKIP** (exact duplicate),
-**MERGE** (near-identical restatement, rewritten in place), **SUPERSEDE**
+path routes through one writer that decides **SKIP** (exact duplicate that
+adds nothing), **REINFORCE** (exact duplicate carrying a higher
+importance or new tags — no new row; they are folded into the row it
+matched), **MERGE** (near-identical restatement, rewritten in place), **SUPERSEDE**
 (the fact changed — archive the old row, link the new one to it), or
 **INSERT** (genuinely new). Nothing is ever deleted; superseded history stays
 walkable. Similarity is CJK-aware (character bigrams inside Chinese runs —
@@ -455,8 +457,10 @@ Real output, not mockups. Below: the anti-patch writer refusing to stack, then
 a deep consolidation run converging — captured verbatim from a v2.12.0 demo
 project on 2026-08-26.
 
-**Write-time reconciliation.** The same fact restated is skipped; a changed
-value supersedes its predecessor and the history stays walkable:
+**Write-time reconciliation.** The same fact restated adds no row — skipped
+when it carries nothing new (as below, where both calls take the same
+defaults), reinforced when it carries a higher importance or new tags.
+A changed value supersedes its predecessor and the history stays walkable:
 
 ```text
 $ cc-mem add decision "Use SQLite WAL mode for the memory store"

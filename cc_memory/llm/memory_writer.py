@@ -7,7 +7,9 @@ CLI mem.py add) MUST go through `upsert_smart`. Direct calls to
 
 Decision tree for a new memory M about topic T:
 
-  1. Hash exact match (db.find_by_hash) → SKIP (M is a perfect duplicate).
+  1. Hash exact match → no new row and no content rewrite: M is a perfect
+     duplicate of the stored content. M's importance and tags are still
+     folded into the matched row (REINFORCE); when they add nothing, SKIP.
   2. Same topic + trigram-Jaccard ≥ HIGH_SIM (>= 0.80) on existing memory E:
         → MERGE_IN_PLACE: db.update_memory(E.id, content=M.content, ...)
         Treats M as a refined wording of the SAME fact. No new row.
@@ -85,6 +87,13 @@ MAX_TAGS = 32
 _MEMORY_MD_TOPICS = 40
 
 
+# The two provenance tags the WRITER appends itself (`_merge_fields` /
+# `_supersede_fields` below). `_merged_tags` needs to know which entries of a
+# union are its own record of what it did, because those are the one thing the
+# cap may never treat as excess — see its docstring.
+_ACTION_TAGS = ("merged", "supersedes")
+
+
 def _merged_tags(*groups):
     """Order-preserving union of tag lists, capped at MAX_TAGS.
 
@@ -93,6 +102,19 @@ def _merged_tags(*groups):
     ``["observer","realtime"]`` lost its provenance on the first merge
     (measured: tags collapsed to ``["merged"]``). Existing tags come first so
     the cap can only ever drop the newest excess, never provenance.
+
+    ORDERING RULE: the cap drops the newest CALLER-supplied excess and nothing
+    else — never the surviving row's own tags (they are unioned first) and
+    never a tag in `_ACTION_TAGS`, which is held out of the capped region and
+    re-appended after it. A plain ``out[:MAX_TAGS]`` applied the cap AFTER the
+    marker had been appended, so every reconcile against a row already holding
+    MAX_TAGS tags lost the marker (measured on a 32-tag row: the MERGE landed
+    and `merged` was absent from the result), contradicting the documented
+    "the writer appends merged / supersedes on top of whatever the caller
+    passed". A capped list therefore holds at most MAX_TAGS caller tags PLUS
+    the markers present — MAX_TAGS + len(_ACTION_TAGS) in the worst case. The
+    ceiling exists to bound a model-supplied list (a 10,000-entry one was
+    stored verbatim); two writer-authored strings are not that list.
     """
     out = []
     for group in groups:
@@ -105,8 +127,13 @@ def _merged_tags(*groups):
             if isinstance(tag, str) and tag and tag not in out:
                 out.append(tag)
     if len(out) > MAX_TAGS:
-        _log.warn(f"tag list capped at {MAX_TAGS} (got {len(out)})")
-        out = out[:MAX_TAGS]
+        marks = [t for t in out if t in _ACTION_TAGS]
+        keep = [t for t in out if t not in _ACTION_TAGS]
+        if len(keep) > MAX_TAGS:
+            _log.warn(f"tag list capped at {MAX_TAGS} (got {len(keep)} "
+                      f"caller tags)")
+            keep = keep[:MAX_TAGS]
+        out = keep + marks
     return out
 
 
@@ -144,6 +171,68 @@ def _make_pick(content: str):
     return pick
 
 
+def _fold_into_hash_match(db: MemoryDB, result: Dict,
+                          importance: int, tags: List[str]) -> Dict:
+    """Fold a restatement's NEW information into the row it hash-matched.
+
+    `compute_content_hash` folds case and surrounding whitespace, so a
+    verbatim restatement is a hash match and `reconcile_upsert` returns
+    `{"action": "skipped", "reason": "hash_match"}` without writing. That
+    treated "perfect duplicate" as "nothing to update" — but importance and
+    tags are not part of the hash, and the near-duplicate branches already
+    know they are new information: `_merge_fields` / `_supersede_fields` do
+    `max(importance, row)` and union the tags. Measured (register C3): a fact
+    stored at importance 2, restated IDENTICALLY at importance 5, stayed at 2
+    with the incoming tags dropped, while the same fact reworded slightly
+    enough to SUPERSEDE carried the bump. The stronger signal — the same
+    sentence said again — was the one that lost. Importance is the writer's
+    one ranking signal (it orders the candidate scan and the SessionStart
+    injection).
+
+    Folded: importance (max) and tags (union, `_merged_tags`). Nothing else.
+    The content is NOT rewritten (the two spellings hash the same, so the
+    stored one is as good), `topic` is NOT moved (a hash match can come from
+    another topic, and this branch never decided the row belongs here), no
+    row is inserted and no provenance marker is added — nothing was merged or
+    superseded. `updated_at` moves only on the turn something actually
+    changed, because a no-op returns `result` untouched and never writes.
+
+    Returns `result` with `action="reinforced"` when a write landed, and the
+    caller's `result` unchanged (`"skipped"`) when the restatement added
+    nothing.
+
+    Concurrency, stated rather than implied: this read-modify-write runs on
+    its own connections AFTER `reconcile_upsert` has committed, so two
+    simultaneous savers of one sentence can both compute their max from the
+    same pre-fold row and the second write can land the lower of the two
+    maxima. The row is never lost or duplicated (that is the transaction's
+    job and it still holds) and neither writer's value is invented; only a
+    bump can be missed, and the next restatement re-applies it. Closing that
+    window needs the fold INSIDE `reconcile_upsert`'s `BEGIN IMMEDIATE`, as a
+    fourth policy callable beside `merge_fields` / `supersede_fields`.
+    """
+    row = db.get_memory(result.get("id"))
+    if not row or not row.get("is_active"):
+        # why: the matched row was archived between reconcile_upsert's commit
+        # and this read (consolidation, /cc-mem archive, a concurrent
+        # supersede). Folding into a dead row writes metadata nothing renders
+        # and would report a write that changed nothing live.
+        return result
+    try:
+        current = int(row["importance"])
+    except (TypeError, ValueError, KeyError):
+        current = 1
+    row_tags = _row_tags(row)
+    new_importance = max(int(importance), current)
+    new_tags = _merged_tags(row_tags, tags)
+    if new_importance == current and new_tags == row_tags:
+        return result
+    db.update_memory(result["id"], importance=new_importance, tags=new_tags)
+    folded = dict(result)
+    folded["action"] = "reinforced"
+    return folded
+
+
 def upsert_smart(db: MemoryDB,
                  project_id: int,
                  session_id: Optional[int],
@@ -155,8 +244,12 @@ def upsert_smart(db: MemoryDB,
     """Anti-patch write entry.
 
     Returns a result dict:
-      {"action": "skipped"|"merged"|"superseded"|"inserted",
+      {"action": "skipped"|"reinforced"|"merged"|"superseded"|"inserted",
        "id": <memory_id>, "similarity": <float>, "old_id": <int|None>}
+
+    "reinforced" is an exact-hash match whose importance or tags carried
+    NEW information (see `_fold_into_hash_match`); "skipped" still means
+    nothing was written at all.
     """
     content = clean_for_storage((content or "").strip())
     if not content or len(content) < MIN_CONTENT_LEN:
@@ -206,7 +299,15 @@ def upsert_smart(db: MemoryDB,
         merge_fields=_merge_fields,
         supersede_fields=_supersede_fields,
     )
-    if result["action"] == "merged":
+    if result["action"] == "skipped" and result.get("reason") == "hash_match":
+        # The one branch that decided "perfect duplicate" and wrote nothing.
+        # A restatement's importance and tags are outside the hash, so they
+        # are new information the MERGE branch already folds in (register C3).
+        result = _fold_into_hash_match(db, result, importance, tags)
+    if result["action"] == "reinforced":
+        _log.info(f"reinforced #{result['id']} (exact-hash restatement: "
+                  f"importance/tags folded in)")
+    elif result["action"] == "merged":
         _log.info(f"merged into #{result['id']} sim={result['similarity']:.2f}")
     elif result["action"] == "superseded":
         _log.info(f"superseded #{result['old_id']} -> #{result['id']} "
@@ -225,9 +326,16 @@ def upsert_batch(db: MemoryDB,
         category, content, importance, topic (optional), tags (optional)
 
     Returns aggregate counts: {"inserted": N, "merged": N, "superseded": N,
-                               "skipped": N, "results": [<per-item>]}
+                               "reinforced": N, "skipped": N,
+                               "results": [<per-item>]}
+
+    "reinforced" (register C3) is an exact-hash restatement whose importance
+    or tags were folded into the matched row; it is counted apart from
+    "skipped" because a write DID land. Every key is pre-seeded so the shape
+    is stable for callers that read one of them.
     """
-    counts = {"inserted": 0, "merged": 0, "superseded": 0, "skipped": 0}
+    counts = {"inserted": 0, "merged": 0, "superseded": 0,
+              "reinforced": 0, "skipped": 0}
     results = []
     for m in memories:
         r = upsert_smart(

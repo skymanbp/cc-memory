@@ -1420,7 +1420,11 @@ Key columns added in v2.1:
 ## Anti-patch contract
 
 > Every memory save path routes through `llm.memory_writer.upsert_smart`,
-> which MERGES in place, SUPERSEDES with a chain link, or INSERTS based on
+> which MERGES in place, SUPERSEDES with a chain link, REINFORCES an
+> exact-hash duplicate (no new row — only the restatement's higher
+> importance and new tags are folded into the row it matched; a
+> restatement that adds nothing is still a plain SKIP that writes
+> nothing), or INSERTS based on
 > trigram-Jaccard similarity. Never call `db.insert_memory` directly from a
 > caller path. See `docs/CONTRACTS.md#anti-patch-contract` for the full spec.
 

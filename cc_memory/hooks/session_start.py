@@ -364,8 +364,14 @@ def _build_footer(db, project_id, memory_dir, budget=None):
                 ni = neutralize_inline(str(info.get("n_inserted", 0)))
                 nm = neutralize_inline(str(info.get("n_merged", 0)))
                 ns = neutralize_inline(str(info.get("n_superseded", 0)))
+                # `^` = reinforced: an exact-hash restatement whose importance
+                # or tags were folded into the row it matched (register C3).
+                # A write landed, so it belongs in a line that accounts for
+                # the writes; absent from an older status file it reads 0.
+                nr = neutralize_inline(str(info.get("n_reinforced", 0)))
                 lines.append(
-                    f"[Last save: {ts}{trig_s} | +{ni}/~{nm}/↻{ns} via {method}]"
+                    f"[Last save: {ts}{trig_s} | +{ni}/~{nm}/↻{ns}/^{nr} "
+                    f"via {method}]"
                 )
             else:
                 lines.append(f"[Last save FAILED at {ts}{trig_s}]")
@@ -1273,7 +1279,8 @@ def retroactive_save(cwd, db, project_id, current_session_id="", deadline=None):
             n_retroactive += 1
             _log.info(
                 f"retroactive {session_uuid[:8]}: +{counts.get('inserted',0)} "
-                f"~{counts.get('merged',0)} ↻{counts.get('superseded',0)}"
+                f"~{counts.get('merged',0)} ↻{counts.get('superseded',0)} "
+                f"^{counts.get('reinforced',0)}"
             )
         except Exception as e:
             _log.error(f"retroactive save error: {e}")
