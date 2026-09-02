@@ -856,11 +856,12 @@ def section_9():
     # ONE policy point. A pre-check here is a second copy of the lock policy,
     # and the copy is what lost the staleness rule.
     stop_src = hook.read_text(encoding="utf-8")
-    check("hooks/stop.py holds no lock pre-check of its own",
-          '".consolidation.lock").exists()' not in stop_src
-          and re.search(r"^_STALE_LOCK_S\s*=", stop_src, re.M) is None,
-          "the probe re-grew a lock check; the ONE policy point is "
-          "consolidate_async._acquire_lock")
+    check("the probe reads the worker's staleness constant, never its own",
+          "from hooks.consolidate_async import _STALE_LOCK_S" in stop_src
+          and re.search(r"^_STALE_LOCK_S\s*=", stop_src, re.M) is None
+          and '".consolidation.lock").exists()' not in stop_src,
+          "the probe re-spelled the lock policy instead of importing it; the "
+          "ONE policy point is consolidate_async._acquire_lock")
     _sh.rmtree(root, ignore_errors=True)
 
 

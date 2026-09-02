@@ -445,20 +445,31 @@ def _maybe_kick_consolidation(cwd, memory_dir, db, project_id):
     reason = consolidation_backlog(db, project_id, marker)
     if reason is None:
         return False
-    # NO LOCK PRE-CHECK HERE, deliberately. `consolidate_async._acquire_lock`
-    # is the lock's ONE policy point: it refuses while a lock is young and
-    # RECLAIMS one older than `_STALE_LOCK_S` (360s), because a worker killed
-    # mid-run (crash, reboot, Ctrl-C) leaves its lock behind. This probe used
-    # to answer the same question with `.exists()` — a second copy of the
-    # policy MINUS its staleness rule — so one abandoned lock vetoed every
-    # spawn forever: measured, a 2-hour-old lock kept the backpressure kick at
-    # False over three consecutive Stops, and the only other reclaimer is the
-    # async PreCompact leg, which fires on compaction, the exact case
-    # backpressure exists to cover. Restoring the check re-creates the v2.12.0
-    # starvation permanently. The cost of not pre-checking is bounded and
-    # small: a live worker makes at most one redundant spawn per
-    # `_CONSOLIDATE_KICK_COOLDOWN_S`, and that spawn exits at `_acquire_lock`
-    # without touching the database.
+    # A LIVE worker defers the spawn; an ABANDONED lock must not.
+    # `consolidate_async._acquire_lock` is the lock's ONE policy point: it
+    # refuses while a lock is younger than `_STALE_LOCK_S` and RECLAIMS one
+    # older, because a worker killed mid-run (crash, reboot, Ctrl-C) leaves
+    # its lock behind. This probe used to ask `.exists()` — a second copy of
+    # that policy MINUS its staleness rule — and since the probe is what
+    # SPAWNS the only process that can reclaim, one abandoned lock vetoed
+    # every spawn forever: measured, a 2-hour-old lock kept the kick at False
+    # over three consecutive Stops (the other reclaimer, the async PreCompact
+    # leg, fires on compaction — the exact case backpressure exists to
+    # cover), which is the v2.12.0 starvation made permanent. The constant is
+    # IMPORTED from the worker, never re-spelled here: two numbers named the
+    # same thing is how this drifted in the first place.
+    from hooks.consolidate_async import _STALE_LOCK_S
+    try:
+        _lock_age = time.time() - (memory_dir / ".consolidation.lock").stat().st_mtime
+    except OSError:
+        # why: no lock (the common case) or an unstatable one — either way
+        # this probe cannot judge it, and `_acquire_lock` in the spawned
+        # worker is the real guard: it takes O_CREAT|O_EXCL and exits if it
+        # loses. Deferring here on an unreadable lock would be the same
+        # permanent veto this branch exists to end.
+        _lock_age = None
+    if _lock_age is not None and _lock_age < _STALE_LOCK_S:
+        return False  # a live worker is already on it
     kick = memory_dir / ".consolidation.kick"
     try:
         if (kick.exists() and

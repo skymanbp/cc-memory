@@ -2128,10 +2128,8 @@ def _break_r14blockinline(root):
       "give the backpressure probe its own lock check again -> a lock left by a killed worker vetoes every spawn forever, and only the spawn can reclaim it")
 def _break_r14stalelock(root):
     _patch(root, f"{PKG}/hooks/stop.py",
-           "    # NO LOCK PRE-CHECK HERE, deliberately.",
-           "    if (memory_dir / \".consolidation.lock\").exists():\n"
-           "        return False  # BREAKAGE: no age check, so a stale lock wedges it\n"
-           "    # NO LOCK PRE-CHECK HERE, deliberately.")
+           "    if _lock_age is not None and _lock_age < _STALE_LOCK_S:",
+           "    if _lock_age is not None:  # BREAKAGE: existence, not age")
 
 
 @case("r14seedprev", ["tests/test_surfaces.py"],
