@@ -1,4 +1,4 @@
-<!-- i18n-source: ARCHITECTURE.md | sha256: de953795539300c5 | version: 2.14.0 | translated: 2026-09-01 | translation: 473e21f0d8561813 -->
+<!-- i18n-source: ARCHITECTURE.md | sha256: a0f721674ef46a57 | version: 2.14.0 | translated: 2026-09-01 | translation: 3e015415d7117cda -->
 > [English](ARCHITECTURE.md) · **简体中文**
 
 # cc-memory — 架构
@@ -761,14 +761,14 @@ agent 自己的 `cd` 走：一个在仓库根启动、却在 `cli/` 里跑过一
 函数同一套链接拒绝检查时，且只在一次连接确实失败之后——于是活得比重命名更久的仪表盘、
 网页查看器或 MCP 服务器能继续应答，而除迁移之外没有任何东西会去拼接旧名。
 
-`project_root`（`core/roots.py:587-632`）先解析出根。每个 hook 都在 `is_excluded`
+`project_root`（`core/roots.py:682-727`）先解析出根。每个 hook 都在 `is_excluded`
 **之后**、且绝不在之前把 `cwd` 重新绑定到它：先解析会因为爬到未被排除的父目录，而把
 按子目录设置的排除范围稀释掉。自 v2.10.0 起这一先后顺序不再是每个 hook 各自遵守的
 纪律，而是机制：hook 统一调用 `hooks/_entry.py:resolve_project` 这一个共享闸门——
 它对原始 cwd 跑 `is_excluded`，然后才锚定（stdin 解析同样经由 `parse_payload` 共享）。
 `tests/test_surfaces.py` 只在闸门内部断言一次顺序、拒绝任何 hook 直接 import 这两个
 守卫，`tools/falsify_fixes.py --case r10entryorder` 证明顺序反转会翻红。候选祖先链会在任何 home 目录之下、文件系统根之下、
-`.ccm-root` 钉之处以及 25 层处停止（`_chain`，`core/roots.py:315-343`）。先命中者胜：
+`.ccm-root` 钉之处以及 25 层处停止（`_chain`，`core/roots.py:359-387`）。先命中者胜：
 
 0. `cwd` 自己有 `.ccm/memory.db` → 就是 `cwd`。终止档，在其余一切之前。就是这一行
    让"永不弃养已有数据库"这条约束对今天存在的每一个库都成立。
@@ -776,7 +776,7 @@ agent 自己的 `cd` 走：一个在仓库根启动、却在 `cli/` 里跑过一
    这一档修复了所报告的 bug，因为 `CodeEraser/cli` 没有数据库而 `CodeEraser` 有。它不
    需要任何版本控制系统、不需要任何清单文件——对根本不是仓库的项目，这一点是决定性的。
 2. `CLAUDE_PROJECT_DIR`，当它指向链中某个目录时（`_from_env`，
-   `core/roots.py:588-606`）。刻意排在数据库两档**之后**：它记录的是 Claude Code 在
+   `core/roots.py:661-679`）。刻意排在数据库两档**之后**：它记录的是 Claude Code 在
    哪里启动，而这并不构成弃养一个数据库的授权。同样地，"必须在链内"也是要点——别的项目
    残留的值不得改道本项目。
 3. 项目标记——`.git`、`.hg`、`.svn`、`.ccm-root` 以及常见清单文件（`_MARKERS`）——
@@ -829,7 +829,7 @@ home 边界是双份的：环境所声称的（`HOME`/`USERPROFILE`/`Path.home()
 
 **不只 hook，所有入口都锚定（v2.8.0）。** v2.7.0 宣称做到了这一点，实际只对
 `cli/mem.py` 兑现；随后的审计又找出七个把外部字符串变成数据库路径、却完全不锚定的入口。
-它们现在共用同一个实现 `anchor_project`（`core/roots.py:635-688`）：
+它们现在共用同一个实现 `anchor_project`（`core/roots.py:730-783`）：
 
 | 入口 | 会不会**创建**？ | 通过什么announce |
 |---|---|---|
@@ -862,7 +862,7 @@ home 边界是双份的：环境所声称的（`HOME`/`USERPROFILE`/`Path.home()
 退出的；同一对 CLI 的两半不该在这件事上互相矛盾。
 
 因此，已存在的野生库会被原地留下——并且被**报告**出来，不至于隐形：`nested_databases`
-（`core/roots.py:724-789`）支撑着 `cc-mem status` 里的
+（`core/roots.py:797-862`）支撑着 `cc-mem status` 里的
 `[WARN] Separate database below this project` 一行，逐个点名并给出记忆条数。它是显式
 命令而不是 hook，因为它要走一遍目录树。`.ccm-root`——一个空文件——把某个目录钉成独立的
 根，这是"刻意嵌套在另一个项目里的项目"以及"任何被这些启发式读错的布局"的逃生舱。

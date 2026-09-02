@@ -863,7 +863,7 @@ only after a connect actually failed — so a dashboard, web viewer or MCP
 server that outlives the rename keeps answering, and nothing but the
 migration ever joins the legacy name.
 
-`project_root` (`core/roots.py:587-632`) resolves a root first. Every hook
+`project_root` (`core/roots.py:682-727`) resolves a root first. Every hook
 rebinds `cwd` to it immediately **after** `is_excluded` and never before:
 resolving first would widen a per-subdirectory exclusion away by climbing to
 its unexcluded parent. Since v2.10.0 that ordering is not a per-hook
@@ -874,7 +874,7 @@ same way via `parse_payload`). `tests/test_surfaces.py` asserts the order
 once inside the gate, refuses a direct import in any hook, and
 `tools/falsify_fixes.py --case r10entryorder` proves the inversion goes red. The chain of candidate ancestors stops below any home
 directory, below the filesystem root, at a `.ccm-root` pin, and after 25
-levels (`_chain`, `core/roots.py:315-343`). First hit wins:
+levels (`_chain`, `core/roots.py:359-387`). First hit wins:
 
 0. `cwd` itself has `.ccm/memory.db` → `cwd`. Terminal, before anything else
    is consulted. This single line is what discharges the "never orphan"
@@ -884,7 +884,7 @@ levels (`_chain`, `core/roots.py:315-343`). First hit wins:
    `CodeEraser/cli` has no database while `CodeEraser` does. It needs no VCS
    and no manifest, which matters for projects that are not repositories.
 2. `CLAUDE_PROJECT_DIR`, when it names a directory in the chain (`_from_env`,
-   `core/roots.py:588-606`). Ranked *below* the database rungs deliberately:
+   `core/roots.py:661-679`). Ranked *below* the database rungs deliberately:
    it records where Claude Code was launched, which is not authority to orphan
    a database. Containment is likewise the point — a value left over from
    another project must not redirect this one.
@@ -959,7 +959,7 @@ stray four levels down — the defect produced by the guard against it.
 and delivered it for `cli/mem.py` alone; the audit that followed found seven
 more surfaces that turn a supplied string into a database path, none of them
 anchoring. They now share one implementation, `anchor_project`
-(`core/roots.py:635-688`):
+(`core/roots.py:730-783`):
 
 | Surface | Can it CREATE? | Announces via |
 |---|---|---|
@@ -1000,7 +1000,7 @@ was in the queue. `cli/mem.py` had always refused instead; two halves of one
 CLI pair must not disagree about that.
 
 A pre-existing stray is therefore left exactly where it is — and *reported*,
-so it is not invisible: `nested_databases` (`core/roots.py:724-789`) backs a
+so it is not invisible: `nested_databases` (`core/roots.py:797-862`) backs a
 `[WARN] Separate database below this project` line in `cc-mem status`, which
 names each one and its memory count. That is an explicit command rather than a
 hook, because it walks the tree. `.ccm-root` — an empty file — pins a
