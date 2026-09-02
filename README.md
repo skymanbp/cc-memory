@@ -143,7 +143,11 @@ SessionStart injection it opens with is in there too):
 > Read PROGRESS.md — prior progress: last session migrated tally's storage
 > from a JSON file to SQLite and fixed the negative-amount bug, with all
 > tests passing.
->
+
+<!-- /verbatim -->
+
+<!-- verbatim: demo/captures/handoff/B.with-ccm.txt -->
+
 > […] One discrepancy between two memory entries (error message "must be
 > positive" vs "must be non-negative") — let me verify against the actual
 > source.

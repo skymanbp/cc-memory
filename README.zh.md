@@ -1,4 +1,4 @@
-<!-- i18n-source: README.md | sha256: 6f7d064ef7da98fb | version: 2.14.0 | translated: 2026-09-01 | translation: edda6de6b2b22683 -->
+<!-- i18n-source: README.md | sha256: 50a1bd90ad94dd49 | version: 2.14.0 | translated: 2026-09-01 | translation: 54f6510d25d7d6f5 -->
 > [English](README.md) · **简体中文**
 
 <div align="center">
@@ -138,7 +138,11 @@
 > Read PROGRESS.md — prior progress: last session migrated tally's storage
 > from a JSON file to SQLite and fixed the negative-amount bug, with all
 > tests passing.
->
+
+<!-- /verbatim -->
+
+<!-- verbatim: demo/captures/handoff/B.with-ccm.txt -->
+
 > […] One discrepancy between two memory entries (error message "must be
 > positive" vs "must be non-negative") — let me verify against the actual
 > source.

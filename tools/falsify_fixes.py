@@ -8,9 +8,18 @@ to catch is not a check — it is a comment that costs CI time.
 Each case reverts ONE fix in the copy and asserts the corresponding gate
 FAILS there, while the same gate passes on the untouched tree.
 
+That second half is ESTABLISHED, not assumed (v2.14.0 — it had been assumed
+since this file was written). `gate_baseline` runs each gate script once on an
+untouched copy before any case gated on it is judged; a case whose gate is red
+BEFORE the breakage is reported `UNSOUND` and counted as a failure, never as
+`RED (detected)`. Without that negative control a gate red for an unrelated
+reason "detects" every breakage put in front of it — measured on a box with no
+tkinter, where three cases gated on `tests/test_surfaces.py` all reported RED.
+
     python tools/falsify_fixes.py             # every case
     python tools/falsify_fixes.py --list      # what each one breaks
     python tools/falsify_fixes.py --case tags # just one
+    python tools/falsify_fixes.py --anchors   # anchors only, runs NO gate
 """
 import argparse
 import json
@@ -55,6 +64,27 @@ def _copy_repo():
         ignore=shutil.ignore_patterns("__pycache__", "*.pyc", ".git",
                                       "dist", "build", ".ccm", "memory",
                                       ".ce", "*.db-shm", "*.db-wal"))
+    # `.git` is omitted above (a full object database per case is minutes of
+    # copying), but two gates ASK git about the copy: `smoke_test.py` runs
+    # `git check-ignore` over eight shipped and two private paths, and its
+    # citation gate enumerates markdown with `git ls-files` +
+    # `--others --exclude-standard`. With no repository at all `check-ignore`
+    # exits 128 — which reads as "not ignored", so the shipped-path half
+    # passed VACUOUSLY and the private-path half failed outright. Measured the
+    # moment `gate_baseline` was added: smoke_test was RED on an untouched
+    # copy at `.gitignore no longer excludes per-user state:
+    # .claude/settings.json`, and had been for every one of the 138 cases
+    # gated on it. An empty repository is enough for both questions — the
+    # `.gitignore` FILE is what `check-ignore` reads, and `ls-files` +
+    # `--others` enumerate the same markdown when nothing is staged.
+    try:
+        subprocess.run(["git", "init", "-q"], cwd=str(dst),
+                       capture_output=True, timeout=60)
+    except (OSError, subprocess.SubprocessError):
+        pass  # why: git may be absent on this box; the copy is still a
+        # faithful subject for every gate that does not ask git, and the ones
+        # that do now report a RED BASELINE — visibly UNSOUND — instead of
+        # being silently judged against.
     return box, dst
 
 
@@ -2153,6 +2183,161 @@ def _break_r13claimsgap(root):
            '    rf"(?:(?!of\\b)(?!{_NUM}\\b)[A-Za-z][A-Za-z-]*\\s+){{1}}"  # BREAKAGE')
 
 
+# ── v2.14.0: markers, quoted evidence, and this harness's own control ───────
+
+@case("r14markercwd", ["tests/smoke_test.py"],
+      "accept the os.getcwd() temp-dir fallback again -> the 500-char prompt "
+      "marker is written INTO the user's repository, untracked and un-ignored")
+def _break_r14markercwd(root):
+    # `tempfile.gettempdir()` ends at `os.getcwd()` when no candidate temp
+    # directory is usable, and under a hook the cwd is the user's project.
+    _patch(root, f"{PKG}/core/markers.py",
+           "    if _is_cwd(base) or _norm(base) not in designated:",
+           "    if False:  # BREAKAGE: the cwd fallback is a temp directory again")
+
+
+@case("r14markernone", ["tests/smoke_test.py"],
+      "drop the leaf functions' None guard -> the refusal reaches a hook as "
+      "an AttributeError, and the hook silently stops doing its OTHER jobs")
+def _break_r14markernone(root):
+    # The refusal is only safe because every consumer hands `marker_path`'s
+    # result straight to these two. Without the guard `Path(None).parent`
+    # raises inside `user_prompt.main`, which is NOT an OSError, so it escapes
+    # the local handler and the turn-1 request seed is never written — the
+    # hook still exits 0 with empty stderr, which is exactly why the gate has
+    # to assert the hook's other WORK and not just its contract.
+    _patch(root, f"{PKG}/core/markers.py",
+           "    if path is None or not _dir_is_private(Path(path).parent) "
+           "or _is_link(path):\n        return False",
+           "    if not _dir_is_private(Path(path).parent) or _is_link(path):"
+           "  # BREAKAGE\n        return False")
+
+
+@case("r14verbatimorder", ["tests/smoke_test.py"],
+      "check verbatim segments for membership ANYWHERE again -> a quote "
+      "rebuilt back-to-front reads as VERBATIM")
+def _break_r14verbatimorder(root):
+    _patch(root, "tools/citation_check.py",
+           "        pos, broke, why = 0, None, \"\"\n"
+           "        for seg in segments:\n"
+           "            at = haystack.find(seg, pos)\n"
+           "            if at < 0:\n"
+           "                broke = seg\n"
+           "                why = (\"out of order at\" if seg in haystack\n"
+           "                       else \"not in source:\")\n"
+           "                break\n"
+           "            pos = at + len(seg)",
+           "        _missing = [s for s in segments if s not in haystack]  # BREAKAGE\n"
+           "        broke = _missing[0] if _missing else None\n"
+           "        why = \"not in source:\"")
+
+
+@case("r14baseline", ["tests/smoke_test.py"],
+      "judge a case by the broken copy's exit code alone -> a gate that is "
+      "red for an unrelated reason 'detects' every breakage")
+def _break_r14baseline(root):
+    _patch(root, "tools/falsify_fixes.py",
+           "        base_green, base_tail = gate_baseline(gate)\n"
+           "        if not base_green:",
+           "        base_green, base_tail = True, \"\"  # BREAKAGE: no control\n"
+           "        if not base_green:")
+
+
+# ── the v2.13.0 / v2.13.2 / v2.12.1 rules that had no case (F7) ─────────────
+# Every one of these breaks a rule CLAUDE.md states and an assertion that was
+# already in the tree; none of them invents a gate. Each was driven RED on its
+# own before being kept.
+
+@case("r13statelit", ["tests/smoke_test.py"],
+      "spell the state directory by hand in the installer bootstrap again -> "
+      "a fresh install initialises a directory the hooks then cannot find")
+def _break_r13statelit(root):
+    # One of the TWO registered literal copies (the other is
+    # skills/ccm-load/SKILL.md, which r13skilldir already covers from the
+    # save-memories side). Neither can import the package, so both are gated.
+    _patch(root, f"{PKG}/ui/installer.py",
+           '    _STATE_DIRNAME = ".ccm"',
+           '    _STATE_DIRNAME = "memory"  # BREAKAGE')
+
+
+@case("r13statejoin", ["tests/smoke_test.py"],
+      "join the state directory's name by hand in a module again -> the name "
+      "lives at two call sites, which is how the last rename took 34")
+def _break_r13statejoin(root):
+    _patch(root, f"{PKG}/core/idle.py",
+           "    memory_dir = resolve_memory_dir(cwd)",
+           "    memory_dir = resolve_memory_dir(cwd).parent / \".ccm\"  # BREAKAGE")
+
+
+@case("r13ccmident", ["tests/smoke_test.py"],
+      "identify a state directory by NAME again -> a real project's package "
+      "called `memory` is renamed out from under it")
+def _break_r13ccmident(root):
+    _patch(root, f"{PKG}/core/layout.py",
+           "    return (_has_ccm_gitignore(directory)\n"
+           "            or _has_ccm_database(directory / DB_FILENAME))",
+           "    return directory.name in (MEMORY_DIRNAME, LEGACY_MEMORY_DIRNAME)"
+           "  # BREAKAGE")
+
+
+@case("r13readmigrate", ["tests/smoke_test.py"],
+      "route the READ side through the migrating resolver -> opening a picker "
+      "renames the state directory of every project on the machine")
+def _break_r13readmigrate(root):
+    _patch(root, f"{PKG}/core/layout.py",
+           "    new, old = state_dir_candidates(project_root)\n"
+           "    if _safe_is_dir(new):\n"
+           "        return new\n"
+           "    if _safe_is_file(old / DB_FILENAME):\n"
+           "        return old\n"
+           "    return new",
+           "    return memory_dir(project_root)  # BREAKAGE: a look is a write")
+
+
+@case("r13hasdbboth", ["tests/smoke_test.py"],
+      "let _has_db know only the new name -> an unmigrated project stops "
+      "resolving as a root and the marker rung answers for it")
+def _break_r13hasdbboth(root):
+    _patch(root, f"{PKG}/core/roots.py",
+           "    for mem in state_dir_candidates(directory):",
+           "    for mem in state_dir_candidates(directory)[:1]:  # BREAKAGE")
+
+
+@case("r13safepath", ["tests/smoke_test.py"],
+      "let the path coercion raise again -> memory_dir({'cwd': 123}) escapes "
+      "a function whose docstring promises it never raises, inside a hook")
+def _break_r13safepath(root):
+    # The v2.6.0 defect this module reproduced: `memory_dir`'s handler catches
+    # the TypeError and then re-raises it by coercing again on the way out, so
+    # the breakage has to be in the coercion itself, not in the handler.
+    _patch(root, f"{PKG}/core/layout.py",
+           "    try:\n"
+           "        return Path(value)\n"
+           "    except Exception:",
+           "    if True:  # BREAKAGE: the coercion raises again\n"
+           "        return Path(value)\n"
+           "    if False:")
+
+
+@case("r13renderdir", ["tests/smoke_test.py"],
+      "hard-code the state directory in MEMORY.md's archive links again -> "
+      "every generated index points at a path that stopped existing")
+def _break_r13renderdir(root):
+    _patch(root, f"{PKG}/llm/memory_writer.py",
+           '                lines.append(f"- `{memory_dir.name}/{rel}`")',
+           '                lines.append(f"- `memory/{rel}`")  # BREAKAGE')
+
+
+@case("r12canoncase", ["tests/smoke_test.py"],
+      "fold path case on every platform again -> two POSIX directories that "
+      "differ only in case become one identity (detected on POSIX; on Windows "
+      "the filesystem folds case and the expectation is the other one)")
+def _break_r12canoncase(root):
+    _patch(root, f"{PKG}/core/layout.py",
+           "        return os.path.normcase(str(Path(text).resolve()))",
+           "        return str(Path(text).resolve()).lower()  # BREAKAGE")
+
+
 def verify_anchors():
     """Count every registered case's breakage anchors WITHOUT running a gate.
 
@@ -2188,7 +2373,53 @@ def verify_anchors():
     return 1 if rotted else 0
 
 
+_BASELINES = {}
+
+
+def gate_baseline(gate):
+    """(green, tail) for `gate` run on an UNTOUCHED copy. Cached per gate.
+
+    THE negative control, and it was missing entirely through v2.14.0. A case
+    was judged RED purely by the gate's exit code on the BROKEN copy, so the
+    docstring's promise — "while the same gate passes on the untouched tree" —
+    was never established, and a gate that is red for a reason unrelated to
+    the breakage "detects" every breakage put in front of it. Measured twice:
+    synthetically (`sys.exit(1)` injected into the three checkers ->
+    `r8claimpy`, `r12verbatim`, `r11doccoverage` all `RED (detected)`, 3/3),
+    and for real on a box with no tkinter, where `tests/test_surfaces.py`
+    fails at `ui/dashboard.py`'s import and `r10lograise` / `claimword` /
+    `r12scancap` — all three gated on that suite — still reported RED
+    (`docs/debug-pass-2026-09/evidence/F-baseline_gates.txt`,
+    `F-falsify_slow.txt`). CLAUDE.md § v2.13.1 tells maintainers to prove a
+    repaired anchor "still DETECTS (`--case <id>`)"; without this control that
+    proof proves nothing.
+
+    Cached by gate ARGV, so a full run pays one baseline per distinct gate
+    script (7 today, against 190 cases) and `--case` pays exactly one. A fresh
+    copy per gate, never a shared one: the discipline of this file is that
+    nothing runs against the working tree, and a gate that ever writes must
+    not carry into the next baseline. `--anchors` still runs no gate at all.
+    """
+    key = tuple(gate)
+    if key not in _BASELINES:
+        box, root = _copy_repo()
+        try:
+            proc = _run(root, *gate)
+            tail = (proc.stdout or "")[-600:] + (proc.stderr or "")[-600:]
+            _BASELINES[key] = (proc.returncode == 0, tail.strip()[-400:])
+        finally:
+            shutil.rmtree(box, ignore_errors=True)
+    return _BASELINES[key]
+
+
 def run_case(name, keep=False):
+    """Judge one case: "RED" / "GREEN" / "ROT" / "UNSOUND".
+
+    Only "RED" counts as detected. The other three are failures of three
+    different kinds and `main` reports each under its own heading, because
+    "the gate did not notice" and "the gate was red before the breakage" are
+    different facts and only the first one is about the fix.
+    """
     breaker, gate, description = CASES[name]
     box, root = _copy_repo()
     try:
@@ -2208,7 +2439,17 @@ def run_case(name, keep=False):
                   f"{(str(e) or '(no message)').splitlines()[0]}")
             print(f"          {description}")
             print("          fix this script, not the tree — then re-run")
-            return False
+            return "ROT"
+        base_green, base_tail = gate_baseline(gate)
+        if not base_green:
+            # The verdict below would be meaningless: an exit code that was
+            # already non-zero cannot be evidence that THIS breakage was seen.
+            print(f"[FAIL] {name:<11} UNSOUND (gate red before the breakage)")
+            print(f"          {description}")
+            print(f"          {gate[0]} fails on an UNTOUCHED copy, so no "
+                  f"verdict about this fix is possible; repair the gate first")
+            print("          baseline tail:", base_tail.replace("\n", " | "))
+            return "UNSOUND"
         proc = _run(root, *gate)
         red = proc.returncode != 0
         tail = (proc.stdout or "")[-600:] + (proc.stderr or "")[-600:]
@@ -2219,7 +2460,7 @@ def run_case(name, keep=False):
             print("          the breakage survived every gate; the check that "
                   "was supposed to catch it is vacuous")
             print("          gate tail:", tail.strip()[-400:].replace("\n", " | "))
-        return red
+        return "RED" if red else "GREEN"
     finally:
         if keep:
             print(f"          copy kept at {root}")
@@ -2248,11 +2489,19 @@ def main():
     print(f"Falsifying {len(names)} fix(es) against a temporary copy of "
           f"{REPO}\n")
     results = {n: run_case(n, keep=args.keep) for n in names}
-    n_red = sum(1 for v in results.values() if v)
+    n_red = sum(1 for v in results.values() if v == "RED")
     print(f"\nSummary: {n_red}/{len(names)} breakages detected")
-    undetected = sorted(n for n, v in results.items() if not v)
-    if undetected:
-        print(f"UNDETECTED: {undetected}")
+    for label, verdict in (
+            ("UNDETECTED", "GREEN"),
+            # Reported apart from UNDETECTED on purpose: an unsound case says
+            # nothing about the fix it names, so filing it as "the check is
+            # vacuous" would be the same unearned verdict in the other
+            # direction.
+            ("UNSOUND (gate red before the breakage)", "UNSOUND"),
+            ("ROTTED ANCHORS", "ROT")):
+        hits = sorted(n for n, v in results.items() if v == verdict)
+        if hits:
+            print(f"{label}: {hits}")
     return 0 if n_red == len(names) else 1
 
 

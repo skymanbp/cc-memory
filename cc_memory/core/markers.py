@@ -71,12 +71,94 @@ def _owner_tag():
         return "user"
 
 
-def marker_dir():
-    """The 0700 directory this process's markers live in. Created on demand.
+def _norm(path):
+    """`path` resolved and case-folded for comparison. `""` when it cannot be.
 
-    Never raises: a caller that cannot get a private directory falls back to
-    the shared temp dir, which is exactly the pre-v2.8.0 behaviour — degraded,
-    but a hook that cannot write a turn counter must not fail the user's turn.
+    Deliberately local rather than imported from `core.layout`: this module is
+    loaded by every hook before anything else and must not grow a package
+    dependency to answer a question about two strings.
+    """
+    try:
+        return os.path.normcase(os.path.realpath(str(path)))
+    except Exception:
+        # why: a non-path, an unresolvable drive, a cwd that has been deleted.
+        # A spelling that cannot be computed can only ever MISS, and a miss is
+        # the refusing direction for both callers below.
+        return ""
+
+
+def _designated_temp_roots():
+    """Every directory the user or the platform actually NAMES as temp.
+
+    `tempfile.gettempdir()` walks `TMPDIR`, `TEMP`, `TMP`, then the platform's
+    conventional locations, and **falls back to `os.getcwd()`** when none of
+    them is usable. Under a hook the cwd is the USER'S PROJECT, so that last
+    rung silently relocates every marker into the repository — the measurement
+    is in `marker_dir`. This is the same list WITHOUT that rung, so a base
+    that is not in it was chosen by the fallback and by nothing else.
+
+    Mirrors `tempfile._candidate_tempdir_list` from the documented sources
+    rather than calling it: a private helper is not a contract, and reading
+    the env vars and the platform conventions here keeps this module
+    self-contained. Entries that do not exist are harmless — membership is the
+    only question asked.
+
+    Read BEFORE `gettempdir()` runs, and that ordering is load-bearing:
+    `tempfile.tempdir` is both the embedder's declaration slot AND
+    `gettempdir()`'s own cache, so once the fallback has been taken the
+    fallback directory is sitting in it and would answer this question with
+    its own output. `_is_cwd` still refuses it — the cached value IS
+    `os.getcwd()` as of that first call — but a net that depends on nothing
+    ever chdir-ing is one net too few.
+    """
+    names = []
+    explicit = getattr(tempfile, "tempdir", None)
+    if explicit:
+        # an assignment to `tempfile.tempdir` is a deliberate declaration by
+        # the embedding program, and `gettempdir()` returns it unconditionally.
+        names.append(explicit)
+    for env in ("TMPDIR", "TEMP", "TMP"):
+        value = os.environ.get(env)
+        if value:
+            names.append(value)
+    if os.name == "nt":
+        names.extend([os.path.expanduser(r"~\AppData\Local\Temp"),
+                      os.path.expandvars(r"%SYSTEMROOT%\Temp"),
+                      r"c:\temp", r"c:\tmp", r"\temp", r"\tmp"])
+    else:
+        names.extend(["/tmp", "/var/tmp", "/usr/tmp"])
+    return {n for n in (_norm(x) for x in names) if n}
+
+
+def _is_cwd(base):
+    """True when `base` IS the current working directory. Never raises.
+
+    The second half of the refusal: the environment can point `TMPDIR`
+    straight at the checkout, in which case the base IS designated and only
+    this test catches it.
+
+    EQUALITY, deliberately not containment. A first draft refused any base
+    INSIDE the cwd, which is a different and much larger set: a project opened
+    at the user's home directory has `%TEMP%` (`~/AppData/Local/Temp`) beneath
+    it, and a checkout at a drive root has `D:\\Temp` beneath it — both are
+    real per-user temp directories, and refusing them would silently turn off
+    every marker for that project (turn counter, prompt, idle cooldown, and
+    the Stop hook's escape budget, whose failure mode is a session that cannot
+    end). Neither is the leak this module is guarding: the markers land in the
+    temp directory, not beside the user's source. Only the cwd ITSELF is both
+    the getcwd fallback's answer and the user's working tree.
+    """
+    here, there = _norm(os.curdir), _norm(base)
+    return bool(here) and here == there
+
+
+def marker_dir():
+    """The 0700 directory this process's markers live in, or None.
+
+    Created on demand. Never raises: a caller that cannot get a private
+    directory falls back to the shared temp dir, which is exactly the
+    pre-v2.8.0 behaviour — degraded, but a hook that cannot write a turn
+    counter must not fail the user's turn.
 
     `gettempdir()` is INSIDE the try. It sits at the top of a function that
     promises never to raise, yet it raises `FileNotFoundError` ("No usable
@@ -87,17 +169,37 @@ def marker_dir():
     `core/logger.py` module-scope `Path.home()` fix removed one release
     earlier, reintroduced one frame deeper.
 
-    The last-resort path is CWD-relative rather than absolute because there is
-    no temp directory left to name; markers are best-effort state, and
-    `write_marker` swallows a failure to write there.
+    **None is a real return value, and the no-temp-directory state gets it.**
+    Through v2.14.0 the last resort was a CWD-relative `Path(".")` on the
+    stated assumption that `write_marker` would then fail. It does not — and
+    the rung ABOVE it is the worse half, because the stdlib degrades before
+    this function ever runs: when every candidate temp directory is unusable
+    `gettempdir()` returns `os.getcwd()`, which under a hook is the user's
+    project, so this function created `<project>/cc-memory-<uid>/` there at
+    0700, `_dir_is_private` passed it, and the writes SUCCEEDED. Measured on
+    Windows against the shipped v2.14.0 tree: `write_marker(prompt) -> True`,
+    with the 500-character prompt marker sitting in the repository listing
+    beside the user's own source — untracked, and matched by no `.gitignore`
+    line. Keeping markers out of the user's repository is the first paragraph
+    of this module's docstring; a degradation that lands them IN it defeats the
+    module rather than degrading it. `marker_path` propagates the None and both
+    leaf functions refuse it, so the cost is the one this module already says
+    it is willing to pay: markers do not persist, which costs an extra LLM call
+    or a repeated nudge and never correctness.
     """
+    designated = _designated_temp_roots()   # BEFORE gettempdir(): see above
     try:
         base = Path(tempfile.gettempdir())
     except Exception:
-        # why: no temp directory exists at all. Returning something writable-
-        # ish keeps every caller's "best effort" contract; returning nothing
-        # would make each of the seven call sites handle None.
-        return Path(".")
+        # why: no temp directory exists at all, and there is nowhere safe left
+        # to name — under a hook the cwd is the user's repository. Callers
+        # handle None (marker_path propagates it; both leaves refuse it).
+        return None
+    if _is_cwd(base) or _norm(base) not in designated:
+        # A base nobody designated can only be the `os.getcwd()` fallback rung;
+        # a base that IS the cwd is the same leak declared out loud. Both put
+        # markers in the user's working tree, so both are refused.
+        return None
     try:
         d = base / f"cc-memory-{_owner_tag()}"
         if _is_link(d):
@@ -140,7 +242,17 @@ def safe_id(session_id):
 
 
 def marker_path(prefix, safe_id):
-    return marker_dir() / f"{prefix}{safe_id}"
+    """The path one marker lives at, or None when there is no safe directory.
+
+    Propagates `marker_dir()`'s None rather than joining onto it: every caller
+    hands the result straight to `read_marker` / `write_marker`, both of which
+    refuse a None path, so the refusal reaches the leaves without any of the
+    call sites having to know about it.
+    """
+    base = marker_dir()
+    if base is None:
+        return None
+    return base / f"{prefix}{safe_id}"
 
 
 def _is_link(path):
@@ -224,8 +336,12 @@ def write_marker(path, text):
     `_dir_is_private` on the PARENT, because guarding the leaf while trusting
     the directory it sits in guards nothing: a reparse point at the directory
     name redirects the write before the leaf checks ever run.
+
+    A None path is `marker_dir()`'s refusal arriving here: there is no
+    directory outside the user's repository to write into, so there is no
+    write. Refusing is what the docstring's "last resort" always claimed.
     """
-    if not _dir_is_private(Path(path).parent) or _is_link(path):
+    if path is None or not _dir_is_private(Path(path).parent) or _is_link(path):
         return False
     flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
     flags |= getattr(os, "O_NOFOLLOW", 0)   # POSIX only; 0 is a no-op elsewhere
@@ -262,8 +378,12 @@ def read_marker(path, default=""):
     whose content is spliced into the Anthropic request. The ``fstat`` below is
     a further, weaker net (it catches a fifo or a device, not a link — see
     `_is_link`).
+
+    A None path is `marker_dir()`'s refusal (see `write_marker`): nothing was
+    ever written, so `default` is the honest answer — the same one every
+    caller already gives an absent marker.
     """
-    if not _dir_is_private(Path(path).parent) or _is_link(path):
+    if path is None or not _dir_is_private(Path(path).parent) or _is_link(path):
         return default
     flags = os.O_RDONLY
     flags |= getattr(os, "O_NOFOLLOW", 0)   # POSIX only; 0 is a no-op elsewhere
