@@ -60,6 +60,28 @@ memory the user has, and the project would come up looking brand new while its
 history sat one directory away. Degrading to "keep using the old directory"
 costs one retry per turn and loses nothing.
 
+Through v2.13.2 that reasoning covered the RENAME failing and not the PROBE
+failing, and the probe's negative verdict is what selects the direction. Every
+identification returned a plain False when it could not run — a lock timeout,
+an AV or indexer hold, CANTOPEN — so a TRANSIENT failure was indistinguishable
+from "not ours" and took the irreversible branch. Measured: a 25-row legacy
+database in rollback-journal mode (the documented network-share fallback) with
+``BEGIN EXCLUSIVE`` held for one second by a second connection — the first hook
+of the session resolved to ``.ccm``, created it, opened an empty database into
+it, and from then on outcome 1 answered ``.ccm`` unconditionally while all 25
+memories sat in ``memory/`` reported by nothing. The probes are TRI-STATE now
+(`UNKNOWN`), and "could not probe" routes to the same branch as a refused
+rename.
+
+A ``.ccm`` that is a LINK is not a state directory at all. `is_dir()` follows a
+symlink or a junction, so a planted link was returned as "the" directory and
+every caller that re-derives its path through this module wrote into the link's
+target — the write `core/progress.ensure_memory_dir` refuses on the primary
+path. Measured: `.last_save.json` landed in the link target and a file there
+was unlinked through it. `core.markers._is_link` (junctions included, because
+`S_ISLNK` is False for `mklink /J`) is the probe, the link is never followed,
+and it is never renamed onto.
+
 IDENTIFICATION, NOT NAME-MATCHING
 ---------------------------------
 ``memory`` is a name real projects use for real content. Moving a directory
@@ -73,10 +95,13 @@ exactly where it is, and the project gets a fresh ``.ccm/`` beside it.
 COST
 ----
 `memory_dir` runs wherever the old join ran — every hook, every CLI command,
-every MCP call. The settled case is ONE stat: ``.ccm`` is a directory, return
-it. A project with neither directory costs that stat plus the identification
-probe's own first stat, and creates nothing. Only an unmigrated project pays
-for identification, and only until the rename succeeds.
+every MCP call. The settled case is one `stat` of ``.ccm/memory.db`` plus the
+`lstat` (two on Windows, where a junction needs `os.path.isjunction` as well)
+that proves ``.ccm`` is not a link. It was ONE stat through v2.13.2, and the
+extra probe is what the link refusal above costs — paid on every call, because
+a link can be planted at any time. A project with neither directory costs the
+first stat and creates nothing. Only an unmigrated project pays for
+identification, and only until the rename succeeds.
 """
 import os
 from pathlib import Path
@@ -125,6 +150,29 @@ _GITIGNORE_PROBE_BYTES = 4096
 _SQLITE_MAGIC = b"SQLite format 3\x00"
 
 
+class _Unknown:
+    """The third verdict of every probe in this module: it could not run.
+
+    FALSY on purpose. `if is_ccm_dir(d):` keeps meaning "positively ours" for
+    every caller that only wants a write guard — the fail-CLOSED direction they
+    already wanted — while the one caller whose negative verdict triggers an
+    irreversible write (`migrate_legacy_dir`) asks `is UNKNOWN` and takes the
+    fail-SAFE branch instead. Those two directions are not the same direction,
+    and collapsing them into one boolean is the whole of finding A3.
+    """
+
+    __slots__ = ()
+
+    def __bool__(self):
+        return False
+
+    def __repr__(self):
+        return "UNKNOWN"
+
+
+UNKNOWN = _Unknown()
+
+
 def _safe_is_dir(path):
     """`path.is_dir()` that cannot raise.
 
@@ -147,16 +195,57 @@ def _safe_is_file(path):
 
 
 def _safe_link(path):
-    """`_markers_is_link` that cannot raise; an unprobeable path counts as one.
+    """Is `path` a link? True / False / `UNKNOWN`, and it cannot raise.
 
-    Fail CLOSED, matching `core/roots._has_db` and
-    `core/progress.ensure_memory_dir`: a path that cannot even be lstat'd is
-    exactly the one that must not be renamed, nor identified as ours.
+    `core.markers._is_link` covers a Windows junction as well as a symlink —
+    `stat.S_ISLNK` is False for `mklink /J`, which needs no privilege at all,
+    so the symlink-only probe answered "not a link" for the commonest planted
+    link on the primary platform.
+
+    A path that cannot even be lstat'd is `UNKNOWN`, not False. Every caller
+    still treats that as "do not write through it" (the fail-CLOSED rule
+    `core/roots._has_db` and `core/progress.ensure_memory_dir` share), because
+    `UNKNOWN` is falsy; what it additionally buys is that `migrate_legacy_dir`
+    can tell "this is not a link" from "nobody could tell", and only the former
+    licenses the irreversible move.
     """
     try:
-        return _markers_is_link(path)
+        return bool(_markers_is_link(path))
     except Exception:
-        return True
+        # why: an unprobeable path must never be followed, and must never be
+        # recorded as a definite negative either — see A3.
+        return UNKNOWN
+
+
+def _is_usable_state_dir(path):
+    """True when `path` is a real directory this plugin may hold state in.
+
+    A LINK is not one and neither is an unprobeable path: both fail the
+    `is False` test on purpose. `is_dir()` FOLLOWS a link, so every caller that
+    asked it alone accepted a planted `.ccm` symlink or junction as the state
+    directory and wrote through it — the fail-closed refusal in
+    `core/progress.ensure_memory_dir` applied to the primary write path only,
+    and any recovery path that re-derived the location through this module went
+    around it (finding B1). Ask this instead of `_safe_is_dir` wherever the
+    question is "may we USE this directory", not "does something exist here".
+    """
+    return _safe_link(path) is False and _safe_is_dir(path)
+
+
+def _state_db_size(directory):
+    """Bytes of `<directory>/memory.db`, or -1 when there is no such file.
+
+    One `stat`, and it does not care whether the file is a link: the caller
+    establishes that separately about the DIRECTORY. Zero and -1 are the same
+    answer to the only question asked of it — "is there a database here worth
+    preferring over a legacy one".
+    """
+    try:
+        return (directory / DB_FILENAME).stat().st_size
+    except Exception:
+        # why: absent, unreadable, or not spellable — all "no database here",
+        # and this probe must never be what raises inside a hook.
+        return -1
 
 
 def _safe_path(value):
@@ -227,13 +316,20 @@ def find_memory_dir(project_root):
     Migration belongs to the surfaces that are about to write: the hooks, the
     CLI commands that act on one named project, the installer's init.
 
-    Cheaper than `memory_dir` on purpose — two stats, no identification. A
-    read does not need to PROVE the directory is ours before reading the
-    database inside it; it needs to find the database that is there. Returns
-    the new name when neither exists, so callers can `.exists()` the result.
+    Cheaper than `memory_dir` on purpose — a link probe and two stats, no
+    identification. A read does not need to PROVE the directory is ours before
+    reading the database inside it; it needs to find the database that is
+    there. Returns the new name when neither exists, so callers can
+    `.exists()` the result.
+
+    It does need to refuse a LINKED `.ccm`, though, and for the same reason
+    `core/roots._has_db` does: `is_dir()` follows the link, so a planted one
+    shadowed a real `memory/` holding the database on the read path too, and
+    the resolver and this function then disagreed about which directory the
+    project keeps its state in.
     """
     new, old = state_dir_candidates(project_root)
-    if _safe_is_dir(new):
+    if _is_usable_state_dir(new):
         return new
     if _safe_is_file(old / DB_FILENAME):
         return old
@@ -339,9 +435,17 @@ def database_owner(db_path):
 
 
 def _has_ccm_gitignore(directory):
-    """True when `directory/.gitignore` carries this plugin's marker line."""
+    """Does `directory/.gitignore` carry this plugin's marker line?
+
+    True / False / `UNKNOWN`. An ABSENT file is a real negative; one that
+    exists and cannot be READ is `UNKNOWN` — "proves nothing either way" was
+    already the comment below, and returning False said the opposite.
+    """
     gi = directory / ".gitignore"
-    if _safe_link(gi) or not _safe_is_file(gi):
+    link = _safe_link(gi)
+    if link is not False:
+        return UNKNOWN if link is UNKNOWN else False
+    if not _safe_is_file(gi):
         return False
     try:
         with open(gi, "rb") as fh:
@@ -349,12 +453,12 @@ def _has_ccm_gitignore(directory):
     except (OSError, ValueError):
         # why: an unreadable courtesy file proves nothing either way, and the
         # database probe is the other half of the identification.
-        return False
+        return UNKNOWN
     return CCM_GITIGNORE_MARKER.encode("utf-8") in head
 
 
 def _has_ccm_database(path):
-    """True when `path` is a SQLite file carrying THIS schema's tables.
+    """Is `path` a SQLite file carrying THIS schema's tables? True/False/UNKNOWN.
 
     Three gates, cheapest first: a real file (never a link — the same
     fail-closed identity rule `core/roots._has_db` applies), SQLite's magic
@@ -362,17 +466,28 @@ def _has_ccm_database(path):
     only: without it an unrelated or absent `memory.db` reaches
     `sqlite3.connect`, which CREATES the file it was asked about and leaves
     journal files beside it — a probe that manufactures its own evidence.
+
+    The sqlite verdict splits on a MEASURED boundary, not a guess. Through a
+    `mode=ro` URI: a truncated or garbage file raises `sqlite3.DatabaseError`
+    ("file is not a database") — permanent, and a real negative; a locked or
+    unopenable one raises `sqlite3.OperationalError` ("database is locked",
+    "unable to open database file") — transient, and `UNKNOWN`. Anything
+    unclassified is `UNKNOWN` too, because this probe's negative is what makes
+    `migrate_legacy_dir` orphan a directory.
     """
-    if _safe_link(path) or not _safe_is_file(path):
+    link = _safe_link(path)
+    if link is not False:
+        return UNKNOWN if link is UNKNOWN else False
+    if not _safe_is_file(path):
         return False
     try:
         with open(path, "rb") as fh:
             if fh.read(len(_SQLITE_MAGIC)) != _SQLITE_MAGIC:
                 return False
     except (OSError, ValueError):
-        # why: unreadable is not identified, and leaving the directory alone
-        # is the safe direction for a probe whose YES triggers a rename.
-        return False
+        # why: unreadable is not "not ours"; it is "we could not look", and
+        # the caller must retry rather than take the irreversible direction.
+        return UNKNOWN
     # Lazy imports: `core/roots.py` imports this module and is on every hook's
     # path, so the settled case must not pay to parse `core/db.py` or
     # `sqlite3`. Only an unmigrated project whose marker file is gone gets
@@ -387,28 +502,49 @@ def _has_ccm_database(path):
                 "SELECT name FROM sqlite_master WHERE type='table'").fetchall()
         finally:
             conn.close()
-    except Exception:
-        # why: a locked, corrupt or unopenable database is not identified.
+    except sqlite3.OperationalError:
+        # why: locked or unopenable — transient, so the caller must retry.
         # `mode=ro` also guarantees this probe can never create the file it is
         # asking about, on any of the three path shapes `_readonly_uri` covers.
+        return UNKNOWN
+    except sqlite3.DatabaseError:
+        # why: "file is not a database" — a permanent, positive negative.
         return False
+    except Exception:
+        # why: an unclassified failure is not evidence of anything; see A3.
+        return UNKNOWN
     names = {row[0] for row in rows}
     return all(table in names for table in _IDENTIFYING_TABLES)
 
 
 def is_ccm_dir(directory):
-    """True when `directory` is a state directory cc-memory itself wrote.
+    """Is `directory` a state directory cc-memory wrote? True / False / UNKNOWN.
 
     Positive identification, never name-matching — see the module docstring.
     A link is refused outright: `core/progress.ensure_memory_dir` already
     refuses to WRITE through a linked state directory, and renaming one would
     move the link rather than the data it points at.
+
+    A POSITIVE from either half wins even when the other could not run — one
+    proof is a proof. `UNKNOWN` is returned only when nothing was proved AND
+    something could not be looked at, which is exactly the state in which the
+    caller must do nothing irreversible.
     """
     directory = _safe_path(directory)
-    if _safe_link(directory) or not _safe_is_dir(directory):
+    link = _safe_link(directory)
+    if link is not False:
+        return UNKNOWN if link is UNKNOWN else False
+    if not _safe_is_dir(directory):
         return False
-    return (_has_ccm_gitignore(directory)
-            or _has_ccm_database(directory / DB_FILENAME))
+    gitignore = _has_ccm_gitignore(directory)
+    if gitignore is True:
+        return True
+    database = _has_ccm_database(directory / DB_FILENAME)
+    if database is True:
+        return True
+    if gitignore is UNKNOWN or database is UNKNOWN:
+        return UNKNOWN
+    return False
 
 
 def migrate_legacy_dir(project_root, log=None):
@@ -418,25 +554,60 @@ def migrate_legacy_dir(project_root, log=None):
     NEVER raises — this runs inside hooks, where an exception surfaces as an
     error in the user's session.
 
-    Four outcomes, in the order they are decided:
+    Outcomes, in the order they are decided:
 
-      1. ``.ccm`` already exists -> return it. The settled case, one stat.
-         Decided FIRST and unconditionally: once the new directory exists it
-         is the answer, whatever else is on disk. A leftover ``memory/`` beside
-         it — a restored backup, a half-finished manual move, a directory the
-         user genuinely owns — is not this function's business.
-      2. No identifiable legacy directory -> return ``.ccm``. A fresh project,
+      1. ``.ccm`` already holds a database and is not a link -> return it. The
+         settled case. Both halves of that condition are load-bearing and both
+         are v2.14.0: the old test was `is_dir()` alone, which FOLLOWS a link
+         (B1) and which answered "settled" for the empty ``.ccm`` a failed
+         probe had just created (A3), making that orphaning permanent.
+      2. ``.ccm`` is a LINK -> never followed, never renamed onto. Use the
+         legacy directory when one is positively ours; otherwise return the
+         linked name so the caller's own fail-closed write guard refuses it.
+         Returning a fabricated third name would be worse: the project's state
+         directory IS ``.ccm``, and something is standing in its place.
+      3. ``.ccm`` exists but holds no database, and ``memory/`` is positively
+         ours -> return ``memory/``. The repair half of A3. A POSITIVE
+         identification is required, because this branch overrules an existing
+         directory and a repair on a guess is another way to lose a project.
+      4. Identification could not run (`UNKNOWN`) -> return ``memory/``, the
+         same fail-safe branch as a refused rename, and retry next turn.
+      5. No identifiable legacy directory -> return ``.ccm``. A fresh project,
          or one whose ``memory/`` belongs to somebody else. Nothing is created
          here; the caller's `ensure_memory_dir` does that.
-      3. Rename succeeds -> return ``.ccm``.
-      4. Rename fails -> return ``memory/``, the fail-safe direction. See the
+      6. Rename succeeds -> return ``.ccm``.
+      7. Rename fails -> return ``memory/``, the fail-safe direction. See the
          module docstring: handing back the new name would strand the user's
          database one directory away behind a brand-new empty one.
     """
     new, old = state_dir_candidates(project_root)
-    if _safe_is_dir(new):
+    new_link = _safe_link(new)
+    if new_link is False and _state_db_size(new) > 0:
+        return new                                          # outcome 1
+
+    verdict = is_ccm_dir(old)
+    legacy_usable = verdict is True and _is_usable_state_dir(old)
+
+    if new_link is not False:                               # outcome 2
+        _log(log, "warn",
+             f"cc-memory state directory {new} is a link and is not followed; "
+             f"using {old if legacy_usable else new}")
+        return old if legacy_usable else new
+
+    if _safe_is_dir(new):                                   # outcome 3
+        if legacy_usable:
+            _log(log, "warn",
+                 f"cc-memory: {new} holds no database while {old} is one of "
+                 f"ours; using {old}")
+            return old
         return new
-    if not is_ccm_dir(old):
+
+    if verdict is UNKNOWN:                                  # outcome 4
+        _log(log, "warn",
+             f"cc-memory state directory {old} could not be identified "
+             f"right now; continuing to use it rather than starting fresh")
+        return old if _safe_is_dir(old) else new
+    if verdict is not True:                                 # outcome 5
         return new
     try:
         # os.rename, not os.replace: `replace` overwrites an existing target,
@@ -449,12 +620,13 @@ def migrate_legacy_dir(project_root, log=None):
         return new
     except FileExistsError:
         # A concurrent process won the race between the probe and here; its
-        # rename is as good as ours.
-        return new if _safe_is_dir(new) else old
+        # rename is as good as ours — unless what appeared is a link, which is
+        # never ours (`_is_usable_state_dir`, not `_safe_is_dir`).
+        return new if _is_usable_state_dir(new) else old
     except FileNotFoundError:
         # The same race seen from the other side: the source was moved out
         # from under us.
-        return new if _safe_is_dir(new) else old
+        return new if _is_usable_state_dir(new) else old
     except OSError as exc:
         # The realistic failure on the primary platform: Windows refuses to
         # rename a directory while a handle inside it is open, so a second

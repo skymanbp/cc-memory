@@ -2092,6 +2092,71 @@ def _break_r13handlefollow(root):
            "                raise")
 
 
+# ── v2.14.0 · the 2026-09 debug pass: boundaries, declarations, probes, links
+
+@case("r14a1b", ["tests/smoke_test.py"],
+      "require the profile's parent to sit at the FILESYSTEM root again -> a Windows profile reached from WSL (/mnt/c/Users/<u>) is walked into and its database adopted")
+def _break_r14a1b(root):
+    _patch(root, f"{PKG}/core/roots.py",
+           "                and _is_volume_root(parent.parent))",
+           "                and _is_fs_root(parent.parent))  # BREAKAGE")
+
+
+@case("r14depcut", ["tests/smoke_test.py"],
+      "let the dependency NAME overrule a `.ccm-root` pin and an owned database again -> a project called `external` (or living under one) plants a stray state directory in every subdirectory the agent enters")
+def _break_r14depcut(root):
+    _patch(root, f"{PKG}/core/roots.py",
+           "        if dep and not (_is_pinned(directory) or _has_db(directory)):",
+           "        if dep:  # BREAKAGE: a name outranks both declarations")
+
+
+@case("r14depdb", ["tests/smoke_test.py"],
+      "drop a database-owning directory at or inside the dependency cut again -> the project under ~/work/external/ loses its own database, and one `cd` deeper than a dependency that owns one flips which database the session writes to")
+def _break_r14depdb(root):
+    _patch(root, f"{PKG}/core/roots.py",
+           "        if i <= cut and not _has_db(directory):",
+           "        if i <= cut:  # BREAKAGE: a name outranks an owned database")
+
+
+@case("r14probe3", ["tests/smoke_test.py"],
+      "collapse 'could not probe' back into 'not ours' -> a lock timeout on a legacy database orphans the whole history behind a fresh empty state directory")
+def _break_r14probe3(root):
+    _patch(root, f"{PKG}/core/layout.py",
+           "    except sqlite3.OperationalError:" + N
+           + "        # why: locked or unopenable — transient, so the caller must retry.",
+           "    except sqlite3.OperationalError:" + N
+           + "        return False  # BREAKAGE: a transient failure reads as a verdict"
+           + N
+           + "        # why: locked or unopenable — transient, so the caller must retry.")
+
+
+@case("r14emptyccm", ["tests/smoke_test.py"],
+      "make outcome 1 unconditional again -> an empty state directory beside a legacy one holding everything is answered as the settled case, which is what made A3's orphaning permanent")
+def _break_r14emptyccm(root):
+    _patch(root, f"{PKG}/core/layout.py",
+           "    if _safe_is_dir(new):                                   # outcome 3"
+           + N + "        if legacy_usable:",
+           "    if _safe_is_dir(new):                                   # outcome 3"
+           + N + "        if False:  # BREAKAGE: the new name always wins")
+
+
+@case("r14linkdir", ["tests/smoke_test.py"],
+      "follow a symlinked / junctioned state directory again -> migrate_legacy_dir returns the link and every caller that re-derives the path writes into its target")
+def _break_r14linkdir(root):
+    _patch(root, f"{PKG}/core/layout.py",
+           "    if new_link is False and _state_db_size(new) > 0:",
+           "    if new_link is not None and _state_db_size(new) > 0:  # BREAKAGE")
+
+
+@case("r14findlink", ["tests/smoke_test.py"],
+      "let the READ side follow a linked state directory again -> find_memory_dir shadows a real legacy database with the link, so the resolver and the reader disagree about where the project keeps its state")
+def _break_r14findlink(root):
+    _patch(root, f"{PKG}/core/layout.py",
+           "    return _safe_link(path) is False and _safe_is_dir(path)",
+           "    return _safe_is_dir(path)  # BREAKAGE: is_dir() follows a link")
+
+
+
 @case("r13privatecase", ["tests/smoke_test.py"],
       "match span tags case-sensitively again -> <PRIVATE>secret</PRIVATE> is neither stripped nor escaped")
 def _break_r13privatecase(root):
