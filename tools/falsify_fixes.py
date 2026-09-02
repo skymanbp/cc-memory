@@ -1479,7 +1479,14 @@ def _break_r9chain(root):
 @case("r9progtx", ["tests/smoke_test.py"],
       "split the progress bootstrap back out -> a stale verdict wipes a patch")
 def _break_r9progtx(root):
+    # anchor repaired 2026-09-01: fill_empty_progress bootstraps through the
+    # same INSERT OR IGNORE under the same BEGIN IMMEDIATE (deliberately -- it
+    # is the same discipline), so the bootstrap text alone matched TWICE and
+    # the case aborted as ROT. The anchor now opens on patch_progress's own
+    # set_clause, which is the line that distinguishes the two methods.
     _patch(root, f"{PKG}/core/db.py",
+           "        set_clause = \", \".join(f\"{c} = ?\" for c in serialized.keys()) + \", updated_at = ?\"\n"
+           "        params = list(serialized.values()) + [now, project_id]\n"
            "        with self._connect() as conn:\n"
            "            conn.execute(\"BEGIN IMMEDIATE\")\n"
            "            conn.execute(\n"
@@ -1487,6 +1494,8 @@ def _break_r9progtx(root):
            "                \"VALUES (?, ?)\",\n"
            "                (project_id, now)\n"
            "            )",
+           "        set_clause = \", \".join(f\"{c} = ?\" for c in serialized.keys()) + \", updated_at = ?\"\n"
+           "        params = list(serialized.values()) + [now, project_id]\n"
            "        if not self.get_progress(project_id):  # BREAKAGE\n"
            "            self.upsert_progress(project_id)\n"
            "        with self._connect() as conn:")
@@ -2107,6 +2116,54 @@ def _break_r13budgetreset(root):
            "            # The turn may close, so the streak is over",
            "        if False:  # BREAKAGE: the streak survives a clean Stop\n"
            "            # The turn may close, so the streak is over")
+
+
+# ── SessionStart: the progress refresh and the retroactive pass ─────────────
+
+@case("r14fillrace", ["tests/smoke_test.py"],
+      "write the refresh's fill unconditionally again -> a PreCompact rewrite committing between the fill-only-empty read and its write is clobbered")
+def _break_r14fillrace(root):
+    _patch(root, f"{PKG}/hooks/session_start.py",
+           "        db.fill_empty_progress(project_id, **patch)",
+           "        db.patch_progress(project_id, **patch)  # BREAKAGE: unconditional")
+
+
+@case("r14emptytodos", ["tests/smoke_test.py"],
+      "read `[]` as never-written again -> an open_todos a full rewrite wrote empty is re-filled from another session's next_steps")
+def _break_r14emptytodos(root):
+    _patch(root, f"{PKG}/hooks/session_start.py",
+           '    return str((cur or {}).get("trigger_type") or "") not in _PATCH_ONLY_TRIGGERS',
+           '    return False  # BREAKAGE: empty is never-written again')
+
+
+@case("r14curtranscript", ["tests/smoke_test.py"],
+      "exclude the current transcript on compact/resume again -> tier 3 mines the newest OTHER session and files its pending todos as this one's")
+def _break_r14curtranscript(root):
+    _patch(root, f"{PKG}/hooks/session_start.py",
+           '    if str(source or "") in _CONTINUING_SOURCES:\n'
+           '        return None\n'
+           '    return current_session_id',
+           '    return current_session_id  # BREAKAGE: the start reason is ignored')
+
+
+@case("r14retroempty", ["tests/smoke_test.py"],
+      "collapse an EMPTY extraction result into None again -> no sessions row, and the transcript is re-sent to Haiku at every SessionStart")
+def _break_r14retroempty(root):
+    _patch(root, f"{PKG}/hooks/session_start.py",
+           '        # saving. Only None means "no answer" (see the docstring).\n'
+           '        return valid',
+           '        return valid if valid else None  # BREAKAGE: empty reads as no answer')
+
+
+@case("r14retrokey", ["tests/smoke_test.py"],
+      "spend the credential check after the loads again -> up to three transcript windows are decoded before the hook discovers there is no key")
+def _break_r14retrokey(root):
+    _patch(root, f"{PKG}/hooks/session_start.py",
+           "    api_key, key_source = get_api_key()\n"
+           "    if not api_key:",
+           "    api_key, key_source = get_api_key()\n"
+           "    if False:  # BREAKAGE: the check no longer guards the loads")
+
 
 
 # ── gate checkers: a necessary condition is not a sufficient one ─────────────
