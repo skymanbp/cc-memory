@@ -556,6 +556,58 @@ class MemoryDB:
             # itself; this catches an unavailable import on a partial install.
             pass
 
+    def _follow_state_dir(self) -> bool:
+        """Re-point a handle whose legacy `memory/` was renamed to `.ccm/`.
+
+        `MemoryDB` keeps the `db_path` it was constructed with, and
+        `ui/dashboard.py`, `ui/web_viewer.py` and `mcp/server.py` each keep
+        ONE instance for their whole process. On the primary platform the
+        rename `core.layout.migrate_legacy_dir` performs is REFUSED while a
+        handle inside the directory is open, so a long-lived surface that
+        opened `<root>/memory/memory.db` keeps that path; between its
+        operations every connection is closed (`_connect` always closes),
+        another surface completes the rename, and the next connect here
+        failed with "unable to open database file" — on every operation,
+        until the process was restarted. Measured: 1 memory before the
+        rename, `OperationalError` on the same handle after it. The eighth
+        instance of the identity cause: the FILE moved, the project did not.
+
+        ONE direction — the migration's own. Only a path under the legacy
+        name is followed, only to the new name, only when the new file
+        exists and passes the same link refusal the constructor applies, and
+        only after a connect actually failed, so the settled case pays
+        nothing. Never the reverse, and never another project's file: the
+        owner is `core.layout.database_owner`, the file's own location, and
+        `find_db_path` is the read-side resolver that never migrates.
+        """
+        try:
+            from core.layout import (LEGACY_MEMORY_DIRNAME, database_owner,
+                                     find_db_path)
+        except ImportError:
+            return False
+        try:
+            if self.db_path.parent.name != LEGACY_MEMORY_DIRNAME:
+                return False
+            owner = database_owner(self.db_path)
+            if owner is None:
+                return False
+            new = find_db_path(owner)
+            if new == self.db_path or new.parent.name == LEGACY_MEMORY_DIRNAME:
+                return False
+            if not new.is_file():
+                return False
+            for probe in (new.parent, new):
+                if self._is_reparse(probe):
+                    return False
+        except Exception:
+            # why: an unprobeable path is not followed; the caller re-raises
+            # the connect error it already holds.
+            return False
+        self._db_warn(f"state directory renamed under an open handle: "
+                      f"{self.db_path} -> {new}")
+        self.db_path = new
+        return True
+
     @contextlib.contextmanager
     def _connect(self):
         """Yield a connection that COMMITS on success, ROLLS BACK on error, and
@@ -598,7 +650,15 @@ class MemoryDB:
         `busy_timeout` covers the cross-process case (the PreCompact sync leg
         running alongside the async consolidation leg).
         """
-        conn = sqlite3.connect(str(self.db_path), timeout=10)
+        try:
+            conn = sqlite3.connect(str(self.db_path), timeout=10)
+        except sqlite3.OperationalError:
+            # The ONE shape this may mean is answered by `_follow_state_dir`:
+            # a legacy `memory/` renamed to `.ccm/` under a handle constructed
+            # before the move. Anything else re-raises unchanged.
+            if not self._follow_state_dir():
+                raise
+            conn = sqlite3.connect(str(self.db_path), timeout=10)
         try:
             conn.row_factory = sqlite3.Row
             conn.execute("PRAGMA foreign_keys = ON")

@@ -651,9 +651,15 @@ def main():
                       for k in ("OK", "BOUNDS", "SKIP", "STALE", "MISSING"))
           + f"; {n_regions} verbatim region(s) — "
           f"{counts.get('VERBATIM', 0)} verified, {counts.get('QUOTE', 0)} quote")
-    print(f"         checked: {total - counts.get('SKIP', 0)} of {total} "
-          f"({counts.get('OK', 0)} symbol-anchored, "
-          f"{counts.get('BOUNDS', 0)} bounds-only)")
+    # Two strengths, stated as two numbers rather than one "checked" total:
+    # a symbol-anchored citation was VERIFIED to cover or mention its symbol;
+    # a bounds-only one was found in range and non-blank, which a citation
+    # that has drifted onto the wrong line also is. Five tag-emitter citations
+    # in CLAUDE.md sat 24 lines off their targets under a green "checked:
+    # 624 of 624" (measured, v2.13.2) — the summary must not overstate.
+    print(f"         verified against a symbol: {counts.get('OK', 0)}; "
+          f"bounds-only (in range and non-blank, NOT verified against a "
+          f"symbol): {counts.get('BOUNDS', 0)}; unchecked: {counts.get('SKIP', 0)}")
     bad = (counts.get("STALE", 0) + counts.get("MISSING", 0)
            + counts.get("QUOTE", 0))
     print("Result: " + ("OK (no rot detectable)" if not bad

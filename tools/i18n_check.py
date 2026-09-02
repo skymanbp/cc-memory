@@ -9,13 +9,20 @@ in docs/ARCHITECTURE.md#9-documentation-language-convention-i18n:
   * ``NAME.zh.md`` is a Chinese sibling. Its FIRST line carries a machine-readable
     marker recording a hash of the English source it was translated from::
 
-        <!-- i18n-source: README.md | sha256: <16hex> | version: 2.3.2 | translated: 2026-07-11 -->
+        <!-- i18n-source: README.md | sha256: <16hex> | version: 2.3.2 | translated: 2026-07-11 | translation: <16hex> -->
 
 Drift is decided SOLELY by the sha256 of the *normalized* English source (``version``
 and ``translated`` are informational, so a future version bump never mass-flags
 translations as stale). Both emit-time (``--emit-marker``) and check-time run the
 SAME normalizer, so CRLF/LF, a UTF-8 BOM, or trailing-whitespace churn cannot move
 the digest — the single cross-platform-critical property of this tool.
+
+``translation:`` (v2.14.0, optional) is the same kind of digest over the
+translation's own body. It is consulted by ``--emit-marker`` and nowhere else:
+a re-stamp is REFUSED (exit 2) when the English digest has changed since the
+previous marker but the translation's body has not — the digest test alone
+certifies that a marker was re-typed, not that anything was translated.
+``--translation-unchanged REASON`` overrides it for an English-only fix.
 
 This file is a DEV/CI tool. It lives OUTSIDE the ``cc_memory`` package on purpose and
 is deliberately NOT added to ``ui/installer.py`` SUBPACKAGE_FILES, ``build_exe.py``, or
@@ -49,14 +56,24 @@ from pathlib import Path
 
 MARKER_FMT = (
     "<!-- i18n-source: {source} | sha256: {digest} | "
-    "version: {version} | translated: {date} -->"
+    "version: {version} | translated: {date}{translation} -->"
 )
 
+# `translation:` (v2.14.0) is the sha256 prefix of the TRANSLATION's own body —
+# every line but the marker — recorded when the marker is emitted and consulted
+# at emit time only. Drift is still decided solely by `sha256:`; this field
+# exists so `--emit-marker` can refuse the one workflow the digest can never
+# see: the English source changed, the translator re-emitted and pasted the
+# fresh marker, and translated nothing. Measured: README.md edited to claim
+# macOS, marker re-pasted, README.zh.md still said Windows and Linux, and this
+# tool answered IN-SYNC. Optional in the grammar so markers stamped before it
+# still parse; the first re-stamp records it.
 MARKER_RE = re.compile(
     r"<!--\s*i18n-source:\s*(?P<source>\S+)\s*\|\s*"
     r"sha256:\s*(?P<digest>[0-9a-f]{16})\s*\|\s*"
     r"version:\s*(?P<version>\S+)\s*\|\s*"
-    r"translated:\s*(?P<date>\d{4}-\d{2}-\d{2})\s*-->"
+    r"translated:\s*(?P<date>\d{4}-\d{2}-\d{2})\s*"
+    r"(?:\|\s*translation:\s*(?P<translation>[0-9a-f]{16})\s*)?-->"
 )
 
 # One row per doc (or orphan translation). english_rel / zh_rel are repo-relative
@@ -102,6 +119,15 @@ def hash_source(path: Path) -> str:
     return hashlib.sha256(
         normalize_markdown(path.read_bytes()).encode("utf-8")
     ).hexdigest()[:16]
+
+
+def hash_translation(zh_path: Path) -> str:
+    """The 16-hex-char sha256 prefix of a translation's BODY: every line but
+    the marker on line 1, normalised like the source — so re-stamping the
+    marker cannot move it, and only a change to the translated text can."""
+    parts = normalize_markdown(zh_path.read_bytes()).split("\n", 1)
+    body = parts[1] if len(parts) > 1 else ""
+    return hashlib.sha256(body.encode("utf-8")).hexdigest()[:16]
 
 
 def parse_marker(path: Path):
@@ -295,14 +321,32 @@ def _read_version(root: Path) -> str:
     return "0.0.0"
 
 
-def emit_marker(english_path: Path, version: str, when: str) -> str:
-    """Build the marker line for a translation of ``english_path``."""
+def emit_marker(english_path: Path, version: str, when: str,
+                translation: str | None = None) -> str:
+    """Build the marker line for a translation of ``english_path``.
+
+    ``translation`` is the body hash of the translation the marker is going
+    into (see `hash_translation`); None omits the field (no sibling yet).
+    """
     return MARKER_FMT.format(
         source=english_path.name,
         digest=hash_source(english_path),
         version=version,
         date=when,
+        translation=f" | translation: {translation}" if translation else "",
     )
+
+
+def refuse_unchanged_translation(prev, digest: str, translation) -> bool:
+    """True when re-stamping would certify a translation nobody translated.
+
+    All four must hold: the sibling carries a marker, that marker recorded a
+    body hash, the English digest has CHANGED since it, and the translation's
+    body has NOT. A marker without the field (stamped before v2.14.0) cannot
+    be judged and is accepted — the re-stamp records the field for next time.
+    """
+    return bool(prev and prev.get("translation") and prev["digest"] != digest
+                and prev["translation"] == translation)
 
 
 # --------------------------------------------------------------------------- #
@@ -335,6 +379,12 @@ def main(argv=None):
     parser.add_argument(
         "--date", default=None,
         help="translated: date for --emit-marker (default: today, YYYY-MM-DD).")
+    parser.add_argument(
+        "--translation-unchanged", metavar="REASON", default=None,
+        help="Let --emit-marker re-stamp a translation whose body has not "
+             "changed since the last stamp although the English source has "
+             "(an English-only typo, a citation renumbering). The reason is "
+             "echoed, not stored.")
     args = parser.parse_args(argv)
 
     root = (args.root or _default_root()).resolve()
@@ -348,7 +398,21 @@ def main(argv=None):
             return 2
         version = args.version_label or _read_version(root)
         when = args.date or date.today().isoformat()
-        print(emit_marker(eng, version, when))
+        zh = zh_sibling_for(eng)
+        translation = hash_translation(zh) if zh.exists() else None
+        prev = parse_marker(zh) if zh.exists() else None
+        digest = hash_source(eng)
+        if refuse_unchanged_translation(prev, digest, translation):
+            if not args.translation_unchanged:
+                print(f"error: {eng.name} changed ({prev['digest']} -> {digest}) "
+                      f"but {zh.name}'s body is byte-identical to the one "
+                      f"stamped at {prev['digest']}. Translate first, or pass "
+                      f"--translation-unchanged '<why no translation is "
+                      f"needed>'.", file=sys.stderr)
+                return 2
+            print(f"note: re-stamping over an unchanged translation: "
+                  f"{args.translation_unchanged}", file=sys.stderr)
+        print(emit_marker(eng, version, when, translation))
         return 0
 
     if args.do_list:

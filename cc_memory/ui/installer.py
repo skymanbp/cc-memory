@@ -102,7 +102,8 @@ SURFACE_FILES = [
     "skills/save-memories/SKILL.md",
 ]
 
-# The 5 SYNC single-command hooks (one command each) + one async sibling.
+# The 5 SYNC single-command hooks <!--ce:hooks:subset--> (one command each)
+# + one async sibling.
 # These timeouts are the FINAL wire values - no multiplier is applied anywhere.
 # hooks/hooks.json is the source of truth and is read when available
 # (_declared_hook_timeouts); this table is the fallback for a frozen/flat

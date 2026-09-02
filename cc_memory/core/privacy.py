@@ -177,6 +177,28 @@ _HARNESS_FAMILIES = (
 )
 
 
+# Span tokens are matched CASE-INSENSITIVELY, like `_MARKER_TAG_RE` has been
+# since v2.5.2 — and this scanner was not, which left exactly one spelling of
+# the tag with no defence on either side: `<PRIVATE>secret</PRIVATE>` (or
+# `<Private>`) was not a span here, so it was not stripped, and `private` is
+# not an authority marker there, so it was not escaped either — measured, the
+# secret reached `clean_for_storage`'s output verbatim, i.e. the Anthropic
+# request and the memories table. A user who wrapped a secret has named it
+# private; the case they typed it in is not a consent signal. One compiled
+# literal per token, cached: under re.IGNORECASE a literal is still a single
+# left-to-right scan, so the r6-C1 cost model above `_strip_spans` holds, and
+# `m.end() - m.start()` is taken from the match rather than `len(tok)` so a
+# case-folded match of a different width could never desynchronise `pos`.
+_TOKEN_RES = {}
+
+
+def _token_re(tok):
+    r = _TOKEN_RES.get(tok)
+    if r is None:
+        r = _TOKEN_RES[tok] = re.compile(re.escape(tok), re.IGNORECASE)
+    return r
+
+
 def _strip_spans(text: str, families=_SPAN_FAMILIES, fail_closed=True) -> str:
     """Remove every protected span in ONE linear pass with true DEPTH
     tracking across every tag family at once.
@@ -198,23 +220,26 @@ def _strip_spans(text: str, families=_SPAN_FAMILIES, fail_closed=True) -> str:
     it is not an authority marker). Text containing no open tag of any
     family is returned byte-identical; otherwise the result is `.strip()`ed,
     both matching the scanner this replaces.
+
+    Tags match CASE-INSENSITIVELY (see `_token_re`): `<PRIVATE>` and
+    `<Private>` open the same span as `<private>`, and any spelling of the
+    close closes it.
     """
-    if not text or not any(o in text for o, _ in families):
+    if not text or not any(_token_re(o).search(text) for o, _ in families):
         return text
     # ALL token positions are collected up front in one find-loop per token
     # (register r6-C1): the previous shape re-searched the remaining suffix
     # for every token at every step, which is quadratic when the text is
     # dense with tokens — 32k unmatched opens measured 2.37 s, hook-budget
     # money. Tokens cannot overlap one another (distinct fixed strings, none
-    # a substring of another), so a sorted event list replays the exact same
-    # left-to-right decisions in O(n + m log m).
+    # a substring of another, and case-folding changes neither fact), so a
+    # sorted event list replays the exact same left-to-right decisions in
+    # O(n + m log m).
     events = []  # (position, token_length, family, is_open)
     for fi, (o, c) in enumerate(families):
         for tok, is_open in ((o, True), (c, False)):
-            start = text.find(tok)
-            while start >= 0:
-                events.append((start, len(tok), fi, is_open))
-                start = text.find(tok, start + len(tok))
+            for m in _token_re(tok).finditer(text):
+                events.append((m.start(), m.end() - m.start(), fi, is_open))
     events.sort()
     # Which OPEN tags never get a close? Only needed on the fail-open path,
     # where an unpaired open must survive as literal text instead of opening a
@@ -319,7 +344,14 @@ def strip_harness_blocks(text: str) -> str:
 
 
 def has_private(text: str) -> bool:
-    return bool(text and _PRIVATE_OPEN in text)
+    """True when `text` opens a `<private>` span in any letter case.
+
+    The classifier behind `observations.is_private` (`hooks/post_tool_use.py`),
+    which keeps a row out of the Stop observer's Anthropic request. It must
+    recognise every spelling `_strip_spans` strips, or a Read of a file
+    marked `<PRIVATE>` is stored as is_private=0 and shipped.
+    """
+    return bool(text and _token_re(_PRIVATE_OPEN).search(text))
 
 
 def neutralize_markers(text: str) -> str:

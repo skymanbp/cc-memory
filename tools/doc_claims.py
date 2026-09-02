@@ -148,8 +148,13 @@ TRIGGER_OF_RE = re.compile(
 #
 # Two guards make this safe, and both were measured over every scanned surface
 # before being kept (5 matches, 0 false positives):
-#  * exactly ONE word, never a free-length gap — `.{0,20}` was tried and
-#    paired numbers with nouns from different clauses;
+#  * ONE OR TWO words, never a free-length gap — `.{0,20}` was tried and
+#    paired numbers with nouns from different clauses. Exactly one word was
+#    the rule through v2.13.2, and one extra modifier was enough to state an
+#    unbound count: "All nine shipped plugin hooks" passed while "All nine
+#    hooks" was refused (measured). Widening to two surfaced exactly one live
+#    site in the tree (`ui/installer.py`'s "5 command hooks" — a real count,
+#    now bound) and no false positive;
 #  * the noun must be PLURAL. That is what separates a count of hooks from the
 #    ADJECTIVAL use, where the trigger noun modifies the real head: "Two
 #    independent hook registries" counts registries, "the 300 s hook timeout"
@@ -157,7 +162,7 @@ TRIGGER_OF_RE = re.compile(
 # `of` and number words are excluded because TRIGGER_OF_RE owns those forms.
 TRIGGER_GAP_RE = re.compile(
     rf"(?<!every\s)(?<!each\s)\b(?<!\.)(?P<n>{_NUM})\s+"
-    rf"(?!of\b)(?!{_NUM}\b)[A-Za-z][A-Za-z-]*\s+"
+    rf"(?:(?!of\b)(?!{_NUM}\b)[A-Za-z][A-Za-z-]*\s+){{1,2}}"
     rf"(?P<noun>hooks|renderers|render\s+paths)\b(?![-/])",
     re.IGNORECASE)
 # Headings and tables also write the count AFTER the noun: `## Hooks (6)`.

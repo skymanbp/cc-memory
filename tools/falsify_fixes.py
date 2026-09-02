@@ -526,14 +526,14 @@ def _break_r6failopen(root):
 @case("r6quadratic", ["tests/smoke_test.py"],
       "re-search the suffix per token -> 32k dangling opens cost seconds again")
 def _break_r6quadratic(root):
+    # The breakage keeps the v2.14.0 case-insensitive tokens (`_token_re`) so
+    # this case proves the QUADRATIC cost alone, not the case rule too.
     _patch(root, f"{PKG}/core/privacy.py",
            "    events = []  # (position, token_length, family, is_open)\n"
            "    for fi, (o, c) in enumerate(families):\n"
            "        for tok, is_open in ((o, True), (c, False)):\n"
-           "            start = text.find(tok)\n"
-           "            while start >= 0:\n"
-           "                events.append((start, len(tok), fi, is_open))\n"
-           "                start = text.find(tok, start + len(tok))\n"
+           "            for m in _token_re(tok).finditer(text):\n"
+           "                events.append((m.start(), m.end() - m.start(), fi, is_open))\n"
            "    events.sort()",
            "    events = []  # BREAKAGE: per-step suffix re-search (quadratic)\n"
            "    _scan = 0\n"
@@ -541,9 +541,9 @@ def _break_r6quadratic(root):
            "        best = None\n"
            "        for fi, (o, c) in enumerate(families):\n"
            "            for tok, is_open in ((o, True), (c, False)):\n"
-           "                j = text.find(tok, _scan)\n"
-           "                if j >= 0 and (best is None or j < best[0]):\n"
-           "                    best = (j, len(tok), fi, is_open)\n"
+           "                m = _token_re(tok).search(text, _scan)\n"
+           "                if m and (best is None or m.start() < best[0]):\n"
+           "                    best = (m.start(), m.end() - m.start(), fi, is_open)\n"
            "        if best is None:\n"
            "            break\n"
            "        events.append(best)\n"
@@ -2067,6 +2067,90 @@ def _break_r13registry(root):
     _patch(root, f"{PKG}/ui/dashboard.py",
            "        return canonical_path(path)",
            "        return str(path).lower()  # BREAKAGE: folds case on every platform")
+
+
+@case("r13handlefollow", ["tests/smoke_test.py"],
+      "keep the constructed db_path after the state directory is renamed -> a long-lived dashboard / web-viewer handle fails on every operation")
+def _break_r13handlefollow(root):
+    _patch(root, f"{PKG}/core/db.py",
+           "            if not self._follow_state_dir():\n"
+           "                raise",
+           "            if True:  # BREAKAGE: the stale path is kept\n"
+           "                raise")
+
+
+@case("r13privatecase", ["tests/smoke_test.py"],
+      "match span tags case-sensitively again -> <PRIVATE>secret</PRIVATE> is neither stripped nor escaped")
+def _break_r13privatecase(root):
+    _patch(root, f"{PKG}/core/privacy.py",
+           "        r = _TOKEN_RES[tok] = re.compile(re.escape(tok), re.IGNORECASE)",
+           "        r = _TOKEN_RES[tok] = re.compile(re.escape(tok))  # BREAKAGE: case-sensitive")
+
+
+@case("r13authhome", ["tests/smoke_test.py"],
+      "call Path.home() bare again -> a missing home discards an explicit ANTHROPIC_API_KEY")
+def _break_r13authhome(root):
+    _patch(root, f"{PKG}/core/auth.py",
+           "    try:\n"
+           "        return Path.home() / \".claude\" / \".credentials.json\"\n"
+           "    except Exception:",
+           "    if True:  # BREAKAGE: the RuntimeError escapes with the key\n"
+           "        return Path.home() / \".claude\" / \".credentials.json\"\n"
+           "    if False:")
+
+
+@case("r13budgetreset", ["tests/test_directive_enforcement.py"],
+      "stop resetting the refusal streak when a turn may close -> the budget is per session, and enforcement is advisory after three resolved refusals")
+def _break_r13budgetreset(root):
+    _patch(root, f"{PKG}/hooks/stop.py",
+           "        if not reasons:\n"
+           "            # The turn may close, so the streak is over",
+           "        if False:  # BREAKAGE: the streak survives a clean Stop\n"
+           "            # The turn may close, so the streak is over")
+
+
+# ── gate checkers: a necessary condition is not a sufficient one ─────────────
+
+@case("r13i18nrestamp", ["tests/smoke_test.py"],
+      "let --emit-marker certify an untranslated re-stamp again -> the digest proves a marker was re-typed, not that anything was translated")
+def _break_r13i18nrestamp(root):
+    _patch(root, "tools/i18n_check.py",
+           "    return bool(prev and prev.get(\"translation\") and prev[\"digest\"] != digest\n"
+           "                and prev[\"translation\"] == translation)",
+           "    return False  # BREAKAGE: any re-stamp certifies the translation")
+
+
+@case("r13coveragename", ["tests/smoke_test.py"],
+      "count a bare substring as documentation again -> a column named `source` is satisfied by the i18n marker")
+def _break_r13coveragename(root):
+    _patch(root, "tools/doc_coverage.py",
+           "    return re.search(r\"`(?:[\\w.-]+\\.)?\" + re.escape(needle) + r\"`\"\n"
+           "                     r'|\"' + re.escape(needle) + r'\"\\s*:', text) is not None",
+           "    return needle in text  # BREAKAGE: containment, not naming")
+
+
+@case("r13coverageenum", ["tests/smoke_test.py"],
+      "enumerate only plain CREATE TABLE again -> the FTS5 index is not a surface the docs must name")
+def _break_r13coverageenum(root):
+    _patch(root, "tools/doc_coverage.py",
+           '    created = set(re.findall(r"CREATE (?:VIRTUAL )?TABLE IF NOT EXISTS (\\w+)", src))',
+           '    created = set(re.findall(r"CREATE TABLE IF NOT EXISTS (\\w+)", src))  # BREAKAGE')
+
+
+@case("r13coveragetools", ["tests/smoke_test.py"],
+      "enumerate MCP tools by name prefix again -> a tool outside memory_/progress_ is never required to be documented")
+def _break_r13coveragetools(root):
+    _patch(root, "tools/doc_coverage.py",
+           "    return sorted(set(re.findall(r'\"name\":\\s*\"(\\w+)\"', src[start:end])))",
+           "    return sorted(set(re.findall(r'\"name\":\\s*\"((?:memory|progress)_\\w+)\"', src[start:end])))  # BREAKAGE")
+
+
+@case("r13claimsgap", ["tests/smoke_test.py"],
+      "allow exactly one modifier word again -> 'nine shipped plugin hooks' states a count nothing must bind")
+def _break_r13claimsgap(root):
+    _patch(root, "tools/doc_claims.py",
+           '    rf"(?:(?!of\\b)(?!{_NUM}\\b)[A-Za-z][A-Za-z-]*\\s+){{1,2}}"',
+           '    rf"(?:(?!of\\b)(?!{_NUM}\\b)[A-Za-z][A-Za-z-]*\\s+){{1}}"  # BREAKAGE')
 
 
 def verify_anchors():

@@ -275,6 +275,20 @@ def section_5():
               blocked == [True, True, True, False, False], f"blocked={blocked}")
         check("a changed condition set restarts the budget",
               S._block_attempt("sess-ok", ["plan-drift"]) == 1)
+        # ...and the streak ENDS when a Stop is allowed to close (v2.14.0).
+        # Nothing reset the marker before, so a condition resolved after two
+        # refusals resumed at 3 the next time it arose, and after three
+        # resolved refusals a session was advisory-only for the rest of its
+        # life. §8 drives the call site through the real hook.
+        seq = [S._block_attempt("sess-episode", ["plan-drift"]) for _ in range(2)]
+        S._block_reset("sess-episode")             # the Stop that could close
+        check("a resolved condition ends the streak: the next episode starts at 1",
+              seq == [1, 2] and S._block_attempt("sess-episode", ["plan-drift"]) == 1,
+              f"seq={seq}")
+        n_before = len(store)
+        S._block_reset("sess-never-refused")
+        check("a session never refused writes no marker on reset",
+              len(store) == n_before)
     finally:
         S.write_marker, S.read_marker = _real_w, _real_r
 
@@ -650,6 +664,67 @@ def section_7():
           "plan mode or use `/cc-mem plan-set` to create one.)*\n")
 
 
+# ── §8 v2.14.0: the budget is per EPISODE, through the real hook ───────────
+# §5(a) proves `_block_reset` at the function level; this drives hooks/stop.py
+# as the harness does and asserts the CALL SITE: refuse, refuse, resolve, and
+# the next refusal of the same condition opens at attempt 1. Without the reset
+# it opened at 3 — measured, the second episode's first Stop announced no
+# remaining budget and its second was already advisory — so after three
+# resolved refusals a session had no enforcement left at all.
+def section_8():
+    print("\n§8 v2.14.0：逃生预算按「一次事件」计数，经真实 Stop hook 驱动")
+    import json as _json
+    import shutil as _sh
+    import subprocess
+    import tempfile as _tf
+    root = Path(_tf.mkdtemp(prefix="ccm-enf-episode-"))
+    db = MemoryDB(root / _MEM / "memory.db")
+    pid = db.upsert_project(str(root))
+    hook = REPO / "cc_memory" / "hooks" / "stop.py"
+    # no API key: the observer leg must not reach the network from a gate
+    env = {k: v for k, v in os.environ.items() if k != "ANTHROPIC_API_KEY"}
+    env["PYTHONIOENCODING"] = "utf-8"
+    payload = _json.dumps({"cwd": str(root), "session_id": "enf-episode-sess",
+                           "hook_event_name": "Stop"})
+
+    def _stop():
+        r = subprocess.run([sys.executable, str(hook)], input=payload,
+                           capture_output=True, text=True, encoding="utf-8",
+                           errors="replace", env=env, timeout=120)
+        doc = {}
+        lines = [ln for ln in r.stdout.splitlines() if ln.strip()]
+        if lines and lines[-1].lstrip().startswith("{"):
+            doc = _json.loads(lines[-1])
+        return r, doc.get("decision"), str(doc.get("reason", ""))
+
+    db.upsert_plan_active(pid, raw="episode one: a raw plan", needs_refine=1)
+    r1, d1, why1 = _stop()
+    r2, d2, why2 = _stop()
+    check("an unrefined plan is refused, twice, counting the budget down",
+          d1 == "block" and "2 more refusal" in why1
+          and d2 == "block" and "1 more refusal" in why2,
+          f"rc={r1.returncode}/{r2.returncode} d={d1}/{d2} "
+          f"out={r1.stdout[-200:]!r} err={r1.stderr[-200:]!r}")
+    structured = {"version": 1, "goal": "ship", "success_criteria": ["ships"],
+                  "steps": [{"id": 1, "title": "build", "status": "pending",
+                             "notes": ""}],
+                  "context": "", "refined_by": "test"}
+    plan_mod.apply_refined_plan(db, pid, structured, memory_dir=root / _MEM)
+    r3, d3, _why3 = _stop()
+    check("the resolved plan lets the turn close",
+          r3.returncode == 0 and d3 is None, f"d={d3} out={r3.stdout[-200:]!r}")
+    db.upsert_plan_active(pid, raw="episode two: another raw plan",
+                          needs_refine=1)
+    r4, d4, why4 = _stop()
+    check("the next episode of the same condition opens at attempt 1",
+          d4 == "block" and "2 more refusal" in why4,
+          f"d={d4} reason tail={why4[-160:]!r}")
+    check("the hook wrote nothing to stderr on any of the four Stops",
+          all(r.stderr == "" for r in (r1, r2, r3, r4)),
+          repr((r1.stderr + r2.stderr + r3.stderr + r4.stderr)[-300:]))
+    _sh.rmtree(root, ignore_errors=True)
+
+
 def main():
     print("=" * 66)
     print("v2.11.0 enforcement gate — plan + directive ledger")
@@ -662,6 +737,7 @@ def main():
         section_5()
         section_6()
         section_7()
+        section_8()
     finally:
         _cleanup_sandbox()
     print("\n" + "=" * 66)

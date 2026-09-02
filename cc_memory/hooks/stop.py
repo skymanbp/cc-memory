@@ -194,6 +194,32 @@ def _block_attempt(session_id, keys):
     return n
 
 
+def _block_reset(session_id):
+    """End the refusal streak the moment a turn is allowed to close. Never raises.
+
+    `_block_attempt` counts CONSECUTIVE refusals of one condition set, and
+    until this function existed nothing ever ended a streak: the marker
+    survived the Stop on which the condition was resolved, so the next time
+    the SAME set came back — and `plan-drift` comes back every 8 turns by
+    design — the count resumed where it had stopped. After three resolved
+    refusals in a session the fourth episode opened at attempt 4, past
+    `_BLOCK_MAX_CONSECUTIVE`, and plan enforcement was an advisory for the
+    rest of that session: the v2.11.0 measurement (a plan unrefined for
+    416 user messages) waiting to recur one budget later. Measured with the
+    real hook before the fix: refuse, refuse, resolve, re-trigger -> the
+    second episode's first Stop was attempt 3, its second was already
+    advisory.
+
+    Clears only a marker that carries a count, so a session that was never
+    refused costs one failed open per turn and no write. Called on every
+    Stop that does not block, live plan or not: a cleared plan is a resolved
+    condition too.
+    """
+    f = marker_path(_BLOCK_MARKER_PREFIX, _safe_id(session_id))
+    if read_marker(f, "").strip():
+        write_marker(f, "")
+
+
 def _idle_directives(db, project_id, idle_turns=25):
     """Active directives that have gone `idle_turns` turns untouched.
 
@@ -575,6 +601,7 @@ def main():
         # refused every 8 turns, demanding a drift check against a plan that no
         # longer exists. Only projects with a LIVE plan are enforced, which is
         # also what makes opting in the thing that turns enforcement on.
+        reasons = []
         if plan_mod.is_live_plan(plan_row):
             # Always bump turn counter so guardian thresholds accrue
             db.bump_plan_turn_counter(project_id, n=1)
@@ -597,6 +624,11 @@ def main():
                             + " — still unresolved after "
                             f"{plan_mod._BLOCK_MAX_CONSECUTIVE} refusals; "
                             "degrading to advisory so you are not trapped.")
+        if not reasons:
+            # The turn may close, so the streak is over: the NEXT refusal of
+            # any condition set starts at attempt 1 again. Without this the
+            # budget was per session, not per episode — see _block_reset.
+            _block_reset(session_id)
         print(status_line + advisory)
     except SystemExit:
         raise

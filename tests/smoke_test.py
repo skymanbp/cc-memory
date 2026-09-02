@@ -1051,6 +1051,93 @@ def main():
         "README.zh.md marker hash != current README.md (stale translation)"
     print("[OK] i18n: README.zh.md in-sync with README.md; no drift across tracked docs")
 
+    # === v2.14.0: four gate checkers stop treating a NECESSARY condition as a
+    # SUFFICIENT one. Each condition below was measured GREEN on the state it
+    # now refuses, against the shipped v2.13.2 tree.
+    import doc_coverage as _gc_cov
+    import doc_claims as _gc_claims
+    # (a) coverage membership is NAMING, not containment: the column `source`
+    #     was satisfied by the `<!-- i18n-source: … -->` marker on line 1 of
+    #     the Chinese sibling, and a bare English word by any prose using it.
+    assert not _gc_cov._names("source", "<!-- i18n-source: X.md | sha256: 0 -->")
+    assert _gc_cov._names("source", "the `source` column") \
+        and _gc_cov._names("source", "`memories.source`") \
+        and _gc_cov._names("enabled", '  "enabled": false,')
+    assert not _gc_cov._names("topic", "v1 (topic column + indexes)"), \
+        "a bare word is not documentation of an identifier"
+    # (b) the enumerators read the TOOLS registry and the whole CREATE grammar;
+    #     a probe table the same file drops is not schema
+    _gc_real_read = _gc_cov._read
+    try:
+        _gc_cov._read = lambda rel: (
+            '# fixture: the registry is anchored at a line start\n'
+            'TOOLS = [\n    {"name": "memory_search"},\n'
+            '    {"name": "directive_list"},\n]\n'
+            '_TOOLS_BY_NAME = {"name": "not_a_tool"}\n'
+            'CREATE TABLE IF NOT EXISTS projects (id)\n'
+            'CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(c)\n'
+            'CREATE VIRTUAL TABLE IF NOT EXISTS _fts5_probe USING fts5(t)\n'
+            'DROP TABLE IF EXISTS _fts5_probe\n')
+        assert _gc_cov._mcp_tools() == ["directive_list", "memory_search"], \
+            f"a tool outside the memory_/progress_ prefix must be enumerated: {_gc_cov._mcp_tools()}"
+        assert _gc_cov._schema_tables() == ["memories_fts", "projects"], \
+            f"virtual tables are schema, a dropped probe is not: {_gc_cov._schema_tables()}"
+    finally:
+        _gc_cov._read = _gc_real_read
+    assert "memories_fts" in _gc_cov._schema_tables() \
+        and "_fts5_probe" not in _gc_cov._schema_tables()
+    _gc_probs, _gc_n, _gc_checks = _gc_cov.check()
+    assert not _gc_probs, f"doc coverage gaps under the naming rule: {_gc_probs}"
+    # (c) a count claim with TWO modifier words is still a count claim
+    assert _gc_claims.TRIGGER_GAP_RE.search("All nine shipped plugin hooks route cwd"), \
+        "two modifier words between number and noun evade the must-bind rule"
+    assert _gc_claims.TRIGGER_GAP_RE.search("declares 6 command hooks")
+    assert not _gc_claims.TRIGGER_GAP_RE.search("the 300 s hook timeout"), \
+        "the adjectival singular must stay a non-claim"
+    # (d) i18n: `--emit-marker` refuses to certify a translation nobody
+    #     translated. The digest alone proves a marker was re-typed: measured,
+    #     README.md edited, marker re-pasted, README.zh.md untouched, IN-SYNC.
+    _gc_box = Path(tempfile.mkdtemp(prefix="cc-memory-i18n-"))
+    (_gc_box / "docs").mkdir()
+    _gc_en, _gc_zh = _gc_box / "docs" / "NOTE.md", _gc_box / "docs" / "NOTE.zh.md"
+    _gc_en.write_text("# Note\n\nWindows and Linux.\n", encoding="utf-8")
+    _gc_zh.write_text("placeholder\n\n# 说明\n\nWindows 与 Linux。\n", encoding="utf-8")
+
+    def _gc_emit(*extra):
+        _o, _e = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(_o), contextlib.redirect_stderr(_e):
+            _rc = i18n_check.main(["--root", str(_gc_box), "--emit-marker",
+                                   "docs/NOTE.md", "--version-label", "0.0.0",
+                                   "--date", "2026-09-01", *extra])
+        return _rc, _o.getvalue().strip(), _e.getvalue()
+
+    def _gc_restamp(marker, body):
+        _gc_zh.write_text(marker + "\n" + body, encoding="utf-8")
+    _gc_rc, _gc_m1, _gc_err = _gc_emit()
+    assert _gc_rc == 0 and "| translation: " in _gc_m1, (_gc_rc, _gc_m1, _gc_err)
+    _gc_restamp(_gc_m1, "\n# 说明\n\nWindows 与 Linux。\n")
+    assert all(r.state == "IN-SYNC" for r in i18n_check.classify(_gc_box))
+    _gc_en.write_text("# Note\n\nWindows, Linux and macOS.\n", encoding="utf-8")
+    _gc_rc, _gc_m2, _gc_err = _gc_emit()
+    assert _gc_rc == 2 and "byte-identical" in _gc_err and not _gc_m2, \
+        f"a re-stamp over an untranslated change must be REFUSED: rc={_gc_rc} {_gc_err[-200:]}"
+    _gc_rc, _gc_m3, _gc_err = _gc_emit("--translation-unchanged", "English-only typo")
+    assert _gc_rc == 0 and "translation: " in _gc_m3, "the documented override must emit"
+    _gc_restamp(_gc_m1, "\n# 说明\n\nWindows、Linux 与 macOS。\n")   # translated
+    _gc_rc, _gc_m4, _gc_err = _gc_emit()
+    assert _gc_rc == 0 and _gc_m4 != _gc_m1, "a translated body must emit without an override"
+    # a marker stamped before the field existed cannot be judged: accepted,
+    # and the re-stamp records the field for next time
+    _gc_restamp(_gc_m4.split(" | translation:")[0] + " -->",
+                "\n# 说明\n\nWindows、Linux 与 macOS。\n")
+    _gc_en.write_text("# Note\n\nWindows, Linux, macOS and BSD.\n", encoding="utf-8")
+    _gc_rc, _gc_m5, _gc_err = _gc_emit()
+    assert _gc_rc == 0 and "translation: " in _gc_m5, "a pre-field marker must re-stamp"
+    shutil.rmtree(_gc_box, ignore_errors=True)
+    print("[OK] v2.14.0 gate checkers: coverage NAMES its members (registry + "
+          "virtual tables, probes excluded), a two-word count claim must be "
+          "bound, and --emit-marker refuses an untranslated re-stamp")
+
     # === v2.5.2: doc `file.py:LINE` citations must cover their symbol ========
     # Until this gate existed, CLAUDE.md § Tests said outright: "Nothing gates
     # doc file:line citations. They are hand-maintained and rot on every
@@ -1501,6 +1588,21 @@ def main():
                        for i in range(101))
     assert _v5_leak.count("<private>") == 101, "fixture must exceed the old cap"
     assert _v5_has_priv(_v5_leak) is True
+    # ...in ANY letter case (v2.14.0). `_MARKER_TAG_RE`, the render-side net,
+    # has ignored case since v2.5.2; the span scanner did not, so `<PRIVATE>`
+    # / `<Private>` was the one spelling neither stripped here nor escaped
+    # there — measured, the secret came out of clean_for_storage verbatim,
+    # i.e. it reached the Anthropic request and the memories table.
+    _v5_mixed = "a <PRIVATE>SECRET-A</PRIVATE> b <Private>SECRET-B</private> c"
+    assert _v5_has_priv(_v5_mixed) is True, "has_private is case-sensitive"
+    assert _v5_strip(_v5_mixed) == "a  b  c", _v5_strip(_v5_mixed)
+    assert "SECRET" not in _v5_clean(_v5_mixed), \
+        "an upper-case <PRIVATE> span reached the storage/LLM gate verbatim"
+    assert _v5_strip("x <PRIVATE>dangling upper") == "x", \
+        "an upper-case dangling open must fail closed like the lower-case one"
+    assert "BLOB" not in _v5_clean(
+        "k <CC-MEMORY-CONTEXT>BLOB</cc-memory-context>"), \
+        "the anti-recursion tag must be case-insensitive too"
     assert "SECRET" not in _v5_strip(_v5_leak), \
         "101 <private> tags came back verbatim — the tag cap still fails OPEN"
     assert "SECRET" not in _v5_clean(_v5_leak), \
@@ -1670,6 +1772,43 @@ def main():
          _v5_ccl._call_haiku, _v5_ccl._call_ollama) = _v5_saved_llm
     print("[OK] v2.5.0 call_llm: `deadline` kwarg accepted, a past deadline "
           "skips every leg without opening a socket")
+
+    # === v2.14.0: no resolvable home must not discard an explicit key ========
+    # `Path.home()` raises RuntimeError when no home variable and no passwd
+    # entry names a directory (measured on Windows with USERPROFILE / HOMEPATH
+    # / HOMEDRIVE / HOME unset: "Could not determine home directory."), and
+    # both credential readers called it bare AFTER accepting the env key, so
+    # the key went out with the exception and every hook took its no-LLM path.
+    # Driven in-process by making Path.home raise: a Linux runner's passwd
+    # entry would otherwise resolve a home and the check would prove nothing.
+    _v5_home_owner = next(c for c in Path.__mro__ if "home" in c.__dict__)
+    _v5_saved_home = _v5_home_owner.__dict__["home"]
+    _v5_saved_env_key = os.environ.get("ANTHROPIC_API_KEY")
+
+    def _v5_no_home():
+        raise RuntimeError("Could not determine home directory.")
+    try:
+        os.environ["ANTHROPIC_API_KEY"] = _v5_fake_keys[0]
+        Path.home = staticmethod(_v5_no_home)
+        _v5_cands = _v5_auth.get_api_candidates()
+        assert [(s, w) for _k, s, w in _v5_cands] == [("env", "api_key")], \
+            f"an explicit ANTHROPIC_API_KEY must survive a missing home: {_v5_cands}"
+        assert _v5_auth.get_api_key() == (_v5_fake_keys[0], "env")
+        del os.environ["ANTHROPIC_API_KEY"]
+        assert _v5_auth.get_api_key() == ("", ""), \
+            "no key and no home must degrade to the no-LLM signal, not raise"
+    finally:
+        if _v5_home_owner is Path:
+            Path.home = _v5_saved_home
+        else:
+            del Path.home
+        if _v5_saved_env_key is None:
+            os.environ.pop("ANTHROPIC_API_KEY", None)
+        else:
+            os.environ["ANTHROPIC_API_KEY"] = _v5_saved_env_key
+    assert Path.home() == _HOME, "Path.home was not restored"
+    print("[OK] v2.14.0 auth: an explicit ANTHROPIC_API_KEY is returned when "
+          "Path.home() raises; no key + no home degrades to ('', '')")
 
     # === v2.5.0 (4): version single-source ===================================
     # core/version.py is THE runtime version; four manifests cannot import it
@@ -2529,6 +2668,47 @@ def main():
     assert sorted(p.name for p in _pi_skproj.iterdir()) == [_MEM], \
         sorted(p.name for p in _pi_skproj.iterdir())
 
+    # (j) a handle opened on the LEGACY path follows the rename (v2.14.0).
+    #     MemoryDB keeps its db_path, and the dashboard, the web viewer and
+    #     the MCP server keep one instance per process; on Windows the rename
+    #     is refused while such a handle is open and completed by another
+    #     surface later, after which every operation on the stale handle
+    #     raised "unable to open database file" until the process restarted.
+    #     The eighth instance of the identity cause: the FILE moved, the
+    #     project did not. Followed in ONE direction only — the migration's.
+    _pi_lh = _pi_box / "legacy-handle"
+    (_pi_lh / _SD_OLD).mkdir(parents=True)
+    _pi_ldb = MemoryDB(_pi_lh / _SD_OLD / "memory.db")
+    _pi_lpid = _pi_ldb.upsert_project(str(_pi_lh))
+    _pi_ldb.insert_memory(_pi_lpid, None, "decision",
+                          "identity: the handle follows the rename", 4)
+    os.rename(str(_pi_lh / _SD_OLD), str(_pi_lh / _MEM))
+    assert _pi_ldb.get_stats(_pi_lpid)["n_memories"] == 1, \
+        "a handle opened on the legacy state directory must keep working after the rename"
+    assert _pi_ldb.db_path == _pi_lh / _MEM / "memory.db", _pi_ldb.db_path
+    assert _pi_ldb.upsert_project(str(_pi_lh)) == _pi_lpid, \
+        "the followed handle must see the same project row"
+    assert sorted(p.name for p in _pi_lh.iterdir()) == [_MEM], \
+        f"following the rename recreated the legacy directory: {sorted(p.name for p in _pi_lh.iterdir())}"
+    # never the reverse: a handle on the NEW name whose directory vanished
+    # does not adopt a legacy directory beside it — nothing but the migration
+    # may join the legacy name (core/layout.py), and a rename the other way
+    # is not one this plugin performs. The connect error is the CORRECT
+    # answer here, so it is caught and asserted rather than swallowed.
+    _pi_rv = _pi_box / "reverse-handle"
+    (_pi_rv / _MEM).mkdir(parents=True)
+    _pi_rdb = MemoryDB(_pi_rv / _MEM / "memory.db")
+    _pi_rpid = _pi_rdb.upsert_project(str(_pi_rv))
+    os.rename(str(_pi_rv / _MEM), str(_pi_rv / _SD_OLD))
+    _pi_rv_refused = False
+    try:
+        _pi_rdb.get_stats(_pi_rpid)
+    except sqlite3.OperationalError:
+        _pi_rv_refused = True   # why: the stale handle must NOT be re-pointed backwards
+    assert _pi_rv_refused, \
+        "a handle on the new name followed a rename BACK to the legacy name"
+    assert _pi_rdb.db_path == _pi_rv / _MEM / "memory.db"
+
     shutil.rmtree(_pi_box, ignore_errors=True)
     print("[OK] identity: canonical_path is the one spelling; a moved project "
           "keeps its row (id, memories, progress) with ONE projects row; a "
@@ -2536,7 +2716,8 @@ def main():
           "status/list answer without minting; the consolidation marker "
           "follows the row (id, resolved path, `--project .`); the home "
           "boundary knows its resolved spelling; both skills ask layout for "
-          "the state directory")
+          "the state directory; a legacy-path handle follows the rename, "
+          "one way")
 
     # ── v2.5.2 · MemoryDB._connect must not leak one handle per operation ───
     # It used to: sqlite3's context manager COMMITS BUT DOES NOT CLOSE, and the

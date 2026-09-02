@@ -1,4 +1,4 @@
-<!-- i18n-source: README.md | sha256: 5b30f6acd614d6c9 | version: 2.13.2 | translated: 2026-08-30 -->
+<!-- i18n-source: README.md | sha256: 5b30f6acd614d6c9 | version: 2.14.0 | translated: 2026-09-01 | translation: eb7c44319159ac6a -->
 > [English](README.md) · **简体中文**
 
 <div align="center">

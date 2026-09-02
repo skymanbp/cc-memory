@@ -19,10 +19,22 @@ appear in the document that owns it — and in that document's translated
 sibling, because a Chinese reader following the same spec must not be reading a
 shorter one:
 
-    schema tables      core/db.py CREATE TABLE   -> docs/ARCHITECTURE.md (+zh)
-    schema columns     core/db.py ALTER ... ADD  -> docs/ARCHITECTURE.md (+zh)
-    MCP tools          mcp/server.py inputSchema -> README.md (+zh)
-    config keys        cc_memory/config.json     -> README.md (+zh)
+    schema tables      core/db.py CREATE [VIRTUAL] TABLE -> docs/ARCHITECTURE.md (+zh)
+    schema columns     core/db.py ALTER ... ADD          -> docs/ARCHITECTURE.md (+zh)
+    MCP tools          mcp/server.py TOOLS registry      -> README.md (+zh)
+    config keys        cc_memory/config.json             -> README.md (+zh)
+
+"Appear" means NAMED, not merely contained (v2.14.0). Membership used to be a
+bare substring test, and a bare substring is a necessary condition mistaken
+for a sufficient one: a column called `source` was satisfied by the
+`<!-- i18n-source: … -->` marker on line 1 of the Chinese sibling, and the
+MCP enumerator matched a name PREFIX (`memory_` / `progress_`), so a tool
+outside it was never enumerated at all — both measured, both green. A member
+now counts as documented only where a document spells it the way this
+project's prose spells identifiers: as a code span (`name`, or a dotted
+`path.name`), or as a quoted `"name":` key inside a fenced JSON example. The
+table enumerator also sees `CREATE VIRTUAL TABLE` (`memories_fts`), and the
+tool enumerator reads every `"name"` inside the `TOOLS = [...]` registry.
 
 WHAT IT DELIBERATELY DOES NOT CHECK, measured rather than assumed:
 
@@ -69,8 +81,14 @@ def _read(rel: str) -> str:
 
 
 def _schema_tables() -> list[str]:
-    return sorted(set(re.findall(r"CREATE TABLE IF NOT EXISTS (\w+)",
-                                 _read("cc_memory/core/db.py"))))
+    """Every table the schema creates — `CREATE TABLE` and `CREATE VIRTUAL
+    TABLE` alike (the FTS5 index `memories_fts` is schema a reader must know
+    about) — minus any name the same file also DROPs: `_fts5_probe` exists
+    for one statement, to learn whether this SQLite build has FTS5 at all."""
+    src = _read("cc_memory/core/db.py")
+    created = set(re.findall(r"CREATE (?:VIRTUAL )?TABLE IF NOT EXISTS (\w+)", src))
+    dropped = set(re.findall(r"DROP TABLE (?:IF EXISTS )?(\w+)", src))
+    return sorted(created - dropped)
 
 
 def _schema_columns() -> list[str]:
@@ -85,8 +103,28 @@ def _schema_columns() -> list[str]:
 
 
 def _mcp_tools() -> list[str]:
-    return sorted(set(re.findall(r'"name":\s*"((?:memory|progress)_\w+)"',
-                                 _read("cc_memory/mcp/server.py"))))
+    """Every tool the server advertises: the `TOOLS = [...]` registry, whole.
+
+    A name-prefix guess (`memory_` / `progress_`) is how a tool outside the
+    prefix was enumerated 0 times and the gate stayed green (measured with a
+    `directive_list` tool: 0 mentions in either README, "0 gap(s)"). The
+    registry is the one list `tools/list` answers from, so it is the one list
+    to enumerate; a registry that cannot be found is an error, not an empty
+    surface.
+    """
+    src = _read("cc_memory/mcp/server.py")
+    start = src.index("\nTOOLS = [")
+    end = src.index("\n]", start)
+    return sorted(set(re.findall(r'"name":\s*"(\w+)"', src[start:end])))
+
+
+# How a member must be SPELLED to count as named: a code span holding exactly
+# the name (or a dotted path ending in it), or a quoted JSON key. Prose that
+# merely contains the letters — `i18n-source` for a column called `source`,
+# an English word that happens to be a key — is not documentation of it.
+def _names(needle: str, text: str) -> bool:
+    return re.search(r"`(?:[\w.-]+\.)?" + re.escape(needle) + r"`"
+                     r'|"' + re.escape(needle) + r'"\s*:', text) is not None
 
 
 def _config_keys() -> list[str]:
@@ -131,7 +169,7 @@ def check(repo: Path = REPO):
                 # the LEAF of a dotted config key: prose writes `ccl.enabled`
                 # as often as it writes the bare `enabled` inside a table row
                 needle = member.rsplit(".", 1)[-1]
-                if needle not in text:
+                if not _names(needle, text):
                     problems.append((surface, member, doc))
     return problems, members, checks
 

@@ -17,6 +17,29 @@ def _wire_for(key: str) -> str:
     return "oauth" if key.startswith("sk-ant-oat") else "api_key"
 
 
+def _credentials_path():
+    """`~/.claude/.credentials.json`, or None when no home directory resolves.
+
+    `Path.home()` RAISES `RuntimeError` when neither the platform's home
+    variables nor a passwd entry name a directory — a bare container, a
+    service account, a sandbox that scrubbed `USERPROFILE`/`HOMEPATH` — and
+    both readers below used to call it bare, ahead of their return. An
+    explicit `ANTHROPIC_API_KEY` that had already been accepted as the first
+    candidate was thrown away with the exception, and every hook's broad
+    handler then took its no-LLM path. Measured on the primary platform with
+    `USERPROFILE`, `HOMEPATH`, `HOMEDRIVE` and `HOME` unset and the key set:
+    `get_api_candidates()` raised `RuntimeError: Could not determine home
+    directory.` instead of returning the key. No home means no OAuth file to
+    read; it says nothing about the key the operator set.
+    """
+    try:
+        return Path.home() / ".claude" / ".credentials.json"
+    except Exception:
+        # why: no resolvable home (see the docstring). The env candidate must
+        # still be returned; the OAuth file simply cannot exist.
+        return None
+
+
 def get_api_candidates() -> list:
     """Return Anthropic auth candidates in priority order.
 
@@ -37,8 +60,8 @@ def get_api_candidates() -> list:
     if env_key:
         out.append((env_key, "env", _wire_for(env_key)))
 
-    creds_path = Path.home() / ".claude" / ".credentials.json"
-    if creds_path.exists():
+    creds_path = _credentials_path()
+    if creds_path is not None and creds_path.exists():
         try:
             creds = json.loads(creds_path.read_text(encoding="utf-8"))
             oauth = creds.get("claudeAiOauth", {})
@@ -75,8 +98,8 @@ def get_api_key() -> tuple:
 
     # No live candidate — distinguish "OAuth present but expired" for the
     # session_start warning footer.
-    creds_path = Path.home() / ".claude" / ".credentials.json"
-    if creds_path.exists():
+    creds_path = _credentials_path()
+    if creds_path is not None and creds_path.exists():
         try:
             creds = json.loads(creds_path.read_text(encoding="utf-8"))
             oauth = creds.get("claudeAiOauth", {})

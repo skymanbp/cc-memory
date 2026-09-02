@@ -1,4 +1,4 @@
-<!-- i18n-source: ARCHITECTURE.md | sha256: 3f54a8053271a507 | version: 2.13.2 | translated: 2026-09-01 -->
+<!-- i18n-source: ARCHITECTURE.md | sha256: de953795539300c5 | version: 2.14.0 | translated: 2026-09-01 | translation: 473e21f0d8561813 -->
 > [English](ARCHITECTURE.md) · **简体中文**
 
 # cc-memory — 架构
@@ -207,7 +207,7 @@ v2.4.3 把原本 5 份的 `docs/` 目录合并为 2 份。全部 79 处仓库内
 
 - `SessionStart` 的 stdout → 注入的上下文（由 Claude 读取）。
 - `Stop` 的 stdout → 状态行：每回合一行 `[cc-memory] …`
-  （`stop.py:260-265`），外加至多一行 `[cc-memory.plan] …` 建议行。
+  （`stop.py:582-587`），外加至多一行 `[cc-memory.plan] …` 建议行。
 - `PreCompact`（同步）的 stdout → **一行**状态行（会出现在下一次会话的压缩后
   上下文中）。
 - `PreCompact`（异步）/ `PostToolUse` / `UserPromptSubmit` 的 stdout → 空。异步
@@ -323,21 +323,21 @@ SQLite 表（定义在 [`cc_memory/core/db.py`](../cc_memory/core/db.py)），�
 
 此外还有 `memories_fts`——一个建立在 `memories` 之上的 FTS5 虚拟表
 （`core/db.py:455-458`），由三个触发器保持同步（`core/db.py:459-478`，迁移 `v2_fts5` 在
-`db.py:3063-3097`）。它只在本地 SQLite 构建带 FTS5 时才会创建；否则
-`db.search_fts`（`core/db.py:3063-3097`）回退到 `LIKE ? ESCAPE '\'`
-（`core/db.py:3063-3097`）。FTS5 在 `.claude-plugin/plugin.json:4` 与 `:12` 中被
+`db.py:3126-3160`）。它只在本地 SQLite 构建带 FTS5 时才会创建；否则
+`db.search_fts`（`core/db.py:3126-3160`）回退到 `LIKE ? ESCAPE '\'`
+（`core/db.py:3126-3160`）。FTS5 在 `.claude-plugin/plugin.json:4` 与 `:12` 中被
 宣传，`/cc-mem status` 会报告当前实际走哪条路径（`cli/mem.py` 的 `cmd_status`）。
 
 `memories` 上的 `supersedes_id` 列（迁移 `v3_supersedes`，`db.py:168`）把反补丁的
 取代链显式化：当 `upsert_smart` 判定一条新记忆取代了一条旧记忆时，新行会回链到旧行
-的 ID（旧行被归档）。通过 `db.get_supersede_chain(memory_id)`（`db.py:1604-1619`）走一遍
-链条，就能看到完整的更新历史。`content_hash`（迁移 `v2_content_hash`，`db.py:1604-1619`）
+的 ID（旧行被归档）。通过 `db.get_supersede_chain(memory_id)`（`db.py:1667-1682`）走一遍
+链条，就能看到完整的更新历史。`content_hash`（迁移 `v2_content_hash`，`db.py:1667-1682`）
 是归一化内容的 `sha256[:16]`，用于廉价的精确重复检查
-（`db.compute_content_hash` 在 `db.py:2162-2164`，`db.find_by_hash` 在
-`db.py:2162-2164`）。
+（`db.compute_content_hash` 在 `db.py:2222-2224`，`db.find_by_hash` 在
+`db.py:2222-2224`）。
 
 迁移按 `_MIGRATIONS` 列表（`db.py:121-284`）的顺序应用，并记录在 `_migrations` 中。目前
-已交付的层级：**v1**（topic 列 + 索引）、**v2**（content_hash、observations、
+已交付的层级：**v1**（`topic` 列 + 索引）、**v2**（content_hash、observations、
 session_summaries、项目模式、FTS5、哈希回填）、**v3**（反补丁 + 强制交接：
 `supersedes_id`、`progress`）、**v4**（`plan_active`）、**v5**（会话标注：
 `progress.current_session_id`、`progress.session_started_at`——这样多会话工作流就能
@@ -408,7 +408,7 @@ regenerate_memory_index(db, project_id, memory_dir)   ← MEMORY.md 刷新
 
 - `upsert_batch`（`memory_writer.py:200-235`）逐条循环调用 `upsert_smart`，并在最后
   重新生成**一次**，但仅当传入了 `memory_dir` 时才会（`memory_writer.py:200-235`）。
-  所有钩子调用方都会传（`pre_compact.py:435`、`stop.py:253`、
+  所有钩子调用方都会传（`pre_compact.py:435`、`stop.py:279`、
   `session_start.py:1056`）；同步 PreCompact 支路还会在其余状态变更之后再刷一次
   （`pre_compact.py:783`）。
 - 单发调用方显式调用 `regenerate_memory_index`：`cli/mem.py:1171` 与 `:584`、
@@ -504,7 +504,7 @@ SessionStart：
 ```
 
 上面的调用签名都是真实的：`write_progress_md(db, project_id, memory_dir)`
-（`core/progress.py:331-490`；调用点 `pre_compact.py:752`、`stop.py:474`、
+（`core/progress.py:331-490`；调用点 `pre_compact.py:752`、`stop.py:500`、
 `user_prompt.py:133`、`session_start.py:912`、`mcp/server.py:243`、
 `cli/mem.py:1262`）。PROGRESS.md 的结构规格见
 [docs/CONTRACTS.md](CONTRACTS.md#handoff-contract)。
@@ -755,7 +755,11 @@ agent 自己的 `cd` 走：一个在仓库根启动、却在 `cli/` 里跑过一
 数据库也永不重新挂接任何行，所以刻意共享同一文件的兄弟项目行保持自己的身份。`MemoryDB.find_project_id` 是提问类表面（`status`、`stats`、`list`、`sessions`、
 `keywords`）用的同一种查找：它会重新挂接，但永不插入。合并标记带着行的 `project_id`，
 所以重命名不再付出路径检查过去收取的"多跑一次合并"的代价；它的 `project_path` 也以解析后
-的形式存储，于是 CLI 文档规定的 `--project .` 能匹配 hook 拿到的绝对 cwd。
+的形式存储，于是 CLI 文档规定的 `--project .` 能匹配 hook 拿到的绝对 cwd。在重命名之前
+就以旧名 `memory/memory.db` 构造出来的 `MemoryDB` 句柄会跟上这次重命名：`_connect` 经
+`MemoryDB._follow_state_dir` 只重试一次，只从旧名指向 `.ccm/`，只在新文件存在且通过构造
+函数同一套链接拒绝检查时，且只在一次连接确实失败之后——于是活得比重命名更久的仪表盘、
+网页查看器或 MCP 服务器能继续应答，而除迁移之外没有任何东西会去拼接旧名。
 
 `project_root`（`core/roots.py:587-632`）先解析出根。每个 hook 都在 `is_excluded`
 **之后**、且绝不在之前把 `cwd` 重新绑定到它：先解析会因为爬到未被排除的父目录，而把
@@ -1100,7 +1104,7 @@ PATH” + “py launcher”，或者把 `python3` 别名到 `python`。否则钩
 切换器只有在其目标会随同一次发布一起存在时才可以添加。`docs/I18N.md` 曾交付了一个
 指向 `docs/I18N.zh.md` 的切换器，而后者从未被写出来——在 GitHub 上就是一条死链，
 并且按设计 CI 也抓不到，因为 MISSING-TRANSLATION 不在 `FAIL_STATES` 里
-（`tools/i18n_check.py:68`）。添加切换器是 §9.6 中 5 步流程的第 2 步；第 3-5 步必须
+（`tools/i18n_check.py:85`）。添加切换器是 §9.6 中 5 步流程的第 2 步；第 3-5 步必须
 在同一次改动中跟上。
 
 **本文件带切换器**（第 2 行，第 1 行是漂移标记），因为
@@ -1132,9 +1136,11 @@ Claude Code 的 plugin/skill/agent 加载器是惰性的（它**绝不是** YAML
 | `sha256` | **归一化后**英文源 sha256 的 16 位十六进制前缀 | **是——唯一的漂移信号** |
 | `version` | 翻译时的 `cc_memory.__version__` | 否（仅供参考） |
 | `translated` | 翻译刷新的日期 `YYYY-MM-DD` | 否（仅供参考） |
+| `translation` | **译文自身正文**（除标记行外的每一行）sha256 的 16 位十六进制前缀，自 v2.14.0 起可选 | 否——只有 `--emit-marker` 读取它（§9.7） |
 
 漂移**仅仅**由 `sha256` 决定。`version` 与 `translated` 只是信息性的，因此将来的版本
-号提升绝不会把所有翻译一次性标成过期——只有英文*内容*的真实变化才会。
+号提升绝不会把所有翻译一次性标成过期——只有英文*内容*的真实变化才会。`translation`
+也不是漂移信号：它的用处是让 `--emit-marker` 拒绝为一份没人翻译过的译文背书（§9.7）。
 
 标记解析是**失败即关闭（fail-closed）**的（`tools/i18n_check.py:107-124`）：它容忍
 BOM，但任何读取/解码错误，或者第一行不匹配语法，都会得到 `None`，调用方随即报告
@@ -1146,7 +1152,7 @@ NO-MARKER（一个 FAIL 状态），而不是无声地把该翻译当作有效�
 归一化器。这正是让该哈希跨 Windows/Unix 稳定的原因：CRLF 与 LF、UTF-8 BOM、或者
 行尾空白的抖动，都无法改变摘要。
 
-配方（`tools/i18n_check.py:85-97` 中的 `normalize_markdown`）：
+配方（`tools/i18n_check.py:102-114` 中的 `normalize_markdown`）：
 
 ```
 剥离 UTF-8 BOM  →  按 utf-8 解码  →  CRLF/CR → LF  →  每行 rstrip
@@ -1187,7 +1193,7 @@ python tools/i18n_check.py --emit-marker README.md --date 2026-08-04      # 覆�
 | NO-MARKER | `[FAIL]` | 首行没有合法标记的翻译 | 非零 |
 
 只要存在**任何** STALE / ORPHAN / NO-MARKER，检查器就以非零退出
-（`FAIL_STATES`，`tools/i18n_check.py:68`；`main` 在失败时返回 `1`，`:351-353`）。
+（`FAIL_STATES`，`tools/i18n_check.py:85`；`main` 在失败时返回 `1`，`:351-353`）。
 MISSING-TRANSLATION 是软警告——只是还没产出翻译而已——绝不会让构建失败。
 `tests/smoke_test.py:878-895` 导入该检查器，断言被跟踪文档中没有
 STALE/ORPHAN/NO-MARKER，并另外断言 `README.zh.md` 的标记摘要等于实时的
@@ -1223,6 +1229,14 @@ STALE/ORPHAN/NO-MARKER，并另外断言 `README.zh.md` 的标记摘要等于实
 4. 用新生成的标记替换 `docs/NAME.zh.md` 的**第 1 行**。
 5. 验证：`python tools/i18n_check.py` → `[OK]`，退出码 0。
 
+第 2 步是摘要永远看不见的一步，所以自 v2.14.0 起由第 3 步来检查它：`--emit-marker`
+会把译文正文的哈希记进标记（`translation:`），当英文摘要相对上一个标记已经变化、而译文
+正文没有变化时，它会**拒绝**（退出码 2），而不是打印出一个会读作 `[OK]` 的标记。在这项
+检查存在之前实测过：把 README.md 改成声称支持 macOS，重新生成并粘贴标记，README.zh.md
+一字未动，检查器报 `IN-SYNC`。不需要翻译的纯英文改动（一个错别字、一处引文重新编号）
+用 `--translation-unchanged "<原因>"` 放行；在该字段存在之前打上的标记会被接受一次，
+并在重新生成时补上该字段。
+
 如果你是删除或重命名了一份英文文档，那就同时删除或重命名它的译文，否则检查器会报
 `[FAIL] ORPHAN`。
 
@@ -1250,7 +1264,7 @@ STALE/ORPHAN/NO-MARKER，并另外断言 `README.zh.md` 的标记摘要等于实
 - 反例测试：对一份有翻译的英文文档做一次**真实的内容变更**——例如在行中间插入一个
   词——→ 检查器报告 `[STALE]` 且冒烟测试失败；刷新标记 → 变绿。本条在合并前的措辞
   （“在任意一行末尾追加一个空格”）是错的，在此纠正：`normalize_markdown` 会对每一行
-  做 rstrip（`tools/i18n_check.py:96`），所以行尾空白会被归一化掉，无法改变摘要。
+  做 rstrip（`tools/i18n_check.py:102-114`），所以行尾空白会被归一化掉，无法改变摘要。
 - 加载器安全性：每份文档的首字节都是引用块（`>`）、HTML 注释（`<!--`）或 `#`——
   绝不是 `---`。任何面向 Claude 的文件都不会被修改。
 

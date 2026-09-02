@@ -9,13 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.14.0] — 2026-09-01
+
 ### A project's identity is its database, not the path string inside it
 
 A whole-repository debug pass — six read-only reviewers over disjoint file
 sets, every finding reproduced before it was reported — surfaced 38 findings.
 Eight of them shared one upstream cause, and that cause is what this entry
-fixes (seven of the eight are closed by it; the eighth is recorded under
-*Reported* below): `projects.path`, the resolved cwd, WAS the project's identity, and
+fixes (all eight are closed by it; the eighth, a handle that outlived the
+state-directory rename, is the last bullet of the identity set below). Four
+more of the pass's named findings are closed under their own causes; the
+rest are recorded under *Reported*. The cause: `projects.path`, the resolved
+cwd, WAS the project's identity, and
 every surface decided "which project is this" with its own path arithmetic —
 `resolve()` on one side and the raw string on the other, `normcase` without
 `resolve`, `.lower()` on every platform, a state-directory join spelled by
@@ -84,37 +89,121 @@ never got it.
   order.** It delegates to `canonical_path` now, so the opt-out list, the
   projects table, the marker and the registry cannot disagree about whether
   two paths are one directory.
+- **A handle constructed before the state-directory rename failed on every
+  operation after it.** `MemoryDB` keeps the `db_path` it was constructed
+  with, and the dashboard, the web viewer and the MCP server keep one
+  instance per process. On Windows `core.layout.migrate_legacy_dir`'s rename
+  is refused while such a handle is open, then completed by another surface
+  once the handle's connection has closed (`_connect` always closes) — and
+  the next connect on the stale `memory/memory.db` path raised "unable to
+  open database file", on every operation, until the process was restarted
+  (measured: 1 memory before the rename, `OperationalError` on the same
+  handle after it). `_connect` now retries ONCE through
+  `MemoryDB._follow_state_dir`: from the legacy name to `.ccm/` only, only
+  when the new file exists and passes the constructor's link refusal, and
+  only after a connect actually failed, so the settled case pays nothing;
+  the reverse direction is never followed, because nothing but the
+  migration may join the legacy name.
+- **`<PRIVATE>` was stripped nowhere.** The span scanner matched its tags
+  with `str.find`, case-sensitively, while the render-side `_MARKER_TAG_RE`
+  has ignored case since v2.5.2 — so `<PRIVATE>secret</PRIVATE>` (or
+  `<Private>`) was not a span on the write path and not an authority marker
+  on the render path, and the secret left `clean_for_storage` verbatim, i.e.
+  reached the Anthropic request and the memories table; `has_private`, the
+  classifier behind `observations.is_private`, said False for it. Tokens are
+  compiled once under `re.IGNORECASE` (`privacy._token_re`), still one
+  linear scan per token; a dangling upper-case open fails closed like the
+  lower-case one.
+- **The Stop hook's escape budget was per session, not per episode.**
+  `_block_attempt` counts consecutive refusals of one condition set and
+  nothing ever ended a streak: the marker survived the Stop on which the
+  condition was resolved, so the next time the same set arose — `plan-drift`
+  returns every 8 turns by design — the count resumed where it had stopped,
+  and after three resolved refusals a session was advisory-only for the rest
+  of its life: the v2.11.0 measurement (a plan unrefined for 416 user
+  messages) waiting to recur one budget later. Measured through the real
+  hook: refuse, refuse, resolve, re-trigger opened the second episode at
+  attempt 3. `hooks/stop._block_reset` clears the marker on every Stop that
+  is allowed to close, live plan or not; a session never refused writes
+  nothing.
+- **A missing home directory discarded an explicit `ANTHROPIC_API_KEY`.**
+  Both credential readers in `core/auth.py` called `Path.home()` bare after
+  accepting the env key, and it raises `RuntimeError` when no home variable
+  and no passwd entry name a directory (measured on Windows with
+  `USERPROFILE`, `HOMEPATH`, `HOMEDRIVE` and `HOME` unset: "Could not
+  determine home directory."), so the key went out with the exception and
+  every hook took its no-LLM path. `_credentials_path` returns None there;
+  no home means no OAuth file to read, nothing about the key.
+- **`docs/CONTRACTS.md`'s save-path table quoted the hand-spelled join** the
+  `/save-memories` skill no longer contains (and a line number it no longer
+  has). Both languages now name `core.layout.memory_dir`.
+- **Four gate checkers treated a necessary condition as a sufficient one**,
+  each measured GREEN on the v2.13.2 tree against the state it exists to
+  refuse. `tools/doc_coverage.py` counted a bare substring as documentation
+  (the `<!-- i18n-source: … -->` marker on line 1 of the Chinese sibling
+  satisfied a column called `source`; a bare word satisfied `topic`) and
+  enumerated MCP tools by a name prefix (a `directive_list` tool: 0 mentions
+  in either README, "0 gap(s)") — a member now counts only where a document
+  NAMES it as a code span or a quoted JSON key, the `TOOLS` registry is read
+  whole, `CREATE VIRTUAL TABLE` (`memories_fts`) is schema and a probe table
+  the file itself drops is not. `tools/doc_claims.py` let a count with two
+  modifier words through ("nine shipped plugin hooks" bound nothing) — the
+  gap is one or two words, and the first sweep found one unbound count in
+  `ui/installer.py`. `tools/citation_check.py` printed a bounds-only
+  citation as `ok`, the same word as a symbol-verified one — the summary
+  now says "NOT verified against a symbol", and six bounds-only citations
+  had rotted silently (all in prose naming a section rather than a symbol),
+  repointed by hand. `tools/i18n_check.py --emit-marker` certified a
+  translation nobody translated (README.md edited to claim macOS, marker
+  re-emitted and pasted, README.zh.md untouched: `IN-SYNC`) — the marker
+  now records the translation body's hash (`translation:`) and the emitter
+  refuses, exit 2, when the English digest changed and the translation did
+  not; `--translation-unchanged "<why>"` passes an English-only change, and
+  a marker stamped before the field existed is accepted once.
 
 ### Added
 
 - `core.layout.canonical_path`, `same_path`, `database_owner`;
   `MemoryDB.find_project_id`, `MemoryDB.project_paths`; the marker's
   `project_id`; `DashboardApp._registry_key`.
+- `MemoryDB._follow_state_dir`, `core.privacy._token_re`,
+  `hooks/stop._block_reset`, `core.auth._credentials_path`.
+- The optional `translation:` marker field (`docs/ARCHITECTURE.md` §9.4),
+  `i18n_check.hash_translation`, `refuse_unchanged_translation` and
+  `--translation-unchanged`; `doc_coverage._names`.
+- `tests/smoke_test.py` § *v2.14.0 gate checkers*: the naming rule, both
+  enumerators on a fixture, the two-word count grammar, and the emitter
+  driven through refuse / override / translated / pre-field marker.
 - `tests/smoke_test.py` § *identity* (a moved project keeps its row, a
   sibling's row and other live directories' rows are never taken, `status`
   and `list` answer without minting, the marker follows the row across a
   rename and matches `--project .`, the home boundary knows its resolved
-  spelling, both skills ask layout for the state directory and the
-  save-memories body is RUN against an initialised project); eight
-  falsification cases `r13*`, each driven RED individually (`r13home` and
-  `r13registry` on POSIX — on Windows without the symlink privilege, or with
-  a case-folding filesystem, the two spellings they distinguish coincide).
+  spelling, both skills ask layout for the state directory, the
+  save-memories body is RUN against an initialised project, and a
+  legacy-path handle follows the rename one way and never the reverse);
+  case-insensitive assertions in § *v2.5.0 privacy*; § *v2.14.0 auth*
+  (driven in-process by making `Path.home` raise, so a Linux runner whose
+  passwd entry resolves a home proves the same thing).
+  `tests/test_directive_enforcement.py` §5(a) (a resolved condition ends the
+  streak) and §8 (the real Stop hook: refuse, refuse, resolve, and the next
+  episode opens at attempt 1; nothing on stderr). Seventeen falsification cases
+  `r13*`, each driven RED individually (`r13home` and `r13registry` on
+  POSIX — on Windows without the symlink privilege, or with a case-folding
+  filesystem, the two spellings they distinguish coincide); `r6quadratic`'s
+  anchor re-pointed at the case-insensitive token loop and re-driven RED.
 
-### Reported, not fixed here
+### Recorded, not redesigned
 
-The other thirty-one findings of the same pass — among them the eighth
-instance of this cause (`MemoryDB` keeps the `db_path` it was constructed
-with, so a dashboard or web viewer opened against a legacy `memory/` fails on
-every operation once another surface completes the rename — Windows-only,
-where a held handle can refuse the rename), a `<private>` span
-stripper that is case-sensitive while the authority-marker regex is not, a
-Stop-hook escape budget that never resets and so turns plan enforcement
-advisory for the rest of a session after three resolved refusals, a bare
-`Path.home()` in `core/auth.py` that discards an explicit `ANTHROPIC_API_KEY`
-when no home resolves, and four gate checkers whose necessary conditions are
-treated as sufficient — were reproduced with scripts and handed to the
-maintainer as a report. Each has its own upstream cause; none of them is this
-one.
+The four checkers are tightened where a condition was measurably hollow,
+not rebuilt. Three limits stand, each stated so a green run is read for
+what it proves: a bounds-only citation (257 of 624 at this release) is
+inside its file and non-blank, and can still rot without going red; a
+count whose noun is not in `doc_claims.TRIGGER_GAP_RE`'s list, or a bound
+claim whose `:asof` is honest about a past that no longer matches, is not a
+claim the gate sees; a `verbatim` region is verified segment by segment
+against its capture, and a reordering of true segments passes. The pass's
+report also enumerates twenty-three further findings beyond those closed
+above. It was handed to the maintainer and is not part of this tree.
 
 ## [2.13.2] — 2026-08-30
 

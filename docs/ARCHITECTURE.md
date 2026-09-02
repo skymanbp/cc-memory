@@ -229,7 +229,7 @@ Each hook's stdout has a specific role, and violating it is a user-visible bug:
 
 - `SessionStart` stdout → injected context (read by Claude).
 - `Stop` stdout → status line(s): one `[cc-memory] …` line every turn
-  (`stop.py:260-265`), plus at most one `[cc-memory.plan] …` advisory line.
+  (`stop.py:582-587`), plus at most one `[cc-memory.plan] …` advisory line.
 - `PreCompact` (sync) stdout → ONE status line (shows in the next session's
   compacted context).
 - `PreCompact` (async) / `PostToolUse` / `UserPromptSubmit` stdout → empty. The
@@ -359,9 +359,9 @@ Twelve tables, matching `CLAUDE.md` § "Database schema (12 tables)".
 
 Plus `memories_fts` — an FTS5 virtual table over `memories` (`core/db.py:455-458`),
 kept in sync by three triggers (`core/db.py:459-478`, migration `v2_fts5` at
-`db.py:3063-3097`). It is created only when the local SQLite build has FTS5; otherwise
-`db.search_fts` (`core/db.py:3063-3097`) falls back to `LIKE ? ESCAPE '\'`
-(`core/db.py:3063-3097`). FTS5 is advertised in `.claude-plugin/plugin.json:4`
+`db.py:3126-3160`). It is created only when the local SQLite build has FTS5; otherwise
+`db.search_fts` (`core/db.py:3126-3160`) falls back to `LIKE ? ESCAPE '\'`
+(`core/db.py:3126-3160`). FTS5 is advertised in `.claude-plugin/plugin.json:4`
 and `:12`, and `/cc-mem status` reports which path is live (`cli/mem.py`,
 `cmd_status`).
 
@@ -369,14 +369,14 @@ The `supersedes_id` column on `memories` (migration `v3_supersedes`,
 `db.py:168`) makes the anti-patch chain explicit: when `upsert_smart` decides a
 new memory supersedes an old one, the new row links back to the old row's ID
 (and the old row is archived). Walking the chain via
-`db.get_supersede_chain(memory_id)` (`db.py:1604-1619`) shows the full update
-history. `content_hash` (migration `v2_content_hash`, `db.py:1604-1619`) is
+`db.get_supersede_chain(memory_id)` (`db.py:1667-1682`) shows the full update
+history. `content_hash` (migration `v2_content_hash`, `db.py:1667-1682`) is
 `sha256[:16]` of the normalized content, used for the cheap exact-duplicate
-check (`db.compute_content_hash` at `db.py:2162-2164`, `db.find_by_hash` at
-`db.py:2162-2164`).
+check (`db.compute_content_hash` at `db.py:2222-2224`, `db.find_by_hash` at
+`db.py:2222-2224`).
 
 Migrations are applied in order from the `_MIGRATIONS` list (`db.py:121-284`) and
-recorded in `_migrations`. Levels shipped so far: **v1** (topic column +
+recorded in `_migrations`. Levels shipped so far: **v1** (`topic` column +
 index), **v2** (content_hash, observations, session_summaries, project mode,
 FTS5, hash backfill), **v3** (anti-patch + forced handoff: `supersedes_id`,
 `progress`), **v4** (`plan_active`), **v5** (session annotation:
@@ -557,7 +557,7 @@ SessionStart:
 
 Call signatures above are the real ones: `write_progress_md(db, project_id,
 memory_dir)` (`core/progress.py:331-490`; call sites `pre_compact.py:752`,
-`stop.py:474`, `user_prompt.py:75`, `session_start.py:937`, `mcp/server.py:243`,
+`stop.py:486`, `user_prompt.py:75`, `session_start.py:937`, `mcp/server.py:243`,
 `cli/mem.py:1262`). See
 [docs/CONTRACTS.md](CONTRACTS.md#handoff-contract) for the PROGRESS.md
 schema.
@@ -855,7 +855,13 @@ the surfaces that ask a question (`status`, `stats`, `list`, `sessions`,
 carries the row's `project_id`, so a rename no longer costs the "one early
 consolidation" the path check used to charge, and its `project_path` is
 stored resolved, so the CLI's documented `--project .` matches the absolute
-cwd a hook reads with.
+cwd a hook reads with. A `MemoryDB` constructed on the legacy
+`memory/memory.db` before the rename follows it: `_connect` retries once
+through `MemoryDB._follow_state_dir`, from the legacy name to `.ccm/` only,
+only when the new file exists and passes the constructor's link refusal, and
+only after a connect actually failed — so a dashboard, web viewer or MCP
+server that outlives the rename keeps answering, and nothing but the
+migration ever joins the legacy name.
 
 `project_root` (`core/roots.py:587-632`) resolves a root first. Every hook
 rebinds `cwd` to it immediately **after** `is_excluded` and never before:
@@ -1274,7 +1280,7 @@ The current language is shown in **bold**; the others are links.
 A switcher must only be added once its target will exist in the same release.
 `docs/I18N.md` shipped a switcher pointing at `docs/I18N.zh.md`, which was never
 written — a dead link on GitHub, and one CI cannot catch by design, because
-MISSING-TRANSLATION is not in `FAIL_STATES` (`tools/i18n_check.py:68`). Adding
+MISSING-TRANSLATION is not in `FAIL_STATES` (`tools/i18n_check.py:85`). Adding
 the switcher is step 2 of the 5-step sequence in §9.6; steps 3-5 must follow in
 the same change.
 
@@ -1309,10 +1315,13 @@ Fields:
 | `sha256` | 16-hex-char sha256 prefix of the **normalized** English source | **yes — the only drift signal** |
 | `version` | `cc_memory.__version__` at translation time | no (informational) |
 | `translated` | `YYYY-MM-DD` the translation was refreshed | no (informational) |
+| `translation` | 16-hex-char sha256 prefix of the **translation's own body** (every line but the marker), optional since v2.14.0 | no — read by `--emit-marker` only (§9.7) |
 
 Drift is decided **solely** by the `sha256`. `version` and `translated` are
 informational, so a future version bump never mass-flags every translation as stale —
-only an actual change to the English *content* does.
+only an actual change to the English *content* does. `translation` is not a
+drift signal either: it is what lets `--emit-marker` refuse to certify a
+translation nobody translated (§9.7).
 
 Marker parsing is **fail-closed** (`tools/i18n_check.py:107-124`): it is
 BOM-tolerant, but any read/decode error, or a first line that does not match the
@@ -1326,7 +1335,7 @@ same normalizer runs at emit time and at check time. This is what makes the hash
 stable across Windows/Unix: CRLF vs LF, a UTF-8 BOM, or trailing-whitespace churn
 cannot move the digest.
 
-Recipe (`normalize_markdown` in `tools/i18n_check.py:85-97`):
+Recipe (`normalize_markdown` in `tools/i18n_check.py:102-114`):
 
 ```
 strip UTF-8 BOM  →  decode utf-8  →  CRLF/CR → LF  →  rstrip each line
@@ -1370,7 +1379,7 @@ States, labels, and exit codes:
 | NO-MARKER | `[FAIL]` | translation whose first line has no valid marker | nonzero |
 
 The checker exits nonzero if **any** STALE / ORPHAN / NO-MARKER is present
-(`FAIL_STATES`, `tools/i18n_check.py:68`; `main` returns `1` on failure,
+(`FAIL_STATES`, `tools/i18n_check.py:85`; `main` returns `1` on failure,
 `:351-353`). MISSING-TRANSLATION is a soft warning — a translation simply hasn't
 been produced yet — and never fails the build. `tests/smoke_test.py:878-895`
 imports the checker, asserts no STALE/ORPHAN/NO-MARKER across tracked docs, and
@@ -1409,6 +1418,17 @@ When you edit an English doc that already has a translation, the checker will re
 4. Replace **line 1** of `docs/NAME.zh.md` with the newly emitted marker.
 5. Verify: `python tools/i18n_check.py` → `[OK]`, exit 0.
 
+Step 2 is the one the digest can never see, so since v2.14.0 step 3 checks
+it: `--emit-marker` records the translation body's hash in the marker
+(`translation:`), and when the English digest has changed since the previous
+marker but the translation's body has not, it **refuses** (exit 2) instead
+of printing a marker that would read `[OK]`. Measured before the check
+existed: README.md edited to claim macOS, marker re-emitted and pasted,
+README.zh.md untouched, checker `IN-SYNC`. An English-only change that needs
+no translation (a typo, a citation renumbered) passes with
+`--translation-unchanged "<why>"`; a marker stamped before the field existed
+is accepted once and gains the field.
+
 If instead you delete or rename an English doc, delete or rename its translation too,
 or the checker will report `[FAIL] ORPHAN`.
 
@@ -1437,7 +1457,7 @@ or the checker will report `[FAIL] ORPHAN`.
   translation — e.g. insert a word mid-line — → checker reports `[STALE]` and the
   smoke test fails; refresh the marker → green. The pre-merge wording of this
   bullet ("append a space to any line") was wrong and is corrected here:
-  `normalize_markdown` rstrips every line (`tools/i18n_check.py:96`), so trailing
+  `normalize_markdown` rstrips every line (`tools/i18n_check.py:102-114`), so trailing
   whitespace is normalized away and cannot move the digest.
 - Loader safety: the first bytes of every doc are a blockquote (`>`) or HTML comment
   (`<!--`) or `#` — never `---`. No Claude-facing file is modified.

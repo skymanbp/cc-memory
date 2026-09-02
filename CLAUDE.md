@@ -2,7 +2,7 @@
 
 ## Project: cc-memory
 
-**Claude Code persistent memory plugin (v2.13.2)** — anti-patch reconcile-on-write
+**Claude Code persistent memory plugin (v2.14.0)** — anti-patch reconcile-on-write
 + LLM-judged semantic de-duplication with **backpressure-triggered
 consolidation**, forced PROGRESS.md handoff with per-session annotation, live
 PLAN.md anchor with plan-refiner / plan-guardian subagents + mandatory
@@ -11,22 +11,22 @@ injection observability, FTS5 search, AI-judged extraction with Haiku
 (optional local Ollama fallback).
 
 - **Language**: Python 3.8+ (pure stdlib, zero pip dependencies at runtime)
-- **Version**: 2.13.2
+- **Version**: 2.14.0
 - **License**: MIT
 - **Platform**: Windows-primary, cross-platform compatible (Tkinter required for GUI)
 
-## What changed since v2.13.2 (unreleased)
+## What changed in v2.14.0 (over v2.13.2)
 
 **A project's identity is its database, not the path string inside it.** A
 whole-repository debug pass (six read-only reviewers over disjoint file sets,
 every finding reproduced before it was reported) produced 38 findings; eight
 shared one upstream cause — `projects.path` WAS the identity, and every surface
-decided "which project is this" with its own path arithmetic — and seven of
-the eight are closed here (the eighth, a `MemoryDB` that keeps a stale
-`db_path` after another surface renames `memory/` → `.ccm/`, is Windows-only
-and recorded in `CHANGELOG.md` § *Reported*). Full narrative in
-`CHANGELOG.md` § *Unreleased*; the specification is `docs/ARCHITECTURE.md` §7.
-Four rules a future change must not break:
+decided "which project is this" with its own path arithmetic — and all eight
+are closed here, plus four of the pass's other named findings, each with its
+own cause (rules 5-8). What the report names beyond these is recorded in
+`CHANGELOG.md` § *Reported*; the report itself is not in this tree. Full
+narrative in `CHANGELOG.md`; the specification is `docs/ARCHITECTURE.md` §7.
+Eight rules a future change must not break:
 
 1. **`core.layout.canonical_path` is THE comparable spelling of a path.**
    Resolved, then `normcase`d, never raises, and a non-path spells as `""` so
@@ -72,6 +72,70 @@ Four rules a future change must not break:
    ONE permitted spelling in `skills/`, the smoke gate scans both files for a
    hand-spelled join, and the save-memories body is RUN against an initialised
    project. Gate: `falsify --case r13skilldir`.
+
+5. **A handle follows the migration, one way.** `MemoryDB` keeps the `db_path`
+   it was constructed with, and the dashboard, the web viewer and the MCP
+   server keep one instance per process; on Windows `migrate_legacy_dir`'s
+   rename is refused while such a handle is open and completed by another
+   surface later, after which every operation on the stale handle raised
+   "unable to open database file". `_connect` retries ONCE through
+   `MemoryDB._follow_state_dir`: from `memory/` to `.ccm/` only, only when the
+   new file exists and passes the constructor's link refusal, and only after a
+   connect actually failed — the settled case pays nothing. Never the reverse:
+   nothing but the migration may join the legacy name (`core/layout.py`).
+   Gate: `smoke_test.py` § *identity* (j); `falsify --case r13handlefollow`.
+
+6. **Span tags match case-insensitively, through `privacy._token_re`.**
+   `_MARKER_TAG_RE` had ignored case since v2.5.2 and the span scanner had
+   not, so `<PRIVATE>…</PRIVATE>` was neither stripped on the write path nor
+   escaped on the render path — measured, the secret left `clean_for_storage`
+   verbatim. `has_private` (the `is_private` classifier) uses the same regex.
+   Do not test for a tag with `in` or `str.find`. Gate: `falsify --case
+   r13privatecase`; `r6quadratic`'s anchor now sits on the regex loop and was
+   re-driven RED after the move.
+
+7. **The escape budget is per EPISODE.** `_block_attempt` counts consecutive
+   refusals of one condition set and nothing ended a streak, so a condition
+   resolved after two refusals resumed at 3 when it next arose (`plan-drift`
+   returns every 8 turns by design), and after three resolved refusals a
+   session was advisory-only for the rest of its life — the v2.11.0
+   measurement waiting to recur. `hooks/stop._block_reset` clears the marker
+   on every Stop that may close, live plan or not. Gate:
+   `test_directive_enforcement.py` §5(a) and §8 (the real hook: refuse,
+   refuse, resolve, and the next episode opens at attempt 1); `falsify --case
+   r13budgetreset`.
+
+8. **Never call `Path.home()` bare on a hook path.** `core/auth._credentials_path`
+   returns None when no home resolves (`RuntimeError`, measured on Windows
+   with `USERPROFILE`/`HOMEPATH`/`HOMEDRIVE`/`HOME` unset), so an explicit
+   `ANTHROPIC_API_KEY` is returned instead of discarded with the exception —
+   the failure class `core/markers.marker_dir`'s docstring records for
+   `core/logger.py`'s module-scope `Path.home()`, one frame deeper. Gate:
+   `smoke_test.py` § *v2.14.0 auth*; `falsify --case r13authhome`.
+
+9. **A gate's condition must be SUFFICIENT for the sentence it certifies.**
+   Four checkers passed on states they exist to refuse, each measured on the
+   v2.13.2 tree before the tightening: `doc_coverage` counted a substring as
+   documentation (the `<!-- i18n-source: … -->` marker satisfied a column
+   called `source`) and enumerated MCP tools by a name prefix (a tool
+   outside `memory_` / `progress_` was required 0 times) — membership is now
+   NAMING (`_names`: a code span or a quoted JSON key), the `TOOLS` registry
+   is read whole, and `CREATE VIRTUAL TABLE` counts; `doc_claims` let a
+   count with two modifier words through ("nine shipped plugin hooks" was
+   not a claim) — the gap is one or two words now, and the first sweep
+   found one unbound count in `ui/installer.py`; `citation_check` printed a
+   bounds-only citation as `ok` — the summary now says "NOT verified against
+   a symbol", and six such citations had rotted; `i18n_check --emit-marker`
+   certified a translation nobody translated (README.md edited, marker
+   re-pasted, README.zh.md untouched: `IN-SYNC`) — the marker records the
+   translation body's hash and the emitter refuses an untranslated re-stamp
+   (`--translation-unchanged "<why>"` for an English-only change). Recorded,
+   not redesigned: a bounds-only citation still cannot rot LOUDLY, a count
+   whose noun is not in the trigger list is still not a claim, and a
+   verbatim region is checked segment by segment, not in order. Gates:
+   `smoke_test.py` § *v2.14.0 gate checkers*; `falsify --case
+   r13i18nrestamp` / `r13coveragename` / `r13coverageenum` /
+   `r13coveragetools` / `r13claimsgap`.
 
 ## What changed in v2.13.2 (over v2.13.1)
 
@@ -1030,7 +1094,7 @@ not be imported at all — `cli/plan.py` now has a `main()`.
 
 **Residual limits, recorded rather than papered over:**
 
-- `core/db.py`'s three plan mutators — `update_plan_status` (`db.py:3226-3270`),
+- `core/db.py`'s three plan mutators — `update_plan_status` (`db.py:3289-3333`),
   `delete_plan` (`:1410`) and `update_plan_content` (`:1427`) — all accept
   `project_id`, and `cli/plan.py` + `ui/dashboard.py` pass it at every call
   site, but none of them *requires* it (it defaults to `None`). An unscoped raw
@@ -1483,12 +1547,12 @@ standalone installs.
   - `["observer","realtime"]` — `hooks/stop.py`
   - `["mcp"]` — `mcp/server.py`
   - `["manual"]` — `cli/mem.py`
-  - `["manual","dashboard"]` — `ui/dashboard.py:1767` (Add-Memory dialog)
+  - `["manual","dashboard"]` — `ui/dashboard.py:1791` (Add-Memory dialog)
   - `[method, "manual"]` where `method` is `"llm"` or `"regex"` —
-    `ui/dashboard.py:2272` (Save Session)
-  - `["regex","manual"]` — `ui/dashboard.py:2298` (Save Session, regex leg)
-  - `["metric","manual"]` — `ui/dashboard.py:2303` (Save Session, metric leg)
-  - `["auto-detected","init"]` — `ui/dashboard.py:2440` (new-project init)
+    `ui/dashboard.py:2296` (Save Session)
+  - `["regex","manual"]` — `ui/dashboard.py:2322` (Save Session, regex leg)
+  - `["metric","manual"]` — `ui/dashboard.py:2327` (Save Session, metric leg)
+  - `["auto-detected","init"]` — `ui/dashboard.py:2464` (new-project init)
   - `["web"]` — `ui/web_viewer.py`
   - `["llm-dedup","merged"]` — `core/consolidate.py`
 
@@ -1626,7 +1690,13 @@ translation is bound to its source — while it asks whether a public surface
 produced any documentation AT ALL. v2.11.2's two schema columns appeared 0
 times in the specification and all ten gates passed. It enumerates schema
 tables, `ALTER`-added columns, MCP tools and config keys from the CODE and
-requires the owning document, in BOTH languages, to name each one.
+requires the owning document, in BOTH languages, to name each one — NAME,
+since v2.14.0, as a code span or a quoted JSON key: a bare substring test
+let the `<!-- i18n-source: … -->` marker document a column called `source`,
+and the MCP enumerator's name-prefix guess (`memory_` / `progress_`) never
+enumerated a tool outside the prefix at all. It now reads the `TOOLS`
+registry whole and counts `CREATE VIRTUAL TABLE` (`memories_fts`) as schema,
+minus a probe table the file itself drops.
 Deliberately NOT checked, measured rather than assumed: migration KEYS
 against `CHANGELOG.md` (27 of 29 are absent, and the only remedy would be
 rewriting history entries). `tools/citation_check.py`
@@ -1750,10 +1820,15 @@ restored from the source by hand — there is no `--fix` for it, by design.
 Gate: `falsify --case r12verbatim` / `r12verbatimskip`.
 
 Two limits to know before trusting a green result: a citation whose sentence
-names no resolvable symbol at all is reported **SKIP**, not OK (253 of 594
-today, down from 370 once v2.5.3 taught it to anchor CROSS-FILE citations on the
-text of the cited range — the `` `db.tag_progress_session(...)`
-(`user_prompt.py:213`) `` shape, which is the commonest in these docs). `--fix`
+names no resolvable symbol at all is **bounds-checked only** — inside the
+file and non-blank, NOT verified against a symbol — and the summary says so
+in those words since v2.14.0 (257 of 624 at v2.14.0; the class was 253 of
+594 as `SKIP` at v2.5.4, down from 370 once v2.5.3 taught it to anchor
+CROSS-FILE citations on the text of the cited range — the
+`` `db.tag_progress_session(...)` (`user_prompt.py:213`) `` shape, which is
+the commonest in these docs). A bounds-only citation can rot silently: six
+had, all in prose that names a section rather than a symbol, and were
+repointed by hand in v2.14.0. `--fix`
 rewrites a same-file citation to the **definition** site and a cross-file one to
 the occurrence NEAREST the stale number — a stated assumption (it was right when
 written; the file grew above it), not a proof. Ordinary variable
