@@ -38,9 +38,12 @@ block with
 
 and two things happen: nothing inside is scanned for citations, and every
 segment of it (split on ``[…]`` elisions; blockquote ``>`` prefixes and code
-fences stripped; whitespace collapsed) must occur in the named file, or the
-region is reported as QUOTE and the gate fails. "The quotes are verbatim" is
-then a measurement, not a promise.
+fences stripped; whitespace collapsed) must occur in the named file **in the
+order the quote gives them**, or the region is reported as QUOTE and the gate
+fails. "The quotes are verbatim" is then a measurement, not a promise. Order
+matters because an elision means text was CUT, never that it was rearranged:
+membership alone passed a region rebuilt back-to-front (see
+``_verbatim_results``).
 
 ## Exit codes
 
@@ -207,9 +210,23 @@ def _verbatim_regions(doc_lines):
 
 
 def _verbatim_results(root: Path, rel: str, regions):
-    """One Result per region: VERBATIM when every segment is in the source,
-    QUOTE (a failure) otherwise. A QUOTE names the first 70 characters of the
-    segment that was not found, so the drift is locatable without a diff."""
+    """One Result per region: VERBATIM when every segment occurs IN ORDER in
+    the source, QUOTE (a failure) otherwise. A QUOTE names the first 70
+    characters of the segment that broke, so the drift is locatable without a
+    diff.
+
+    IN ORDER is the load-bearing word, and it was missing through v2.14.0.
+    Membership alone (`s not in haystack`, each segment tested against the
+    whole file) is a NECESSARY condition treated as a sufficient one — the
+    same shape the v2.14.0 coverage gate was tightened for. Measured against
+    the shipped tree: the README's first verbatim region rebuilt as
+    ``<last line> / > […] / <first line>`` — a quote that says the capture's
+    conclusion came before its premise — was reported ``14 verified, 0
+    quote`` and the gate exited 0. An elision means "text was cut", never
+    "text was rearranged", so each segment is searched from the END of the
+    previous segment's match and a segment that only occurs earlier is
+    reported as out of order rather than found.
+    """
     out = []
     for open_line, src, body, closed in regions:
         if not closed:
@@ -231,15 +248,23 @@ def _verbatim_results(root: Path, rel: str, regions):
             out.append(Result(rel, open_line, src, 0, 0, "QUOTE",
                               detail="empty verbatim region"))
             continue
-        missing = [s for s in segments if s not in haystack]
-        if missing:
+        pos, broke, why = 0, None, ""
+        for seg in segments:
+            at = haystack.find(seg, pos)
+            if at < 0:
+                broke = seg
+                why = ("out of order at" if seg in haystack
+                       else "not in source:")
+                break
+            pos = at + len(seg)
+        if broke is not None:
             out.append(Result(rel, open_line, src, 0, 0, "QUOTE",
-                              detail='not in source: "%s%s"'
-                              % (missing[0][:70],
-                                 "…" if len(missing[0]) > 70 else "")))
+                              detail='%s "%s%s"'
+                              % (why, broke[:70],
+                                 "…" if len(broke) > 70 else "")))
         else:
             out.append(Result(rel, open_line, src, 0, 0, "VERBATIM",
-                              detail="%d segment(s) found in source"
+                              detail="%d segment(s) found in source, in order"
                               % len(segments)))
     return out
 

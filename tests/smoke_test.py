@@ -1464,6 +1464,115 @@ def main():
           "virtual tables, probes excluded), a two-word count claim must be "
           "bound, and --emit-marker refuses an untranslated re-stamp")
 
+    # === v2.14.0: a quoted region must be verbatim IN ORDER, and the ========
+    #     falsification harness must establish a GREEN baseline first.
+    #
+    # Two more instances of the same class as the four above — a NECESSARY
+    # condition standing in for a sufficient one — measured on the tree that
+    # shipped with those four already tightened.
+    import citation_check as _vo_cc
+    import falsify_fixes as _fb
+
+    # (a) verbatim: membership ANYWHERE is not "the quote is verbatim". An
+    #     elision means text was CUT, never that it was rearranged, so the
+    #     segments must occur in the source in the order the quote gives them.
+    #     Measured against the shipped tree: the README's first verbatim
+    #     region rebuilt as <last line> / > […] / <first line> was reported
+    #     "14 verified, 0 quote" and the gate exited 0.
+    _vo_box = Path(tempfile.mkdtemp(prefix="cc-memory-verbatim-"))
+    (_vo_box / "cap.txt").write_text(
+        "alpha one.\n\nbeta two.\n\ngamma three.\n", encoding="utf-8")
+
+    def _vo_verdict(body):
+        doc = ["<!-- verbatim: cap.txt -->", ""] + body + ["", "<!-- /verbatim -->"]
+        _skip, _regions = _vo_cc._verbatim_regions(doc)
+        out = _vo_cc._verbatim_results(_vo_box, "DOC.md", _regions)
+        assert len(out) == 1, out
+        return out[0].verdict, out[0].detail
+
+    assert _vo_verdict(["> alpha one.", ">", "> […] gamma three."]) \
+        == ("VERBATIM", "2 segment(s) found in source, in order"), \
+        "a quote that IS in order must still verify"
+    _vo_v, _vo_d = _vo_verdict(["> gamma three.", ">", "> […] alpha one."])
+    assert _vo_v == "QUOTE" and _vo_d.startswith("out of order at"), \
+        (f"a REORDERED quote must not read as verbatim: {_vo_v} {_vo_d!r} — "
+         f"membership anywhere in the source is a necessary condition, not a "
+         f"sufficient one, and an elision does not license a rearrangement")
+    _vo_v, _vo_d = _vo_verdict(["> alpha one.", ">", "> […] delta four."])
+    assert _vo_v == "QUOTE" and _vo_d.startswith("not in source:"), \
+        f"an absent segment must still be reported as absent: {_vo_v} {_vo_d!r}"
+    shutil.rmtree(_vo_box, ignore_errors=True)
+
+    # (b) falsify_fixes: a case is RED only against a GREEN baseline. Without
+    #     that control a gate red for an unrelated reason "detects" every
+    #     breakage — measured on a box with no tkinter, where three cases
+    #     gated on tests/test_surfaces.py all reported RED while the suite
+    #     itself was failing at ui/dashboard.py's import
+    #     (docs/debug-pass-2026-09/evidence/F-baseline_gates.txt).
+    #     Driven in-process against stub copies, so this costs no sandbox.
+    class _FbProc:
+        def __init__(self, rc):
+            self.returncode, self.stdout, self.stderr = rc, "gate output", ""
+
+    _fb_real_copy, _fb_real_run = _fb._copy_repo, _fb._run
+    _fb_gate = ["tests/__fb_stub__.py"]
+    _fb_calls = []
+    try:
+        def _fb_copy():
+            box = Path(tempfile.mkdtemp(prefix="cc-memory-fbstub-"))
+            (box / "cc-memory").mkdir()
+            return box, box / "cc-memory"
+
+        _fb._copy_repo = _fb_copy
+        _fb.CASES["__fb_stub__"] = (lambda root: None, _fb_gate,
+                                    "a stub case with a no-op breakage")
+        # baseline RED -> UNSOUND, never "detected", and never counted as one
+        _fb._BASELINES.clear()
+        _fb._run = lambda root, *a, **k: (_fb_calls.append(a) or _FbProc(1))
+        _fb_out = io.StringIO()
+        with contextlib.redirect_stdout(_fb_out):
+            _fb_verdict = _fb.run_case("__fb_stub__")
+        assert _fb_verdict == "UNSOUND", (
+            f"a case whose gate is RED on an UNTOUCHED copy must be UNSOUND, "
+            f"not {_fb_verdict!r} — an exit code that was already non-zero is "
+            f"no evidence that this breakage was seen")
+        assert "UNSOUND (gate red before the breakage)" in _fb_out.getvalue(), \
+            _fb_out.getvalue()
+        assert len(_fb_calls) == 1, \
+            "an unsound case must not go on to run the gate on the broken copy"
+        # baseline GREEN, broken copy RED -> detected, and the baseline is
+        # paid ONCE per gate script however many cases name it
+        _fb._BASELINES.clear()
+        del _fb_calls[:]
+        _fb._run = lambda root, *a, **k: (
+            _fb_calls.append(a) or _FbProc(0 if len(_fb_calls) == 1 else 1))
+        with contextlib.redirect_stdout(io.StringIO()):
+            assert _fb.run_case("__fb_stub__") == "RED"
+            assert _fb.run_case("__fb_stub__") == "RED"
+        assert len(_fb_calls) == 3, \
+            (f"the baseline must be cached per gate script (expected 1 "
+             f"baseline + 2 case runs, got {len(_fb_calls)} gate runs)")
+        # a rotted anchor is still its own verdict, not an undetected breakage
+        def _fb_rot(root):
+            raise SystemExit("BREAKAGE ANCHOR ROTTED: stub")
+
+        _fb.CASES["__fb_stub__"] = (_fb_rot, _fb_gate, "a rotted stub")
+        with contextlib.redirect_stdout(io.StringIO()):
+            assert _fb.run_case("__fb_stub__") == "ROT"
+    finally:
+        _fb.CASES.pop("__fb_stub__", None)
+        _fb._BASELINES.clear()
+        _fb._copy_repo, _fb._run = _fb_real_copy, _fb_real_run
+    # and --anchors still runs NO gate: it is the cheap CI half, and making it
+    # pay a baseline per gate script would be 7 suite runs for a scan that
+    # only reads source text.
+    import inspect as _fb_inspect
+    assert "_run(" not in _fb_inspect.getsource(_fb.verify_anchors), \
+        "verify_anchors must not run a gate — --anchors is the anchors-only half"
+    print("[OK] v2.14.0 evidence + harness: a reordered verbatim quote is "
+          "QUOTE, not VERBATIM, and falsify_fixes reports UNSOUND instead of "
+          "RED when its gate was already red on an untouched copy")
+
     # === v2.5.2: doc `file.py:LINE` citations must cover their symbol ========
     # Until this gate existed, CLAUDE.md § Tests said outright: "Nothing gates
     # doc file:line citations. They are hand-maintained and rot on every
@@ -3933,6 +4042,125 @@ def main():
     print("[OK] v2.8.0 markers: one whole-id namer shared by all 3 consumers "
           "(prefix collision impossible), reads refuse a planted symlink, and "
           "an absent marker still degrades to its default")
+
+    # ── v2.14.0 · markers never land in the user's repository ───────────────
+    # `tempfile.gettempdir()` has a last rung nothing in this module accounted
+    # for: when no candidate temp directory is usable it returns `os.getcwd()`,
+    # which under a hook is the USER'S PROJECT. Measured on Windows against the
+    # shipped v2.14.0 tree — `marker_dir()` created `<project>/cc-memory-user/`
+    # at 0700, `_dir_is_private` passed it, `write_marker(prompt) -> True`, and
+    # the 500-character prompt marker sat in the repository listing beside the
+    # user's own source, untracked and matched by no .gitignore line. Keeping
+    # markers OUT of the repo is the FIRST paragraph of core/markers.py's
+    # docstring, so this degradation defeated the module rather than degrading
+    # it. Refusal (None) is the documented last resort, and it costs a marker,
+    # which costs an extra LLM call or a repeated nudge — never correctness.
+    _mkc_box = Path(tempfile.mkdtemp(prefix="cc-memory-nostmp-"))
+    _mkc_proj = _mkc_box / "user-repo"
+    _mkc_proj.mkdir()
+    (_mkc_proj / "src.py").write_text("# the user's code\n", encoding="utf-8")
+    _mkc_cwd = os.getcwd()
+    _mkc_cand = tempfile._candidate_tempdir_list
+    _mkc_tmpdir = tempfile.tempdir
+    try:
+        os.chdir(str(_mkc_proj))
+        # the faithful stdlib mechanism: every candidate unusable, so
+        # `_get_default_tempdir` falls through to its `os.getcwd()` rung
+        tempfile._candidate_tempdir_list = lambda: [
+            os.path.join(str(_mkc_box), "nonexistent-a"),
+            os.path.join(str(_mkc_box), "nonexistent-b"),
+            os.getcwd()]
+        tempfile.tempdir = None
+        assert Path(tempfile.gettempdir()) == Path(os.getcwd()), \
+            ("the fixture failed to reproduce the fallback; gettempdir is "
+             + tempfile.gettempdir())
+        assert _mk.marker_dir() is None, (
+            f"marker_dir returned {_mk.marker_dir()!r} inside the user's "
+            f"project — the temp-dir fallback IS the cwd here, and this "
+            f"module exists to keep markers out of the repository")
+        _mkc_path = _mk.marker_path("cc_mem_prompt_", _mk.safe_id("sess-1"))
+        assert _mkc_path is None, \
+            f"marker_path must propagate the refusal, got {_mkc_path!r}"
+        assert _mk.write_marker(_mkc_path, "USER PROMPT TEXT") is False, \
+            "write_marker must refuse a refused directory"
+        assert _mk.read_marker(_mkc_path, "none") == "none", \
+            "read_marker must return its default for a refused directory"
+    finally:
+        os.chdir(_mkc_cwd)
+        tempfile._candidate_tempdir_list = _mkc_cand
+        tempfile.tempdir = _mkc_tmpdir
+    assert sorted(p.name for p in _mkc_proj.iterdir()) == ["src.py"], (
+        f"a marker was written into the user's repository: "
+        f"{sorted(p.name for p in _mkc_proj.iterdir())}")
+
+    # …and the REFUSAL must reach the hooks as a refusal, not as a crash.
+    # `marker_path` returns None now, so any consumer that did a direct Path
+    # operation on it (`.exists()`, `.unlink()`, a `/` join) would raise
+    # inside a hook — where the exception is swallowed and the hook silently
+    # stops doing its OTHER jobs (the turn counter, the plan block). Every
+    # consumer in cc_memory/ hands the result straight to read_marker /
+    # write_marker, which refuse None; `ui/installer.py:_sweep_temp_markers`
+    # is the one caller of `marker_dir()` itself and tests for None. Asserted
+    # here by DRIVING the two marker-writing hooks as real subprocesses in
+    # exactly that state, because a source rule cannot see a swallowed
+    # exception.
+    _mkc_hookproj = _mkc_box / "hookproj"
+    _mkc_hookproj.mkdir()
+    _mkc_nodir = _mkc_box / "no-such-temp-dir"       # never created
+    _mkc_wrap = _mkc_box / "nostmp_wrapper.py"
+    _mkc_wrap.write_text(
+        "import os, runpy, sys, tempfile\n"
+        # TMPDIR/TEMP/TMP already point at a directory that does not exist;
+        # the platform rungs are cut here so the fallback is reached on every
+        # OS rather than only where C:\\Windows\\Temp happens to be unusable.
+        "tempfile._candidate_tempdir_list = lambda: [\n"
+        "    os.environ.get('TMPDIR', ''), os.getcwd()]\n"
+        "tempfile.tempdir = None\n"
+        "assert os.path.realpath(tempfile.gettempdir()) == "
+        "os.path.realpath(os.getcwd()), tempfile.gettempdir()\n"
+        "runpy.run_path(sys.argv[1], run_name='__main__')\n",
+        encoding="utf-8")
+    _mkc_env = {**os.environ, "PYTHONIOENCODING": "utf-8",
+                "TMPDIR": str(_mkc_nodir), "TEMP": str(_mkc_nodir),
+                "TMP": str(_mkc_nodir)}
+    _mkc_sid = "nostmp-session-0001"
+    import json as _mkc_json
+    for _mkc_hook, _mkc_payload in (
+            ("user_prompt", {"cwd": str(_mkc_hookproj), "session_id": _mkc_sid,
+                             "prompt": "add the exporter retry"}),
+            ("stop", {"cwd": str(_mkc_hookproj), "session_id": _mkc_sid})):
+        _mkc_r = subprocess.run(
+            [sys.executable, str(_mkc_wrap),
+             str(_REPO / "cc_memory" / "hooks" / f"{_mkc_hook}.py")],
+            input=_mkc_json.dumps(_mkc_payload), cwd=str(_mkc_hookproj),
+            capture_output=True, text=True, encoding="utf-8",
+            errors="replace", env=_mkc_env, timeout=300)
+        assert _mkc_r.returncode == 0 and _mkc_r.stderr == "", (
+            f"{_mkc_hook} broke the hook contract with no usable temp "
+            f"directory: rc={_mkc_r.returncode} stderr={_mkc_r.stderr[-500:]!r}")
+    _mkc_stray = sorted(
+        p.relative_to(_mkc_hookproj).as_posix()
+        for p in _mkc_hookproj.rglob("*")
+        if p.name.startswith(("cc-memory-", "cc_mem_")))
+    assert not _mkc_stray, \
+        f"a hook wrote marker state into the user's project: {_mkc_stray}"
+    # and the hooks still did their OTHER jobs: UserPromptSubmit initialised
+    # the project and seeded the turn-1 request, which is the work the marker
+    # write sits beside and must not take down with it.
+    assert (_mkc_hookproj / _MEM / "memory.db").is_file(), \
+        "UserPromptSubmit skipped its auto-init when the marker was refused"
+    _mkc_db = MemoryDB(_mkc_hookproj / _MEM / "memory.db")
+    _mkc_prog = _mkc_db.get_progress(
+        _mkc_db.find_project_id(str(_mkc_hookproj))) or {}
+    assert "exporter retry" in (_mkc_prog.get("current_request") or ""), (
+        f"UserPromptSubmit lost its turn-1 request seed: "
+        f"{_mkc_prog.get('current_request')!r}")
+    del _mkc_db
+    shutil.rmtree(_mkc_box, ignore_errors=True)
+    print("[OK] v2.14.0 markers: with no usable system temp directory the "
+          "cwd fallback is REFUSED (marker_dir None, write_marker False), "
+          "both marker-writing hooks still exit 0 with empty stderr and keep "
+          "their other work, and nothing lands in the user's repository")
 
     # ── v2.8.0 · contracts.py must see EVERY memory/ creator ────────────────
     # The registry that exists to end prose enumeration was itself enumerating:

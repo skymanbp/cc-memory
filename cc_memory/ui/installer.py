@@ -615,8 +615,8 @@ def _sweep_temp_markers(log_fn=print):
     roots = [Path(tempfile.gettempdir())]
     try:
         from core.markers import marker_dir
-        d = marker_dir()
-        if d not in roots:
+        d = marker_dir()   # None (v2.14.0) when the cwd is the only temp dir
+        if d is not None and d not in roots:   # ...so tmp.glob cannot raise
             roots.append(d)
     except Exception:
         # why: uninstall must work even against a package tree too damaged to
