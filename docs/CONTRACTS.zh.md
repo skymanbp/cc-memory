@@ -1,4 +1,4 @@
-<!-- i18n-source: CONTRACTS.md | sha256: 93f6432f0dcb0d06 | version: 2.14.0 | translated: 2026-09-01 | translation: 31def881733339dd -->
+<!-- i18n-source: CONTRACTS.md | sha256: c479b2f976881e59 | version: 2.14.0 | translated: 2026-09-01 | translation: 87b475ed7908342f -->
 > [English](CONTRACTS.md) · **简体中文**
 
 # cc-memory — 契约（Contracts）
@@ -188,7 +188,7 @@ v2.0 有四条互相独立的保存路径（`pre_compact`、`stop` 观察者、`
 |-----------|---------------|
 | `PreCompact` 钩子 | `upsert_batch(db, pid, sid, extracted_list, memory_dir)`（`hooks/pre_compact.py:673`） |
 | `Stop` 观察者 | `upsert_batch(db, pid, None, observer_list, memory_dir)`（`hooks/stop.py:384`） |
-| `SessionStart` 追溯保存 | `upsert_batch(db, pid, sid, memories, memory_dir=memory_dir)` —— 处理此前未保存的会话（`hooks/session_start.py:1138`） |
+| `SessionStart` 追溯保存 | `upsert_batch(db, pid, sid, memories, memory_dir=memory_dir)` —— 处理此前未保存的会话（`hooks/session_start.py:1266`） |
 | `/save-memories` 技能 | `upsert_batch(db, pid, None, memories, memory_dir=mem_dir)` —— `mem_dir` 是 `core.layout.memory_dir(project)`，绝不是手写的路径拼接（`skills/save-memories/SKILL.md:180`） |
 | `mem.py add` CLI | `upsert_smart(...)` + `regenerate_memory_index(...)`（`cli/mem.py:1171,524`） |
 | `mcp/server.py handle_memory_add` | `upsert_smart(...)` + `regenerate_memory_index(...)`（`mcp/server.py:629-656,192`） |
@@ -335,15 +335,15 @@ SQL 行生成。Schema 见 `cc_memory/core/db.py:_MIGRATIONS:v3_progress`（`db.
 | `status_done` | TEXT | `session_summaries.completed`（`progress.py:236`），PreCompact 用抽取结果里 `result` / `decision` 类的记忆填充（`pre_compact.py:666-700`），仅当抽取没给出任何结论时才退回到观察到的 Edit/Write 路径列表。v2.8.0 以前**永远**走那条路径列表，于是 §2 的 “Done” 渲染出来是一份文件清单，而不是“做完了什么”。若为空，SessionStart 会补上（`session_start.py:589-590`） |
 | `status_in_flight` | TEXT | `session_summaries.learned`，由抽取结果里 `arch` / `config` / `bug` 类的记忆填充（`pre_compact.py:666-700`）。v2.8.0 以前 PreCompact 把它硬编码成 `""`，所以 §2 的 “In-flight” 无条件渲染成 `*(none active)*` —— 那是结构性的，不是因为真的没有在办事项 |
 | `status_blocked` | TEXT | 显式的 `patch_progress(status_blocked=...)` —— 今天树内没有任何调用方这样做；它是留给外部工具的 API。全仓库 grep 只能找到 schema 默认值（`core/db.py:2548-2587,853`）、空播种（`core/progress.py:276`）和读取处（`core/progress.py:276`） |
-| `open_todos` | JSON | PreCompact 经 `ext["latest_todos"]` 调用 `extract_latest_todo_state(window)`（`core/extractor.py:478-513,558`；`pre_compact.py:630,656`）→ SessionStart 第 3 级：挖掘上一次会话的 transcript（`session_start.py:874`）→ **最后手段**：把 `session_summary.next_steps` 按 `;` 切分（`session_start.py:874`）。只保留非 `completed` 的 todo（`progress.py:276`） |
-| `plan` | TEXT | `session_summaries.next_steps` —— 若有最新 TodoWrite 的 pending 项则取自它，否则取自 LLM 抽取出的 `task` 类记忆（`pre_compact.py:462-468`）；在 `progress.py:255` 传播，在 `session_start.py:874` 按“空则填”补齐 |
-| `critical_context` | JSON | importance ≥ 4 的前 10 条记忆，内容截断到 200 字符（`progress.py:107-113`；`session_start.py:875`） |
-| `files_touched` | JSON | `observations` 表（`pre_compact.py:446-453` → `progress.py:128-134`；Stop 每回合打补丁 `stop.py:193-211`；SessionStart 第 2C 级 `session_start.py:875`）→ 第 3 级：对上一次会话 transcript 跑 `extract_file_changes`（`session_start.py:875`） |
-| `transcript_ptr` | TEXT | PreCompact 解析为绝对路径的 `transcript_path`（`pre_compact.py:751`）→ 第 3 级 `find_latest_transcript(cwd, exclude_session_id=...)`（`session_start.py:946`） |
+| `open_todos` | JSON | PreCompact 经 `ext["latest_todos"]` 调用 `extract_latest_todo_state(window)`（`core/extractor.py:478-513,558`；`pre_compact.py:630,656`）→ SessionStart 第 3 级：挖掘上一次会话的 transcript（`session_start.py:961`）→ **最后手段**：把 `session_summary.next_steps` 按 `;` 切分（`session_start.py:961`）。只保留非 `completed` 的 todo（`progress.py:276`） |
+| `plan` | TEXT | `session_summaries.next_steps` —— 若有最新 TodoWrite 的 pending 项则取自它，否则取自 LLM 抽取出的 `task` 类记忆（`pre_compact.py:462-468`）；在 `progress.py:255` 传播，在 `session_start.py:961` 按“空则填”补齐 |
+| `critical_context` | JSON | importance ≥ 4 的前 10 条记忆，内容截断到 200 字符（`progress.py:107-113`；`session_start.py:962`） |
+| `files_touched` | JSON | `observations` 表（`pre_compact.py:446-453` → `progress.py:128-134`；Stop 每回合打补丁 `stop.py:193-211`；SessionStart 第 2C 级 `session_start.py:962`）→ 第 3 级：对上一次会话 transcript 跑 `extract_file_changes`（`session_start.py:962`） |
+| `transcript_ptr` | TEXT | PreCompact 解析为绝对路径的 `transcript_path`（`pre_compact.py:751`）→ 第 3 级 `find_latest_transcript(cwd, exclude_session_id=...)`（`session_start.py:925`） |
 | `updated_at` | TEXT | ISO 时间戳，由 `upsert_progress` / `patch_progress` 打戳（`db.py:2389-2465`、`:937-943`） |
-| `trigger_type` | TEXT | "auto" \| "manual"（PreCompact 把宿主自己的触发字符串原样透传 —— `pre_compact.py:71,492`；`"precompact"` 只是 `collect_progress_state` 在 `progress.py:200-260` 的默认关键字参数，且总会被覆盖）\| "stop"（`stop.py:561`）\| "user_prompt" \| "resume_request"（`user_prompt.py:213`）\| "session_start_refresh"（`session_start.py:890`） |
-| `current_session_id` | TEXT | 只由 `db.tag_progress_session` 写入（`db.py:2589-2613`）—— 由 PreCompact（`pre_compact.py:750`）、Stop（`stop.py:561`）、SessionStart（`session_start.py:890`）、UserPromptSubmit（`user_prompt.py:213`）打标签 |
-| `session_started_at` | TEXT | `db.tag_progress_session` —— 只在存储的 sid 发生变化时重置；`upsert_progress` 在整篇重写时会把这两个字段一并保留（`db.py:2589-2613`） |
+| `trigger_type` | TEXT | "auto" \| "manual"（PreCompact 把宿主自己的触发字符串原样透传 —— `pre_compact.py:71,492`；`"precompact"` 只是 `collect_progress_state` 在 `progress.py:200-260` 的默认关键字参数，且总会被覆盖）\| "stop"（`stop.py:561`）\| "user_prompt" \| "resume_request"（`user_prompt.py:213`）\| "session_start_refresh"（`session_start.py:987`） |
+| `current_session_id` | TEXT | 只由 `db.tag_progress_session` 写入（`db.py:2641-2665`）—— 由 PreCompact（`pre_compact.py:750`）、Stop（`stop.py:561`）、SessionStart（`session_start.py:987`）、UserPromptSubmit（`user_prompt.py:213`）打标签 |
+| `session_started_at` | TEXT | `db.tag_progress_session` —— 只在存储的 sid 发生变化时重置；`upsert_progress` 在整篇重写时会把这两个字段一并保留（`db.py:2641-2665`） |
 
 渲染出的 Markdown（[`cc_memory/core/progress.py`](../cc_memory/core/progress.py)
 中的第 0-7 节）就是从这一行生成的。手工编辑 PROGRESS.md 毫无意义：四条自动更新路径
@@ -351,7 +351,7 @@ SQL 行生成。Schema 见 `cc_memory/core/db.py:_MIGRATIONS:v3_progress`（`db.
 手动重新生成入口 `/cc-mem progress`（`cli/mem.py:1238`）和 MCP 的
 `progress_regenerate` 工具（`mcp/server.py:745`）——都会覆盖它。全部六处
 `write_progress_md` 调用点：`pre_compact.py:752`、`stop.py:500`、`user_prompt.py:205`、
-`session_start.py:1013`、`cli/mem.py:1416`、`mcp/server.py:745`。
+`session_start.py:1121`、`cli/mem.py:1416`、`mcp/server.py:745`。
 
 ### 渲染布局（§0-§7）
 
@@ -389,7 +389,7 @@ sid），每一行形如
      `extracted_memories + observations + session_summaries` 构建完整状态
      （`progress.py:355`）。
    - `db.tag_progress_session(...)` **先**运行，这样标签才能存活
-     （`pre_compact.py:750`；保留逻辑见 `db.py:2589-2613`）。
+     （`pre_compact.py:750`；保留逻辑见 `db.py:2641-2665`）。
    - `db.upsert_progress(**all_fields)` 覆盖整行（`pre_compact.py:751`）。
    - `write_progress_md(db, pid, memory_dir)` 重写文件（`:501`）。
 
@@ -414,6 +414,23 @@ sid），每一行形如
 4. **SessionStart 刷新**（每次会话启动，第 2/3 级兜底）：
    - `_refresh_progress_row(db, pid, memory_dir, current_session_id)`
      （`session_start.py:855-1015`）。
+   - 「是否为空」的判定放在**写入事务内部**。`db.fill_empty_progress` 把每个字段写成
+     `SET col = CASE WHEN COALESCE(col, '') IN ('', '[]') THEN ? ELSE col END`，
+     在 `BEGIN IMMEDIATE` 下执行（`db.py:2530-2546`）；它上面那次读取只负责决定**提供**
+     哪些值。旧写法是一条连接上的 `get_progress()` 读，加另一条连接上的无条件
+     `patch_progress()` 写，中间还夹着第 3 级的 transcript 加载：在这个窗口里提交的
+     PreCompact 整篇重写，会被那次过期读取所批准的启发式值覆盖 —— 实测
+     `status_done`、`status_in_flight`、`plan`、`open_todos` 四项全部被替换。
+   - **空**不等于**从未写过**。`[]` 是假值，所以 PreCompact 因为「没有待办」而写下的
+     `open_todos` 被读成了「这个字段还没填」。当 `progress.trigger_type` 表明该行是被
+     整篇重写敲定的（`progress_was_fully_written`，`session_start.py:893`），
+     被挖掘出来的工作清单 —— `open_todos` 与 `files_touched` —— 就保持那次重写留下的
+     样子。**局限**：该列记录的是**最后一个写入者**，而 Stop 钩子每回合都会把它盖成
+     `"stop"`，所以这个事实只保护紧跟在一次重写之后的那次 compact/resume 启动。
+   - 当 `source="compact"` / `"resume"` 时，第 3 级挖掘的是**当前** transcript
+     （`tier3_exclusion`，`session_start.py:922`）：会话 id 没有变，而那个文件
+     **就是**历史。把它排除掉，等于把挖掘对象交给磁盘上最新的**另一个**会话，那个会话
+     待办中的 TodoWrite 条目于是作为本会话自己的条目进入 PROGRESS.md §3。
    - 空则填：绝不覆盖上游写入的非空字段（契约陈述见 `session_start.py:555-557`）。
    - 来源依次为：DB 的 critical_memories / session_summary / observations，然后
      （如果仍为空）去挖掘上一次会话的 `.jsonl` transcript，取 `open_todos`、

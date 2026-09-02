@@ -1,4 +1,4 @@
-<!-- i18n-source: ARCHITECTURE.md | sha256: de953795539300c5 | version: 2.14.0 | translated: 2026-09-01 | translation: 473e21f0d8561813 -->
+<!-- i18n-source: ARCHITECTURE.md | sha256: 91187c15cd319e10 | version: 2.14.0 | translated: 2026-09-01 | translation: 0e2828b43b1a4f0b -->
 > [English](ARCHITECTURE.md) · **简体中文**
 
 # cc-memory — 架构
@@ -323,9 +323,9 @@ SQLite 表（定义在 [`cc_memory/core/db.py`](../cc_memory/core/db.py)），�
 
 此外还有 `memories_fts`——一个建立在 `memories` 之上的 FTS5 虚拟表
 （`core/db.py:455-458`），由三个触发器保持同步（`core/db.py:459-478`，迁移 `v2_fts5` 在
-`db.py:3126-3160`）。它只在本地 SQLite 构建带 FTS5 时才会创建；否则
-`db.search_fts`（`core/db.py:3126-3160`）回退到 `LIKE ? ESCAPE '\'`
-（`core/db.py:3126-3160`）。FTS5 在 `.claude-plugin/plugin.json:4` 与 `:12` 中被
+`db.py:3178-3212`）。它只在本地 SQLite 构建带 FTS5 时才会创建；否则
+`db.search_fts`（`core/db.py:3178-3212`）回退到 `LIKE ? ESCAPE '\'`
+（`core/db.py:3178-3212`）。FTS5 在 `.claude-plugin/plugin.json:4` 与 `:12` 中被
 宣传，`/cc-mem status` 会报告当前实际走哪条路径（`cli/mem.py` 的 `cmd_status`）。
 
 `memories` 上的 `supersedes_id` 列（迁移 `v3_supersedes`，`db.py:168`）把反补丁的
@@ -505,7 +505,7 @@ SessionStart：
 
 上面的调用签名都是真实的：`write_progress_md(db, project_id, memory_dir)`
 （`core/progress.py:331-490`；调用点 `pre_compact.py:752`、`stop.py:500`、
-`user_prompt.py:133`、`session_start.py:912`、`mcp/server.py:243`、
+`user_prompt.py:133`、`session_start.py:1107`、`mcp/server.py:243`、
 `cli/mem.py:1262`）。PROGRESS.md 的结构规格见
 [docs/CONTRACTS.md](CONTRACTS.md#handoff-contract)。
 
