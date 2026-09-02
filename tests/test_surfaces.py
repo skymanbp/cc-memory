@@ -135,7 +135,13 @@ def _cleanup_sandbox():
     of 475,136 B in the real %TEMP%, forever, because the teardown was
     `shutil.rmtree(_SANDBOX, ignore_errors=True)`. A leak this cannot clean is
     now REPORTED as a failure rather than swallowed.
+
+    Idempotent: main() tears down on success and the entry point's
+    `finally` calls this again on every exit, failure included; a sandbox
+    that is already gone is not a leak.
     """
+    if not _SANDBOX.exists():
+        return  # already torn down by the success path; nothing to leak
     for _conn in [o for o in gc.get_objects()
                   if isinstance(o, sqlite3.Connection)]:
         try:
@@ -5226,5 +5232,12 @@ if __name__ == "__main__":
     except BaseException:
         import traceback
         traceback.print_exc()
-        print(f"\n===== SURFACE TESTS FAILED (sandbox kept at {_SANDBOX}) =====")
+        print("\n===== SURFACE TESTS FAILED =====")
         sys.exit(1)
+    finally:
+        # The sandbox used to be KEPT on failure for post-mortems. Nobody
+        # ever opened one, and falsification runs fail this suite on
+        # purpose once per case: 53 kept sandboxes (347 MB) sat in the
+        # real %TEMP% on 2026-09-02. The docstring above promised removal
+        # at the end; now it is true on every exit.
+        _cleanup_sandbox()

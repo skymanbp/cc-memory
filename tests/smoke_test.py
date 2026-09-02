@@ -73,7 +73,13 @@ def _cleanup_sandbox():
     Deliberate literal twin of tests/test_surfaces.py:_cleanup_sandbox --
     these two files are standalone scripts that cannot import each other, and
     a shared helper module would have to live inside the package under test.
+
+    Idempotent: the success path tears down inside main() (so the marker
+    line precedes the PASSED banner) and the entry point's `finally` calls
+    this again on EVERY exit; a sandbox that is already gone is not a leak.
     """
+    if not _SANDBOX.exists():
+        return  # already torn down by the success path; nothing to leak
     for _conn in [o for o in gc.get_objects()
                   if isinstance(o, sqlite3.Connection)]:
         try:
@@ -6522,4 +6528,13 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    finally:
+        # Teardown runs on the FAILURE path too. A suite that leaks only
+        # when it fails leaks exactly when nobody is looking: falsification
+        # runs make this suite fail on purpose, once per case, and 120
+        # sandboxes (594 MB) had accumulated in the real %TEMP% before this
+        # `finally` existed (measured 2026-09-02). The helper is a no-op
+        # after main()'s own teardown, so a green run pays nothing twice.
+        _cleanup_sandbox()

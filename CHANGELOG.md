@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Test sandboxes are removed on the failure path too.** `tests/smoke_test.py`
+  tore its sandbox down only at the end of `main()`, and `tests/test_surfaces.py`
+  kept its sandbox on failure by design ("sandbox kept at ..."). Falsification
+  runs fail both suites on purpose, once per case, so every RED case leaked one:
+  measured on the reporting machine on 2026-09-02, 120 `cc-memory-smokebox-*`
+  (594 MB) and 53 `cc-memory-surfaces-*` (347 MB) under the real `%TEMP%`. Both
+  entry points now tear down in a `finally`, the shape `test_plan_carryover.py`
+  and `test_directive_enforcement.py` already had, and `_cleanup_sandbox` is a
+  no-op once the sandbox is gone, so the success path's own teardown (which
+  keeps the marker line ahead of the PASSED banner) is not repeated. Verified
+  by driving `r14depcut` (smoke-gated) and `r14frozendash` (surfaces-gated)
+  RED with 0 sandboxes left afterwards.
+
 ## [2.14.0] — 2026-09-02
 
 ### A project's identity is its database, not the path string inside it

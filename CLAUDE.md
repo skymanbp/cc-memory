@@ -1958,10 +1958,13 @@ behavior to `memory_writer`, `progress`, `extractor.load_transcript_window`, or
 `session_start._refresh_progress_row`, add a corresponding assertion block.
 
 **Tests MUST use `tempfile` directories only, and MUST remove them.** All
-three suites redirect `USERPROFILE`/`HOME` **and** `TMPDIR`/`TEMP`/`TMP` into a
+four suites redirect `USERPROFILE`/`HOME` **and** `TMPDIR`/`TEMP`/`TMP` into a
 sandbox before importing the package, assert `Path.home()` really moved, and
-tear the sandbox down in a `finally` — an uncleanable leak is a test FAILURE,
-not a warning. `test_plan_carryover.py` was the exception through v2.8.0: it
+tear the sandbox down in a `finally` at the ENTRY POINT — on the failure
+path too, because falsification runs fail a suite on purpose once per case
+and 173 kept sandboxes (941 MB) were measured in the real `%TEMP%` on
+2026-09-02 before `smoke_test.py` and `test_surfaces.py` did so — and an
+uncleanable leak is a test FAILURE, not a warning. `test_plan_carryover.py` was the exception through v2.8.0: it
 ran against the real home and left two project directories per run in the real
 `%TEMP%` (found: 270 of them, 42 MB). Every subprocess capture needs an
 explicit `encoding="utf-8"` — the default codec on this box is gbk and the CLI
