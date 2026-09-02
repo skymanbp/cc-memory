@@ -24,7 +24,7 @@ Workflow (this file):
 
 Status flow: draft -> evaluating -> ready -> executing -> done/failed/skipped
 """
-import argparse, sys, textwrap
+import argparse, sqlite3, sys, textwrap
 from pathlib import Path
 
 _HERE = Path(__file__).resolve().parent     # cc_memory/cli/
@@ -135,6 +135,97 @@ def _die(msg):
     """Print an error and exit non-zero (CLI failure paths must not exit 0)."""
     print(msg)
     sys.exit(1)
+
+
+# SQLite stores an INTEGER in 64 bits and `sqlite3` raises OverflowError on a
+# bound parameter that does not fit. Kept identical to cli/mem.py's `_row_id`:
+# the two halves of one CLI pair must not disagree about what an id is.
+_SQLITE_INT_MAX = 2 ** 63 - 1
+
+
+def _plan_int(value):
+    """argparse type for a plan id / order: an integer SQLite can hold.
+
+    `plan.py add x --start-order 99999999999999999999` reached the driver and
+    raised `OverflowError: Python int too large to convert to SQLite INTEGER`
+    — a traceback out of a CLI whose every other failure path prints one line
+    (register D5). The id subcommands pre-flight through `_require_plans` and
+    already answer "Plan #N not found", so this is about the values that go
+    STRAIGHT into a write.
+    """
+    n = int(value)
+    if not (-_SQLITE_INT_MAX - 1 <= n <= _SQLITE_INT_MAX):
+        raise argparse.ArgumentTypeError(
+            f"{n} is outside the range SQLite stores an integer in "
+            f"(-2**63 .. 2**63-1)")
+    return n
+
+
+# What EXTERNAL input can raise on the way through a subcommand — the
+# filesystem, the SQLite driver, a decoder, an integer too wide for a column.
+# Deliberately not a bare `ValueError`: `UnicodeError` is the only subclass
+# here that means "the bytes we were handed are wrong", so a genuine bug in
+# this file still surfaces as a traceback rather than one tidy line.
+_BOUNDARY_ERRORS = (OSError, sqlite3.Error, UnicodeError, OverflowError)
+
+# The sqlite3 messages MEASURED for an ENVIRONMENT fault. Kept in step with
+# `cli/mem.py:_SQLITE_ENV_FAULTS`, which carries the full reasoning: the class
+# is not sufficient, because `OperationalError` is both "unable to open
+# database file" and "no such column: frequency". A message not in this table
+# is not demonstrably external, so `_boundary_report` returns None and `main`
+# re-raises rather than misdiagnosing a bug.
+_SQLITE_ENV_FAULTS = (
+    ("file is not a database",
+     "the plan database is not a SQLite file",
+     "       Something else was written over .ccm/memory.db. Move it aside "
+     "and re-initialise with /ccm-load."),
+    ("unable to open database file",
+     "the plan database could not be opened",
+     "       Check that .ccm/memory.db is a writable FILE (a directory of "
+     "that name gives exactly this error)."),
+    ("database is locked",
+     "the plan database is locked by another process",
+     "       A hook, the dashboard or a second CLI is mid-write. Retry in a "
+     "moment; if it persists, close the dashboard."),
+    ("attempt to write a readonly database",
+     "the plan database is read-only",
+     "       Check the file permissions on .ccm/memory.db and its "
+     "directory."),
+)
+
+
+def _boundary_report(exc, project):
+    """One actionable line (plus a remedy) per MEASURED failure shape, or None
+    when the shape was not measured and the caller must re-raise.
+
+    Mirrors `cli/mem.py:_boundary_report`. This CLI had NO dispatch boundary
+    at all, so a `memory.db` that is a directory or not SQLite, and a `.ccm`
+    that is a regular file, each reached the user as a traceback.
+    """
+    where = f" (--project {project})" if project is not None else ""
+    if isinstance(exc, sqlite3.Error):
+        msg = str(exc)
+        for needle, headline, remedy in _SQLITE_ENV_FAULTS:
+            if needle in msg:
+                return [f"{headline}{where}: {exc}", remedy]
+        return None
+    if isinstance(exc, FileExistsError):
+        return [f"cannot create the state directory{where}: {exc}",
+                "       A regular file is sitting where .ccm/ has to be."]
+    if isinstance(exc, UnicodeDecodeError):
+        return [f"a file this command read is not UTF-8 text ({exc.encoding} "
+                f"codec failed at byte {exc.start}: {exc.reason})."]
+    if isinstance(exc, UnicodeError):
+        return [f"text encoding error: {type(exc).__name__}: {exc}"]
+    if isinstance(exc, OverflowError):
+        return [f"a number in this command is too large for the database: "
+                f"{exc}",
+                "       Ids and orders must fit in 64 bits."]
+    # Every remaining OSError is a real filesystem fault; only FileExistsError
+    # above was measured to have a remedy. State what the OS said and name the
+    # path it said it about — a restatement cannot be a wrong diagnosis.
+    named = f" ({exc.filename})" if getattr(exc, "filename", None) else ""
+    return [f"{type(exc).__name__}: {exc}{named}"]
 
 
 def _require_plans(db, pid, ids, statuses=None):
@@ -463,7 +554,7 @@ def make_parser():
 
     pa = sub.add_parser("add", help="Add plans")
     pa.add_argument("content", nargs="+", help="Plan descriptions")
-    pa.add_argument("--start-order", type=int, default=0,
+    pa.add_argument("--start-order", type=_plan_int, default=0,
                     help="Starting order number (0=auto)")
 
     pl = sub.add_parser("list", help="List plans")
@@ -539,7 +630,29 @@ def main():
         "done": cmd_done, "fail": cmd_fail, "skip": cmd_skip,
         "clear": cmd_clear, "reorder": cmd_reorder,
     }
-    dispatch[args.command](args)
+    try:
+        dispatch[args.command](args)
+    except FileNotFoundError as exc:
+        # why: the project directory is GONE. `_get_db` catches this for
+        # `ensure_memory_dir` only; `MemoryDB(...)` raises it one line later
+        # and there was nothing above it. Same wording as cli/mem.py's.
+        _die(f"Error: {exc}")
+    except _BOUNDARY_ERRORS as exc:
+        # why: this CLI is the half of a pair whose OTHER half is cited in
+        # `_get_db`'s docstring for printing one clean line — and it had no
+        # boundary of its own (register D5). Enumerating classes by incident
+        # is what made cli/mem.py's boundary miss four of them; the rule here
+        # is the class of thing EXTERNAL input can raise.
+        report = _boundary_report(exc, getattr(args, "project", None))
+        if report is None:
+            # why: the class was caught but the MESSAGE is not one external
+            # input was measured to produce — most likely a bug in this file,
+            # and a bug needs its traceback, not a borrowed remedy.
+            raise
+        for line in report:
+            if line:
+                print(line if line.startswith(" ") else f"Error: {line}")
+        sys.exit(1)
 
 
 if __name__ == "__main__":

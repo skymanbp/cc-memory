@@ -3999,6 +3999,391 @@ def _web_header_phase_is_deadline_bounded():
     return wv._HEADER_DEADLINE_S
 
 
+def _plan_set_advisory_reads_what_was_written(pkg):
+    """(§9h) The advisory judges the plan that LANDED, not the raw payload.
+
+    `apply_refined_plan` normalises and commits, and only then did
+    `unmatched_criteria(outgoing, structured)` run — on the RAW dict, whose
+    `success_criteria` the normaliser had already dropped for being the wrong
+    type. `core/plan.py:unmatched_criteria` read it as `x or []`, which is not
+    a type guard: `7` and `true` are truthy and not iterable, so an ADVISORY
+    raised `TypeError: 'int' object is not iterable` AFTER "[OK] Plan stored".
+    rc=1 then said the write had failed, the user retried, and the carryover
+    gate refused the retry — because the plan had in fact landed and the
+    outgoing plan was now the new one (register D4).
+
+    Both halves are asserted: the CLI passes `result`, and the core function
+    guards the type on its own — a core function must not depend on its
+    callers having normalised for it. And the third assert is the one the
+    finding is really about: the exit code has to tell the truth about the
+    write, so an identical retry is accepted rather than refused.
+    """
+    from core import plan as _plan_mod
+
+    box = Path(tempfile.mkdtemp(prefix="ccm-d4-"))
+    proj = box / "P"
+    (proj / _MEM).mkdir(parents=True)
+    db = MemoryDB(proj / _MEM / "memory.db")
+    db.upsert_project(str(proj))
+    mem_py = pkg / "cli" / "mem.py"
+    checks = 0
+
+    def plan_set(payload):
+        return subprocess.run(
+            [sys.executable, str(mem_py), "--project", str(proj),
+             "plan-set", "--from-refiner"],
+            input=json.dumps(payload), capture_output=True, encoding="utf-8",
+            env=dict(os.environ, PYTHONIOENCODING="utf-8"))
+
+    good = {"goal": "Ship the billing migration",
+            "success_criteria": ["All invoices reconcile", "No 5xx in canary"],
+            "steps": [{"id": 1, "title": "Write the migration script",
+                       "status": "pending"},
+                      {"id": 2, "title": "Run canary for one day",
+                       "status": "pending"}],
+            "context": "c", "refined_by": "plan-refiner"}
+    repl = {"goal": "Different goal now",
+            "steps": [{"title": "Completely unrelated work"}],
+            "dispositions": [
+                {"old_title": "Write the migration script",
+                 "action": "done", "reason": "shipped in 1a2b"},
+                {"old_title": "Run canary for one day",
+                 "action": "dropped", "reason": "no canary env"}]}
+
+    # Every non-list `success_criteria` a refiner can realistically emit. A
+    # dict never CRASHED — it iterated its KEYS and judged the outgoing
+    # criteria against them, which is the same defect answering quietly.
+    for bad in (7, True, {"a": 1}, "not a list", 1.5):
+        r = plan_set(good)
+        assert r.returncode == 0, f"fixture GOOD plan refused: {r.stdout[:300]}"
+        r = plan_set(dict(repl, success_criteria=bad))
+        assert "Traceback" not in r.stderr, (
+            f"the carryover advisory crashed on success_criteria={bad!r} "
+            f"AFTER the plan was committed: "
+            f"{r.stderr.strip().splitlines()[-1:]}")
+        assert r.returncode == 0 and "[OK] Plan stored" in r.stdout, (
+            f"the write LANDED but rc={r.returncode} said otherwise for "
+            f"success_criteria={bad!r}: {r.stdout[:300]!r}")
+        # The retry a truthful exit code makes unnecessary must still work —
+        # the outgoing plan is now the replacement, and the identical payload
+        # auto-carries its own step by title.
+        r = plan_set(dict(repl, success_criteria=bad))
+        assert r.returncode == 0, (
+            f"the identical retry was refused for success_criteria={bad!r}: "
+            f"{r.stdout[:300]!r}")
+        checks += 1
+        subprocess.run([sys.executable, str(mem_py), "--project", str(proj),
+                        "plan-clear", "--reason", "gate reset"],
+                       capture_output=True, encoding="utf-8",
+                       env=dict(os.environ, PYTHONIOENCODING="utf-8"))
+
+    # The advisory must also be judged against the NORMALISED text, not the
+    # raw. A criterion folded into the replacement's GOAL counts as carried —
+    # "lossy survival is still survival", per unmatched_criteria's docstring —
+    # but only if the goal it is compared against is the string that was
+    # stored. A refiner emitting the goal as a list of lines makes the raw
+    # payload's `goal` a non-str, which the candidate loop skips, so the
+    # advisory cries "vanished" over a criterion sitting in the goal.
+    r = plan_set({"goal": "Ship the billing migration",
+                  "success_criteria": ["All invoices reconcile"],
+                  "steps": [{"id": 1, "title": "Write the migration script",
+                             "status": "pending"}],
+                  "refined_by": "plan-refiner"})
+    assert r.returncode == 0, f"fixture plan refused: {r.stdout[:300]}"
+    r = plan_set({"goal": ["All invoices", "reconcile"],
+                  "steps": [{"title": "Completely unrelated work"}],
+                  "dispositions": [{"old_title": "Write the migration script",
+                                    "action": "done", "reason": "shipped"}]})
+    assert r.returncode == 0, f"replacement refused: {r.stdout[:300]}"
+    assert "carryover advisory" not in r.stdout, (
+        f"the advisory read the RAW payload: a criterion absorbed into the "
+        f"stored goal 'All invoices reconcile' was reported lost because the "
+        f"raw goal is a list and the candidate loop skips a non-str: "
+        f"{r.stdout[:400]!r}")
+    checks += 1
+    subprocess.run([sys.executable, str(mem_py), "--project", str(proj),
+                    "plan-clear", "--reason", "gate reset"],
+                   capture_output=True, encoding="utf-8",
+                   env=dict(os.environ, PYTHONIOENCODING="utf-8"))
+
+    # Half two, in-process: the core function guards the type itself.
+    for bad in (7, True, "s", 1.5, None):
+        lost = _plan_mod.unmatched_criteria(
+            {"version": 1, "goal": "g", "success_criteria": ["keep this one"],
+             "steps": [{"id": 1, "title": "t", "status": "done"}]},
+            {"goal": "g2", "success_criteria": bad,
+             "steps": [{"id": 1, "title": "t", "status": "pending"}]})
+        assert lost == ["keep this one"], (
+            f"unmatched_criteria mis-read success_criteria={bad!r}: {lost!r}")
+        checks += 1
+    # ...and an old-side non-list is guarded the same way, symmetrically.
+    assert _plan_mod.unmatched_criteria(
+        {"version": 1, "goal": "g", "success_criteria": 7,
+         "steps": [{"id": 1, "title": "t", "status": "done"}]},
+        {"goal": "g2", "steps": [{"id": 1, "title": "t"}]}) == []
+    checks += 1
+
+    # `goal` / `context` are TEXT. `_s()` ran str() over anything, so a list
+    # goal was stored as the literal Python repr "['list goal']" and PASSED
+    # is_valid_structured, which exists to refuse a wrong-typed goal.
+    joined = _plan_mod.normalize_structured(
+        {"goal": ["Ship the", "billing migration"],
+         "context": ["ctx a", "ctx b"], "steps": [{"title": "t"}]})
+    assert joined["goal"] == "Ship the billing migration", joined["goal"]
+    assert joined["context"] == "ctx a ctx b", joined["context"]
+    checks += 1
+    for bad in ({"a": 1}, 7, True, 1.5, [1, 2], [["x"]]):
+        got = _plan_mod.normalize_structured(
+            {"goal": bad, "context": bad, "steps": [{"title": "t"}]})
+        assert got["goal"] == "" and got["context"] == "", (
+            f"a {type(bad).__name__} goal/context was stringified into the "
+            f"stored plan: goal={got['goal']!r} context={got['context']!r}")
+        assert not _plan_mod.is_valid_structured(got), (
+            f"a {type(bad).__name__} goal passed the schema check")
+        checks += 1
+
+    for conn in [o for o in gc.get_objects() if isinstance(o, sqlite3.Connection)]:
+        try:
+            conn.close()
+        except sqlite3.Error:
+            # why: only releasing the OS handle before rmtree matters here
+            pass
+    shutil.rmtree(box, ignore_errors=True)
+    return checks
+
+
+def _cli_boundaries_catch_the_class(pkg):
+    """(§9i) Both CLI boundaries refuse EXTERNAL-input failures, not incidents.
+
+    `cli/mem.py:main` caught `FileNotFoundError` and nothing else — under a
+    comment warning that enumerating sites by incident is how the fourteenth
+    gets missed. Four more classes were reachable from ordinary input
+    (register D5): a `memory.db` that is a directory or not SQLite
+    (`sqlite3.OperationalError` / `DatabaseError`), a `.ccm` that is a regular
+    file (`FileExistsError`), a UTF-16 `--raw-file` (`UnicodeDecodeError` —
+    Notepad's default on the primary platform), and any id past 2**63
+    (`OverflowError`). `cli/plan.py` had no boundary at all, while its own
+    `_get_db` docstring cited mem.py for printing one clean line instead.
+
+    Asserted per shape: no traceback, a non-zero exit, and an actionable
+    line — a boundary that prints `Error: <repr>` and exits 1 passes a
+    "no traceback" test while telling the user nothing they can act on.
+    """
+    box = Path(tempfile.mkdtemp(prefix="ccm-d5-"))
+    mem_py, plan_py = pkg / "cli" / "mem.py", pkg / "cli" / "plan.py"
+    checks = 0
+
+    live = box / "live"
+    (live / _MEM).mkdir(parents=True)
+    db = MemoryDB(live / _MEM / "memory.db")
+    db.upsert_project(str(live))
+    not_sqlite = box / "notdb"
+    (not_sqlite / _MEM).mkdir(parents=True)
+    (not_sqlite / _MEM / "memory.db").write_text("hello", encoding="utf-8")
+    db_is_dir = box / "dbdir"
+    (db_is_dir / _MEM / "memory.db").mkdir(parents=True)
+    ccm_is_file = box / "ccmfile"
+    ccm_is_file.mkdir()
+    (ccm_is_file / _MEM).write_text("not a directory", encoding="utf-8")
+    utf16 = box / "plan_utf16.txt"
+    utf16.write_text("Plan: migrate the billing service", encoding="utf-16")
+    gbk = box / "plan_gbk.txt"
+    gbk.write_bytes("计划：迁移计费服务".encode("gbk"))
+
+    HUGE = "99999999999999999999"
+    # (cli, project, argv, a word the remedy must contain)
+    shapes = [
+        (mem_py, not_sqlite, ["list"], "SQLite"),
+        (mem_py, not_sqlite, ["stats"], "SQLite"),
+        (mem_py, not_sqlite, ["add", "decision", "long enough content row"],
+         "SQLite"),
+        (mem_py, db_is_dir, ["list"], "writable"),
+        (mem_py, db_is_dir, ["status"], "writable"),
+        (mem_py, ccm_is_file, ["add", "decision", "long enough content row"],
+         "regular file"),
+        (mem_py, live, ["plan-set", "--raw-file", str(utf16)], "UTF-8"),
+        (mem_py, live, ["plan-set", "--raw-file", str(gbk)], "UTF-8"),
+        (plan_py, not_sqlite, ["list"], "SQLite"),
+        (plan_py, not_sqlite, ["add", "a plan"], "SQLite"),
+        (plan_py, db_is_dir, ["add", "a plan"], "writable"),
+        (plan_py, db_is_dir, ["status"], "writable"),
+    ]
+    for cli, proj, argv, remedy in shapes:
+        r = subprocess.run(
+            [sys.executable, str(cli), "--project", str(proj)] + argv,
+            capture_output=True, encoding="utf-8",
+            env=dict(os.environ, PYTHONIOENCODING="utf-8"))
+        label = f"{cli.name} {' '.join(argv)[:40]} in {proj.name}"
+        assert "Traceback" not in r.stderr, (
+            f"{label} escaped the dispatch boundary: "
+            f"{r.stderr.strip().splitlines()[-1:]}")
+        assert r.returncode != 0, f"{label} reported success on a failure"
+        assert remedy in r.stdout, (
+            f"{label} refused without an actionable remedy (wanted "
+            f"{remedy!r}): {r.stdout[:400]!r}")
+        checks += 1
+
+    # An id SQLite cannot hold is refused at argparse, BEFORE the driver sees
+    # it — `OverflowError: Python int too large to convert to SQLite INTEGER`
+    # is not a message about the user's typo.
+    for cli, argv in ((mem_py, ["supersedes", HUGE]),
+                      (mem_py, ["archive", HUGE]),
+                      (mem_py, ["archive", "1", "--supersedes", HUGE]),
+                      (mem_py, ["list", "--sessions", HUGE]),
+                      (mem_py, ["directive-add", "d", "--times", HUGE]),
+                      (plan_py, ["add", "x", "--start-order", HUGE])):
+        r = subprocess.run(
+            [sys.executable, str(cli), "--project", str(live)] + argv,
+            capture_output=True, encoding="utf-8",
+            env=dict(os.environ, PYTHONIOENCODING="utf-8"))
+        assert r.returncode == 2, (
+            f"{cli.name} {' '.join(argv)} was not refused by argparse: "
+            f"rc={r.returncode} {(r.stdout + r.stderr)[:300]!r}")
+        assert "Traceback" not in r.stderr and "OverflowError" not in r.stderr, (
+            f"{cli.name} {' '.join(argv)} still reached the SQLite driver: "
+            f"{r.stderr.strip().splitlines()[-1:]}")
+        checks += 1
+    # THE NEGATIVE CASE. `sqlite3.OperationalError` is BOTH an environment
+    # fault ("unable to open database file") and a bug in the CLI itself
+    # ("no such column: frequency"), so a remedy keyed on the CLASS answers a
+    # schema bug with "Check that the .ccm/memory.db path is a writable FILE"
+    # — measured, and a confident wrong diagnosis is worse than the traceback
+    # it replaced. A message outside `_SQLITE_ENV_FAULTS` must therefore keep
+    # its traceback, not borrow a remedy for a fault it does not have.
+    bug = box / "bug"
+    (bug / _MEM).mkdir(parents=True)
+    bug_db = MemoryDB(bug / _MEM / "memory.db")
+    bug_pid = bug_db.upsert_project(str(bug))
+    with bug_db._connect() as conn:
+        conn.execute("INSERT INTO keywords (project_id,keyword,frequency,"
+                     "last_seen) VALUES (?,?,?,?)",
+                     (bug_pid, "scheduler", 3, bug_db._now()))
+    for conn in [o for o in gc.get_objects()
+                 if isinstance(o, sqlite3.Connection)]:
+        try:
+            conn.close()
+        except sqlite3.Error:
+            # why: the handle has to be released before the ALTER below
+            pass
+    raw = sqlite3.connect(str(bug / _MEM / "memory.db"))
+    raw.execute("ALTER TABLE keywords RENAME COLUMN frequency TO frequency_x")
+    raw.commit()
+    raw.close()
+    r = subprocess.run(
+        [sys.executable, str(mem_py), "--project", str(bug), "keywords"],
+        capture_output=True, encoding="utf-8",
+        env=dict(os.environ, PYTHONIOENCODING="utf-8"))
+    assert r.returncode != 0, "a broken schema reported success"
+    for borrowed in ("writable FILE", "could not be opened",
+                     "not a SQLite file", "locked by another process",
+                     "read-only"):
+        assert borrowed not in r.stdout, (
+            f"an OperationalError the CLI's own SQL caused was answered with "
+            f"the {borrowed!r} remedy — a confident wrong diagnosis: "
+            f"{r.stdout[:400]!r}")
+    assert "no such column" in r.stderr, (
+        f"a bug in this file's SQL was swallowed by the boundary instead of "
+        f"keeping its traceback: {r.stderr[-400:]!r}")
+    checks += 1
+
+    # ...and an ordinary id is untouched: a bound that refuses -1 would have
+    # replaced "No memory with id -1" with a usage dump.
+    r = subprocess.run(
+        [sys.executable, str(mem_py), "--project", str(live), "supersedes", "-1"],
+        capture_output=True, encoding="utf-8",
+        env=dict(os.environ, PYTHONIOENCODING="utf-8"))
+    assert r.returncode == 1 and "id -1" in r.stdout, (
+        f"the id bound swallowed an ordinary out-of-range id: "
+        f"rc={r.returncode} {r.stdout[:200]!r}")
+    checks += 1
+
+    for conn in [o for o in gc.get_objects() if isinstance(o, sqlite3.Connection)]:
+        try:
+            conn.close()
+        except sqlite3.Error:
+            # why: only releasing the OS handle before rmtree matters here
+            pass
+    shutil.rmtree(box, ignore_errors=True)
+    return checks
+
+
+def _plan_set_accepts_a_bom(pkg):
+    """(§9j) A BOM-prefixed refiner payload is a PowerShell 5.1 default.
+
+    `/cc-mem plan-set --from-refiner < refiner.json` is the documented way to
+    land a refined plan, and on the primary platform `>`, `Out-File` and
+    `Set-Content` all write UTF-8 WITH a BOM. `json.loads` refuses it outright
+    ("Unexpected UTF-8 BOM (decode using utf-8-sig)"), so the command was
+    unusable exactly where it is documented (register D6). Every other read in
+    this CLI is already utf-8-sig; stdin and `--raw-file` were not on the list.
+    """
+    box = Path(tempfile.mkdtemp(prefix="ccm-d6-"))
+    proj = box / "P"
+    (proj / _MEM).mkdir(parents=True)
+    db = MemoryDB(proj / _MEM / "memory.db")
+    db.upsert_project(str(proj))
+    mem_py = pkg / "cli" / "mem.py"
+    checks = 0
+
+    payload = json.dumps({"goal": "Ship the billing migration",
+                          "steps": [{"title": "Write the migration script"}]})
+    r = subprocess.run(
+        [sys.executable, str(mem_py), "--project", str(proj),
+         "plan-set", "--from-refiner"],
+        input="\ufeff" + payload, capture_output=True, encoding="utf-8",
+        env=dict(os.environ, PYTHONIOENCODING="utf-8"))
+    assert r.returncode == 0 and "[OK] Plan stored" in r.stdout, (
+        f"a BOM-prefixed refiner payload was refused — the shape PowerShell "
+        f"5.1 writes by default: rc={r.returncode} {r.stdout[:300]!r}")
+    assert "\ufeff" not in (db.get_plan_active(
+        db.find_project_id(str(proj)))["structured"] or {}).get("goal", ""), \
+        "the BOM was stored as the first character of the goal"
+    checks += 1
+
+    # ...and a BOM in --raw-file is a byte order mark, not plan text.
+    raw_file = box / "plan_bom.txt"
+    raw_file.write_text("Migrate the billing service to the new queue",
+                        encoding="utf-8-sig")
+    subprocess.run([sys.executable, str(mem_py), "--project", str(proj),
+                    "plan-clear", "--reason", "gate reset"],
+                   capture_output=True, encoding="utf-8",
+                   env=dict(os.environ, PYTHONIOENCODING="utf-8"))
+    r = subprocess.run(
+        [sys.executable, str(mem_py), "--project", str(proj),
+         "plan-set", "--raw-file", str(raw_file)],
+        capture_output=True, encoding="utf-8",
+        env=dict(os.environ, PYTHONIOENCODING="utf-8"))
+    assert r.returncode == 0, f"--raw-file with a BOM: {r.stdout[:300]!r}"
+    stored = db.get_plan_active(db.find_project_id(str(proj)))["raw"] or ""
+    assert not stored.startswith("\ufeff"), \
+        f"--raw-file stored the BOM as plan text: {stored[:20]!r}"
+    checks += 1
+
+    # Malformed stdin still refuses with one line, BOM or no BOM: stripping a
+    # BOM must not become "accept anything".
+    for bad in ("\ufeff{bad", "\ufeffnull", "\ufeff", "[" * 60000 + "]" * 60000):
+        r = subprocess.run(
+            [sys.executable, str(mem_py), "--project", str(proj),
+             "plan-set", "--from-refiner"],
+            input=bad, capture_output=True, encoding="utf-8",
+            env=dict(os.environ, PYTHONIOENCODING="utf-8"))
+        assert r.returncode != 0 and "Traceback" not in r.stderr, (
+            f"malformed stdin {bad[:20]!r} was accepted or crashed: "
+            f"rc={r.returncode} {r.stderr.strip().splitlines()[-1:]}")
+        assert "[FAIL]" in r.stdout, \
+            f"malformed stdin {bad[:20]!r} refused with no [FAIL] line"
+        checks += 1
+
+    for conn in [o for o in gc.get_objects() if isinstance(o, sqlite3.Connection)]:
+        try:
+            conn.close()
+        except sqlite3.Error:
+            # why: only releasing the OS handle before rmtree matters here
+            pass
+    shutil.rmtree(box, ignore_errors=True)
+    return checks
+
+
 def test_dual_review_surfaces():
     print("\n--- §9 v2.9.0 dual-review surfaces ---------------------------")
     pkg = Path(tempfile.mkdtemp(prefix="ccm-r9-pkg-")) / "cc_memory"
@@ -4036,6 +4421,20 @@ def test_dual_review_surfaces():
     print(f"[OK] web header phase: {16} drippers cannot hold the admission "
           f"permits past the {hdr:g}s absolute header budget; the viewer "
           f"recovers on its own")
+    n_adv = _plan_set_advisory_reads_what_was_written(pkg)
+    print(f"[OK] plan-set carryover advisory: {n_adv} checks — the advisory "
+          f"judges the NORMALISED plan that landed, unmatched_criteria guards "
+          f"success_criteria's type on both sides, a truthful rc lets the "
+          f"identical retry through, and goal/context are text, never a repr")
+    n_bnd = _cli_boundaries_catch_the_class(pkg)
+    print(f"[OK] CLI dispatch boundaries: {n_bnd} shapes — a non-SQLite or "
+          f"directory memory.db, a .ccm that is a file, a UTF-16 --raw-file "
+          f"and an id past 2**63 each refuse with an actionable line and a "
+          f"non-zero exit, in BOTH CLIs")
+    n_bom = _plan_set_accepts_a_bom(pkg)
+    print(f"[OK] plan-set stdin/--raw-file: {n_bom} checks — the BOM "
+          f"PowerShell 5.1 writes by default is stripped, never stored, and "
+          f"malformed stdin still refuses with one [FAIL] line")
     shutil.rmtree(pkg.parent, ignore_errors=True)
 
 
