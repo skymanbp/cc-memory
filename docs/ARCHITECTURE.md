@@ -652,6 +652,36 @@ banner plus the verbatim raw text, labelling any older structured plan as
 superseded. The verbatim block's fence widens past the longest backtick run in
 the raw text, because plan-mode output routinely contains code fences.
 
+### The plan queue (`cc-memory-plan`)
+
+A task queue in the same database (the `plans` table), distinct from the
+live plan **anchor** above: the anchor is the one plan the session is
+executing, the queue is a backlog of drafts moving through
+`draft → evaluating → ready → executing → done | failed | skipped`.
+
+```bash
+P="cc-memory-plan --project ."       # or python .../cli/plan.py --project .
+
+$P add "Task A" "Task B" "Task C"    # append drafts
+$P list                              # show the queue
+$P reorder <id> <position>           # move a task
+$P evaluate                          # draft → evaluating
+$P set-eval <id> "<verdict>"         # record a feasibility verdict
+$P approve --all                     # evaluating → ready
+$P exec --next                       # ready → executing, print the plan text
+$P done <id> "<result>"              # → done
+$P fail <id> "<why>"                 # → failed
+$P skip <id> "<why>"                 # → skipped
+$P status                            # queue summary
+$P clear                             # drop done/failed/skipped
+```
+
+`exec` spawns nothing — it flips status and prints the plan text plus the
+`done` command to run afterwards. Every subcommand that names an id resolves
+it within `--project` first and exits 1 on an unknown or foreign id —
+`plans.id` is global to the database file, which is why the plan mutators in
+`core/db.py` take a keyword-only `project_id` (`CLAUDE.md` § v2.5.3).
+
 ---
 
 ## 6. LLM backends and auth
@@ -1096,6 +1126,23 @@ reports on each:
 Under the marketplace layouts `~/.claude/hooks/cc-memory/` holds only `logs/`
 (the `core.logger` output target). `logs/` is present under every layout,
 because the logger path is absolute and independent of where code lives.
+
+The MCP server follows the same split. Under the marketplace layouts
+`.claude-plugin/plugin.json` ships the registration inline and there is
+nothing to do; a standalone install registers it by hand, in
+`<project>/.mcp.json` or the user-scoped equivalent — note the absent
+`cc_memory/` path segment of the flat tree described next:
+
+```jsonc
+{
+  "mcpServers": {
+    "cc-memory": {
+      "command": "python3",
+      "args": ["<HOME>/.claude/hooks/cc-memory/mcp/server.py"]
+    }
+  }
+}
+```
 
 ### Nested vs flat: the standalone installer writes a FLAT tree
 

@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [2.14.0] — 2026-09-01
+## [2.14.0] — 2026-09-02
 
 ### A project's identity is its database, not the path string inside it
 
@@ -610,7 +610,14 @@ baseline control is itself finding F6, below).
   insertions (`r7harness`, `r9emptypr`, `r9progtx`, `r12canoncase`) were
   repaired and re-driven; `r12canoncase` cannot be driven RED on Windows,
   where `Path.resolve()` already case-canonicalises, and is labelled so
-  beside `r13home` / `r13registry`.
+  beside `r13home` / `r13registry`. Re-driving all 52 v2.14.0-relevant
+  cases against the negative control found one vacuous check: `r14depcut`
+  ran GREEN, because every assertion in `smoke_test.py` § A2 was satisfied
+  by `_candidates`' own database exemption — the exemption inside
+  `_dependency_cut` can change an answer only below a PINNED directory
+  named like a dependency, and nothing asked. The section now asks: a
+  repository nested in a pinned `external/` resolves to itself, exactly as
+  it does in a pinned `foo/`, and the case is RED.
 
 - `docs/debug-pass-2026-09.md` — the record of the debug pass: six
   reviewers' findings quoted verbatim with their reproduction scripts
@@ -620,6 +627,21 @@ baseline control is itself finding F6, below).
   EVIDENCE_PREFIXES` beside `demo/captures/`: its `file:line` citations are
   statements about the reviewed tree, and its scripts' symbols are not this
   plugin's, so neither the citation gate nor the symbol index reads them.
+
+### Changed
+
+- **README slimmed, both languages** (English 1100 → 1003 lines): the
+  per-project file tree, the schema table, the `cc-memory-plan` queue and
+  the standalone MCP registration moved to `docs/ARCHITECTURE.md` §7 / §4 /
+  §5 / §8, where the first two were already specified with their writers
+  and definition sites; the README keeps pointers, the subcommand sheet,
+  the MCP tool table, the configuration table and the hook table (the
+  coverage gate's owners). The repository tree and the per-gate command
+  list gave way to `run_gates.py --only <gate>` and links to ARCHITECTURE
+  §2 and CONTRIBUTING; the v2.14.0 note's seventeen-line sentence became a
+  list; and the configuration table's `version` row no longer spells a
+  version literal — it still said `2.12.2`, the one rot the slimming pass
+  found, two releases old and read by no gate.
 
 ### Recorded, not redesigned
 

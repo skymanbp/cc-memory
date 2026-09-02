@@ -3343,6 +3343,30 @@ def main():
     (_bd_pin / "sub").mkdir()
     assert _bd_same(_bd_root(str(_bd_pin / "sub")), _bd_pin), \
         "moving the pin exemption must not stop the pin working"
+    # ...and the cut's OWN exemption is observable, not a comment. An owned
+    # database is decided one rung earlier (nearest database, before
+    # `_marker_root` is consulted), so the database half of the exemption
+    # can never change an answer; the PIN half can, in exactly one shape:
+    # below a pinned directory named like a dependency, the subtree must be
+    # filtered like any other project's, so a nested repository inside a
+    # pinned `external/` resolves to itself exactly as it does inside a
+    # pinned `foo/`. Without the exemption the cut swallows everything under
+    # the pin -- the pin survives as the escape hatch, so the pinned root
+    # still answers, and the two layouts disagree about the repository
+    # nested in them. `falsify --case r14depcut` ran GREEN against this
+    # section before this shape was added: every other assertion here is
+    # satisfied by `_candidates`' database exemption alone.
+    for _bd_name in ("external", "foo"):
+        _bd_top = _bd_box / "pinned-nest" / _bd_name
+        (_bd_top / ".git").mkdir(parents=True)
+        (_bd_top / _BD_PIN).write_text("", encoding="utf-8")
+        _bd_nested = _bd_top / "app"
+        (_bd_nested / ".git").mkdir(parents=True)
+        (_bd_nested / "src").mkdir()
+        assert _bd_same(_bd_root(str(_bd_nested / "src")), _bd_nested), (
+            f"a repository nested in a pinned project named `{_bd_name}` "
+            f"resolved to {_bd_root(str(_bd_nested / 'src'))}, not to "
+            f"itself: the dependency-name cut filtered below a declaration")
 
     # (c) A3 — "the probe said no" is not "the probe could not run".
     #     `_has_ccm_database` returned a plain False for a lock timeout, an AV

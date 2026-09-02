@@ -33,11 +33,9 @@ before it does anything, and what is stored is *reconciled*, never stacked.
 - [Measured numbers](#measured-numbers)
 - [Reference](#reference)
   - [`/cc-mem` — 34 subcommands](#cc-mem--34-subcommands)
-  - [`cc-memory-plan` — the plan queue](#cc-memory-plan--the-plan-queue)
   - [MCP tools](#mcp-tools)
   - [Configuration](#configuration)
-  - [Per-project files](#per-project-files)
-  - [Database schema](#database-schema)
+  - [On disk and in the database](#on-disk-and-in-the-database)
   - [Hook table](#hook-table)
 - [Design philosophy](#design-philosophy)
 - [Architecture](#architecture)
@@ -630,32 +628,6 @@ $M status
 $M search "auth flow"
 ```
 
-### `cc-memory-plan` — the plan queue
-
-A task queue in the same database, distinct from the live plan **anchor**.
-
-```bash
-P="cc-memory-plan --project ."       # or python .../cli/plan.py --project .
-
-$P add "Task A" "Task B" "Task C"    # append drafts
-$P list                              # show the queue
-$P reorder <id> <position>           # move a task
-$P evaluate                          # draft → evaluating
-$P set-eval <id> "<verdict>"         # record a feasibility verdict
-$P approve --all                     # evaluating → ready
-$P exec --next                       # ready → executing, print the plan text
-$P done <id> "<result>"              # → done
-$P fail <id> "<why>"                 # → failed
-$P skip <id> "<why>"                 # → skipped
-$P status                            # queue summary
-$P clear                             # drop done/failed/skipped
-```
-
-Flow: `draft → evaluating → ready → executing → done | failed | skipped`.
-`exec` spawns nothing — it flips status and prints the plan text plus the
-`done` command to run afterwards. Every subcommand that names an id resolves it
-within `--project` first and exits 1 on an unknown or foreign id.
-
 ### MCP tools
 
 8 tools over JSON-RPC 2.0 stdio. The server forces UTF-8 with LF newlines on
@@ -676,20 +648,10 @@ is required**.
 **Marketplace / dev checkout — nothing to do.** `.claude-plugin/plugin.json`
 ships the registration inline.
 
-**Standalone install — register by hand.** Note the absent `cc_memory/` path
-segment in the flat layout:
-
-```jsonc
-// <project>/.mcp.json, or the user-scoped equivalent
-{
-  "mcpServers": {
-    "cc-memory": {
-      "command": "python3",
-      "args": ["<HOME>/.claude/hooks/cc-memory/mcp/server.py"]
-    }
-  }
-}
-```
+**Standalone install — register by hand**, in `<project>/.mcp.json` or the
+user-scoped equivalent. The snippet, and why the flat layout has no
+`cc_memory/` path segment, are in
+[docs/ARCHITECTURE.md §8](docs/ARCHITECTURE.md#8-install-layouts).
 
 ### Configuration
 
@@ -702,7 +664,7 @@ something.
 
 | Key | Default | Meaning |
 |---|---|---|
-| `version` | `2.12.2` | Last-resort fallback for a flat install predating `core/version.py`, which is canonical |
+| `version` | the current release (the version gate asserts it equals `core/version.py`) | Last-resort fallback for a flat install predating `core/version.py`, which is canonical |
 | `consolidation.auto_interval_sessions` | `5` | Sessions between async consolidation runs (the backlog trigger is independent of this — its thresholds are module constants in `core/consolidate.py`) |
 | `ccl.enabled` | `false` | Local Ollama fallback — **opt-in** |
 | `ccl.ollama_url` | `http://localhost:11434` | Ollama endpoint |
@@ -726,50 +688,18 @@ config key.
 | `CLAUDE_PROJECT_DIR` | Consulted by the project-root resolver when it names a directory in the ancestor chain |
 | `CC_MEMORY_PLAN_ENFORCE=0` | Kill switch for Stop-hook plan enforcement |
 
-### Per-project files
+### On disk and in the database
 
-```
-<project>/.ccm/
-├── memory.db                   SQLite (WAL) — the source of truth
-├── MEMORY.md                   browsable index, refreshed after every write
-├── PROGRESS.md                 handoff; full-rewritten from the `progress` row
-├── PLAN.md                     live plan anchor; from the `plan_active` row
-├── .gitignore                  written by cc-memory; migrates on existing installs
-├── .last_save.json             status + trigger of the last PreCompact
-├── .last_inject.json           what SessionStart injected (observability)
-├── .last_consolidation.json    cadence marker + row-id watermark for the backlog trigger
-├── .consolidation.lock         prevents overlapping async workers
-├── .consolidation.kick         backpressure spawn cooldown (v2.12.0)
-├── .pre_compact_attempt.json   start marker; survives ⇒ the last run was killed
-├── .plan_raw.md                last raw ExitPlanMode capture
-├── .plan_history/              append-only archive of replaced / cleared plans
-├── sessions/YYYY/MM/           per-session archives
-└── topics/                     reserved for per-topic exports
-```
-
-Note: this `.ccm/` lives in **your project directory** — it is unrelated to
-`~/.claude/projects/<slug>/memory/`, which some Claude Code setups use for
-their own per-project notes. `/cc-mem paths` prints exactly which files this
-plugin reads and writes for the current project.
-
-### Database schema
-
-12 tables in one project-local SQLite file:
-
-| Table | Holds |
-|---|---|
-| `projects` | One row per project root |
-| `sessions` | Compaction / session history with archive paths |
-| `memories` | The facts, with `supersedes_id`, `content_hash`, `is_active` |
-| `topics` | Rolled-up topic summaries |
-| `keywords` | Project vocabulary by frequency |
-| `observations` | PostToolUse events, cleaned after extraction |
-| `session_summaries` | A structured summary per session |
-| `progress` | **One row per project** — the source of truth for PROGRESS.md |
-| `plan_active` | **One row per project** — the source of truth for PLAN.md |
-| `plans` | The plan **queue** (`cc-memory-plan`) |
-| `directives` | The user-intent ledger (`/cc-mem directive-*`) |
-| `_migrations` | Applied schema migrations |
+`/cc-mem paths` prints exactly which files this plugin reads and writes for
+the current project. The `.ccm/` it names lives in **your project
+directory** and is unrelated to `~/.claude/projects/<slug>/memory/`, which
+some Claude Code setups use for their own per-project notes. The full
+per-project file tree, with the writer of each file, is in
+[docs/ARCHITECTURE.md §7](docs/ARCHITECTURE.md#7-per-project-state-ccm); the
+12-table schema, with the definition site of each table, in
+[§4](docs/ARCHITECTURE.md#4-database-schema); and the `cc-memory-plan` task
+queue — a queue in the same database, distinct from the live plan anchor —
+in [§5](docs/ARCHITECTURE.md#the-plan-queue-cc-memory-plan).
 
 ### Hook table
 
@@ -844,32 +774,12 @@ Any code or documentation that probes for an install must accept both.
 
 ### Repository layout
 
-```
-cc-memory/
-├── .claude-plugin/          plugin.json (+ inline mcpServers) · marketplace.json
-├── .github/                 CI: gates.yml (every gate, on push) · release.yml
-│                            (tag → gates → exes → run them → Release) · templates
-├── agents/                  plan-refiner.md · plan-guardian.md
-├── commands/                cc-mem.md — the /cc-mem slash command
-├── hooks/hooks.json         hook declarations (6 commands / 5 events)
-├── skills/                  ccm-load/ · save-memories/
-├── cc_memory/               the Python package
-│   ├── core/                db · extractor · consolidate · plan · progress · privacy
-│   │                        modes · roots · atomic · markers · textsim · auth · …
-│   ├── hooks/               _entry (shared ladder) + the six hook entry points
-│   ├── llm/                 ccl_backend · memory_writer · parse
-│   ├── cli/                 mem.py · plan.py
-│   ├── mcp/                 server.py
-│   └── ui/                  installer · dashboard · web_viewer
-├── docs/                    ARCHITECTURE.md · CONTRACTS.md (+ .zh.md siblings)
-├── scripts/                 build_exe.py (PyInstaller) · release_notes.py
-│                            (CHANGELOG section → release body)
-├── tests/                   4 suites + run_gates.py (one command, every gate)
-├── tools/                   citation_check · doc_claims · doc_coverage · contracts ·
-│                            falsify_fixes · i18n_check
-├── CLAUDE.md                project instructions for Claude Code
-├── CHANGELOG.md · README.md · README.zh.md · LICENSE · pyproject.toml
-```
+Annotated in [docs/ARCHITECTURE.md §2](docs/ARCHITECTURE.md#2-repository-layout)
+(and, for Claude Code working on this tree, in [CLAUDE.md](CLAUDE.md)). In
+short: `cc_memory/` is the package (`core/`, `hooks/`, `llm/`, `cli/`,
+`mcp/`, `ui/`); `tests/` holds the test suites and `run_gates.py`; `tools/`
+holds the dev-time checkers, which are never packaged; `docs/` holds the two
+specifications with their Chinese siblings.
 
 ### Release gates
 
@@ -881,20 +791,9 @@ python tests/run_gates.py           # runs all 11, prints a table, exits nonzero
 python tests/run_gates.py --list    # show what each gate is
 ```
 
-Or individually:
-
-```bash
-python -m compileall -q cc_memory tests tools
-python -c "import tomllib,pathlib;tomllib.loads(pathlib.Path('pyproject.toml').read_text(encoding='utf-8'))"
-python tests/smoke_test.py                    # end-to-end + the doc gates it hosts + version agreement
-python tests/test_plan_carryover.py           # the carryover gate
-python tests/test_surfaces.py                 # installer · MCP · web viewer · opt-out · anchoring
-python tests/test_directive_enforcement.py    # the directive ledger + Stop enforcement
-python tools/i18n_check.py                    # translation drift
-python tools/citation_check.py                # every file.py:LINE citation in the tracked docs
-python tools/doc_claims.py                    # prose counts vs the sets computed from the tree
-python tools/doc_coverage.py                  # every public surface is named by the doc that owns it
-```
+Or one at a time — `python tests/run_gates.py --only <gate>`; `--list` names
+them. What each gate checks, and how to read a red one, is in
+[CONTRIBUTING.md](CONTRIBUTING.md).
 
 Two more scripts are **not** gates, and are the ones to reach for when you
 doubt a gate:
@@ -1019,22 +918,26 @@ session, progress row, plan and directive went dark on every surface.
   re-stamp a translation nobody translated (`--translation-unchanged "<why>"`
   for an English-only edit).
 - **The rest of the debug pass, closed — twenty-seven findings, each at its
-  own cause.** A transient probe failure no longer orphans a pre-v2.13.0
-  `memory/` for good; a linked `.ccm` is never followed or written through; a
-  project called `external` resolves; a WSL-mounted profile is a boundary;
-  the SessionStart refresh decides fill-only-empty inside the write and no
-  longer re-mines an empty todo list from another session's transcript; a
-  restated fact keeps its higher importance (`reinforced`); the Stop
-  advisory is neutralised; a stale consolidation lock no longer vetoes
-  backpressure forever; `/ccm-load` is no longer the session's request; the
-  CLI answers bad input with one line instead of seventeen tracebacks; the
-  shipped exe's "Open Dashboard" starts; a dotfiles-managed `settings.json`
-  keeps its hooks; a stranger's `package.json` cannot write sections into a
-  generated CLAUDE.md; markers never land in the repository; and the
-  falsification suite gained the negative control it never had. The full
-  report is in the tree:
+  own cause.** The full report is in the tree:
   [docs/debug-pass-2026-09.md](docs/debug-pass-2026-09.md) (English only, an
-  evidence record).
+  evidence record). Among them:
+  - *State directory:* a transient probe failure no longer orphans a
+    pre-v2.13.0 `memory/` for good, and a linked `.ccm` is never followed or
+    written through.
+  - *Project root:* a project called `external` resolves, and a WSL-mounted
+    profile is a boundary.
+  - *Handoff:* the SessionStart refresh decides fill-only-empty inside the
+    write and no longer re-mines an empty todo list from another session's
+    transcript; `/ccm-load` is no longer the session's request.
+  - *Writer and hooks:* a restated fact keeps its higher importance
+    (`reinforced`), the Stop advisory is neutralised, and a stale
+    consolidation lock no longer vetoes backpressure forever.
+  - *Surfaces:* the CLI answers bad input with one line instead of seventeen
+    tracebacks; the shipped exe's "Open Dashboard" starts; a dotfiles-managed
+    `settings.json` keeps its hooks; a stranger's `package.json` cannot write
+    sections into a generated CLAUDE.md.
+  - *Gates:* markers never land in the repository, and the falsification
+    suite gained the negative control it never had.
 
 v2.13.0 moved per-project state from `memory/` to `.ccm/` — dotted state
 beside `.git`, migrated one way on first write and identified by content,

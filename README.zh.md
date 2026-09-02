@@ -1,4 +1,4 @@
-<!-- i18n-source: README.md | sha256: 5aadd657969dbd1d | version: 2.14.0 | translated: 2026-09-01 | translation: 9e01245f047442b8 -->
+<!-- i18n-source: README.md | sha256: bdf06332d3e8d500 | version: 2.14.0 | translated: 2026-09-02 | translation: 77037eab9857185b -->
 > [English](README.md) · **简体中文**
 
 <div align="center">
@@ -34,11 +34,9 @@
 - [实测数字](#实测数字)
 - [参考手册](#参考手册)
   - [`/cc-mem`——34 个子命令](#cc-mem34-个子命令)
-  - [`cc-memory-plan`——计划队列](#cc-memory-plan计划队列)
   - [MCP 工具](#mcp-工具)
   - [配置](#配置)
-  - [每个项目的文件](#每个项目的文件)
-  - [数据库表](#数据库表)
+  - [磁盘上与数据库里](#磁盘上与数据库里)
   - [钩子一览](#钩子一览)
 - [设计哲学](#设计哲学)
 - [架构](#架构)
@@ -593,32 +591,6 @@ $M status
 $M search "auth flow"
 ```
 
-### `cc-memory-plan`——计划队列
-
-同一个数据库里的任务队列，与实时计划**锚点**是两回事。
-
-```bash
-P="cc-memory-plan --project ."       # 或 python .../cli/plan.py --project .
-
-$P add "任务 A" "任务 B" "任务 C"     # 追加草稿
-$P list                              # 查看队列
-$P reorder <id> <position>           # 调整顺序
-$P evaluate                          # draft → evaluating
-$P set-eval <id> "<结论>"            # 记录可行性结论
-$P approve --all                     # evaluating → ready
-$P exec --next                       # ready → executing，并打印计划正文
-$P done <id> "<结果>"                # → done
-$P fail <id> "<原因>"                # → failed
-$P skip <id> "<原因>"                # → skipped
-$P status                            # 队列摘要
-$P clear                             # 清掉 done/failed/skipped
-```
-
-状态流：`draft → evaluating → ready → executing → done | failed | skipped`。
-`exec` **不会**启动任何东西——它只是翻转状态，打印计划正文以及事后该跑的 `done`
-命令。每个带 id 的子命令都先在 `--project` 内解析该 id，遇到未知或属于别的项目
-的 id 就以 1 退出。
-
 ### MCP 工具
 
 8 个工具，JSON-RPC 2.0 over stdio。服务器自己在 stdin 和 stdout 上强制 UTF-8 +
@@ -638,19 +610,9 @@ LF 换行——**不需要任何 `PYTHONUTF8` / `PYTHONIOENCODING` 环境变量*
 **marketplace / dev checkout——什么都不用做。** `.claude-plugin/plugin.json`
 里已内联注册。
 
-**独立安装——需要手工注册。** 注意扁平布局里**没有** `cc_memory/` 这一段路径：
-
-```jsonc
-// <project>/.mcp.json，或用户级的等价文件
-{
-  "mcpServers": {
-    "cc-memory": {
-      "command": "python3",
-      "args": ["<HOME>/.claude/hooks/cc-memory/mcp/server.py"]
-    }
-  }
-}
-```
+**独立安装——需要手工注册**，写在 `<project>/.mcp.json` 或用户级的等价文件里。
+片段本身，以及扁平布局为什么**没有** `cc_memory/` 这一段路径，见
+[docs/ARCHITECTURE.zh.md §8](docs/ARCHITECTURE.zh.md#8-安装布局)。
 
 ### 配置
 
@@ -663,7 +625,7 @@ LF 换行——**不需要任何 `PYTHONUTF8` / `PYTHONIOENCODING` 环境变量*
 
 | 键 | 默认值 | 含义 |
 |---|---|---|
-| `version` | `2.12.2` | 给早于 `core/version.py` 的扁平安装的最后兜底；`core/version.py` 才是权威 |
+| `version` | 当前发布版本（版本门断言它与 `core/version.py` 一致） | 给早于 `core/version.py` 的扁平安装的最后兜底；`core/version.py` 才是权威 |
 | `consolidation.auto_interval_sessions` | `5` | 两次异步整理之间相隔的会话数（积压触发器与它无关——那些阈值是 `core/consolidate.py` 里的模块常量） |
 | `ccl.enabled` | `false` | 本地 Ollama 兜底——**需显式开启** |
 | `ccl.ollama_url` | `http://localhost:11434` | Ollama 端点 |
@@ -685,49 +647,15 @@ LF 换行——**不需要任何 `PYTHONUTF8` / `PYTHONIOENCODING` 环境变量*
 | `CLAUDE_PROJECT_DIR` | 当它指向祖先链中的某个目录时，项目根解析器会采信它 |
 | `CC_MEMORY_PLAN_ENFORCE=0` | Stop 钩子计划强制执行的关闭开关 |
 
-### 每个项目的文件
+### 磁盘上与数据库里
 
-```
-<project>/.ccm/
-├── memory.db                   SQLite（WAL）——真相来源
-├── MEMORY.md                   可浏览索引，每次写入后刷新
-├── PROGRESS.md                 交接；由 `progress` 行全量重写
-├── PLAN.md                     实时计划锚点；由 `plan_active` 行生成
-├── .gitignore                  由 cc-memory 写入；对既有安装会迁移
-├── .last_save.json             上次 PreCompact 的状态与触发方式
-├── .last_inject.json           SessionStart 注入了什么（可观测性）
-├── .last_consolidation.json    节奏标记 + 积压触发器的行号水位线
-├── .consolidation.lock         防止异步 worker 重叠
-├── .consolidation.kick         背压拉起冷却（v2.12.0）
-├── .pre_compact_attempt.json   起始标记；它还在 ⇒ 上次运行被杀了
-├── .plan_raw.md                最近一次 ExitPlanMode 的原始捕获
-├── .plan_history/              被替换/清除计划的只追加归档
-├── sessions/YYYY/MM/           每个会话的归档
-└── topics/                     预留给按主题导出
-```
-
-注意：这个 `.ccm/` 位于**你的项目目录**里——它与
-`~/.claude/projects/<slug>/memory/` 无关，后者是某些 Claude Code 配置自己的
-按项目笔记。`/cc-mem paths` 精确打印本插件为当前项目读写的每个文件。
-
-### 数据库表
-
-一个项目本地 SQLite 文件里的 12 张表：
-
-| 表 | 存什么 |
-|---|---|
-| `projects` | 每个项目根一行 |
-| `sessions` | 压缩/会话历史与归档路径 |
-| `memories` | 事实本身，带 `supersedes_id`、`content_hash`、`is_active` |
-| `topics` | 汇总出的主题摘要 |
-| `keywords` | 按词频的项目词汇 |
-| `observations` | PostToolUse 事件，抽取后清理 |
-| `session_summaries` | 每个会话一份结构化摘要 |
-| `progress` | **每项目一行**——PROGRESS.md 的真相来源 |
-| `plan_active` | **每项目一行**——PLAN.md 的真相来源 |
-| `plans` | 计划**队列**（`cc-memory-plan`） |
-| `directives` | 用户意图账本（`/cc-mem directive-*`） |
-| `_migrations` | 已应用的 schema 迁移 |
+`/cc-mem paths` 精确打印本插件为当前项目读写的每个文件。它指出的 `.ccm/` 位于
+**你的项目目录**里——与 `~/.claude/projects/<slug>/memory/` 无关，后者是某些
+Claude Code 配置自己的按项目笔记。完整的每项目文件树（含每个文件由谁写入）见
+[docs/ARCHITECTURE.zh.md §7](docs/ARCHITECTURE.zh.md#7-按项目的状态ccm)；12 张表的
+schema（含每张表的定义位置）见 [§4](docs/ARCHITECTURE.zh.md#4-数据库-schema)；
+`cc-memory-plan` 任务队列——同一个数据库里的队列，与实时计划锚点是两回事——见
+[§5](docs/ARCHITECTURE.zh.md#计划队列cc-memory-plan)。
 
 ### 钩子一览
 
@@ -793,32 +721,11 @@ LF 换行——**不需要任何 `PYTHONUTF8` / `PYTHONIOENCODING` 环境变量*
 
 ### 仓库结构
 
-```
-cc-memory/
-├── .claude-plugin/          plugin.json（含内联 mcpServers）· marketplace.json
-├── .github/                 CI：gates.yml（每次 push 跑全部闸门）· release.yml
-│                            （tag → 闸门 → exe → 实际运行 → Release）· 模板
-├── agents/                  plan-refiner.md · plan-guardian.md
-├── commands/                cc-mem.md —— /cc-mem 斜杠命令
-├── hooks/hooks.json         钩子声明（6 条命令 / 5 个事件）
-├── skills/                  ccm-load/ · save-memories/
-├── cc_memory/               Python 包
-│   ├── core/                db · extractor · consolidate · plan · progress · privacy
-│   │                        modes · roots · atomic · markers · textsim · auth · …
-│   ├── hooks/               _entry（共用阶梯）+ 六个钩子入口
-│   ├── llm/                 ccl_backend · memory_writer · parse
-│   ├── cli/                 mem.py · plan.py
-│   ├── mcp/                 server.py
-│   └── ui/                  installer · dashboard · web_viewer
-├── docs/                    ARCHITECTURE.md · CONTRACTS.md（各带 .zh.md 兄弟文件）
-├── scripts/                 build_exe.py（PyInstaller）· release_notes.py
-│                            （CHANGELOG 段落 → 发布正文）
-├── tests/                   4 个套件 + run_gates.py（一条命令跑完所有闸门）
-├── tools/                   citation_check · doc_claims · doc_coverage · contracts ·
-│                            falsify_fixes · i18n_check
-├── CLAUDE.md                给 Claude Code 的项目说明
-├── CHANGELOG.md · README.md · README.zh.md · LICENSE · pyproject.toml
-```
+带注释的完整布局见 [docs/ARCHITECTURE.zh.md §2](docs/ARCHITECTURE.zh.md#2-仓库布局)
+（给在这棵树上工作的 Claude Code 看的版本在 [CLAUDE.md](CLAUDE.md)）。一句话：
+`cc_memory/` 是 Python 包（`core/`、`hooks/`、`llm/`、`cli/`、`mcp/`、`ui/`）；
+`tests/` 放测试套件和 `run_gates.py`；`tools/` 放从不打包的开发期检查器；
+`docs/` 放两份规格及其中文兄弟文件。
 
 ### 发布闸门
 
@@ -829,20 +736,8 @@ python tests/run_gates.py           # 跑全部 11 道，打印表格，任一�
 python tests/run_gates.py --list    # 看每道闸门查什么
 ```
 
-或者单独跑：
-
-```bash
-python -m compileall -q cc_memory tests tools
-python -c "import tomllib,pathlib;tomllib.loads(pathlib.Path('pyproject.toml').read_text(encoding='utf-8'))"
-python tests/smoke_test.py                    # 端到端 + 它承载的文档闸门 + 版本一致性
-python tests/test_plan_carryover.py           # 结转闸门
-python tests/test_surfaces.py                 # 安装器 · MCP · 查看器 · 退出开关 · 锚定
-python tests/test_directive_enforcement.py    # 指令账本 + Stop 强制执行
-python tools/i18n_check.py                    # 翻译漂移
-python tools/citation_check.py                # 被跟踪文档里的每条 file.py:LINE 引用
-python tools/doc_claims.py                    # 文字里的计数 vs 从代码树算出的集合
-python tools/doc_coverage.py                  # 每个公开面都被拥有它的文档提到
-```
+或者一次跑一道——`python tests/run_gates.py --only <gate>`；`--list` 列出名字。
+每道闸门查什么、红了怎么读，见 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
 还有两个脚本**不是**闸门，而是当你怀疑某道闸门时该跑的东西：
 
@@ -948,18 +843,21 @@ Release，附上两个 exe，并以对应的 CHANGELOG 段落作为正文。与 
   被包含；带两个修饰词的计数仍然是计数；检查器只能做边界检查的引文按原话报告；
   `--emit-marker` 拒绝为没人翻译过的译文重新盖章（纯英文改动用
   `--translation-unchanged "<原因>"`）。
-- **调试审查的其余部分也关闭了——二十七条发现，各在其根源处修复。** 探针的
-  一次瞬时失败不再把 v2.13.0 之前的 `memory/` 永久遗弃；链接形态的 `.ccm`
-  既不被跟随也不被写穿；名叫 `external` 的项目能被解析；WSL 挂载的用户目录是
-  边界；SessionStart 的刷新在写入内部裁决「只填空」，也不再把另一个会话转录里
-  的待办挖进一份本来就为空的清单；被复述的事实保住更高的重要度
-  （`reinforced`）；Stop 的建议行会被中和；陈旧的整理锁不再永久否决背压；
-  `/ccm-load` 不再成为会话的「当前请求」；CLI 对坏输入回一行，而不是十七个
-  回溯；发布的 exe 里「Open Dashboard」能启动了；由 dotfiles 管理的
-  `settings.json` 保住钩子；陌生的 `package.json` 写不进生成的 CLAUDE.md 的
-  章节；标记文件绝不落进仓库；证伪套件补上了它从未有过的阴性对照。完整报告
-  在树里：[docs/debug-pass-2026-09.md](docs/debug-pass-2026-09.md)（仅英文，
-  作为证据记录）。
+- **调试审查的其余部分也关闭了——二十七条发现，各在其根源处修复。** 完整报告
+  在树里：[docs/debug-pass-2026-09.md](docs/debug-pass-2026-09.md)（仅英文，作为
+  证据记录）。其中：
+  - *状态目录：* 探针的一次瞬时失败不再把 v2.13.0 之前的 `memory/` 永久遗弃；
+    链接形态的 `.ccm` 既不被跟随也不被写穿。
+  - *项目根：* 名叫 `external` 的项目能被解析；WSL 挂载的用户目录是边界。
+  - *交接：* SessionStart 的刷新在写入内部裁决「只填空」，也不再把另一个会话
+    转录里的待办挖进一份本来就为空的清单；`/ccm-load` 不再成为会话的「当前
+    请求」。
+  - *写入器与钩子：* 被复述的事实保住更高的重要度（`reinforced`）；Stop 的建议
+    行会被中和；陈旧的整理锁不再永久否决背压。
+  - *各个面：* CLI 对坏输入回一行，而不是十七个回溯；发布的 exe 里「Open
+    Dashboard」能启动了；由 dotfiles 管理的 `settings.json` 保住钩子；陌生的
+    `package.json` 写不进生成的 CLAUDE.md 的章节。
+  - *闸门：* 标记文件绝不落进仓库；证伪套件补上了它从未有过的阴性对照。
 
 v2.13.0 把每个项目的状态从 `memory/` 挪到了 `.ccm/`——放在 `.git` 旁边的点状态
 目录，首次写入时单向迁移，按内容而不是按名字识别。v2.12.x 带来了背压触发的整理、

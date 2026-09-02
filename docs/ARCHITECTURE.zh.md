@@ -1,4 +1,4 @@
-<!-- i18n-source: ARCHITECTURE.md | sha256: 3fb79ae68b4ab9ec | version: 2.14.0 | translated: 2026-09-01 | translation: 9490563afca190e4 -->
+<!-- i18n-source: ARCHITECTURE.md | sha256: e8b90d8b97ecf0bb | version: 2.14.0 | translated: 2026-09-02 | translation: 425a0419bd8c7d71 -->
 > [English](ARCHITECTURE.md) · **简体中文**
 
 # cc-memory — 架构
@@ -586,6 +586,34 @@ PENDING REFINEMENT 横幅加逐字原文开头，并把更旧的结构化计划�
 那段逐字块的围栏宽度会超过原始文本里最长的一串反引号，因为计划模式的输出里经常
 带有代码围栏。
 
+### 计划队列（`cc-memory-plan`）
+
+同一个数据库里的任务队列（`plans` 表），与上面的实时计划**锚点**是两回事：锚点是
+会话正在执行的那一个计划，队列是一串草稿的积压，沿
+`draft → evaluating → ready → executing → done | failed | skipped` 流转。
+
+```bash
+P="cc-memory-plan --project ."       # 或 python .../cli/plan.py --project .
+
+$P add "任务 A" "任务 B" "任务 C"     # 追加草稿
+$P list                              # 查看队列
+$P reorder <id> <position>           # 调整顺序
+$P evaluate                          # draft → evaluating
+$P set-eval <id> "<结论>"            # 记录可行性结论
+$P approve --all                     # evaluating → ready
+$P exec --next                       # ready → executing，并打印计划正文
+$P done <id> "<结果>"                # → done
+$P fail <id> "<原因>"                # → failed
+$P skip <id> "<原因>"                # → skipped
+$P status                            # 队列摘要
+$P clear                             # 清掉 done/failed/skipped
+```
+
+`exec` **不会**启动任何东西——它只是翻转状态，打印计划正文以及事后该跑的 `done`
+命令。每个带 id 的子命令都先在 `--project` 内解析该 id，遇到未知或属于别的项目
+的 id 就以 1 退出——`plans.id` 对整个数据库文件是全局的，这也是 `core/db.py`
+里的计划变更器只接受仅限关键字的 `project_id` 的原因（`CLAUDE.md` § v2.5.3）。
+
 ---
 
 ## 6. LLM 后端与认证
@@ -938,6 +966,21 @@ home 边界是双份的：环境所声称的（`HOME`/`USERPROFILE`/`Path.home()
 
 在市场类布局下，`~/.claude/hooks/cc-memory/` 只保留 `logs/`（`core.logger` 的输出
 目标）。`logs/` 在每种布局下都存在，因为 logger 的路径是绝对的，与代码位于何处无关。
+
+MCP 服务器遵循同样的分岔。在市场类布局下，`.claude-plugin/plugin.json` 已内联
+注册，什么都不用做；独立安装则要手工注册，写在 `<project>/.mcp.json` 或用户级的
+等价文件里——注意接下来描述的扁平目录树里**没有** `cc_memory/` 这一段路径：
+
+```jsonc
+{
+  "mcpServers": {
+    "cc-memory": {
+      "command": "python3",
+      "args": ["<HOME>/.claude/hooks/cc-memory/mcp/server.py"]
+    }
+  }
+}
+```
 
 ### 嵌套 vs 扁平：独立安装器写出的是**扁平**目录树
 
