@@ -660,6 +660,30 @@ def _detect_python_cmd():
     return "python3"
 
 
+def _python_for_script():
+    """The interpreter that can RUN a .py file. Never `sys.executable` frozen.
+
+    In a PyInstaller onefile build `sys.executable` IS this installer binary,
+    not a Python, so `[sys.executable, dashboard.py, "--project", X]` re-enters
+    `main()` with the dashboard path sitting in argv: `_KNOWN_FLAGS` refuses it
+    and exits 2, and "Open Dashboard" in the shipped exe therefore printed a
+    usage message into a console that closes instantly and started nothing
+    (measured; before the v2.5.3 refusal the very same click performed a silent
+    re-INSTALL). The hook commands already resolve a real interpreter through
+    `_detect_python_cmd()` — that is the one to hand a script to. Resolved to an
+    absolute path when PATH can supply one, so the child does not depend on the
+    GUI process inheriting a usable PATH.
+
+    Do not reintroduce a `sys.executable` spawn of a `.py` on the frozen path;
+    tests/test_surfaces.py §3 asserts the rule at source level as well as
+    driving this function.
+    """
+    if not getattr(sys, "frozen", False):
+        return sys.executable
+    cmd = _detect_python_cmd()
+    return shutil.which(cmd) or cmd
+
+
 def _hooks_json_candidates():
     paths = []
     if getattr(sys, "frozen", False):
@@ -905,6 +929,35 @@ _FP_ABSENT = "<absent>"
 _FP_UNREADABLE = "<unreadable>"
 
 
+def _settings_write_target():
+    """The FILE a settings write must land on. Never raises.
+
+    `SETTINGS_PATH` is the name the user and Claude Code use; on a
+    dotfiles-managed home (stow, chezmoi — a common way to version Claude
+    settings) it is a SYMLINK into a repository. `Path.replace` renames over the
+    LINK, so the atomic write REPLACED the link with a regular file: the
+    versioned copy kept its old content with no hooks, `~/.claude/settings.json`
+    became an unversioned file, and the next dotfiles sync restored the link and
+    un-registered cc-memory (measured: `still a symlink: False`,
+    `dotfiles target has hooks: False`, no warning printed). Resolve the link and
+    write the TARGET instead — and put the temp file beside that target too,
+    because the target can live on another filesystem and `os.replace` cannot
+    cross one.
+
+    Only the link at SETTINGS_PATH itself is followed: a symlinked `.claude/`
+    directory already resolves on the way to the file, and nothing about the
+    rename destroys it.
+    """
+    try:
+        if SETTINGS_PATH.is_symlink():
+            return SETTINGS_PATH.resolve()
+    except OSError:
+        # why: probing a broken / looping link must not abort the install —
+        # writing SETTINGS_PATH itself is exactly the pre-v2.14.0 behaviour
+        pass
+    return SETTINGS_PATH
+
+
 def _settings_fingerprint():
     """Exact identity of settings.json on disk right now.
 
@@ -967,9 +1020,18 @@ def _write_settings_json(settings, log_fn=print, expect=None):
     is a worse outcome than losing atomicity for one write.
     """
     payload = json.dumps(settings, indent=2, ensure_ascii=False)
+    # The rename must land on the RESOLVED file, not on a symlink pointing at
+    # it — see _settings_write_target. The .bak stays beside the NAME the user
+    # knows, and every read below still goes through SETTINGS_PATH, so the
+    # compare-and-swap keeps checking what the rest of the world sees.
+    dest = _settings_write_target()
+    if dest != SETTINGS_PATH:
+        log_fn(f"  [  ] {SETTINGS_PATH.name} is a symlink; writing through it "
+               f"to {dest}")
     bak = SETTINGS_PATH.with_name(SETTINGS_PATH.name + ".cc-memory.bak")
     tmp = None
     try:
+        dest.parent.mkdir(parents=True, exist_ok=True)
         SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
         if SETTINGS_PATH.exists():
             try:
@@ -981,8 +1043,8 @@ def _write_settings_json(settings, log_fn=print, expect=None):
                        f"{bak.name}: {e}")
         with tempfile.NamedTemporaryFile(
                 "w", encoding="utf-8", delete=False,
-                dir=str(SETTINGS_PATH.parent),
-                prefix=SETTINGS_PATH.name + ".", suffix=".tmp") as fh:
+                dir=str(dest.parent),
+                prefix=dest.name + ".", suffix=".tmp") as fh:
             tmp = Path(fh.name)
             fh.write(payload)
         if expect is not None and _settings_fingerprint() != expect:
@@ -996,7 +1058,7 @@ def _write_settings_json(settings, log_fn=print, expect=None):
         last = None
         for _attempt in range(5):
             try:
-                tmp.replace(SETTINGS_PATH)
+                tmp.replace(dest)
                 tmp = None
                 break
             except OSError as e:
@@ -1015,7 +1077,7 @@ def _write_settings_json(settings, log_fn=print, expect=None):
             log_fn(f"  [WARN] the OS refused an atomic replace of "
                    f"{SETTINGS_PATH.name} ({last}); writing in place instead - "
                    f"{bak.name} holds the previous contents")
-            SETTINGS_PATH.write_text(payload, encoding="utf-8")
+            dest.write_text(payload, encoding="utf-8")
         if expect is not None:
             # POST-write verification closes what the pre-write check cannot.
             # Between the digest check above and the rename there is a window
@@ -1589,7 +1651,7 @@ class Installer:
     def _open_dashboard(self):
         dashboard_path = TARGET_DIR / "ui" / "dashboard.py"
         if dashboard_path.exists():
-            cmd = [sys.executable, str(dashboard_path)]
+            cmd = [_python_for_script(), str(dashboard_path)]
             project = self.project_var.get().strip()
             if project:
                 cmd += ["--project", project]
@@ -1605,7 +1667,7 @@ class Installer:
             "  - the cc-memory commands/agents/skills in ~/.claude/\n"
             "  - cc-memory entries in settings.json\n"
             "  - cc-memory temp session markers\n\n"
-            "Project memory/ directories are PRESERVED.\n\nContinue?"
+            "Project .ccm/ directories are PRESERVED.\n\nContinue?"
         ):
             return
 
@@ -1620,7 +1682,7 @@ class Installer:
         self.hooks_btn.configure(text="Configure Hooks")
         messagebox.showinfo("Uninstalled",
                             "cc-memory has been removed.\n"
-                            "Project memory/ directories and logs/ preserved.\n"
+                            "Project .ccm/ directories and logs/ preserved.\n"
                             "Reinstall anytime.")
 
 
@@ -1696,7 +1758,7 @@ def cli_uninstall():
     ok = _uninstall_settings()
     _remove_target_dir()
     _sweep_temp_markers()
-    print("\n[OK] cc-memory uninstalled. Project memory/ data and logs/ preserved.")
+    print("\n[OK] cc-memory uninstalled. Project .ccm/ data and logs/ preserved.")
     return 0 if ok else 1
 
 
