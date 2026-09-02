@@ -223,7 +223,7 @@ would falsify the record.
 | `SessionStart` | [`cc_memory/hooks/session_start.py`](../cc_memory/hooks/session_start.py) | 15s | Inject layered context (standing directives / topics / critical / timeline / PROGRESS preview / footer — the directive ledger is the first layer since v2.12.2; before that nothing injected it); emit the FORCED `<system-reminder>` to Read `PROGRESS.md` + `MEMORY.md`; retroactive save of unsaved JSONLs. |
 | `Stop` | [`cc_memory/hooks/stop.py`](../cc_memory/hooks/stop.py) | 22s | Observer: extract from last turn's observations via Haiku; per-turn `patch_progress(files_touched, ...)`; every 5 turns run `idle.maybe_run_idle` (cleanup + MEMORY.md regen); probe the consolidation backlog and spawn the detached async worker when it is due (v2.12.0); when a plan is LIVE, bump its turn counter and **enforce** — refuse the turn (`{"decision": "block"}`) over an unrefined plan, an undrift-checked plan, or an idle directive, with the escape budget CONTRACTS.md specifies (v2.11.0; the advisory nudge this row used to describe is gone). |
 | `PostToolUse` | [`cc_memory/hooks/post_tool_use.py`](../cc_memory/hooks/post_tool_use.py) | 8s | Live-plan integration FIRST, in every mode: `ExitPlanMode` → `plan_active.raw`, `TodoWrite` → mechanical step sync, `Edit`/`Write`/`MultiEdit`/`NotebookEdit` → +1 drift counter, sensitive Bash call → +20. THEN one row into `observations`, for OBSERVED tool calls only (mode allowlist / skip list — `core.modes.should_observe`). No LLM. Measured ~180-290 ms end to end, of which ~75-120 ms is interpreter start-up. |
-| `UserPromptSubmit` | [`cc_memory/hooks/user_prompt.py`](../cc_memory/hooks/user_prompt.py) | 8s | Auto-init `.ccm/` on first contact; track turn count; save prompt for the Stop observer; on turn 1, tag the session and seed `progress.current_request` (typing the trigger `resume_request` vs `user_prompt` from the bilingual resume-signal whitelist). |
+| `UserPromptSubmit` | [`cc_memory/hooks/user_prompt.py`](../cc_memory/hooks/user_prompt.py) | 8s | Auto-init `.ccm/` on first contact; track turn count; save prompt for the Stop observer; on the first non-scaffolding prompt (once per session — `strip_scaffolding`, shared with `pre_compact._first_user_request`, and the `cc_mem_seeded_` marker; v2.14.0), tag the session and seed `progress.current_request` (typing the trigger `resume_request` vs `user_prompt` from the bilingual resume-signal whitelist). |
 
 ### Hook stdout contract
 
@@ -285,7 +285,7 @@ truth. `cc_memory/ui/installer.py` `HOOK_SCRIPTS` / `ASYNC_HOOK`
 (`installer.py:108-114`) is the standalone-install declaration. Since v2.5 those
 entries carry the **final wire values** — PreCompact 120 (sync) / 300 (async),
 SessionStart 15, Stop 22, PostToolUse 8, UserPromptSubmit 8 — and
-`_declared_hook_timeouts()` (`installer.py:646-677`) *reads* `hooks/hooks.json`
+`_declared_hook_timeouts()` (`installer.py:701-732`) *reads* `hooks/hooks.json`
 whenever it is available (dev checkout, or `cc_memory_meta/hooks.json` inside a
 frozen build), falling back to the literal table only for a flat/frozen install
 where that file is absent.
@@ -458,9 +458,9 @@ caller's responsibility, and there are exactly two shapes:
   (`memory_writer.py:322`). All hook callers pass it
   (`pre_compact.py:435`, `stop.py:166`, `session_start.py:1144`); the sync
   PreCompact leg additionally touches it again after the rest of its state
-  changes (`pre_compact.py:789`).
+  changes (`pre_compact.py:806`).
 - Single-shot callers call `regenerate_memory_index` explicitly:
-  `cli/mem.py:1171` and `:584`, `mcp/server.py:647`, `ui/dashboard.py:1688`,
+  `cli/mem.py:1207` and `:584`, `mcp/server.py:647`, `ui/dashboard.py:1715`,
   `ui/web_viewer.py:1034`, plus the `skills/ccm-load` inline script
   (`skills/ccm-load/SKILL.md:308, 318`). `core/idle.py:96` and
   `hooks/consolidate_async.py:276` also refresh it after maintenance.
@@ -537,7 +537,7 @@ Stop (every turn):
     ↓
   write_progress_md(db, project_id, memory_dir)   ← FULL REWRITE again (idempotent)
 
-UserPromptSubmit (turn 1 only):
+UserPromptSubmit (first non-scaffolding prompt, once per session):
   db.tag_progress_session(project_id, session_id)
     ↓
   db.patch_progress(current_request=<user msg>,
@@ -561,9 +561,9 @@ SessionStart:
 ```
 
 Call signatures above are the real ones: `write_progress_md(db, project_id,
-memory_dir)` (`core/progress.py:331-490`; call sites `pre_compact.py:752`,
-`stop.py:486`, `user_prompt.py:75`, `session_start.py:940`, `mcp/server.py:243`,
-`cli/mem.py:1262`). See
+memory_dir)` (`core/progress.py:331-490`; call sites `pre_compact.py:775`,
+`stop.py:473`, `user_prompt.py:52`, `session_start.py:946`, `mcp/server.py:243`,
+`cli/mem.py:1298`). See
 [docs/CONTRACTS.md](CONTRACTS.md#handoff-contract) for the PROGRESS.md
 schema.
 
@@ -632,9 +632,9 @@ normalises it to JSON, written back via `/cc-mem plan-set --from-refiner`;
 LLM); `Edit`/`Write`/`MultiEdit`/`NotebookEdit` bump
 `edits_since_last_guardian`, and sensitive Bash calls (`git push`, `rm -rf`,
 `DROP TABLE`, `npm publish`, `kubectl apply`, `terraform apply`, … —
-`core.plan.is_sensitive_tool_call`, `plan.py:1335-1358`) bump it by 20. Once
+`core.plan.is_sensitive_tool_call`, `plan.py:1375-1398`) bump it by 20. Once
 `turns_since_last_guardian >= 8` OR `edits_since_last_guardian >= 12`
-(`core.plan.should_nudge_guardian`, `plan.py:1299-1315`), the Stop hook
+(`core.plan.should_nudge_guardian`, `plan.py:1339-1355`), the Stop hook
 **refuses the turn** rather than advising (v2.11.0 — the rate-limited nudge
 this sentence used to describe is deleted; see
 [CONTRACTS.md](CONTRACTS.md#the-stop-hook-can-refuse-the-turn-v2110) for the
@@ -646,7 +646,7 @@ every mode since v2.5 — see
 for what used to shadow them.
 
 A raw plan that has not been refined yet is no longer invisible:
-`core.plan.raw_pending_refinement` (`plan.py:352-381`) is the shared predicate, and
+`core.plan.raw_pending_refinement` (`plan.py:402-431`) is the shared predicate, and
 both `write_plan_md` and `/cc-mem plan-status` lead with a PENDING REFINEMENT
 banner plus the verbatim raw text, labelling any older structured plan as
 superseded. The verbatim block's fence widens past the longest backtick run in
@@ -679,7 +679,7 @@ while the same token via Bearer + beta gets HTTP 200 (`core/auth.py:14-15`).
 does not retry, `core/auth.py:60-93`); it also carries the `oauth_expired`
 signal behind SessionStart's "[WARNING: OAuth expired — LLM extraction
 disabled]" footer (`session_start.py:665`). Hook callers use it to *supply*
-the credential passed into `call_llm`: `pre_compact.py:81 → :166`,
+the credential passed into `call_llm`: `pre_compact.py:94 → :166`,
 `stop.py:86`, `session_start.py:665`, `core/consolidate.py:426, 549, 724`.
 
 Fall-through was added in v2.3.4 for a concrete failure: a dead env key (e.g.
@@ -799,12 +799,32 @@ path touches the project first — `user_prompt.py:57-63` on auto-init, or
 artifacts**. Edit the SQL source of truth instead (`progress` for PROGRESS.md,
 `plan_active` for PLAN.md, `memories`/`topics`/`keywords` for MEMORY.md).
 
+**Identification is tri-state, and a link is not a state directory
+(v2.14.0).** `core.layout` decides where the state directory IS — `.ccm/`,
+or a pre-v2.13.0 `memory/` awaiting its one-way rename — by identifying the
+legacy directory's CONTENTS, never by its name (`CLAUDE.md` § v2.13.0).
+Through v2.13.2 every probe returned a plain False when it could not run, so
+a lock held for one second, an antivirus hold or a CANTOPEN took the same
+branch as "not ours" — the irreversible one: `.ccm/` was created empty
+beside a `memory/` holding every memory the project had, and from then on
+the settled case answered `.ccm/`. The probes now answer `True` / `False` /
+`layout.UNKNOWN`; `UNKNOWN` is falsy, so every write guard keeps failing
+closed, and `migrate_legacy_dir` alone routes it to the refused-rename branch
+(keep using `memory/`, retry next turn). Its settled case requires
+`.ccm/memory.db` to hold bytes, and an empty `.ccm/` beside a positively-ours
+`memory/` returns `memory/`. A symlinked or junctioned `.ccm` is not a state
+directory at all (`_is_usable_state_dir`, through `core.markers._is_link`):
+the resolver never follows it, never renames onto it, and `find_memory_dir`
+refuses it on the read side too; `pre_compact`'s last-resort handler — the
+one recovery path that re-derived the location after `ensure_memory_dir` had
+refused the link — re-applies the same probe before it writes.
+
 ### Which `<project>` — root anchoring (v2.6.0)
 
 `<project>` is **not** the `cwd` the hook payload carries. That cwd is the
 session's CURRENT working directory and follows the agent's own `cd`, so a
 session launched at a repo root that ran one command inside `cli/` began
-reporting `<root>/cli` — and `_init_project_if_needed` (`user_prompt.py:50-78`)
+reporting `<root>/cli` — and `_init_project_if_needed` (`user_prompt.py:106-137`)
 mkdir'd a second, fully independent database there. Four of the six hooks <!--ce:hooks:subset--> gate
 on `.ccm/memory.db` merely EXISTING, so once born the stray kept being
 written: measured 27 memories and its own `projects` row in one such database,
@@ -927,6 +947,20 @@ the same; and neither had any notion of a dependency tree. `_candidates`
   `package.json`, so the marker rung accepted it — and planted a database
   inside the dependency tree, where the reporter did not look. Filtering, not
   truncating: the walk must continue *past* the dependency to reach its owner.
+- **A `.ccm-root` pin short-circuits every rule, and a database survives the
+  cut (v2.14.0).** The pin exemption used to be attached to `_is_container`
+  and to the filesystem-root rule separately, and the dependency-name rule
+  never had one — so a project CALLED `external` (or under
+  `~/work/external/`) was cut from every chain, pinned and initialised alike,
+  and every subdirectory cwd resolved to itself. `_is_pinned` is consulted
+  once, here, before any rule; `_dependency_cut` spares a pinned or
+  database-owning directory, and the verdict is deliberate: a directory that
+  owns a database wins at every depth, dependency name or not — rung 0
+  already says so for the directory itself, and `left-pad` → itself while
+  `left-pad/lib` → repo was one `cd` flipping the target database. The
+  volume-root rule uses `_is_volume_root`, so `/mnt/c` is refused on the same
+  terms as the `C:\` it projects, and `_is_profile_dir` recognises
+  `/mnt/c/Users/bob` as the profile it is.
 
 The marker rung then has two remaining ceilings: `_MARKER_MAX_RISE` = 6 levels
 above cwd (caught by test_surfaces §4 climbing *seven* levels out of a temp
@@ -1039,7 +1073,7 @@ on first PreCompact under v2.1 (one-shot migration
 ## 8. Install layouts
 
 Three layouts are recognised by `cli/mem.py` `_detect_install_layouts`
-(`cc_memory/cli/mem.py:387-464`). A machine can have more than one at once
+(`cc_memory/cli/mem.py:487-565`). A machine can have more than one at once
 (e.g. a dev checkout plus a stale marketplace-cache entry), so `/cc-mem status`
 reports on each:
 
@@ -1056,7 +1090,7 @@ reports on each:
 - **legacy / standalone install** — `~/.claude/hooks/cc-memory/`
   (`mem.py:48`), written by the PyInstaller installer
   (`ui/installer.py:72` `TARGET_DIR`). Hooks here are registered directly in
-  `~/.claude/settings.json` by `_merge_into_settings` (`installer.py:1047-1081+`),
+  `~/.claude/settings.json` by `_merge_into_settings` (`installer.py:1116-1150+`),
   not via a plugin manifest.
 
 Under the marketplace layouts `~/.claude/hooks/cc-memory/` holds only `logs/`
@@ -1084,7 +1118,7 @@ shapes do not share a `cc_memory/` path segment.
 **Standalone installer (FLAT)** — `_copy_subpackages(TARGET_DIR)`
 (`installer.py:77-89`) writes each `SUBPACKAGE_FILES` key (`installer.py:77-89`)
 directly under `TARGET_DIR` (`installer.py:72`), with **no `cc_memory/`
-segment**, and `_make_hooks_config` (`installer.py:695-717`) builds commands as
+segment**, and `_make_hooks_config` (`installer.py:735-757`) builds commands as
 `python "<TARGET_DIR>/hooks/<name>.py"`:
 
 ```
@@ -1156,12 +1190,31 @@ a top-level array) refuse with rc=1 and copy nothing; a malformed hook group is
 mentions "cc-memory" without running one of this build's six hook scripts <!--ce:hooks--> is
 **kept and warned about** rather than deleted.
 
+### The frozen exe spawns scripts through a real interpreter, and a settings write follows the link (v2.14.0)
+
+In a PyInstaller onefile build `sys.executable` IS the installer binary, so
+`[sys.executable, dashboard.py, …]` re-entered `main()` with the dashboard
+path in argv: `_KNOWN_FLAGS` refused it and exited 2 into a console that
+closes instantly, and before the v2.5.3 refusal the same click performed a
+silent re-install. `_python_for_script` (`installer.py`) hands a `.py` to the
+interpreter the hook commands already resolve (`_detect_python_cmd`),
+absolute when PATH can supply it; `tests/test_surfaces.py` §3 asserts at
+source level that nothing else reads `sys.executable`.
+
+`~/.claude/settings.json` is a SYMLINK on a dotfiles-managed home (stow,
+chezmoi), and `Path.replace` renames over the link: the versioned copy kept
+its old content with no hooks, the path became an unversioned regular file,
+and the next sync restored the link and un-registered cc-memory.
+`_settings_write_target` resolves the link and writes the target, with the
+temp file beside the target (a rename cannot cross filesystems); both halves
+of the compare-and-swap still read `SETTINGS_PATH`.
+
 ### Layout detection and inspection agree (fixed in v2.5)
 
 Detection accepts both shapes: `mem.py:522` tests
 `(legacy / "cc_memory").exists() or (legacy / "core" / "db.py").exists()`.
 Inspection used to disagree with it. `_inspect_layout` (`mem.py:493-562`) resolved
-every `cc_memory/…`-prefixed entry of `_REQUIRED_PLUGIN_FILES` (`mem.py:237-277`)
+every `cc_memory/…`-prefixed entry of `_REQUIRED_PLUGIN_FILES` (`mem.py:304-363`)
 against the layout **root**, so a healthy flat install reported all 22 files
 missing, printed `[FAIL]`, and — because `/cc-mem status` only runs the API-key
 check against a "fully-functional" layout — skipped that check entirely.
@@ -1189,7 +1242,7 @@ plugin. Otherwise hooks fail silently (logged to
 missing command).
 
 The standalone installer sidesteps this by **running** each candidate rather
-than probing for its existence: `_detect_python_cmd` (`installer.py:621-641`)
+than probing for its existence: `_detect_python_cmd` (`installer.py:646-666`)
 executes `<cand> -c "import sys;print(sys.version_info[0])"` with a 15 s timeout
 and takes the first that answers `3`. `shutil.which("python3")` was not enough —
 on Windows it resolves to a 0-byte App Execution Alias when Store Python is not
@@ -1356,7 +1409,7 @@ must be finalized *before* you emit the marker (see §9.6).
 `tools/i18n_check.py` is pure stdlib and lives outside the `cc_memory` package on
 purpose — it is a dev/CI tool and is deliberately absent from `ui/installer.py`
 `SUBPACKAGE_FILES` (`installer.py:77-89`), `build_exe.py`, and `cli/mem.py`
-`_REQUIRED_PLUGIN_FILES` (`mem.py:237-277`), so the packaged plugin is unchanged
+`_REQUIRED_PLUGIN_FILES` (`mem.py:304-363`), so the packaged plugin is unchanged
 by it.
 
 ```bash

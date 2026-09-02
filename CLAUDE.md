@@ -23,10 +23,12 @@ every finding reproduced before it was reported) produced 38 findings; eight
 shared one upstream cause — `projects.path` WAS the identity, and every surface
 decided "which project is this" with its own path arithmetic — and all eight
 are closed here, plus four of the pass's other named findings, each with its
-own cause (rules 5-8). What the report names beyond these is recorded in
-`CHANGELOG.md` § *Reported*; the report itself is not in this tree. Full
+own cause (rules 5-8), plus the remaining twenty-seven, each at its own cause
+(rules 10-20; `CHANGELOG.md` § *The rest of the pass* has the measurements).
+The report is in the tree as `docs/debug-pass-2026-09.md` — an evidence
+record: never edited, excluded from the citation and symbol gates. Full
 narrative in `CHANGELOG.md`; the specification is `docs/ARCHITECTURE.md` §7.
-Eight rules a future change must not break:
+Twenty rules a future change must not break:
 
 1. **`core.layout.canonical_path` is THE comparable spelling of a path.**
    Resolved, then `normcase`d, never raises, and a non-path spells as `""` so
@@ -137,6 +139,160 @@ Eight rules a future change must not break:
    r13i18nrestamp` / `r13coveragename` / `r13coverageenum` /
    `r13coveragetools` / `r13claimsgap`.
 
+10. **Identification is TRI-STATE, and only a POSITIVE licenses the
+    irreversible move.** `core.layout.UNKNOWN` (falsy) is what every probe
+    returns when it could not RUN — `sqlite3.OperationalError`, an unreadable
+    marker file, an unprobeable link; `DatabaseError` ("file is not a
+    database") stays a real negative. A write guard keeps failing closed
+    (`if is_ccm_dir(d):` still means "positively ours"); `migrate_legacy_dir`
+    alone asks `is UNKNOWN` and takes the refused-rename branch, its settled
+    case requires `.ccm/memory.db` to hold bytes, and an empty `.ccm/` beside
+    a positively-ours `memory/` returns `memory/`. Measured before: one second
+    of `BEGIN EXCLUSIVE` on a 25-row legacy database orphaned it permanently.
+    A linked `.ccm` is not a state directory at all (`_is_usable_state_dir`,
+    through `core.markers._is_link`, junctions included): never followed,
+    never renamed onto, on the read side too — and a recovery path that
+    re-derives the location (`pre_compact.main`'s last-resort handler did,
+    and wrote through the link) re-applies the same probe before it writes.
+    Gate: `smoke_test.py` § roots (c)(d); `test_surfaces.py` §7 (linked state
+    dir, fails rather than skips); `falsify --case r14probe3` / `r14emptyccm`
+    / `r14linkdir` / `r14findlink` / `r14linkrecover`.
+
+11. **In `core/roots.py` a declaration beats a name, and a volume root is a
+    boundary in every spelling.** `.ccm-root` is consulted ONCE, in
+    `_candidates`, and short-circuits every rule — it had been bolted onto two
+    rules separately and the dependency-name rule never got it, so a project
+    called `external` resolved every subdirectory to itself, pinned or not.
+    `_dependency_cut` also spares a directory that owns a database, and the
+    verdict is on record: the database wins at every depth
+    (`node_modules/left-pad` with its own `.ccm/memory.db` resolves to itself,
+    as rung 0 already said for the directory itself). `_is_volume_root`
+    recognises `/mnt/c`, `/cygdrive/c`, `/host_mnt/c` and `/c` beside `C:\`
+    and `/`, so a Windows profile reached from WSL is a profile and its home
+    database is not adopted. `_is_container` has exactly one caller. Gate:
+    `smoke_test.py` § roots (a)(b); `falsify --case r14a1b` / `r14depcut` /
+    `r14depdb`.
+
+12. **Fill-only-empty is decided INSIDE the write, and EMPTY is not NEVER
+    WRITTEN.** `MemoryDB.fill_empty_progress` tests emptiness in the UPDATE
+    itself (`CASE WHEN COALESCE(col, '') IN ('', '[]')`, `BEGIN IMMEDIATE`);
+    `_refresh_progress_row` no longer reads a verdict on one connection and
+    writes it on another with a transcript load in between — a PreCompact
+    rewrite committing in that window was overwritten by heuristics. Where
+    the row's `trigger_type` says a full rewrite settled it
+    (`progress_was_fully_written`; the PATCH-only writers are the enumerated
+    set, so a new host trigger string still counts as a rewrite), the mined
+    work lists stay as written, empty included; on `source="compact"` /
+    `"resume"` tier 3 mines the CURRENT transcript (`tier3_exclusion`),
+    because excluding it handed the mine to another session's todos. Known
+    limit: the Stop hook's per-turn patch stamps `"stop"`, so the settled fact
+    protects the compact/resume start that follows a rewrite and no longer.
+    Gate: `smoke_test.py`; `falsify --case r14fillrace` / `r14emptytodos` /
+    `r14curtranscript`.
+
+13. **An empty extraction is a RESULT, and no transcript is read before the
+    credential is resolved.** `_retroactive_extract` returns `[]` when the
+    model found nothing worth keeping and `None` only when it did not run;
+    `retroactive_save` records the session either way (a transcript that
+    yielded nothing was re-decoded and re-sent at every SessionStart, forever)
+    and resolves `core.auth.get_api_key()` above the loop (2.98 s per start
+    with no key, 0.25 s after). Gate: `smoke_test.py`; `falsify --case
+    r14retroempty` / `r14retrokey`.
+
+14. **Every line of stdout Claude reads is a render path, and a one-line
+    slot is an INLINE slot.** The Stop advisory printed when the escape
+    budget is spent joined refusal keys raw — a key carries a directive slug,
+    which `upsert_directive` never cleans, and a stored `</system-reminder>`
+    reached the model live. `neutralize_inline` on the advisory and on every
+    `[key]` / `what` / `fix` slot of `render_block_reason`
+    (`neutralize_document` escapes tags but leaves newlines, and a CR/LF in a
+    slug forged extra entries). Gate: `test_directive_enforcement.py`
+    §9(a)(b); `falsify --case r14advisoryslug` / `r14blockinline`.
+
+15. **The consolidation lock has ONE policy point:
+    `consolidate_async._acquire_lock`.** The Stop probe imports its
+    `_STALE_LOCK_S` and compares the lock's age; it used to refuse on
+    `.exists()` alone — a copy of the policy minus its staleness rule — so a
+    lock left by a killed worker vetoed the only process that reclaims one,
+    forever (a 2-hour-old lock held the kick at False over three Stops). A
+    young lock still defers the spawn; `stop.py` holds no lock constant of
+    its own. Gate: `test_directive_enforcement.py` §9(c); `falsify --case
+    r14stalelock`.
+
+16. **`user_prompt.strip_scaffolding` is THE scaffolding predicate for both
+    `current_request` ingresses, and the seed happens once per session.**
+    `/ccm-load` used to become PROGRESS.md §1 (`ccm-load`) and the observer's
+    "User request:"; the live hook and `pre_compact._first_user_request` ask
+    the one function now (the wrapped `<command-name>` form and the bare
+    `/command` form; a request that opens with a path keeps its slash). The
+    seed fires on the first NON-scaffolding prompt, recorded by a
+    `cc_mem_seeded_` marker registered in `ui/installer.py:
+    _TEMP_MARKER_PREFIXES` — NOT by the prompt marker being empty, which a
+    scaffolding or an entirely-private turn also leaves empty (a first draft
+    keyed on that and re-seeded `real → /cc-mem status → 继续` as a
+    mid-session `resume_request`). Gate: `test_surfaces.py` §7
+    `_user_prompt_seeds_the_first_real_request`; `falsify --case
+    r14slashseed` / `r14seedturn1` / `r14seedprev`.
+
+17. **An exact-hash restatement REINFORCES; the tag cap never eats the
+    writer's marker.** `memory_writer._fold_into_hash_match` folds importance
+    (max) and tags (union) into the hash-matched row and nothing else, action
+    `reinforced`, no write when nothing is new (`skipped` still means nothing
+    was written); the fold runs after `reconcile_upsert` commits, so two
+    simultaneous identical saves can miss a bump — never a row. `_merged_tags`
+    caps the caller-supplied union and re-appends `_ACTION_TAGS`, so a stored
+    list can hold `MAX_TAGS + 2`. Every consumer of `upsert_batch`'s counts
+    renders `reinforced`. Gate: `smoke_test.py` § C3/C4; `falsify --case
+    r14hashfold` / `r14foldnoop` / `r14tagcap`.
+
+18. **The CLI boundary catches the CLASS external input can raise, and keys
+    a remedy on the MEASURED message.** `(OSError, sqlite3.Error,
+    UnicodeError, OverflowError, JSONDecodeError)`, never a bare
+    `ValueError`; ids and counts are bounded at argparse (`_row_id` /
+    `_plan_int`); stdin loses its BOM and `--raw-file` is `utf-8-sig`. A
+    remedy is printed only for the four sqlite messages driven first-party
+    (`_SQLITE_ENV_FAULTS`); any other `sqlite3.Error` is re-raised — a first
+    draft told `no such column` (our bug) to "check that memory.db is a
+    writable FILE". `plan-set --from-refiner` judges the plan it WROTE
+    (`result`, normalised), not the raw payload, and `goal` / `context` are
+    TEXT by one rule in `normalize_structured`. Gate: `test_surfaces.py`
+    §9h-j; `falsify --case r14cliboundary` / `r14sqlremedy` / `r14rowid` /
+    `r14stdinbom` / `r14criteriacore` / `r14criteriaraw` / `r14goalrepr`.
+
+19. **The frozen installer never runs a `.py` through `sys.executable`; a
+    settings write follows the link; a value is rendered at its sink.** In a
+    onefile exe `sys.executable` is the installer, so "Open Dashboard"
+    re-entered `main()` and was refused with exit 2 — `_python_for_script`
+    hands scripts to the interpreter the hooks use, and `test_surfaces.py` §3
+    asserts nothing else reads `sys.executable`. `_settings_write_target`
+    writes THROUGH a symlinked `settings.json` (a dotfiles-managed home lost
+    its hooks on every sync). The SQL console renders rows on both branches
+    (`_format_sql_result`, pure); Save Session stores `archive_path=""`
+    because nothing writes that file; `_manifest_slot` bounds, flattens and
+    escapes every manifest or filesystem value the CLAUDE.md generator
+    interpolates (a `description` grew a `## Rules` section; a list-valued
+    `name` raised out of a Tk callback). Gate: `test_surfaces.py` §3 / §8;
+    `falsify --case r14frozendash` / `r14settingslink` /
+    `r14installerprose` / `r14sqlrows` / `r14archivestamp` / `r14pkgdesc` /
+    `r14pkgname`.
+
+20. **`marker_dir()` returns None rather than a directory inside the user's
+    tree, and a gate copy is a git repository.** `tempfile.gettempdir()`
+    falls back to `os.getcwd()` — the project, under a hook — so markers were
+    written into the repository; a base that IS the cwd or is not a
+    designated temp root is refused, `marker_path` propagates None and both
+    leaves refuse it (every call site flows only into `read_marker` /
+    `write_marker`; the installer's sweep tests for None). `_is_cwd` is
+    equality, not containment, by design: a project opened at `~` or a drive
+    root keeps its markers. `tools/falsify_fixes.py` runs each gate once on
+    an UNTOUCHED copy (`gate_baseline`) and reports UNSOUND instead of RED
+    when that baseline is red — the copy lacked `.git`, `git check-ignore`
+    exited 128, and every smoke-gated case had been unsound until v2.14.0;
+    `tools/citation_check.py` walks only this tree's directories
+    (`_tree_files`) and verifies a `verbatim` region IN ORDER. Gate:
+    `smoke_test.py` § markers / § citations; `falsify --case r14markercwd` /
+    `r14markernone` / `r14baseline` / `r14verbatimorder` / `r14dotdirs`.
+
 ## What changed in v2.13.2 (over v2.13.1)
 
 **A rename is not finished when the joins are.** v2.13.0 swept path joins and
@@ -241,7 +397,12 @@ break:
    carrying THIS plugin's `.gitignore` marker line or a `memory.db` that is a
    real SQLite file with this schema's tables — and the magic-byte pre-filter
    is load-bearing, because `sqlite3.connect` on a non-database CREATES one,
-   which would be a probe manufacturing its own evidence.
+   which would be a probe manufacturing its own evidence. (Measured in
+   v2.14.0 while registering falsification cases: the pre-filter is
+   defence-in-depth, not the only guard — `_safe_is_file` short-circuits an
+   absent file and the `mode=ro` URI refuses to create one, so a case that
+   removed the pre-filter ran GREEN and was not kept. Keep the pre-filter;
+   do not cite it as the thing that prevents the create.)
 
 5. **The read side never migrates.** `find_memory_dir` / `find_db_path` exist
    because migration is a WRITE: `ui/dashboard.py` enumerates every sibling of
@@ -985,7 +1146,7 @@ were closed too. Nine things that were silently wrong in shipped code:
    docstring now forbids re-inverting this. Per mode: ExitPlanMode → plan rows
    0/0/0 → 1/1/1; Edit counter 1/0/1 → 1/1/1; `git push` 21/20/1 → 21/21/21.
    A raw plan awaiting refinement is also no longer invisible:
-   `core.plan.raw_pending_refinement` (`plan.py:352-381`) makes PLAN.md and
+   `core.plan.raw_pending_refinement` (`plan.py:402-431`) makes PLAN.md and
    `plan-status` lead with a PENDING REFINEMENT banner + the raw text.
 
 3. **`core/privacy.py` failed OPEN.** `strip_private` was a non-greedy `re.sub`
@@ -1389,7 +1550,7 @@ blocking sync leg + a background `async` leg.
 | `SessionStart` | `cc_memory/hooks/session_start.py` | 15s | Inject layered context (the directive ledger FIRST, v2.12.2) + FORCED `<system-reminder>` to Read PROGRESS.md |
 | `Stop` | `cc_memory/hooks/stop.py` | 22s | Observer (Haiku) + per-turn PROGRESS.md patch + idle reorg every 5 turns + consolidation backpressure probe (v2.12.0) + plan enforcement |
 | `PostToolUse` | `cc_memory/hooks/post_tool_use.py` | 8s | Live plan anchor in EVERY mode (ExitPlanMode capture / TodoWrite step sync / drift counters), THEN an observation row for observed tools only (no LLM) |
-| `UserPromptSubmit` | `cc_memory/hooks/user_prompt.py` | 8s | Auto-init `.ccm/` (migrating a pre-v2.13.0 `memory/`) + turn count + seed `progress.current_request` on turn 1 |
+| `UserPromptSubmit` | `cc_memory/hooks/user_prompt.py` | 8s | Auto-init `.ccm/` (migrating a pre-v2.13.0 `memory/`) + turn count + seed `progress.current_request` on the first NON-scaffolding prompt, once per session (v2.14.0) |
 
 Hook contract (NEVER violate):
 - Hooks must NEVER write to stderr (Claude Code shows stderr as error UI).
@@ -1461,9 +1622,14 @@ non-PK columns in the schema; "11" counts only the user-facing ones, and
 `docs/ARCHITECTURE.md` §4 states it the same way. It is updated by four paths:
 - `PreCompact` does a full overwrite (`upsert_progress`).
 - `Stop` patches `files_touched` per turn (`patch_progress`).
-- `UserPromptSubmit` patches `current_request` on turn 1 (`patch_progress`).
+- `UserPromptSubmit` patches `current_request` on the session's first
+  NON-scaffolding prompt, once (`patch_progress`; `strip_scaffolding` is the
+  predicate both ingresses share, and the `cc_mem_seeded_` marker records
+  that the seed happened — v2.14.0, rule 16).
 - `SessionStart` fills ONLY still-empty fields via
-  `_refresh_progress_row` (`patch_progress`, `trigger_type="session_start_refresh"`).
+  `_refresh_progress_row` (`fill_empty_progress`, which tests emptiness
+  INSIDE the UPDATE; `trigger_type="session_start_refresh"` is filled the
+  same conditional way — v2.14.0, rule 12).
   Fill-only-empty by contract — it must never overwrite a populated field.
 
 `SESSION_HANDOFF.md` from v2.0 is renamed to `SESSION_HANDOFF.md.v2.bak` on
@@ -1632,7 +1798,14 @@ installer's per-entry strip and its absent-file compare-and-swap, the surface
 manifest union, a 600 KiB PostToolUse payload, the empty-prompt marker
 overwrite, the MCP `jsonrpc` member, and 16 header-phase drippers failing to
 hold the admission permits). It also asserts the source-level rule that every
-LLM-calling hook passes an absolute deadline.
+LLM-calling hook passes an absolute deadline. v2.14.0 added to §3 (the
+frozen `Open Dashboard` spawn, a symlinked `settings.json`, installer prose
+naming the old state directory), to §7 (a linked state directory on
+`pre_compact`'s recovery path; the first-real-prompt seed, eight sequences),
+to §8 (the SQL console's two branches, the manifest slots) and §9h-j (the
+CLI boundary, 45 checks); `tests/test_directive_enforcement.py` gained §9
+(the advisory line and the refusal slots as render paths, the stale-lock
+kick through the real hook).
 
 **§4 now opens by binding its own enumeration.** `_HOOK_ORDER` is the sole
 list behind the opt-out gate, §7's subdirectory drive, the
@@ -1770,6 +1943,12 @@ python tools/falsify_fixes.py
 # every case in the register was verified RED individually before being
 # kept, and `--anchors` proves the register itself has not rotted. A green
 # case means the check is vacuous: fix the check, not the case.
+# Since v2.14.0 each gate is first run ONCE on an untouched copy
+# (`gate_baseline`); a red baseline reports the case UNSOUND, never RED —
+# before that control existed the copy had no `.git`, `git check-ignore`
+# exited 128, and every smoke-gated case was being judged against a gate
+# that was already red. A copy is `git init`ed now. Expect ~7 s per case
+# for the copy alone on a machine whose antivirus scans new files.
 # `--list` shows what each case breaks; `--case <name>` runs one.
 ```
 
@@ -1826,10 +2005,10 @@ Gate: `falsify --case r12verbatim` / `r12verbatimskip`.
 Two limits to know before trusting a green result: a citation whose sentence
 names no resolvable symbol at all is **bounds-checked only** — inside the
 file and non-blank, NOT verified against a symbol — and the summary says so
-in those words since v2.14.0 (257 of 624 at v2.14.0; the class was 253 of
+in those words since v2.14.0 (261 of 631 at v2.14.0; the class was 253 of
 594 as `SKIP` at v2.5.4, down from 370 once v2.5.3 taught it to anchor
 CROSS-FILE citations on the text of the cited range — the
-`` `db.tag_progress_session(...)` (`user_prompt.py:213`) `` shape, which is
+`` `db.tag_progress_session(...)` (`user_prompt.py:276`) `` shape, which is
 the commonest in these docs). A bounds-only citation can rot silently: six
 had, all in prose that names a section rather than a symbol, and were
 repointed by hand in v2.14.0. `--fix`

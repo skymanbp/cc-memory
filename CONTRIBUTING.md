@@ -133,6 +133,14 @@ python tools/falsify_fixes.py --anchors       # prove the register itself has no
 When you fix a defect, register a case for it. "I added a test" and "the test
 would have caught this" are different claims, and only the second one matters.
 
+Since v2.14.0 every case is judged against a NEGATIVE CONTROL: the gate is
+first run once on an untouched copy of the tree (`gate_baseline`, cached per
+gate), and a case whose baseline is red is reported `UNSOUND`, never `RED`.
+A `--case` that prints UNSOUND is telling you the gate is broken on the
+current tree — fix that first. Before this control existed, every case gated
+on `smoke_test.py` had been judged against a copy with no `.git`, on which
+the gate was already red.
+
 ## Pull requests
 
 Fill in the template. The three things a review will look for first:

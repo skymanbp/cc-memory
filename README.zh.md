@@ -1,4 +1,4 @@
-<!-- i18n-source: README.md | sha256: 50a1bd90ad94dd49 | version: 2.14.0 | translated: 2026-09-01 | translation: 54f6510d25d7d6f5 -->
+<!-- i18n-source: README.md | sha256: 5aadd657969dbd1d | version: 2.14.0 | translated: 2026-09-01 | translation: 9e01245f047442b8 -->
 > [English](README.md) · **简体中文**
 
 <div align="center">
@@ -329,7 +329,7 @@ importance 或新的 tags —— 不新增行，只把它们合入命中的那�
 ┌──────────────────────── 你的 Claude Code 会话 ───────────────────────────┐
 │                                                                          │
 │  UserPromptSubmit ──▶ 首次接触时创建 .ccm/、计轮次、                     │
-│                       在第 1 轮播种"用户要什么"                          │
+│                       在首条真实提示时播种"用户要什么"                   │
 │                                                                          │
 │  PostToolUse     ──▶ 实时计划锚点（ExitPlanMode → 捕获计划、             │
 │                       TodoWrite → 步骤同步、编辑 → 漂移计数器）          │
@@ -736,7 +736,7 @@ LF 换行——**不需要任何 `PYTHONUTF8` / `PYTHONIOENCODING` 环境变量*
 
 | 事件 | 脚本 | 超时 | 职责 |
 |---|---|---|---|
-| `UserPromptSubmit` | `hooks/user_prompt.py` | 8 秒 | 自动初始化 `.ccm/`、计轮次、第 1 轮播种请求 |
+| `UserPromptSubmit` | `hooks/user_prompt.py` | 8 秒 | 自动初始化 `.ccm/`、计轮次、在首条真实提示时播种请求（每会话一次） |
 | `PostToolUse` | `hooks/post_tool_use.py` | 8 秒 | **在每种模式下**维护实时计划锚点，然后为被观察的工具各写一行 observation |
 | `Stop` | `hooks/stop.py` | 22 秒 | Haiku 观察者、按轮增量更新 PROGRESS、每 5 轮空闲整理、背压探针、计划强制执行 |
 | `PreCompact`（同步） | `hooks/pre_compact.py` | 120 秒 | 抽取 → 调和 → 全量重写 PROGRESS.md → 归档 |
@@ -913,8 +913,13 @@ Release，附上两个 exe，并以对应的 CHANGELOG 段落作为正文。与 
   测试（v2.10.1）；在没有测试的前提下重构剩下的 2.9k 行 GUI 被刻意推迟。
 - **闸门的限制被记录下来，而不是被设计掉（v2.14.0）。** 所在句子没有点名任何
   符号的引文只做边界检查（在文件内、非空行），烂掉了也不会变红；名词不在
-  `doc_claims` 触发词表里的计数句不是闸门看得见的断言；`verbatim` 引用逐段核对，
-  真段落被打乱顺序也能通过。
+  `doc_claims` 触发词表里的计数句不是闸门看得见的断言。（`verbatim` 引用自
+  v2.14.0 起逐段核对**且**按顺序核对。）
+- **调试审查留下的未决项在案（v2.14.0）。** `docs/debug-pass-2026-09.md` 是
+  证据记录（仅英文，从不改动）；它的发现里仍然开着的——在 reconcile 事务之外
+  进行的精确哈希折叠、会被下一次 Stop 补丁抹掉的「已由整篇重写定稿」标记、两条
+  没有闸门断言可供锚定证伪案例的 v2.13 规则——列在 `CHANGELOG.md`
+  § *Recorded, not redesigned*。
 - **候选的后续工作：** 在 Stop 状态行里呈现 `inject-usage` 信号；看板里的
   `directive-*` 界面；面向多数据库机器的更丰富的 `paths` 式诊断。
 
@@ -943,6 +948,18 @@ Release，附上两个 exe，并以对应的 CHANGELOG 段落作为正文。与 
   被包含；带两个修饰词的计数仍然是计数；检查器只能做边界检查的引文按原话报告；
   `--emit-marker` 拒绝为没人翻译过的译文重新盖章（纯英文改动用
   `--translation-unchanged "<原因>"`）。
+- **调试审查的其余部分也关闭了——二十七条发现，各在其根源处修复。** 探针的
+  一次瞬时失败不再把 v2.13.0 之前的 `memory/` 永久遗弃；链接形态的 `.ccm`
+  既不被跟随也不被写穿；名叫 `external` 的项目能被解析；WSL 挂载的用户目录是
+  边界；SessionStart 的刷新在写入内部裁决「只填空」，也不再把另一个会话转录里
+  的待办挖进一份本来就为空的清单；被复述的事实保住更高的重要度
+  （`reinforced`）；Stop 的建议行会被中和；陈旧的整理锁不再永久否决背压；
+  `/ccm-load` 不再成为会话的「当前请求」；CLI 对坏输入回一行，而不是十七个
+  回溯；发布的 exe 里「Open Dashboard」能启动了；由 dotfiles 管理的
+  `settings.json` 保住钩子；陌生的 `package.json` 写不进生成的 CLAUDE.md 的
+  章节；标记文件绝不落进仓库；证伪套件补上了它从未有过的阴性对照。完整报告
+  在树里：[docs/debug-pass-2026-09.md](docs/debug-pass-2026-09.md)（仅英文，
+  作为证据记录）。
 
 v2.13.0 把每个项目的状态从 `memory/` 挪到了 `.ccm/`——放在 `.git` 旁边的点状态
 目录，首次写入时单向迁移，按内容而不是按名字识别。v2.12.x 带来了背压触发的整理、

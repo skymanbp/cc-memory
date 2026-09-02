@@ -346,7 +346,7 @@ an existing backlog down in one sitting, looping the judge until it runs dry.
 ┌──────────────────────── your Claude Code session ─────────────────────────┐
 │                                                                           │
 │  UserPromptSubmit ──▶ create .ccm/ on first contact, count the turn,      │
-│                       seed "what the user asked for" on turn 1            │
+│                       seed "what the user asked for", first real prompt   │
 │                                                                           │
 │  PostToolUse     ──▶ live plan anchor (ExitPlanMode → captured plan,      │
 │                       TodoWrite → step sync, edits → drift counters)      │
@@ -778,7 +778,7 @@ Six hook commands <!--ce:hooks--> across five Claude Code events, declared in
 
 | Event | Script | Timeout | Job |
 |---|---|---|---|
-| `UserPromptSubmit` | `hooks/user_prompt.py` | 8 s | Auto-init `.ccm/`, count the turn, seed the request on turn 1 |
+| `UserPromptSubmit` | `hooks/user_prompt.py` | 8 s | Auto-init `.ccm/`, count the turn, seed the first real request once per session |
 | `PostToolUse` | `hooks/post_tool_use.py` | 8 s | Live plan anchor **in every mode**, then one observation row per observed tool |
 | `Stop` | `hooks/stop.py` | 22 s | Haiku observer, per-turn PROGRESS patch, idle reorg every 5 turns, backpressure probe, plan enforcement |
 | `PreCompact` (sync) | `hooks/pre_compact.py` | 120 s | Extract → reconcile → full-rewrite PROGRESS.md → archive |
@@ -974,8 +974,14 @@ has to rediscover:
 - **Gate limits recorded, not designed away (v2.14.0).** A citation whose
   sentence names no symbol is only bounds-checked (inside the file, non-blank)
   and can rot without going red; a count whose noun is not in `doc_claims`'
-  trigger list is not a claim the gate sees; a `verbatim` quote is verified
-  segment by segment, so a reordering of true segments passes.
+  trigger list is not a claim the gate sees. (A `verbatim` quote is verified
+  segment by segment AND in order since v2.14.0.)
+- **The debug pass's open items are on record (v2.14.0).**
+  `docs/debug-pass-2026-09.md` is the evidence record (English only, never
+  edited); what its findings leave open — an exact-hash fold that runs outside
+  the reconcile transaction, a settled progress row that the next Stop patch
+  un-settles, two v2.13 rules with no gate assertion to anchor a case on — is
+  listed in `CHANGELOG.md` § *Recorded, not redesigned*.
 - **Candidate future work:** surfacing `inject-usage` signals in the Stop
   status line; a `directive-*` surface in the dashboard; richer `paths`-style
   diagnostics for multi-database machines.
@@ -1012,6 +1018,23 @@ session, progress row, plan and directive went dark on every surface.
   bounds-check is reported in those words; and `--emit-marker` refuses to
   re-stamp a translation nobody translated (`--translation-unchanged "<why>"`
   for an English-only edit).
+- **The rest of the debug pass, closed — twenty-seven findings, each at its
+  own cause.** A transient probe failure no longer orphans a pre-v2.13.0
+  `memory/` for good; a linked `.ccm` is never followed or written through; a
+  project called `external` resolves; a WSL-mounted profile is a boundary;
+  the SessionStart refresh decides fill-only-empty inside the write and no
+  longer re-mines an empty todo list from another session's transcript; a
+  restated fact keeps its higher importance (`reinforced`); the Stop
+  advisory is neutralised; a stale consolidation lock no longer vetoes
+  backpressure forever; `/ccm-load` is no longer the session's request; the
+  CLI answers bad input with one line instead of seventeen tracebacks; the
+  shipped exe's "Open Dashboard" starts; a dotfiles-managed `settings.json`
+  keeps its hooks; a stranger's `package.json` cannot write sections into a
+  generated CLAUDE.md; markers never land in the repository; and the
+  falsification suite gained the negative control it never had. The full
+  report is in the tree:
+  [docs/debug-pass-2026-09.md](docs/debug-pass-2026-09.md) (English only, an
+  evidence record).
 
 v2.13.0 moved per-project state from `memory/` to `.ccm/` — dotted state
 beside `.git`, migrated one way on first write and identified by content,

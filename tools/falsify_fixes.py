@@ -2678,8 +2678,15 @@ def _break_r13statejoin(root):
       "called `memory` is renamed out from under it")
 def _break_r13ccmident(root):
     _patch(root, f"{PKG}/core/layout.py",
-           "    return (_has_ccm_gitignore(directory)\n"
-           "            or _has_ccm_database(directory / DB_FILENAME))",
+           "    gitignore = _has_ccm_gitignore(directory)\n"
+           "    if gitignore is True:\n"
+           "        return True\n"
+           "    database = _has_ccm_database(directory / DB_FILENAME)\n"
+           "    if database is True:\n"
+           "        return True\n"
+           "    if gitignore is UNKNOWN or database is UNKNOWN:\n"
+           "        return UNKNOWN\n"
+           "    return False",
            "    return directory.name in (MEMORY_DIRNAME, LEGACY_MEMORY_DIRNAME)"
            "  # BREAKAGE")
 
@@ -2690,7 +2697,7 @@ def _break_r13ccmident(root):
 def _break_r13readmigrate(root):
     _patch(root, f"{PKG}/core/layout.py",
            "    new, old = state_dir_candidates(project_root)\n"
-           "    if _safe_is_dir(new):\n"
+           "    if _is_usable_state_dir(new):\n"
            "        return new\n"
            "    if _safe_is_file(old / DB_FILENAME):\n"
            "        return old\n"

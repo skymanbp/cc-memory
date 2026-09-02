@@ -41,8 +41,8 @@ someone who knows the command exists.
 | `plan-status` | Live-plan counters + freshness summary (no LLM) |
 | `plan-show` | Regenerate + print `.ccm/PLAN.md` |
 | `plan-set --raw '<text>'` | Capture a raw plan, mark `needs_refine=1` |
-| `plan-set --raw-file FILE` | Same, but read raw from a file |
-| `plan-set --from-refiner` | Read structured JSON from stdin (refiner output) |
+| `plan-set --raw-file FILE` | Same, but read raw from a file (UTF-8, a BOM tolerated; any other encoding is refused with a one-line remedy) |
+| `plan-set --from-refiner` | Read structured JSON from stdin (refiner output; a leading BOM, as PowerShell 5.1's `>` writes, is stripped) |
 | `plan-check` | Reset guardian counters + emit plan-guardian invocation hint |
 | `plan-replan` | Re-arm `needs_refine` on the current raw |
 | `plan-clear` | Drop the active plan + delete PLAN.md. Archived to `.ccm/.plan_history/` first; **`--reason "<why>"` is required when unfinished steps exist** (refuses and exits 1 otherwise — v2.4.0 carryover gate) |
