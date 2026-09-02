@@ -134,6 +134,12 @@ _SETTINGS_FIX_HINT = ("Fix that file (or move it aside) and re-run the "
 # The writers, one per prefix (grep the hooks for tempfile.gettempdir to audit):
 #   cc_mem_turns_        hooks/user_prompt.py  turn counter
 #   cc_mem_prompt_       hooks/user_prompt.py  last user prompt, for the observer
+#   cc_mem_seeded_       hooks/user_prompt.py  set once, when this session has
+#                        seeded progress.current_request. The prompt marker
+#                        above cannot stand in for it: it is overwritten with
+#                        "" on a scaffolding or entirely-private turn, so
+#                        "empty" there means "the last turn stored nothing",
+#                        not "this session has seeded nothing".
 #   cc_mem_eval_         NO live writer since v2.8.0 - the observer watermark
 #                        moved to projects.obs_watermark, because a per-SESSION
 #                        marker made every new session replay the project's
@@ -155,9 +161,9 @@ _SETTINGS_FIX_HINT = ("Fix that file (or move it aside) and re-run the "
 #                        the hooks/stop.py module docstring). Kept deliberately
 #                        so an uninstall still sweeps markers an older install
 #                        left in the temp dir.
-_TEMP_MARKER_PREFIXES = ("cc_mem_turns_", "cc_mem_prompt_", "cc_mem_eval_",
-                         "cc_mem_refine_", "cc_mem_block_", "cc_mem_idle_",
-                         "cc_memory_reminded_")
+_TEMP_MARKER_PREFIXES = ("cc_mem_turns_", "cc_mem_prompt_", "cc_mem_seeded_",
+                         "cc_mem_eval_", "cc_mem_refine_", "cc_mem_block_",
+                         "cc_mem_idle_", "cc_memory_reminded_")
 # Marker suffix = hooks/stop.py:_safe_id(session_id) -> a 16-char session id with
 # path separators replaced. Anything else in %TEMP% is not ours; leave it alone.
 _TEMP_MARKER_SUFFIX_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")

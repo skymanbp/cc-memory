@@ -445,8 +445,31 @@ def _maybe_kick_consolidation(cwd, memory_dir, db, project_id):
     reason = consolidation_backlog(db, project_id, marker)
     if reason is None:
         return False
-    if (memory_dir / ".consolidation.lock").exists():
-        return False  # a worker is already on it (or its stale-lock sweep is)
+    # A LIVE worker defers the spawn; an ABANDONED lock must not.
+    # `consolidate_async._acquire_lock` is the lock's ONE policy point: it
+    # refuses while a lock is younger than `_STALE_LOCK_S` and RECLAIMS one
+    # older, because a worker killed mid-run (crash, reboot, Ctrl-C) leaves
+    # its lock behind. This probe used to ask `.exists()` — a second copy of
+    # that policy MINUS its staleness rule — and since the probe is what
+    # SPAWNS the only process that can reclaim, one abandoned lock vetoed
+    # every spawn forever: measured, a 2-hour-old lock kept the kick at False
+    # over three consecutive Stops (the other reclaimer, the async PreCompact
+    # leg, fires on compaction — the exact case backpressure exists to
+    # cover), which is the v2.12.0 starvation made permanent. The constant is
+    # IMPORTED from the worker, never re-spelled here: two numbers named the
+    # same thing is how this drifted in the first place.
+    from hooks.consolidate_async import _STALE_LOCK_S
+    try:
+        _lock_age = time.time() - (memory_dir / ".consolidation.lock").stat().st_mtime
+    except OSError:
+        # why: no lock (the common case) or an unstatable one — either way
+        # this probe cannot judge it, and `_acquire_lock` in the spawned
+        # worker is the real guard: it takes O_CREAT|O_EXCL and exits if it
+        # loses. Deferring here on an unreadable lock would be the same
+        # permanent veto this branch exists to end.
+        _lock_age = None
+    if _lock_age is not None and _lock_age < _STALE_LOCK_S:
+        return False  # a live worker is already on it
     kick = memory_dir / ".consolidation.kick"
     try:
         if (kick.exists() and
@@ -619,8 +642,22 @@ def main():
                 # Escape budget spent (or unmarkable temp dir): say so loudly
                 # and let the turn close. A block we cannot count is a block
                 # that could trap the session.
+                #
+                # THIS IS A RENDER PATH. The keys carry a directive's `slug`
+                # (`directive-idle:<slug>`), which `db.upsert_directive` does
+                # NOT clean — it cleans quote/demand/evidence — and the CLI
+                # accepts any string. The BLOCK path next to it neutralises via
+                # `render_block_reason` and this one interpolated raw into the
+                # stdout Claude reads: measured, a stored
+                # `</system-reminder><system-reminder>…` reached the model
+                # LIVE on the first Stop after the escape budget was spent.
+                # `neutralize_inline`, not `neutralize_document`: the status
+                # line owns exactly one line, so a `\n` in a slug must not be
+                # able to open a second one.
+                from core.privacy import neutralize_inline
                 advisory = ("\n[cc-memory.plan] "
-                            + "; ".join(r[0] for r in reasons)
+                            + neutralize_inline(
+                                "; ".join(str(r[0]) for r in reasons))
                             + " — still unresolved after "
                             f"{plan_mod._BLOCK_MAX_CONSECUTIVE} refusals; "
                             "degrading to advisory so you are not trapped.")

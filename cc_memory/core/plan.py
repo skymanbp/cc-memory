@@ -517,10 +517,25 @@ def render_block_reason(reasons: list, attempt: int) -> str:
     directive. `neutralize_document` escapes rather than deletes, so the text
     stays readable and stops carrying authority — the same treatment
     `render_plan_md` and `render_pending_plan_md` already end with.
+
+    `neutralize_document` ALONE was not enough, and the gap is the one
+    core.privacy states in `neutralize_inline`'s own docstring: `[key]`,
+    `what :` and `fix  :` each own exactly ONE output line, and a document
+    sweep escapes authority tags without touching newlines. A slug or demand
+    carrying `\n` / `\r` therefore forged extra `[key]` / `what` / `fix`
+    entries in the plugin's own voice — measured on ONE reason whose slug and
+    demand carried a CR and an LF: 2 `[key]` lines, 2 `what :` lines and
+    2 `fix  :` lines out of a renderer that emits one of each — the
+    second set entirely the stored text's. Every single-line slot goes
+    through `neutralize_inline` (whitespace collapsed to one space),
+    and the assembled document keeps the
+    final sweep for the joins between them.
     """
     lines = ["cc-memory · plan enforcement — this turn cannot close yet.", ""]
     for key, what, how in reasons:
-        lines += [f"  [{key}]", f"    what : {what}", f"    fix  : {how}", ""]
+        lines += [f"  [{neutralize_inline(str(key))}]",
+                  f"    what : {neutralize_inline(str(what))}",
+                  f"    fix  : {neutralize_inline(str(how))}", ""]
     left = _BLOCK_MAX_CONSECUTIVE - attempt
     if left > 0:
         lines.append(

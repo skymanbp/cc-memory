@@ -1085,8 +1085,10 @@ def _break_r7obsread(root):
 @case("r7harness", ["tests/smoke_test.py"],
       "take the first user record -> the harness caveat becomes the request")
 def _break_r7harness(root):
+    # anchor repaired 2026-09-01 (B9): _first_user_request now calls the ONE
+    # shared scaffolding predicate, which wraps strip_harness_blocks
     _patch(root, f"{PKG}/hooks/pre_compact.py",
-           "        candidate = strip_harness_blocks(candidate)",
+           "        candidate = strip_scaffolding(candidate)",
            "        pass  # BREAKAGE")
 
 
@@ -2163,6 +2165,81 @@ def _break_r13privatecase(root):
     _patch(root, f"{PKG}/core/privacy.py",
            "        r = _TOKEN_RES[tok] = re.compile(re.escape(tok), re.IGNORECASE)",
            "        r = _TOKEN_RES[tok] = re.compile(re.escape(tok))  # BREAKAGE: case-sensitive")
+
+
+# -- reviewer B, 2026-09 debug pass: recovery paths, render paths, one policy --
+
+@case("r14linkrecover", ["tests/test_surfaces.py"],
+      "let the LAST-RESORT handler re-derive the state dir without the link guard -> pre_compact writes and unlinks through a symlinked/junctioned .ccm the primary path just refused")
+def _break_r14linkrecover(root):
+    _patch(root, f"{PKG}/hooks/pre_compact.py",
+           "            if _markers_is_link(memory_dir):\n"
+           "                _log.error(",
+           "            if False:  # BREAKAGE: the recovery path follows links\n"
+           "                _log.error(")
+
+
+@case("r14advisoryslug", ["tests/test_directive_enforcement.py"],
+      "interpolate the directive slug raw into the advisory line again -> a stored authority marker reaches Claude LIVE on the turn the escape budget is spent")
+def _break_r14advisoryslug(root):
+    _patch(root, f"{PKG}/hooks/stop.py",
+           "                from core.privacy import neutralize_inline\n"
+           "                advisory = (\"\\n[cc-memory.plan] \"\n"
+           "                            + neutralize_inline(\n"
+           "                                \"; \".join(str(r[0]) for r in reasons))",
+           "                advisory = (\"\\n[cc-memory.plan] \"\n"
+           "                            + \"; \".join(str(r[0]) for r in reasons)  # BREAKAGE")
+
+
+@case("r14blockinline", ["tests/test_directive_enforcement.py"],
+      "escape the refusal's one-line slots with a document sweep only -> a CR/LF in a slug or demand forges extra [key]/what/fix entries in the plugin's own voice")
+def _break_r14blockinline(root):
+    _patch(root, f"{PKG}/core/plan.py",
+           "        lines += [f\"  [{neutralize_inline(str(key))}]\",\n"
+           "                  f\"    what : {neutralize_inline(str(what))}\",\n"
+           "                  f\"    fix  : {neutralize_inline(str(how))}\", \"\"]",
+           "        lines += [f\"  [{key}]\", f\"    what : {what}\",\n"
+           "                  f\"    fix  : {how}\", \"\"]  # BREAKAGE")
+
+
+@case("r14stalelock", ["tests/test_directive_enforcement.py"],
+      "give the backpressure probe its own lock check again -> a lock left by a killed worker vetoes every spawn forever, and only the spawn can reclaim it")
+def _break_r14stalelock(root):
+    _patch(root, f"{PKG}/hooks/stop.py",
+           "    if _lock_age is not None and _lock_age < _STALE_LOCK_S:",
+           "    if _lock_age is not None:  # BREAKAGE: existence, not age")
+
+
+@case("r14seedprev", ["tests/test_surfaces.py"],
+      "decide 'already seeded?' from the PREVIOUS turn's prompt marker -> a scaffolding or entirely-private turn re-arms the gate and a mid-session prompt overwrites the session's opening request (and can stamp trigger_type=resume_request)")
+def _break_r14seedprev(root):
+    _patch(root, f"{PKG}/hooks/user_prompt.py",
+           "        prompt_file = marker_path(_PROMPT_FILE_PREFIX, safe)\n"
+           "        try:",
+           "        prompt_file = marker_path(_PROMPT_FILE_PREFIX, safe)\n"
+           "        prev_prompt = read_marker(prompt_file, \"\").strip()\n"
+           "        try:")
+    _patch(root, f"{PKG}/hooks/user_prompt.py",
+           "            if not read_marker(seeded_file, \"\").strip():",
+           "            if not prev_prompt:  # BREAKAGE: the last turn, not the seed")
+
+
+@case("r14slashseed", ["tests/test_surfaces.py"],
+      "stop treating a bare slash command as scaffolding -> /ccm-load becomes progress.current_request and stands until the first compaction")
+def _break_r14slashseed(root):
+    _patch(root, f"{PKG}/hooks/user_prompt.py",
+           "    if _SLASH_COMMAND_RE.match(body.lstrip()):\n"
+           "        return \"\"",
+           "    if False:  # BREAKAGE: a slash command is a request again\n"
+           "        return \"\"")
+
+
+@case("r14seedturn1", ["tests/test_surfaces.py"],
+      "restore the turn-1-ONLY seeding rule -> a session opened with a slash command never seeds current_request at all")
+def _break_r14seedturn1(root):
+    _patch(root, f"{PKG}/hooks/user_prompt.py",
+           "            if not read_marker(seeded_file, \"\").strip():",
+           "            if turn_count == 1:  # BREAKAGE: turn 1 or never")
 
 
 @case("r13authhome", ["tests/smoke_test.py"],
