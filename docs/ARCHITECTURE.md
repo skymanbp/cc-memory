@@ -119,8 +119,8 @@ cc-memory/
 ├── commands/
 │   └── cc-mem.md                ← /cc-mem slash command
 ├── demo/                        ← the before/after evidence README § "Before
-│                                  and after" quotes: run_demo.py, the tally
-│                                  fixture, and captures/ (32 tracked files)
+│                                  and after" quotes: README.md, run_demo.py,
+│                                  tally fixture, captures/ (32 tracked files)
 ├── docs/
 │   ├── ARCHITECTURE.md          ← This file (overview + i18n convention)
 │   ├── ARCHITECTURE.zh.md       ← drift-tracked translation (see §9)

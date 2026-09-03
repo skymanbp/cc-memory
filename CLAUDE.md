@@ -1491,6 +1491,7 @@ cc-memory/
 │   └── debug-pass-2026-09/      its evidence files, repros and report.html
 ├── demo/                        ← the before/after evidence README § "Before
 │   │                              and after" quotes
+│   ├── README.md                the demo's own map + the honesty rules
 │   ├── run_demo.py              the capture protocol, as code
 │   ├── tally/                   the fixture project both sides run against
 │   └── captures/                handoff/ + guardian/ streams and transcripts

@@ -1,4 +1,4 @@
-<!-- i18n-source: ARCHITECTURE.md | sha256: e318a0c2ee51fccb | version: 2.14.0 | translated: 2026-09-03 | translation: 35ac7e43019a4690 -->
+<!-- i18n-source: ARCHITECTURE.md | sha256: 0f019ccb07a3cb6c | version: 2.14.0 | translated: 2026-09-03 | translation: 407737aa38f70879 -->
 > [English](ARCHITECTURE.md) · **简体中文**
 
 # cc-memory — 架构
@@ -105,8 +105,8 @@ cc-memory/
 ├── commands/
 │   └── cc-mem.md                ← /cc-mem 斜杠命令
 ├── demo/                        ← README §「加上它之前与之后」引用的实录证据：
-│                                  run_demo.py、tally fixture 与 captures/
-│                                  （32 个被跟踪文件）
+│                                  README.md、run_demo.py、tally fixture
+│                                  与 captures/（32 个被跟踪文件）
 ├── docs/
 │   ├── ARCHITECTURE.md          ← 本文件的英文源（总览 + i18n 约定）
 │   ├── ARCHITECTURE.zh.md       ← 受漂移跟踪的翻译，即本文件（见 §9）
