@@ -9,6 +9,74 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.14.1] — 2026-09-03
+
+### The sentences no gate was standing behind
+
+The eleven gates verify every `file.py:LINE` citation, the counts
+`tools/doc_claims.py` recomputes from the tree, and that every public surface
+is named by the document that owns it. A sentence that cites no line, names no
+symbol and carries no count sits outside all three — a support table, a CI
+lane, a function quoted under the name it had two minors ago. Reading the
+tracked documentation against the code it describes turned up a page of them.
+Six documents changed. Nothing under `cc_memory/` did, beyond the version
+literal every release bumps.
+
+### Fixed
+
+- **`SECURITY.md` offered support for a version line three minors old.** The
+  table read `2.11.x ✅ / < 2.11 ❌` — written at v2.11.1 and never moved — so
+  a reader deciding whether to report a vulnerability against 2.14.0 was told
+  it was unsupported. It reads `2.14.x` now.
+
+- **Counts frozen at the release that measured them.** The falsification
+  register was "166 registered breakage cases as of v2.12.0" and is 238 as of
+  v2.14.0 (`python tools/falsify_fixes.py --list`); the untested Tkinter GUI
+  was "2.9k lines" and is 3.1k; `CLAUDE.md` said "all 13 tracked markdown
+  files" where the set is whatever `tools/citation_check.py:TRACKED` holds —
+  which is why that number rotted, and it is now stated as the set rather than
+  as a count.
+
+- **The CI lanes were stated as a product rather than a matrix.** Both READMEs
+  said the gates run "on both Windows and Linux (Python 3.11 and 3.13)", which
+  reads as four lanes. `.github/workflows/gates.yml` runs Windows on 3.13 and
+  Linux on 3.11 and 3.13 — three.
+
+- **Two claims about the citation gate were backwards.** A citation whose
+  sentence names no symbol is reported `bounds` (inside the file, non-blank),
+  never `SKIP`; measured on this tree, 631 citations are 374 symbol-verified,
+  257 bounds-only, 0 unchecked. And a `verbatim` region IS checked in order —
+  `tools/citation_check.py` advances a `pos` cursor across the segments and
+  reports a hit behind it as out of order — where `CLAUDE.md` said order was
+  not enforced.
+
+- **Symbols and a subcommand family quoted from a previous shape.**
+  `_strip_tagged_spans` has been `core/privacy.py:_strip_spans` since v2.8.0
+  and both `CLAUDE.md` and `docs/ARCHITECTURE.md` kept the old name; the
+  `/cc-mem plan-*` family was called seven subcommands and is six
+  (`plan-show`, `plan-status`, `plan-set`, `plan-clear`, `plan-replan`,
+  `plan-check`); and `core/db.py` citations for `_migrations`, `memories_fts`
+  and its triggers, `v2_fts5`, `v2_content_hash` and `find_by_hash` had
+  drifted to lines the gate could only bounds-check, and are re-anchored to
+  their symbols.
+
+- **`docs/debug-pass-2026-09.md` was described as "English only".** It is
+  written in Chinese. The property the sentence was reaching for is that it
+  has no translated sibling and is never edited; it says untranslated now.
+
+- **The layout trees listed fewer files than the repository tracks.**
+  `CLAUDE.md`'s tree is exhaustive at every depth it lists, so a missing node
+  is a wrong tree. `core/layout.py`, `tools/doc_coverage.py`,
+  `scripts/release_notes.py`, `CONTRIBUTING.md`, `SECURITY.md` and the
+  `docs/debug-pass-2026-09` records are named now, and all three trees name
+  `demo/README.md` — `git ls-files demo` tracks four top-level children and
+  the trees listed three.
+
+- **The demo transcript's prompt is not the installed command.** The captured
+  output shows `cc-mem …`; the console script is `cc-memory` and `--project`
+  is required, so `cc-mem` is a shell alias for `cc-memory --project .`. Both
+  READMEs say so where the transcript begins.
+
 ## [2.14.0] — 2026-09-02
 
 ### A project's identity is its database, not the path string inside it

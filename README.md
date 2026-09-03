@@ -9,7 +9,7 @@ Your project's decisions, results, bugs and plans survive compaction, session
 boundaries, and closed terminals — the next session is *forced* to read them
 before it does anything, and what is stored is *reconciled*, never stacked.
 
-[![version](https://img.shields.io/badge/version-2.14.0-blue.svg)](CHANGELOG.md)
+[![version](https://img.shields.io/badge/version-2.14.1-blue.svg)](CHANGELOG.md)
 [![license](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![python](https://img.shields.io/badge/python-3.8%2B-blue.svg)](pyproject.toml)
 [![dependencies](https://img.shields.io/badge/runtime%20deps-0-brightgreen.svg)](#requirements)
