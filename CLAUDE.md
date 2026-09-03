@@ -2,7 +2,7 @@
 
 ## Project: cc-memory
 
-**Claude Code persistent memory plugin (v2.14.0)** — anti-patch reconcile-on-write
+**Claude Code persistent memory plugin (v2.14.1)** — anti-patch reconcile-on-write
 + LLM-judged semantic de-duplication with **backpressure-triggered
 consolidation**, forced PROGRESS.md handoff with per-session annotation, live
 PLAN.md anchor with plan-refiner / plan-guardian subagents + mandatory
@@ -11,9 +11,61 @@ injection observability, FTS5 search, AI-judged extraction with Haiku
 (optional local Ollama fallback).
 
 - **Language**: Python 3.8+ (pure stdlib, zero pip dependencies at runtime)
-- **Version**: 2.14.0
+- **Version**: 2.14.1
 - **License**: MIT
 - **Platform**: Windows-primary, cross-platform compatible (Tkinter required for GUI)
+
+## What changed in v2.14.1 (over v2.14.0)
+
+**Nothing that runs.** `git diff v2.14.0..v2.14.1 -- cc_memory/ scripts/
+.claude-plugin/ hooks/ tools/ agents/ commands/ skills/` is the version
+literals and nothing else, so the plugin this release installs behaves exactly
+as v2.14.0's does. What changed is six documents, read line by line against
+the code they describe. The gates verify that a citation still points at its
+symbol, that a bound count still equals its contract, and that every public
+surface is named by the document that owns it; a sentence that cites no line,
+names no symbol and carries no count sits outside all three, and that is where
+every defect closed here lived. Three rules:
+
+1. **An unbound sentence rots silently — nothing fails when it does.**
+   `SECURITY.md`'s supported-versions table still read `2.11.x` at v2.14.0 —
+   written at v2.11.1, never moved — so a reader deciding whether to report a
+   vulnerability against a current release was told it was unsupported. Same
+   class: a falsification register counted once at v2.12.0 (166; `python
+   tools/falsify_fixes.py --list` reports 238 today), an untested GUI quoted
+   at 2.9k lines where the live sentence should say 3.1k, and "all 13 tracked
+   markdown files" for a set that is whatever `tools/citation_check.py:TRACKED`
+   holds. A fresh number rots the same way the last one did, so state the SET
+   instead — and where the sentence is a DATED measurement it KEEPS the old
+   number (§ *What changed in v2.10.0*'s 2.9k GUI is ratified 2026-08-10 and
+   stays), which is the rule `CHANGELOG.md` already applies to its own entries.
+
+2. **A matrix stated as a product invents lanes.** Both READMEs said the gates
+   run "on both Windows and Linux (Python 3.11 and 3.13)", which reads as
+   four; `.github/workflows/gates.yml` declares Windows on 3.13 and Linux on
+   3.11 and 3.13 — three, beside the separate `falsify-anchors` job. Name the
+   lanes the workflow declares, never the cross-product of its axes.
+
+3. **A symbol quoted from a previous shape survives the citation gate.** The
+   gate proves a `file.py:LINE` still lands inside the file; prose naming
+   `_strip_tagged_spans` (`core/privacy.py:_strip_spans` since v2.8.0), or
+   seven `/cc-mem plan-*` subcommands where there are six (`plan-show`,
+   `plan-status`, `plan-set`, `plan-clear`, `plan-replan`, `plan-check`), or a
+   `core/db.py` anchor drifted to a line only the bounds check can confirm, is
+   wrong in prose and green in CI. Re-anchor to the symbol. Two claims ABOUT
+   that gate were themselves backwards and are corrected here: a citation
+   whose sentence names no symbol reports `bounds`, never `SKIP`, and a
+   `verbatim` region IS checked in order.
+
+Also corrected: `docs/debug-pass-2026-09.md` is untranslated, not "English
+only" — it is written in Chinese, and the property the sentence was reaching
+for is that it has no translated sibling and is never edited; the layout trees
+name every tracked child at the depths they list, `demo/README.md` included;
+and the demo transcript's `cc-mem …` prompt is a shell alias for `cc-memory
+--project .`, which both READMEs now say where the transcript begins. One
+non-documentation commit rides along (c3cb137): `tests/smoke_test.py` and
+`tests/test_surfaces.py` tear their sandboxes down in a `finally`, so a
+deliberately-RED falsification case no longer leaks one into `%TEMP%`.
 
 ## What changed in v2.14.0 (over v2.13.2)
 
