@@ -1486,8 +1486,14 @@ cc-memory/
 │   ├── ARCHITECTURE.zh.md
 │   ├── CONTRACTS.md             ← anti-patch + forced handoff + live plan anchor
 │   ├── CONTRACTS.zh.md
-│   ├── debug-pass-2026-09.md    ← the v2.14.0 debug pass report (English only)
+│   ├── debug-pass-2026-09.md    ← the v2.14.0 debug pass report (untranslated,
+│   │                              no .zh.md sibling)
 │   └── debug-pass-2026-09/      its evidence files, repros and report.html
+├── demo/                        ← the before/after evidence README § "Before
+│   │                              and after" quotes
+│   ├── run_demo.py              the capture protocol, as code
+│   ├── tally/                   the fixture project both sides run against
+│   └── captures/                handoff/ + guardian/ streams and transcripts
 ├── README.md / README.zh.md     ← drift-tracked pair
 ├── .github/                     ← CI + community health (v2.11.1)
 │   ├── workflows/gates.yml      the release gates, as an executable
@@ -1528,7 +1534,9 @@ cc-memory/
 │   │                            LLM deadline (v2.5.0)
 │   └── test_directive_enforcement.py
 │                                directive ledger + Stop enforcement (v2.11.0)
-├── scripts/build_exe.py         ← PyInstaller build (moved off the root, v2.11.1)
+├── scripts/                     ← build + release helpers (off the root, v2.11.1)
+│   ├── build_exe.py             PyInstaller build
+│   └── release_notes.py         CHANGELOG section → GitHub Release body
 ├── pyproject.toml
 ├── CONTRIBUTING.md / SECURITY.md
 ├── CLAUDE.md                    ← This file

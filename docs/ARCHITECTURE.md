@@ -30,8 +30,9 @@ repaired them mechanically.
 
 That is a gate against rot, not a proof of correctness. A citation whose
 sentence names no uniquely resolvable function, class or ALL_CAPS constant is
-reported SKIP and is **not** checked (370 of 594 today). Treat a line number as
-a hint and the **symbol name** as the fact: `grep -n "def <symbol>" <file>` is
+reported `bounds` — checked for being inside the file and non-blank, **not**
+verified against a symbol (257 of 631 today). Treat a line number as a hint
+and the **symbol name** as the fact: `grep -n "def <symbol>" <file>` is
 authoritative, and `python tools/citation_check.py --fix` is how you repair a
 number rather than hand-counting.
 
@@ -117,18 +118,25 @@ cc-memory/
 │   └── plan-guardian.md         (read-only drift check, ≤150 words)
 ├── commands/
 │   └── cc-mem.md                ← /cc-mem slash command
+├── demo/                        ← the before/after evidence README § "Before
+│                                  and after" quotes: run_demo.py, the tally
+│                                  fixture, and captures/ (32 tracked files)
 ├── docs/
 │   ├── ARCHITECTURE.md          ← This file (overview + i18n convention)
 │   ├── ARCHITECTURE.zh.md       ← drift-tracked translation (see §9)
 │   ├── CONTRACTS.md             ← anti-patch + forced handoff + live plan
-│   └── CONTRACTS.zh.md          ← drift-tracked translation (see §9)
+│   ├── CONTRACTS.zh.md          ← drift-tracked translation (see §9)
+│   ├── debug-pass-2026-09.md    ← the v2.14.0 debug-pass evidence record:
+│   │                              never edited, no Chinese sibling
+│   └── debug-pass-2026-09/      ← its evidence, repros and report.html
+│                                  (88 tracked files)
 ├── cc_memory/                   ← Python package (subpackaged)
 │   ├── __init__.py              (re-exports core/version.py)
 │   ├── config.json
 │   ├── core/                    ← Domain: db, extractor, consolidate, idle,
 │   │                              progress, plan, privacy, modes, roots,
 │   │                              auth, logger, encoding_setup, version,
-│   │                              atomic, markers, textsim
+│   │                              atomic, markers, textsim, layout
 │   ├── hooks/                   ← 6 hook entry points + _entry.py (the
 │   │                              shared entry ladder: stdin parse + the
 │   │                              opt-out→anchor gate, v2.10.0)
@@ -153,6 +161,8 @@ cc-memory/
 ├── README.zh.md                 ← drift-tracked translation (see §9)
 ├── CLAUDE.md                    ← Project instructions for Claude Code
 ├── CHANGELOG.md
+├── CONTRIBUTING.md              ← what each gate checks, and how to read a red
+├── SECURITY.md                  ← threat model + private vulnerability reports
 └── LICENSE
 ```
 

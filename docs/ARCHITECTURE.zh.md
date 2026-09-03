@@ -1,4 +1,4 @@
-<!-- i18n-source: ARCHITECTURE.md | sha256: 6bc6a9f4ee6771f2 | version: 2.14.0 | translated: 2026-09-02 | translation: 867433103158e3ea -->
+<!-- i18n-source: ARCHITECTURE.md | sha256: e318a0c2ee51fccb | version: 2.14.0 | translated: 2026-09-03 | translation: 35ac7e43019a4690 -->
 > [English](ARCHITECTURE.md) · **简体中文**
 
 # cc-memory — 架构
@@ -25,9 +25,10 @@ cc-memory 是一个 Claude Code 插件，为 Claude 提供**跨压缩、跨会�
 只是后来它上面的某处改动把它甩在了后面——并已机械修复。
 
 那是一道防腐化的门禁，不是正确性的证明。如果一条引用所在的句子里没有任何可以唯一
-解析的函数、类或 ALL_CAPS 常量，它会被判为 SKIP，**不做检查**（今天是 594 条里的
-370 条）。请把行号当作线索，把**符号名**当作事实：`grep -n "def <symbol>" <file>`
-才是权威，而修行号请用 `python tools/citation_check.py --fix`，不要手数。
+解析的函数、类或 ALL_CAPS 常量，它会被判为 `bounds`——只核对它落在文件内、且不是
+空行，**不与符号核对**（今天是 631 条里的 257 条）。请把行号当作线索，把**符号名**
+当作事实：`grep -n "def <symbol>" <file>` 才是权威，而修行号请用
+`python tools/citation_check.py --fix`，不要手数。
 
 ## 目录
 
@@ -103,18 +104,25 @@ cc-memory/
 │   └── plan-guardian.md         （只读漂移检查，≤150 词）
 ├── commands/
 │   └── cc-mem.md                ← /cc-mem 斜杠命令
+├── demo/                        ← README §「加上它之前与之后」引用的实录证据：
+│                                  run_demo.py、tally fixture 与 captures/
+│                                  （32 个被跟踪文件）
 ├── docs/
 │   ├── ARCHITECTURE.md          ← 本文件的英文源（总览 + i18n 约定）
 │   ├── ARCHITECTURE.zh.md       ← 受漂移跟踪的翻译，即本文件（见 §9）
 │   ├── CONTRACTS.md             ← 反补丁 + 强制交接 + 实时计划
-│   └── CONTRACTS.zh.md          ← 受漂移跟踪的翻译（见 §9）
+│   ├── CONTRACTS.zh.md          ← 受漂移跟踪的翻译（见 §9）
+│   ├── debug-pass-2026-09.md    ← v2.14.0 全仓 debug 的证据记录：从不改动，
+│   │                              没有中文兄弟文件
+│   └── debug-pass-2026-09/      ← 它的证据、复现脚本与 report.html
+│                                  （88 个被跟踪文件）
 ├── cc_memory/                   ← Python 包（已拆分子包）
 │   ├── __init__.py              (转出口 core/version.py 的 __version__)
 │   ├── config.json
 │   ├── core/                    ← 领域层：db, extractor, consolidate, idle,
 │   │                              progress, plan, privacy, modes, roots, auth,
 │   │                              logger, encoding_setup, version,
-│   │                              atomic, markers, textsim
+│   │                              atomic, markers, textsim, layout
 │   ├── hooks/                   ← 6 个钩子入口 + _entry.py（共享入口阶梯：
 │   │                              stdin 解析 + 退出开关→锚定闸门，v2.10.0）
 │   ├── llm/                     ← ccl_backend（Haiku/Ollama）+ memory_writer
@@ -138,6 +146,8 @@ cc-memory/
 ├── README.zh.md                 ← 受漂移跟踪的翻译（见 §9）
 ├── CLAUDE.md                    ← 给 Claude Code 的项目指令
 ├── CHANGELOG.md
+├── CONTRIBUTING.md              ← 每道闸门查什么、红了怎么读
+├── SECURITY.md                  ← 威胁模型 + 漏洞的私密上报方式
 └── LICENSE
 ```
 

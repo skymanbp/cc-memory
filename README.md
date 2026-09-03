@@ -403,8 +403,8 @@ specifics, each of which cost a measured defect to learn:
   every change — four test suites, four documentation gates, plus build
   checks. A falsification register (`tools/falsify_fixes.py`) reverts each
   registered fix on a temporary copy and asserts its gate actually FAILS
-  there: a check that cannot go red is a comment that costs CI time. 166
-  registered breakage cases as of v2.12.0, every one driven red individually
+  there: a check that cannot go red is a comment that costs CI time. 238
+  registered breakage cases as of v2.14.0, every one driven red individually
   before being kept.
 - **Documentation is under the same gates as code.** Every `file.py:LINE`
   citation in the docs is mechanically verified against the tree; every
@@ -858,9 +858,10 @@ See [CONTRIBUTING.md](CONTRIBUTING.md). Security reports: [SECURITY.md](SECURITY
 Recorded rather than papered over — an unlisted limit is a limit someone else
 has to rediscover:
 
-- **macOS is unmeasured.** All eleven gates run on Windows and Linux (3.11,
-  3.13) in CI; macOS is expected to work (the same POSIX paths Linux
-  exercises) but has not been measured, and this document will not say it has.
+- **macOS is unmeasured.** All eleven gates run on Windows (3.13) and on
+  Linux (3.11 and 3.13) in CI; macOS is expected to work (the same POSIX paths
+  Linux exercises) but has not been measured, and this document will not say
+  it has.
 - **The step-reference audit is lexical.** It catches `步骤 N` / `step #N` /
   `#N` shapes; a directive that references a step by a paraphrased number
   ("the twelfth step") is not matched. The durable rule is to reference steps
@@ -878,11 +879,12 @@ has to rediscover:
   trigger list is not a claim the gate sees. (A `verbatim` quote is verified
   segment by segment AND in order since v2.14.0.)
 - **The debug pass's open items are on record (v2.14.0).**
-  `docs/debug-pass-2026-09.md` is the evidence record (English only, never
-  edited); what its findings leave open — an exact-hash fold that runs outside
-  the reconcile transaction, a settled progress row that the next Stop patch
-  un-settles, two v2.13 rules with no gate assertion to anchor a case on — is
-  listed in `CHANGELOG.md` § *Recorded, not redesigned*.
+  `docs/debug-pass-2026-09.md` is the evidence record: never edited, and
+  untranslated — it has no Chinese sibling. What its findings leave open — an
+  exact-hash fold that runs outside the reconcile transaction, a settled
+  progress row that the next Stop patch un-settles, two v2.13 rules with no
+  gate assertion to anchor a case on — is listed in `CHANGELOG.md`
+  § *Recorded, not redesigned*.
 - **Candidate future work:** surfacing `inject-usage` signals in the Stop
   status line; a `directive-*` surface in the dashboard; richer `paths`-style
   diagnostics for multi-database machines.
@@ -921,8 +923,8 @@ session, progress row, plan and directive went dark on every surface.
   for an English-only edit).
 - **The rest of the debug pass, closed — twenty-seven findings, each at its
   own cause.** The full report is in the tree:
-  [docs/debug-pass-2026-09.md](docs/debug-pass-2026-09.md) (English only, an
-  evidence record). Among them:
+  [docs/debug-pass-2026-09.md](docs/debug-pass-2026-09.md) (an evidence
+  record, untranslated). Among them:
   - *State directory:* a transient probe failure no longer orphans a
     pre-v2.13.0 `memory/` for good, and a linked `.ccm` is never followed or
     written through.
@@ -963,10 +965,10 @@ not what it used to be.
 - **Windows**: `python3` must resolve to a Python 3 interpreter (see
   [Troubleshooting](#troubleshooting))
 
-Developed Windows-first. **All eleven release gates run on both Windows and
-Linux (Python 3.11 and 3.13) in CI**; macOS is not covered by CI — it is
-expected to work but has not been measured, and this document will not say it
-has.
+Developed Windows-first. **All eleven release gates run on Windows (Python
+3.13) and on Linux (Python 3.11 and 3.13) in CI**; macOS is not covered by CI
+— it is expected to work but has not been measured, and this document will not
+say it has.
 
 ---
 
