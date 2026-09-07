@@ -1,9 +1,11 @@
 name: release gates
 
-# The ten release gates were ten commands in a markdown list, run by hand.
-# The v2.11.0 release commit shipped with tests/smoke_test.py RED because of
-# it. This workflow is what makes "run all ten" an executable rather than a
-# sentence.
+# The release gates were once a markdown list of commands, run by hand — ten
+# of them at the time. The v2.11.0 release commit shipped with
+# tests/smoke_test.py RED because of it. This workflow is what makes "run
+# them all" an executable rather than a sentence. The count is deliberately
+# not repeated here: no gate scans a YAML file, so a number written into one
+# rots in silence — which is exactly what happened to the job names below.
 on:
   push:
     branches: [main]
@@ -23,7 +25,10 @@ jobs:
   # gates are developed and verified, and it is the only OS where the whole
   # set is known to pass. So it runs the WHOLE set.
   full:
-    name: all 11 gates (windows)
+    # Named for the SET, not a count: this label said "all 11 gates" while the
+    # tree held twelve, and no gate scans a workflow file — the same unbound
+    # number v2.14.1 found in SECURITY.md, one directory over.
+    name: every release gate (windows)
     runs-on: windows-latest
     timeout-minutes: 30
     steps:
@@ -46,7 +51,7 @@ jobs:
   # the project: whether cc-memory works on Linux at all. `python3-tk` is the
   # one real dependency those suites need; everything else is standard library.
   linux:
-    name: all 11 gates (linux)
+    name: every release gate (linux)
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:

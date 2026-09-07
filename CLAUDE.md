@@ -1976,6 +1976,35 @@ on Windows (3.13) and on Linux (3.11 and 3.13).
 `run_gates.py:GATES` is the single list, and the count above is asserted
 against `len(GATES)` rather than typed.)
 
+**And so is every reader-facing statement of it — this file used to be the
+only one bound.** `CONTRIBUTING.md` said *"Four of the eleven gates"* and
+both `.github/workflows/*.yml` labelled their jobs *"all 11 gates"* while
+`GATES` held twelve; all three shipped that way from v2.14.0, because the
+derivation above covers this file's sentence and nothing else. `smoke_test.py`
+now checks every gate count in `README.md`, `README.zh.md`, `CONTRIBUTING.md`
+and `.github/PULL_REQUEST_TEMPLATE.md` against `len(GATES)`, in both
+languages, **fenced command comments included** — two of the counts live
+inside a ```bash block, where an HTML binding is literal text and
+`doc_claims` is exempt by design. Release-note sections stay exempt (a
+history edited to stay current is not a history), `--only <gate>`'s "one
+gate" is not a count of the set, and a genuine subset carries
+`<!--ce:gates:subset-->`, which `tools/contracts.py`'s new `gates` set makes
+checkable by `doc_claims` too. The workflow files are named for the SET
+instead — no gate scans a YAML file, so a number written into one rots in
+silence.
+
+`doc_claims` is the wrong home for this noun and that was MEASURED rather
+than assumed: `<n> gate(s)` occurs 35 times in the scanned surfaces, fifteen
+of them dated `CHANGELOG.md` entries and four a DIFFERENT SENSE of the word
+inside the shipped package (`core/layout.py`'s *"Three gates, cheapest
+first"* counts three internal checks). A trigger noun would have to be
+silenced more often than it fired, and a gate whose output must be skipped
+teaches its reader to skip it. The check carries a per-file COVERAGE FLOOR
+for the same reason its first drive needed one: `\w` is Unicode, so the
+ASCII trailing guard refused every `十二道闸门`, the site count fell from 13
+to 8, and nothing was red. Gate: `smoke_test.py` § v2.15.1 gate count;
+`falsify --case r15gatecount` / `r15gatecountcjk`.
+
 `tests/smoke_test.py` is the canonical end-to-end check. In a throwaway temp
 project it exercises: v3/v6 migrations, `upsert_smart` decisions
 (INSERT/MERGE/SUPERSEDE/SKIP), the `progress` row + `PROGRESS.md`

@@ -1923,6 +1923,152 @@ def main():
           f"against tools/contracts.py across {_n_sites} countable site(s); "
           f"history sections and fenced diagrams exempt by design")
 
+    # ── v2.15.1 · the gate COUNT outside CLAUDE.md, which nothing scanned ────
+    # CONTRIBUTING.md said "Four of the eleven gates" and both workflow files
+    # labelled their jobs "all 11 gates" while run_gates.py declared TWELVE —
+    # found by hand on 2026-09-07, which is the v2.14.1 rule-1 class exactly:
+    # an unbound sentence rots and nothing fails when it does. The count above
+    # is derived for CLAUDE.md alone; every other reader-facing statement of
+    # it was typed.
+    #
+    # doc_claims.py is the WRONG home for this noun, and that was MEASURED
+    # before deciding rather than assumed. Scanning the whole tree for
+    # "<n> gate(s)" returns 35 sites: fifteen are dated CHANGELOG entries, and
+    # four are a DIFFERENT SENSE of the word inside the shipped package
+    # (`core/layout.py`'s "Three gates, cheapest first" counts three internal
+    # checks, `mcp/server.py`'s "One gate, in `_get_db`" counts one). A
+    # trigger noun would have to be silenced more often than it fired, and a
+    # gate whose output must be skipped teaches its reader to skip it.
+    # So the four USER-FACING docs are asserted here instead — fenced command
+    # comments included, because two of the counts live inside a ```bash block
+    # where an HTML binding would be literal text and doc_claims is exempt by
+    # design. `python tools/contracts.py` now computes the set (`gates`), so
+    # an explicit `<!--ce:gates:subset-->` is checked by that gate too.
+    _gn_words = {w: n for w, n in doc_claims.WORDS.items()}
+    _gn_ascii = "|".join(sorted((w for w in _gn_words if w.isascii()),
+                                key=len, reverse=True))
+    _gn_cjk = "|".join(sorted((w for w in _gn_words if not w.isascii()),
+                              key=len, reverse=True))
+    # `(?<![\w.])…(?![\w.])` and not doc_claims' `\b`: a bare `\b` reads
+    # "3.13" — the Python version beside every gate claim in these files — as
+    # a THREE and a THIRTEEN. Neither is a count of anything.
+    #
+    # The CJK numerals need the OPPOSITE guard, and getting that wrong is
+    # silent: `\w` is Unicode, so `十二` in `十二道闸门` is followed by a word
+    # character and the ASCII guard refused every Chinese claim in the file —
+    # the check reported 8 sites and green while measuring ONE of README.zh's
+    # five. doc_claims builds `_NUM_BOUNDED` as two alternations for exactly
+    # this reason; the lookbehind drops 每/任/这/哪/意/第 the same way, so an
+    # ordinal (第十二道) is not read as a count of twelve.
+    _gn_num = (rf"(?P<n>(?<![\w.])(?:\d+|{_gn_ascii})(?![\w.])"
+               rf"|(?<![每任这哪意第])(?<![0-9A-Za-z.])(?:{_gn_cjk}))")
+    # One gap of horizontal space, or a SINGLE wrapped line. Not `\s+`: these
+    # files wrap at ~78 columns, so "four documentation\n  gates" is one
+    # claim and must be seen, while a blank line separates two paragraphs
+    # whose clauses must never be joined into a claim neither of them makes.
+    _gn_sp = r"(?:[ \t]+|[ \t]*\n[ \t]*(?![\r\n]))"
+    # one or two modifier words ("twelve release gates", "12 documentation
+    # gates"), never a free-length gap, and never `of`: "Four of the twelve
+    # gates" is a claim about TWELVE, and TRIGGER_OF_RE's lesson is that the
+    # inner count is the one to check.
+    _gn_en = _dc_re.compile(
+        rf"{_gn_num}{_gn_sp}(?:(?!of\b)[A-Za-z][A-Za-z-]*{_gn_sp}){{0,2}}"
+        rf"gates?\b", _dc_re.IGNORECASE)
+    # The Chinese sibling writes 十二道发布闸门 (measure word + modifier) and,
+    # in a command comment, elides the noun entirely: "跑全部 12 道". The
+    # elided form is only a claim when the line runs the gate runner —
+    # requiring that keeps an unrelated 三道防线 out of a gate that would
+    # otherwise go red on correct prose.
+    #
+    # The modifier slot is an ALLOWLIST, not a free two-character gap. The
+    # free gap read `两条没有闸门断言…的规则` — "two rules with NO gate
+    # assertion" — as a claim of two gates (measured, README.zh.md:835): a
+    # negation sitting where a modifier would sit inverts the sentence, and
+    # the same two words are the only modifiers these files actually use.
+    _gn_zh = _dc_re.compile(rf"{_gn_num}\s*[个条道处项]?\s*(?:发布|文档)?闸门")
+    _gn_zh_elided = _dc_re.compile(rf"{_gn_num}\s*道")
+    # A COVERAGE FLOOR per file, not a claim about the world: how many gate
+    # counts each file states today, so a pattern that quietly stops matching
+    # is loud instead of green. The scalar "at least one site somewhere" this
+    # replaced would NOT have caught the ASCII-guard bug two comments up —
+    # README.zh.md fell from five measured sites to one and the check still
+    # passed. Lowering a number here is a deliberate edit that says "this
+    # file states one fewer count now", which is the only way it should move.
+    _gn_files = {"README.md": 5, "README.zh.md": 5, "CONTRIBUTING.md": 2,
+                 ".github/PULL_REQUEST_TEMPLATE.md": 1}
+    _gn_bad, _gn_seen = [], {}
+    for _gn_rel in _gn_files:
+        _gn_text = (_REPO / _gn_rel).read_text(encoding="utf-8")
+        _gn_line_of = doc_claims._line_indexer(_gn_text)
+        # Release-note sections are exempt here for the same reason
+        # doc_claims exempts them: a history edited to stay current is not a
+        # history. README.md § "What's new in v2.15.0" says v2.14.x
+        # "tightened four gate checkers", and that sentence must keep saying
+        # four however many gates the tree grows to.
+        _gn_hist = doc_claims._history_spans(_gn_text)
+        _gn_hits = [(m.start(), m.end(), m.group("n"))
+                    for m in _gn_en.finditer(_gn_text)]
+        _gn_hits += [(m.start(), m.end(), m.group("n"))
+                     for m in _gn_zh.finditer(_gn_text)]
+        # The elided Chinese form ("跑全部 12 道") names no noun at all, so it
+        # is a claim only on a line that runs the gate runner. Line-scoped on
+        # purpose: `--fast` sits on such a line too and "the two slow suites"
+        # beside it is a real count of something else.
+        _gn_off = 0
+        for _gn_line in _gn_text.split("\n"):
+            if "run_gates.py" in _gn_line:
+                _gn_hits += [(_gn_off + m.start(), _gn_off + m.end(),
+                              m.group("n"))
+                             for m in _gn_zh_elided.finditer(_gn_line)]
+            _gn_off += len(_gn_line) + 1
+        # Bind each subset marker to the count it FOLLOWS — the nearest one —
+        # never "is there a marker somewhere ahead of this count". README.md
+        # states the whole set one line above a subset of it, and the window
+        # form exempted BOTH: "Twelve release gates run on every change" read
+        # as a subset claim and stopped being checked at all. This is
+        # doc_claims' de-overlap rule arriving one gate later.
+        _gn_subset = set()
+        for _gn_mk in _dc_re.finditer(r"<!--\s*ce:gates:subset\s*-->",
+                                      _gn_text):
+            _gn_near = [i for i, (_, _gn_end, _) in enumerate(_gn_hits)
+                        if 0 <= _gn_mk.start() - _gn_end
+                        <= doc_claims.BIND_WINDOW]
+            if _gn_near:
+                _gn_subset.add(max(_gn_near, key=lambda i: _gn_hits[i][1]))
+        for _gn_idx, (_gn_s, _gn_e, _gn_tok) in enumerate(_gn_hits):
+            if doc_claims._in_history(_gn_hist, _gn_s):
+                continue
+            _gn_val = doc_claims._to_int(_gn_tok)
+            # `--only <gate>` runs ONE gate; that is not a count of the set,
+            # and both READMEs and CONTRIBUTING.md say so.
+            if _gn_val == 1:
+                continue
+            if _gn_idx in _gn_subset:
+                continue
+            _gn_seen[_gn_rel] = _gn_seen.get(_gn_rel, 0) + 1
+            if _gn_val != _dc_n:
+                _gn_bad.append(
+                    f"{_gn_rel}:{_gn_line_of(_gn_s)} says {_gn_val} gates, "
+                    f"tests/run_gates.py declares {_dc_n}: "
+                    f"{_gn_text[_gn_s:_gn_e + 40].strip()[:80]}")
+    assert not _gn_bad, (
+        "gate counts in the user-facing docs no longer match run_gates.py:\n  "
+        + "\n  ".join(_gn_bad))
+    # An assertion over zero sites certifies nothing, and an assertion over
+    # FEWER sites than yesterday certifies less than it says it does.
+    _gn_thin = {rel: (_gn_seen.get(rel, 0), floor)
+                for rel, floor in _gn_files.items()
+                if _gn_seen.get(rel, 0) < floor}
+    assert not _gn_thin, (
+        "the gate-count check is measuring less than when it was written — "
+        f"(found, expected at least) {_gn_thin}. Either a claim was deleted "
+        "from that file (lower the floor in the same commit) or a pattern "
+        "here stopped matching one (fix the pattern)")
+    print(f"[OK] v2.15.1 gate count: {sum(_gn_seen.values())} claim(s) "
+          f"across {len(_gn_files)} user-facing doc(s) all say {_dc_n} "
+          f"({', '.join(f'{r.rsplit(chr(47), 1)[-1]}={n}' for r, n in sorted(_gn_seen.items()))}), "
+          f"and tools/contracts.py computes the same set")
+
     # === v2.4.2: bounded transcript window (hook-safe) =======================
     # An unbounded transcript read is what killed PreCompact on large projects:
     # a 2.11 GiB transcript parses at ~25 MiB/s (~88s) against a 120s budget, so

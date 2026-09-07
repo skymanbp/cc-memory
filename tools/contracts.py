@@ -17,7 +17,9 @@ COMPUTES its answer from the tree, so the answer cannot lag the code, and
 
 Every contract returns a sorted tuple of repo-relative POSIX paths. Counts are
 `len()` of that, so "how many" and "which ones" can never disagree — the two
-were separately hand-maintained before, and did.
+were separately hand-maintained before, and did. `gates` is the one exception
+and returns the runner's gate KEYS: some gates run a function rather than a
+script, so a tuple of paths would count fewer members than the runner runs.
 
     python tools/contracts.py            # print every contract's current value
     python tools/contracts.py --json     # same, machine-readable
@@ -278,6 +280,41 @@ def _insert_memory_callers(repo):
     return _modules_calling(repo, {"insert_memory"},
                             exclude=(f"{PKG}/core/db.py",
                                      f"{PKG}/llm/memory_writer.py"))
+
+
+@contract("gates", "release gates tests/run_gates.py runs (one command, all)")
+def _gates(repo):
+    """The gate keys `tests/run_gates.py:GATES` declares.
+
+    PARSED, never imported: this module is imported by `tools/doc_claims.py`,
+    which is itself one of the gates, and a gate that executes the runner's
+    module body in order to count the runner is a cycle waiting to be
+    discovered by a future edit to either file.
+
+    The count rots everywhere it is not derived. CLAUDE.md § Tests has been
+    asserted against `len(GATES)` since v2.11.4 and was right; every other
+    site was hand-typed and one of them was wrong — CONTRIBUTING.md said
+    "Four of the eleven gates" and both `.github/workflows/*.yml` labelled
+    their jobs "all 11 gates" while this list held twelve (measured
+    2026-09-07). `tests/smoke_test.py` checks the user-facing docs against
+    this set; the workflow files are named for the SET instead, because no
+    gate scans a YAML file.
+    """
+    tree = ast.parse((repo / "tests" / "run_gates.py").read_text(
+        encoding="utf-8", errors="replace"))
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign):
+            continue
+        if not any(isinstance(t, ast.Name) and t.id == "GATES"
+                   for t in node.targets):
+            continue
+        # Each element is (key, title, argv, fn); the key is the name
+        # `--only <gate>` takes, so it is the member a reader can act on.
+        return tuple(sorted(e.elts[0].value for e in node.value.elts))
+    raise RuntimeError(
+        "tests/run_gates.py defines no GATES list — the gate registry cannot "
+        "be computed, and every 'N gates' claim in the docs is unchecked "
+        "until it can be")
 
 
 def values(repo=REPO):

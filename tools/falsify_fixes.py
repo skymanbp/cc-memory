@@ -3011,6 +3011,37 @@ def _break_r15judgeforge(root):
            'if r["id"] == mid), "")  # BREAKAGE')
 
 
+# ── v2.15.1: the gate count outside CLAUDE.md ──────────────────────────────
+
+@case("r15gatecount", ["tests/smoke_test.py"],
+      "restore CONTRIBUTING.md's stale 'eleven gates' -> a reader-facing "
+      "count disagrees with tests/run_gates.py and nothing says so; this is "
+      "the state the tree actually shipped in from v2.14.0 to v2.15.0")
+def _break_r15gatecount(root):
+    _patch(root, "CONTRIBUTING.md",
+           "Four of the twelve gates are documentation gates",
+           "Four of the eleven gates are documentation gates")
+
+
+@case("r15gatecountcjk", ["tests/smoke_test.py"],
+      "guard the CJK numerals with the ASCII word-boundary rule again -> "
+      "every Chinese gate claim stops being scanned and the check reports "
+      "green over a fifth of README.zh.md's sites")
+def _break_r15gatecountcjk(root):
+    # The bug this case pins is the one the check itself had on its first
+    # drive: `\w` is Unicode, so `十二` inside `十二道闸门` is followed by a
+    # word character and the ASCII trailing guard refused it. Nothing was
+    # red — the site count simply fell from 13 to 8. The per-file coverage
+    # floor is what makes this loud, so this case drives the FLOOR, not the
+    # equality assertion above it.
+    _patch(root, "tests/smoke_test.py",
+           '    _gn_num = (rf"(?P<n>(?<![\\w.])(?:\\d+|{_gn_ascii})(?![\\w.])"\n'
+           '               rf"|(?<![每任这哪意第])(?<![0-9A-Za-z.])'
+           '(?:{_gn_cjk}))")',
+           '    _gn_num = rf"(?<![\\w.])(?P<n>\\d+|{_gn_ascii}|{_gn_cjk})'
+           '(?![\\w.])"  # BREAKAGE')
+
+
 def verify_anchors():
     """Count every registered case's breakage anchors WITHOUT running a gate.
 

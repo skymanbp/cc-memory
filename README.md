@@ -417,12 +417,12 @@ specifics, each of which cost a measured defect to learn:
   `<private>` tag drops the remainder rather than leaking it), and so does an
   unreadable `config.json` (it excludes every project rather than guessing).
 - **The gates can go red, and that is checked.** Twelve release gates run on
-  every change — five test suites, four documentation gates, plus build
-  checks. A falsification register (`tools/falsify_fixes.py`) reverts each
-  registered fix on a temporary copy and asserts its gate actually FAILS
-  there: a check that cannot go red is a comment that costs CI time. 238
-  registered breakage cases as of v2.14.0, every one driven red individually
-  before being kept.
+  every change — five test suites, four documentation gates
+  <!--ce:gates:subset-->, plus build checks. A falsification register
+  (`tools/falsify_fixes.py`) reverts each registered fix on a temporary copy
+  and asserts its gate actually FAILS there: a check that cannot go red is a
+  comment that costs CI time. 238 registered breakage cases as of v2.14.0,
+  every one driven red individually before being kept.
 - **Documentation is under the same gates as code.** Every `file.py:LINE`
   citation in the docs is mechanically verified against the tree; every
   counted claim ("all six hooks…" <!--ce:hooks-->) is bound to a set computed from the code;
@@ -813,7 +813,7 @@ Twelve gates, all pure stdlib — no pytest, no pip dependencies. Run them all w
 one command:
 
 ```bash
-python tests/run_gates.py           # runs all 12, prints a table, exits nonzero on any red
+python tests/run_gates.py           # runs all 12 gates, prints a table, exits nonzero on any red
 python tests/run_gates.py --list    # show what each gate is
 ```
 

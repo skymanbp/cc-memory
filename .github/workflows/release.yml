@@ -3,8 +3,9 @@ name: release binaries
 # The two Windows executables used to be built and verified on the
 # maintainer's machine (scripts/build_exe.py by hand). This workflow moves
 # that onto CI: push a `v*` tag and the release — with both exes attached —
-# is built from exactly the tagged commit, after the same eleven gates that
-# guard every push.
+# is built from exactly the tagged commit, after the same release gates that
+# guard every push (the SET, not a count — the count was written here as
+# "eleven" and stayed there while the tree grew to twelve).
 #
 # The v2.5.4 invariant "verify the exes by RUNNING them, not by reading the
 # PE header" is a step here, not a sentence: the installer performs a real

@@ -65,7 +65,7 @@ defect; several are checked mechanically and will turn a gate red.
 
 ## The documentation gates
 
-Four of the eleven gates are documentation gates, and they are the reason this
+Four of the twelve gates are documentation gates, and they are the reason this
 project's prose is trustworthy:
 
 | Gate | What it proves |

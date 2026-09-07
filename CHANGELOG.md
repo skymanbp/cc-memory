@@ -9,6 +9,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### The gate count nothing was standing behind
+
+The post-release documentation sweep for v2.15.0 turned up a number that had
+been wrong since v2.14.0: `CONTRIBUTING.md` said *"Four of the eleven gates
+are documentation gates"* while `tests/run_gates.py:GATES` declared twelve,
+and both `.github/workflows/*.yml` labelled their jobs `all 11 gates`. Nobody
+missed it, because nothing was looking — the derivation added in v2.11.4
+asserts CLAUDE.md § Tests against `len(GATES)` and covers that one sentence
+only. Every other reader-facing statement of the count was typed by hand,
+which is v2.14.1's rule 1 recurring one directory over: an unbound sentence
+rots and nothing fails when it does.
+
+`tests/smoke_test.py` now checks every gate count in `README.md`,
+`README.zh.md`, `CONTRIBUTING.md` and `.github/PULL_REQUEST_TEMPLATE.md`
+against `len(GATES)` — thirteen live claims across the four files, in both
+languages, **fenced command comments included**, since two of the counts sit
+inside a ```bash block where an HTML binding would be literal text and
+`tools/doc_claims.py` is exempt by design. Release-note sections stay exempt
+for the reason they always have; `--only <gate>`'s "one gate" is not a count
+of the set; and a genuine subset (*"four documentation gates"*, in both
+languages) carries `<!--ce:gates:subset-->`, which `tools/contracts.py`'s new
+`gates` set makes checkable by `doc_claims` as well. The workflow files are
+named for the SET instead — no gate scans a YAML file, so a number written
+into one rots in silence, which is exactly what happened.
+
+**`doc_claims` is the wrong home for this noun, and that was measured before
+deciding.** `<n> gate(s)` occurs 35 times across the scanned surfaces:
+fifteen are dated `CHANGELOG.md` entries, and four are a DIFFERENT SENSE of
+the word inside the shipped package — `core/layout.py`'s *"Three gates,
+cheapest first"* counts three internal checks, `mcp/server.py`'s *"One gate,
+in `_get_db`"* counts one. Adding `gates` to `TRIGGER_NOUNS` would have meant
+silencing the gate more often than it fired, and a gate whose output must be
+skipped teaches its reader to skip it.
+
+**The check needed a coverage floor, and its own first drive is why.** `\w`
+is Unicode, so `十二` inside `十二道闸门` is followed by a word character and
+the ASCII trailing guard refused every Chinese claim in the file. Nothing
+went red: the site count simply fell from 13 to 8 while the assertion still
+passed, which is the same class of false green as the rest of this entry. The
+floor is per file, so a language dropping out of the scan is loud. A free
+two-character modifier slot in the Chinese pattern also read `两条没有闸门
+断言…的规则` — "two rules with NO gate assertion" — as a claim of two gates,
+so the modifier slot is an allowlist now: a negation sitting where a modifier
+would sit inverts the sentence.
+
+Gate: `tests/smoke_test.py` § v2.15.1 gate count; `falsify --case
+r15gatecount` (restore the stale "eleven" — the state the tree actually
+shipped in) / `r15gatecountcjk` (restore the ASCII guard, and watch the floor
+rather than the equality catch it). Register: 261 anchors.
+
 ## [2.15.0] — 2026-09-07
 
 ### The channel that had a query, and the search that could not read Chinese

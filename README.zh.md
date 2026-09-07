@@ -1,4 +1,4 @@
-<!-- i18n-source: README.md | sha256: ec4399a204da7476 | version: 2.15.0 | translated: 2026-09-07 | translation: 699b449124b8a09f -->
+<!-- i18n-source: README.md | sha256: 46c3a068531e4cd3 | version: 2.15.0 | translated: 2026-09-07 | translation: 9cec7c685c6d89a0 -->
 > [English](README.md) · **简体中文**
 
 <div align="center">
@@ -389,7 +389,7 @@ BM25 加上本项目已有的 CJK 感知相似度，不需要向量、不需要�
   `<private>` 起始标签会丢弃剩余部分而不是泄漏它），读不了的 `config.json`
   同样如此（排除所有项目而不是靠猜）。
 - **闸门能变红，而且这一点本身被检查。** 每次改动跑十二道发布闸门——五个测试
-  套件、四道文档闸门，外加构建检查。一份可证伪登记册（`tools/falsify_fixes.py`）
+  套件、四道文档闸门 <!--ce:gates:subset-->，外加构建检查。一份可证伪登记册（`tools/falsify_fixes.py`）
   把每条已登记的修复在临时副本上撤销，断言它的闸门在那里确实**失败**：一个不
   可能变红的检查只是一条消耗 CI 时间的注释。截至 v2.14.0 已登记 238 个破坏
   用例，每一个都被单独驱动到红过才保留。
