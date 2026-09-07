@@ -42,7 +42,7 @@ enable_utf8_io()
 
 from core.db import CATEGORIES, MemoryDB
 from core.layout import DB_FILENAME, memory_dir as resolve_memory_dir
-from core.extractor import load_transcript_window, mangle_project_path
+from core.extractor import find_transcript_dir, load_transcript_window
 from core.logger import get_logger
 # Shared entry ladder (v2.10.0): stdin parsing + the opt-out→anchor gate,
 # once, in hooks/_entry.py — six hand-rolled copies is how guard drift
@@ -50,7 +50,7 @@ from core.logger import get_logger
 from hooks._entry import parse_payload, resolve_project
 from core.privacy import (neutralize_document, neutralize_inline,
                           neutralize_markers)
-from core.progress import write_progress_md
+from core.progress import ACK_TEMPLATE, write_progress_md
 from llm.memory_writer import upsert_batch
 
 _log = get_logger("session_start")
@@ -488,7 +488,12 @@ def _build_forced_reminder(memory_dir):
     lines += [
         "",
         "After reading, explicitly state in your first reply:",
-        '  "Read PROGRESS.md — prior progress: <one-sentence summary>."',
+        # The sentence is `core.progress.ACK_TEMPLATE`, not a literal: this is
+        # the DEMAND, and `/cc-mem inject-usage` is the DETECTOR that measures
+        # whether it was stated. Two spellings drift, and the drift is silent
+        # in the direction that matters — the detector reports "never
+        # acknowledged" and the reader believes it.
+        f"  {ACK_TEMPLATE}",
         "",
         "RESUME PROTOCOL — if the user's first message is exactly one of:",
         # i18n Tier 3: bilingual resume tokens INTENTIONAL — keep in sync with
@@ -711,20 +716,13 @@ def _find_transcript_dir(project_path):
 
     Slug construction lives in core.extractor.mangle_project_path (which also
     normalises '_' and '.', the omission that used to push most projects into
-    the fuzzy branch in the first place).
+    the fuzzy branch in the first place), and since v2.15.0 so does the LADDER
+    — `core.extractor.find_transcript_dir`. This function is the name this
+    module's two call sites and its docstring above are written against; the
+    body was a verbatim copy, one of four, and a rule enforced in four places
+    is a rule three of them can stop enforcing without anything going red.
     """
-    claude_projects = Path.home() / ".claude" / "projects"
-    if not claude_projects.exists():
-        return None
-    hash_candidate = mangle_project_path(str(Path(project_path).resolve()))
-    candidate = claude_projects / hash_candidate
-    if candidate.exists():
-        return candidate
-    hash_lower = hash_candidate.lower()
-    for d in claude_projects.iterdir():
-        if d.is_dir() and d.name.lower() == hash_lower:
-            return d
-    return None
+    return find_transcript_dir(project_path)
 
 
 def _transcript_cwd(messages):

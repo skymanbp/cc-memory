@@ -11,11 +11,17 @@ Decision tree for a new memory M about topic T:
      duplicate of the stored content. M's importance and tags are still
      folded into the matched row (REINFORCE); when they add nothing, SKIP.
   2. Same topic + trigram-Jaccard ≥ HIGH_SIM (>= 0.80) on existing memory E:
-        → MERGE_IN_PLACE: db.update_memory(E.id, content=M.content, ...)
-        Treats M as a refined wording of the SAME fact. No new row.
+        → MERGE: archives E, inserts M with supersedes_id=E.id, E's fields
+        folded in by `_merge_fields` and E's `created_at` carried forward.
+        Treats M as a refined wording of the SAME fact.
+        Through v2.14.1 this rewrote E's `content` IN PLACE and left nothing
+        pointing at the replaced text — and shingle similarity cannot tell
+        "三十秒" from "六十秒", so the closer a WRONG correction was to the
+        original the more certainly it took this branch. Recoverable now.
   3. Same topic + Jaccard ≥ MID_SIM (0.50-0.80):
-        → SUPERSEDE: db.supersede_memory(E.id, M.content, ...)
-        Archives E, inserts M with supersedes_id=E.id. Preserves history.
+        → SUPERSEDE: archives E, inserts M with supersedes_id=E.id, fields
+        folded in by `_supersede_fields` and `created_at` stamped fresh.
+        Preserves history.
   4. Otherwise:
         → INSERT NEW (independent fact).
 
@@ -278,9 +284,9 @@ def upsert_smart(db: MemoryDB,
     # module keeps the POLICY: thresholds, the similarity function, and the
     # tag-union rule below all go in as parameters.
     def _merge_fields(row: Dict) -> Dict:
-        # Union with the SURVIVING row's tags, never replace: merge rewrites
-        # the row in place and supersede carries the fact forward, so both
-        # inherit its provenance (["observer","realtime"], ["mcp"], …).
+        # Union with the ARCHIVED row's tags, never replace: both branches
+        # carry the fact forward onto a new row, so both inherit its
+        # provenance (["observer","realtime"], ["mcp"], …).
         return {"importance": max(importance, row["importance"]),
                 "topic": topic or row.get("topic"),
                 "tags": _merged_tags(_row_tags(row), tags, ["merged"])}
@@ -308,7 +314,13 @@ def upsert_smart(db: MemoryDB,
         _log.info(f"reinforced #{result['id']} (exact-hash restatement: "
                   f"importance/tags folded in)")
     elif result["action"] == "merged":
-        _log.info(f"merged into #{result['id']} sim={result['similarity']:.2f}")
+        # Both ids, like the superseded line below: `id` is the new row and
+        # `old_id` the archived one. They were the SAME id while MERGE
+        # overwrote in place, so "merged into #N" said everything there was to
+        # say; now it would name the new row and silently drop the lineage
+        # this branch exists to record.
+        _log.info(f"merged #{result['old_id']} -> #{result['id']} "
+                  f"sim={result['similarity']:.2f}")
     elif result["action"] == "superseded":
         _log.info(f"superseded #{result['old_id']} -> #{result['id']} "
                   f"sim={result['similarity']:.2f}")

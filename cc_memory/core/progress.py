@@ -27,6 +27,7 @@ file. See docs/CONTRACTS.md#handoff-contract for the full handoff spec.
 """
 import json
 import os
+import re
 import sys
 import tempfile
 import time
@@ -72,6 +73,7 @@ MEMORY_GITIGNORE_LINES = [
     "sessions/",
     ".last_save.json",
     ".last_inject.json",
+    ".last_recall.json",
     ".last_consolidation.json",
     ".consolidation.lock",
     ".consolidation.kick",
@@ -297,6 +299,53 @@ def _short_ts(ts: str) -> str:
         return "(unknown)"
     # accept '2026-06-02T12:56:18' or '2026-06-02T12:56:18.123' etc.
     return s.replace("T", " ")[:16]
+
+
+# ── The handoff ACK: one demand, one detector (v2.15.0) ────────────────────
+# `hooks/session_start._build_forced_reminder` DEMANDS this sentence in
+# Claude's first reply; `cli/mem.py inject-usage` MEASURES whether it was
+# stated. Both sides read the constant below, for the same reason
+# `core.modes.is_excluded`, `core.atomic.write_atomic` and the .gitignore line
+# list each had to be unified after their copies drifted: a detector that
+# spells the sentence separately stops matching the day the wording is edited
+# and reports "never acknowledged" for a session that acknowledged every time
+# — a false negative that reads exactly like the real finding it would hide.
+ACK_PREFIX = "Read PROGRESS.md — prior progress:"
+ACK_PLACEHOLDER = "<one-sentence summary>"
+ACK_TEMPLATE = f'"{ACK_PREFIX} {ACK_PLACEHOLDER}."'
+
+# Dash runs collapse to a single ASCII '-'. The demand is written with an EM
+# dash and the reply comes back with whatever the model typed or the console
+# produced: '-', '--', '–' and '—' are the same statement, and an exact
+# compare scores a correct ack as a miss.
+_ACK_DASH_RUN = re.compile("[‐-―−-]+")
+
+
+def _ack_normalize(text: str) -> str:
+    """Casefolded, dash-normalised, whitespace-collapsed form for comparison."""
+    return " ".join(_ACK_DASH_RUN.sub("-", str(text)).split()).casefold()
+
+
+def ack_present(text: str) -> bool:
+    """Did `text` STATE the handoff ack, or merely quote its template?
+
+    The template still carries the literal placeholder; a real ack replaced it
+    with a summary. Without that discrimination a reply QUOTING the reminder —
+    including one explaining that it had not read PROGRESS.md yet — counts as
+    an acknowledgement, which is the exact inverse of the signal. Each
+    occurrence is judged by what FOLLOWS it, so a reply that acks once and
+    quotes the template elsewhere still reads as an ack.
+    """
+    norm = _ack_normalize(text)
+    prefix = _ack_normalize(ACK_PREFIX)
+    placeholder = _ack_normalize(ACK_PLACEHOLDER)
+    i = norm.find(prefix)
+    while i != -1:
+        rest = norm[i + len(prefix):].lstrip()
+        if rest and not rest.startswith(placeholder):
+            return True
+        i = norm.find(prefix, i + 1)
+    return False
 
 
 # Moved to core.atomic in v2.5.3. This module's copy was the STRONGEST of the

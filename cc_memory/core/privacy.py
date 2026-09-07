@@ -97,6 +97,13 @@ _MARKER_TAG_RE = re.compile(
     r"</?\s*(?:"
     r"system[-_]reminder"
     r"|cc-memory-context"
+    # The query-time recall frame (v2.15.0, `core/recall.py`). EVERY frame this
+    # plugin emits belongs in THIS list rather than being escaped by its own
+    # renderer: a renderer that owns half the policy is a renderer whose other
+    # half the next frame forgets. Caught by `tests/test_recall.py` §3e on its
+    # first run — a stored memory closed `</cc-memory-recall>` and opened a
+    # `<system-reminder>` outside it, and `memory_add` is model-invokable.
+    r"|cc-memory-recall"
     r"|ide_opened_file|ide_selection|ide_diagnostics"
     # Claude Code's slash-command scaffolding. `strip_harness_blocks` removes
     # whole blocks at the two request ingresses; this is the render-side net

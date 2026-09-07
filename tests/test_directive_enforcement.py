@@ -865,6 +865,110 @@ def section_9():
     _sh.rmtree(root, ignore_errors=True)
 
 
+# ── §10 v2.15.0: the drift remedy CONVERGES, and the display cannot disagree ─
+# Two user-reported findings with one root cause. `hooks/stop.py` bumps the
+# turn counter and re-reads before it judges, and `hooks/post_tool_use.py` has
+# already recorded this turn's edits by then (n=1 per edit, n=20 for a
+# sensitive Bash call, against an edit_threshold of 12) — so running the remedy
+# the refusal names and then touching one more file re-armed the same block at
+# the same Stop. Separately, `plan-status` printed the two counters raw and
+# named no threshold while `should_nudge_guardian` applied its own on the Stop
+# path: two readers of one row, each interpreting it privately.
+def section_10():
+    print("\n§10 v2.15.0：漂移补救必须收敛；显示层与判定层不得分歧")
+    import json as _json
+    import shutil as _sh
+    import subprocess
+    import tempfile as _tf
+
+    # ── (a) ONE policy point, asserted at the source ──────────────────────
+    plan_src = (REPO / "cc_memory" / "core" / "plan.py").read_text(
+        encoding="utf-8")
+    cli_src = (REPO / "cc_memory" / "cli" / "mem.py").read_text(
+        encoding="utf-8")
+    check("blocking_reasons reads guardian_verdict, not its own thresholds",
+          "guardian_verdict(plan_row)" in plan_src
+          and plan_src.count("edit_threshold: int = 12") == 2,
+          "a second copy of the threshold policy is how plan-status and the "
+          "Stop gate came to disagree in the first place")
+    check("cmd_plan_status prints the GATE's verdict",
+          "guardian_verdict(row)" in cli_src,
+          "plan-status must not re-interpret the counters privately")
+
+    # ── (b) the remedy converges, through the REAL Stop hook ─────────────
+    root = Path(_tf.mkdtemp(prefix="ccm-enf-converge-"))
+    db = MemoryDB(root / _MEM / "memory.db")
+    pid = db.upsert_project(str(root))
+    structured = {"version": 1, "goal": "g", "success_criteria": ["c"],
+                  "steps": [{"id": 1, "title": "s", "status": "pending",
+                             "notes": ""}],
+                  "context": "", "refined_by": "test"}
+    plan_mod.apply_refined_plan(db, pid, structured, memory_dir=root / _MEM)
+    hook = REPO / "cc_memory" / "hooks" / "stop.py"
+    cli = REPO / "cc_memory" / "cli" / "mem.py"
+    env = {k: v for k, v in os.environ.items() if k != "ANTHROPIC_API_KEY"}
+    env["PYTHONIOENCODING"] = "utf-8"
+    payload = _json.dumps({"cwd": str(root), "session_id": "enf-converge",
+                           "hook_event_name": "Stop"})
+
+    def stop_once():
+        r = subprocess.run([sys.executable, str(hook)], input=payload,
+                           capture_output=True, text=True, encoding="utf-8",
+                           errors="replace", env=env, timeout=120)
+        assert r.returncode == 0 and not r.stderr, (r.returncode, r.stderr[:300])
+        return r.stdout.strip().startswith("{")      # True == refused
+
+    # one turn short of the threshold, so the NEXT Stop's own bump crosses it
+    with db._connect() as conn:
+        conn.execute("UPDATE plan_active SET turns_since_last_guardian = 7 "
+                     "WHERE project_id = ?", (pid,))
+    check("the drift gate refuses once the threshold is crossed",
+          stop_once() is True, "nothing to converge if it never refused")
+
+    # the remedy, in the order the refusal now names: guardian, then the
+    # command that records it. Driven as the real CLI subprocess.
+    r = subprocess.run([sys.executable, str(cli), "--project", str(root),
+                        "plan-check"], capture_output=True, text=True,
+                       encoding="utf-8", errors="replace", env=env, timeout=120)
+    check("plan-check succeeds", r.returncode == 0, r.stderr[-300:])
+    # ...and then the turn keeps working: one sensitive Bash call is +20
+    # against a threshold of 12, which is the single event that re-armed the
+    # block on its own before the v10 immunity existed.
+    db.bump_plan_edit_counter(pid, n=20)
+    check("the SAME turn's Stop lets the turn close after the remedy",
+          stop_once() is False,
+          "a remedy that re-arms the block it just cleared is not a remedy — "
+          "the escape budget then spends itself on a condition the user fixed")
+
+    # ── (c) the immunity is EXACTLY one turn — not an escape hatch ────────
+    check("the NEXT turn is refused again while the drift is real",
+          stop_once() is True,
+          "one-turn immunity must not become a way out of enforcement: the "
+          "20 edits from the previous turn are still unchecked")
+
+    # ── (d) the display agrees with the gate, by construction ─────────────
+    r = subprocess.run([sys.executable, str(cli), "--project", str(root),
+                        "plan-status"], capture_output=True, text=True,
+                       encoding="utf-8", errors="replace", env=env, timeout=120)
+    check("plan-status ANNOUNCES the refusal the Stop gate is about to make",
+          r.returncode == 0 and "WOULD REFUSE THE NEXT TURN" in r.stdout,
+          f"rc={r.returncode} stdout={r.stdout[-400:]!r}")
+    check("plan-status names the thresholds it is judging against",
+          "threshold 12" in r.stdout and "threshold 8" in r.stdout,
+          f"stdout={r.stdout[-400:]!r}")
+
+    # ── (e) the remedy TEXT names the guardian BEFORE the reset ───────────
+    row = db.get_plan_active(pid)
+    drift = [x for x in plan_mod.blocking_reasons(row, []) if x[0] == "plan-drift"]
+    check("a plan-drift reason is produced for the remedy text", bool(drift))
+    fix = drift[0][2] if drift else ""
+    check("the remedy runs the guardian first and records it last",
+          fix.index("@plan-guardian") < fix.index("plan-check"),
+          f"the reset must be the FINAL act, or everything after it re-arms "
+          f"the condition it cleared: {fix!r}")
+    _sh.rmtree(root, ignore_errors=True)
+
+
 def main():
     print("=" * 66)
     print("v2.11.0 enforcement gate — plan + directive ledger")
@@ -879,6 +983,7 @@ def main():
         section_7()
         section_8()
         section_9()
+        section_10()
     finally:
         _cleanup_sandbox()
     print("\n" + "=" * 66)

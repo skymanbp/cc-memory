@@ -233,7 +233,7 @@ would falsify the record.
 | `SessionStart` | [`cc_memory/hooks/session_start.py`](../cc_memory/hooks/session_start.py) | 15s | Inject layered context (standing directives / topics / critical / timeline / PROGRESS preview / footer — the directive ledger is the first layer since v2.12.2; before that nothing injected it); emit the FORCED `<system-reminder>` to Read `PROGRESS.md` + `MEMORY.md`; retroactive save of unsaved JSONLs. |
 | `Stop` | [`cc_memory/hooks/stop.py`](../cc_memory/hooks/stop.py) | 22s | Observer: extract from last turn's observations via Haiku; per-turn `patch_progress(files_touched, ...)`; every 5 turns run `idle.maybe_run_idle` (cleanup + MEMORY.md regen); probe the consolidation backlog and spawn the detached async worker when it is due (v2.12.0); when a plan is LIVE, bump its turn counter and **enforce** — refuse the turn (`{"decision": "block"}`) over an unrefined plan, an undrift-checked plan, or an idle directive, with the escape budget CONTRACTS.md specifies (v2.11.0; the advisory nudge this row used to describe is gone). |
 | `PostToolUse` | [`cc_memory/hooks/post_tool_use.py`](../cc_memory/hooks/post_tool_use.py) | 8s | Live-plan integration FIRST, in every mode: `ExitPlanMode` → `plan_active.raw`, `TodoWrite` → mechanical step sync, `Edit`/`Write`/`MultiEdit`/`NotebookEdit` → +1 drift counter, sensitive Bash call → +20. THEN one row into `observations`, for OBSERVED tool calls only (mode allowlist / skip list — `core.modes.should_observe`). No LLM. Measured ~180-290 ms end to end, of which ~75-120 ms is interpreter start-up. |
-| `UserPromptSubmit` | [`cc_memory/hooks/user_prompt.py`](../cc_memory/hooks/user_prompt.py) | 8s | Auto-init `.ccm/` on first contact; track turn count; save prompt for the Stop observer; on the first non-scaffolding prompt (once per session — `strip_scaffolding`, shared with `pre_compact._first_user_request`, and the `cc_mem_seeded_` marker; v2.14.0), tag the session and seed `progress.current_request` (typing the trigger `resume_request` vs `user_prompt` from the bilingual resume-signal whitelist). |
+| `UserPromptSubmit` | [`cc_memory/hooks/user_prompt.py`](../cc_memory/hooks/user_prompt.py) | 8s | Auto-init `.ccm/` on first contact; track turn count; save prompt for the Stop observer; on the first non-scaffolding prompt (once per session — `strip_scaffolding`, shared with `pre_compact._first_user_request`, and the `cc_mem_seeded_` marker; v2.14.0), tag the session and seed `progress.current_request` (typing the trigger `resume_request` vs `user_prompt` from the bilingual resume-signal whitelist). **Then QUERY-TIME RECALL** (v2.15.0): the cleaned prompt is turned into an FTS5 expression, the best matches that clear the relevance floor are printed to stdout inside a `<cc-memory-recall>` frame, and nothing at all is printed otherwise (`core/recall.py`). |
 
 ### Hook stdout contract
 
@@ -244,7 +244,14 @@ Each hook's stdout has a specific role, and violating it is a user-visible bug:
   (`stop.py:582-587`), plus at most one `[cc-memory.plan] …` advisory line.
 - `PreCompact` (sync) stdout → ONE status line (shows in the next session's
   compacted context).
-- `PreCompact` (async) / `PostToolUse` / `UserPromptSubmit` stdout → empty. The
+- `UserPromptSubmit` stdout → **the query-time recall block, or nothing**
+  (v2.15.0). This stream IS injected into Claude's context, and until v2.15.0
+  the plugin left it empty by its own choice — so the only automatic moment
+  that HAS a user query put nothing in front of the model. `core/recall.py`
+  emits at most `RECALL_MAX_ROWS` memories inside a
+  `<cc-memory-recall>` frame when they clear the relevance floor, and **zero
+  bytes** otherwise; a channel that speaks every turn is a per-turn tax.
+- `PreCompact` (async) / `PostToolUse` stdout → empty. The
   async leg's stdout is not shown inline at all (`consolidate_async.py:37`).
 
 ### PreCompact: why two legs
@@ -356,38 +363,38 @@ project-local at `<project>/.ccm/memory.db`, WAL mode:
 |-------|---------|
 | `projects` | One row per project (`db.py:37`) — identified by the database it sits in, not by the `path` string it records: a moved or renamed directory re-attaches its own row instead of minting a second one (§7); carries `mode` since migration `v2_project_mode` (`db.py:144`) and the durable observer cursor `obs_watermark` since `v7_projects_obs_watermark` |
 | `sessions` | One row per compaction event (`db.py:46`); carries `complete` since `v7_sessions_complete` (backfilled, so pre-v7 rows read as complete) |
-| `memories` | Extracted facts (category, importance, topic, content_hash, **supersedes_id**, last_referenced_at) (`db.py:57`) |
+| `memories` | Extracted facts (category, importance, topic, content_hash, **supersedes_id**, last_referenced_at) (`db.py:57`). Carries `recall_count` since `v10_memories_recall_count` — incremented when `core/recall.py` retrieves the row for a real user question, which is a different fact from `last_referenced_at`: that one records that SessionStart's importance/recency ranking chose the row with no query in existence, this one records that somebody asked. The pair is what `/cc-mem inject-usage` reports as two channels — both of them DELIVERY facts. Whether Claude USED a delivered row is a judgement about text, so it is layer 2 (`--judge`, opt-in, `llm/usage_judge.py`): one LLM call over that session's own replies, answering `used` / `unused` / `unknown` per row, where `unknown` covers every case in which the judge could not run and is never printed as `unused` |
 | `topics` | Consolidated summaries per topic name (versioned) (`db.py:71`) |
 | `keywords` | Auto-detected project vocabulary (`db.py:81`) |
 | `plans` | Plan queue (draft → ready → done) (`db.py:90`) |
 | `observations` | Raw PostToolUse events, cleaned up after extraction (`db.py:131`) |
 | `session_summaries` | 6-field structured summary per session (request / investigated / learned / completed / next_steps / notes) + files_read/files_modified (`db.py:144`) |
 | **`progress`** | NEW in v2.1 — single row per project. SOT for `.ccm/PROGRESS.md` (`db.py:188`). |
-| **`plan_active`** | NEW in v2.2 — single row per project. SOT for `.ccm/PLAN.md` (`db.py:212`). Carries `turns_total` since `v9_plan_turns_total`: a MONOTONIC turn count that nothing resets, distinct from `turns_since_last_guardian`, which every guardian check and plan replacement zeroes |
+| **`plan_active`** | NEW in v2.2 — single row per project. SOT for `.ccm/PLAN.md` (`db.py:212`). Carries `turns_total` since `v9_plan_turns_total`: a MONOTONIC turn count that nothing resets, distinct from `turns_since_last_guardian`, which every guardian check and plan replacement zeroes. Carries `guardian_checked_at_turn` since `v10_plan_guardian_checked_at_turn` — the value of `turns_total` at the last `/cc-mem plan-check`, stamped inside that UPDATE — so "checked during this very turn" is `turns_total == guardian_checked_at_turn + 1` and the drift gate's one-turn immunity is a comparison between two monotonic numbers. `DEFAULT -1`, not 0: with 0 a brand-new plan's first Stop would read `1 == 0 + 1` and grant immunity to a check nobody ran |
 | **`directives`** | NEW in v2.11.0 — the user-INTENT ledger. `times_stated` accumulates on ONE row per `slug`; a directive outlives every plan, which is why it is not plan steps. Carries `turns_at_touch` since `v9_directives_turns_at_touch` — the value of `turns_total` when it was last written, so idleness is subtraction between two monotonic numbers. Since v2.12.0 `status` may also be `blocked` (parked on the user, idle-exempt) and `kind` may be `constraint` (a standing prohibition, idle-exempt) — vocabulary additions, no schema change; only `directive-add` may bump the count (`directive-edit` corrects fields without touching it) |
-| `_migrations` | Tracks applied migrations (`db.py:732`) |
+| `_migrations` | Tracks applied migrations (`db.py:736`) |
 
 Twelve tables, matching `CLAUDE.md` § "Database schema (12 tables)".
 
-Plus `memories_fts` — an FTS5 virtual table over `memories` (`core/db.py:835-836`),
+Plus `memories_fts` — an FTS5 virtual table over `memories` (`core/db.py:906-957`),
 kept in sync by three triggers that `db._setup_fts5` creates with it
-(`core/db.py:839-856`); its `_MIGRATIONS` entry is `v2_fts5` (`db.py:163`).
+(`core/db.py:906-957`); its `_MIGRATIONS` entry is `v2_fts5` (`db.py:163`).
 It is created only when the local SQLite build has FTS5; otherwise
-`db.search_fts` (`core/db.py:3178-3212`) falls back to `LIKE ? ESCAPE '\'`
-(`core/db.py:3178-3212`). FTS5 is advertised in `.claude-plugin/plugin.json:4`
+`db.search_fts` (`core/db.py:3461-3509`) falls back to `LIKE ? ESCAPE '\'`
+(`core/db.py:3461-3509`). FTS5 is advertised in `.claude-plugin/plugin.json:4`
 and `:12`, and `/cc-mem status` reports which path is live (`cli/mem.py`,
 `cmd_status`).
 
 The `supersedes_id` column on `memories` (migration `v3_supersedes`,
-`db.py:168`) makes the anti-patch chain explicit: when `upsert_smart` decides a
+`db.py:172`) makes the anti-patch chain explicit: when `upsert_smart` decides a
 new memory supersedes an old one, the new row links back to the old row's ID
 (and the old row is archived). Walking the chain via
-`db.get_supersede_chain(memory_id)` (`db.py:1667-1682`) shows the full update
+`db.get_supersede_chain(memory_id)` (`db.py:1895-1910`) shows the full update
 history. `content_hash` (migration `v2_content_hash` in
 `_MIGRATIONS`, `db.py:126`) is `sha256[:16]` of the normalized content, used
 for the cheap exact-duplicate check
-(`db.compute_content_hash` at `db.py:2222-2224`,
-`db.find_by_hash` at `db.py:2235-2243`).
+(`db.compute_content_hash` at `db.py:2480-2482`,
+`db.find_by_hash` at `db.py:2493-2501`).
 
 Migrations are applied in order from the `_MIGRATIONS` list (`db.py:121-284`) and
 recorded in `_migrations`. Levels shipped so far: **v1** (`topic` column +
@@ -467,14 +474,14 @@ caller's responsibility, and there are exactly two shapes:
 
 - `upsert_batch` (`memory_writer.py:318-360`) loops `upsert_smart` per item and
   regenerates ONCE at the end, but only when a `memory_dir` is passed
-  (`memory_writer.py:322`). All hook callers pass it
+  (`memory_writer.py:334`). All hook callers pass it
   (`pre_compact.py:435`, `stop.py:166`, `session_start.py:1144`); the sync
   PreCompact leg additionally touches it again after the rest of its state
   changes (`pre_compact.py:806`).
 - Single-shot callers call `regenerate_memory_index` explicitly:
-  `cli/mem.py:1207` and `:584`, `mcp/server.py:647`, `ui/dashboard.py:1715`,
+  `cli/mem.py:1213` and `:584`, `mcp/server.py:647`, `ui/dashboard.py:1716`,
   `ui/web_viewer.py:1034`, plus the `skills/ccm-load` inline script
-  (`skills/ccm-load/SKILL.md:308, 318`). `core/idle.py:96` and
+  (`skills/ccm-load/SKILL.md:290, 307`). `core/idle.py:96` and
   `hooks/consolidate_async.py:276` also refresh it after maintenance.
 
 (The pre-merge diagram showed regeneration as an unconditional step of
@@ -484,7 +491,7 @@ by grepping `upsert_smart|upsert_batch` across `cc_memory/`.)
 
 Thresholds live in ONE place — `memory_writer.HIGH_SIM = 0.80`,
 `MID_SIM = 0.50`, `MIN_CONTENT_LEN = 10`, `MAX_CANDIDATES_TO_SCAN = 50`
-(`memory_writer.py:75`). They are no longer mirrored in `config.json`: that
+(`memory_writer.py:81`). They are no longer mirrored in `config.json`: that
 `writer` block was read by nothing and was deleted in v2.5, because an inert
 tunable is worse than no tunable. See
 [docs/CONTRACTS.md](CONTRACTS.md#anti-patch-contract) for the full contract.
@@ -574,8 +581,8 @@ SessionStart:
 
 Call signatures above are the real ones: `write_progress_md(db, project_id,
 memory_dir)` (`core/progress.py:331-490`; call sites `pre_compact.py:775`,
-`stop.py:473`, `user_prompt.py:52`, `session_start.py:946`, `mcp/server.py:243`,
-`cli/mem.py:1298`). See
+`stop.py:473`, `user_prompt.py:52`, `session_start.py:944`, `mcp/server.py:243`,
+`cli/mem.py:1304`). See
 [docs/CONTRACTS.md](CONTRACTS.md#handoff-contract) for the PROGRESS.md
 schema.
 
@@ -612,7 +619,7 @@ its own memories.
 Three changes close it:
 
 1. `core.extractor.mangle_project_path` is the single source of truth for the
-   convention (`extractor.py:535-571`), used by `find_latest_transcript`,
+   convention (`extractor.py:614-635`), used by `find_latest_transcript`,
    `hooks/session_start.py` and `ui/dashboard.py` — which had carried a verbatim
    copy of the old resolver, fuzzy branch included.
 2. The fuzzy fallback is **deleted**. A miss returns `None`. Callers must treat
@@ -644,9 +651,12 @@ normalises it to JSON, written back via `/cc-mem plan-set --from-refiner`;
 LLM); `Edit`/`Write`/`MultiEdit`/`NotebookEdit` bump
 `edits_since_last_guardian`, and sensitive Bash calls (`git push`, `rm -rf`,
 `DROP TABLE`, `npm publish`, `kubectl apply`, `terraform apply`, … —
-`core.plan.is_sensitive_tool_call`, `plan.py:1375-1398`) bump it by 20. Once
+`core.plan.is_sensitive_tool_call`, `plan.py:1440-1463`) bump it by 20. Once
 `turns_since_last_guardian >= 8` OR `edits_since_last_guardian >= 12`
-(`core.plan.should_nudge_guardian`, `plan.py:1339-1355`), the Stop hook
+(`core.plan.guardian_verdict` — THE policy point since v2.15.0, read by
+`should_nudge_guardian`, `blocking_reasons` AND `/cc-mem plan-status`, so the
+numbers a user is shown and the numbers the gate acts on cannot disagree), the
+Stop hook
 **refuses the turn** rather than advising (v2.11.0 — the rate-limited nudge
 this sentence used to describe is deleted; see
 [CONTRACTS.md](CONTRACTS.md#the-stop-hook-can-refuse-the-turn-v2110) for the
@@ -720,9 +730,9 @@ while the same token via Bearer + beta gets HTTP 200 (`core/auth.py:14-15`).
 `get_api_key()` is the single-credential back-compat view of that same list (it
 does not retry, `core/auth.py:60-93`); it also carries the `oauth_expired`
 signal behind SessionStart's "[WARNING: OAuth expired — LLM extraction
-disabled]" footer (`session_start.py:665`). Hook callers use it to *supply*
+disabled]" footer (`session_start.py:670`). Hook callers use it to *supply*
 the credential passed into `call_llm`: `pre_compact.py:94 → :166`,
-`stop.py:86`, `session_start.py:665`, `core/consolidate.py:426, 549, 724`.
+`stop.py:86`, `session_start.py:670`, `core/consolidate.py:426, 549, 724`.
 
 Fall-through was added in v2.3.4 for a concrete failure: a dead env key (e.g.
 zero credit → HTTP 400) used to blackhole the healthy subscription token behind
@@ -825,7 +835,7 @@ Per-project state lives at `<project>/.ccm/`:
 Writers, for traceability: `MEMORY.md` ← `memory_writer.regenerate_memory_index`
 (`memory_writer.py:261-370`); `PROGRESS.md` ← `core.progress.write_progress_md`
 (`progress.py:331-490, 366`); `PLAN.md` ← `core.plan.write_plan_md`
-(`plan.py:733-782`); `.plan_history/` ← `plan.py:733-782`; `.last_save.json` ←
+(`plan.py:783-832`); `.plan_history/` ← `plan.py:783-832`; `.last_save.json` ←
 `pre_compact.py:737, 771`; `.last_inject.json` ← `session_start.py:291-309`
 (tempfile + `os.replace`, genuinely atomic, unlike the plain write used for
 `.last_save.json`); `.last_consolidation.json` ←
@@ -884,7 +894,7 @@ inside another one — `Claude-Code-Local/companion` alone holds 3725 memories
 and carries its own `.git`. A stray sub-database and a deliberate nested
 sub-project are **byte-for-byte indistinguishable on disk**: both have
 `.ccm/memory.db` whose `projects` row names their own directory, because
-`upsert_project` (`core/db.py:1172-1209`) records whatever cwd it was handed.
+`upsert_project` (`core/db.py:1371-1408`) records whatever cwd it was handed.
 Outermost-wins resolves that ambiguity unconditionally in the direction that
 destroys data, so the first post-upgrade session in `companion` would have
 moved 3725 memories out of reach, silently.
@@ -1108,7 +1118,7 @@ exist because they cannot import this module and must be kept in sync:
 
 Old v2.0 `SESSION_HANDOFF.md` files are renamed to `SESSION_HANDOFF.md.v2.bak`
 on first PreCompact under v2.1 (one-shot migration
-`core.progress.migrate_legacy_handoff`, `progress.py:628-646`).
+`core.progress.migrate_legacy_handoff`, `progress.py:676-694`).
 
 ---
 
@@ -1187,10 +1197,11 @@ segment**, and `_make_hooks_config` (`installer.py:735-757`) builds commands as
 ├── installed_surfaces.json  ← what was written into ~/.claude (v2.5)
 ├── core/    atomic.py auth.py consolidate.py db.py encoding_setup.py
 │            extractor.py idle.py layout.py logger.py markers.py modes.py
-│            plan.py privacy.py progress.py roots.py textsim.py version.py
+│            plan.py privacy.py progress.py recall.py roots.py textsim.py
+│            version.py
 ├── hooks/   _entry.py consolidate_async.py post_tool_use.py pre_compact.py
 │            session_start.py stop.py user_prompt.py
-├── llm/     ccl_backend.py memory_writer.py parse.py
+├── llm/     ccl_backend.py memory_writer.py parse.py usage_judge.py
 ├── cli/     mem.py plan.py
 ├── mcp/     server.py
 ├── ui/      dashboard.py installer.py web_viewer.py

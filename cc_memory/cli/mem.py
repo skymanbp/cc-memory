@@ -317,6 +317,12 @@ _REQUIRED_PLUGIN_FILES = [
     "cc_memory/core/auth.py",
     "cc_memory/core/consolidate.py",
     "cc_memory/core/idle.py",
+    # v2.15.0: hooks/user_prompt.py imports this to build the query-time
+    # recall block. The import is lazy (inside `_emit_recall`), so a
+    # missing file does not kill the hook at import — it silently costs
+    # the recall channel and nothing else, which is precisely the shape
+    # `status` has to be able to report rather than call healthy.
+    "cc_memory/core/recall.py",
     # v2.6.0: every hook imports this at MODULE level, so an install missing
     # it does not degrade — all six die at import with a stderr traceback.
     # It was absent from this list, which is what let `status` report an
@@ -1658,7 +1664,7 @@ def _print_raw_plan(raw, max_lines=20):
 
 def cmd_plan_status(args):
     """One-screen summary of the live plan: counters, active step, freshness."""
-    from core.plan import is_live_plan, is_valid_structured
+    from core.plan import guardian_verdict, is_live_plan, is_valid_structured
     db, pid, _ = _plan_db(args.project)
     # is_live_plan, NOT truthiness: `plan-clear` keeps a TOMBSTONE row, so a
     # bare `if not row` fell through to the "raw plan captured" branch below and
@@ -1706,8 +1712,24 @@ def cmd_plan_status(args):
     print(f"Refined: {row.get('last_refined_at') or '(never)'} "
           f"by {structured.get('refined_by', 'unknown')}")
     print(f"Last guardian check: {row.get('last_guardian_at') or '(never)'}")
-    print(f"Counters since last check: {row.get('turns_since_last_guardian', 0)} turns, "
-          f"{row.get('edits_since_last_guardian', 0)} edits")
+    # The DISPLAY reads the same policy point the GATE does (v2.15.0). This
+    # command used to print the two counters raw and name no threshold, while
+    # `core.plan.should_nudge_guardian` applied its own on the Stop path — so
+    # a user could read `plan-status`, see nothing alarming, and be refused
+    # the next turn by numbers this screen had already shown them. Printing
+    # the gate's own `reason` string makes the two incapable of disagreeing.
+    _ps_v = guardian_verdict(row)
+    print(f"Counters since last check: {_ps_v['turns']} turns "
+          f"(threshold {_ps_v['threshold_turns']}), "
+          f"{_ps_v['edits']} edits (threshold {_ps_v['threshold_edits']})")
+    if _ps_v["should"]:
+        print(f"Drift gate: WOULD REFUSE THE NEXT TURN — {_ps_v['reason']}. "
+              f"Invoke the @plan-guardian subagent, then `/cc-mem plan-check`.")
+    elif _ps_v["checked_this_turn"]:
+        print("Drift gate: ok — checked during this turn (immunity lasts "
+              "exactly this turn; drift on the next one is refused normally).")
+    else:
+        print(f"Drift gate: ok — {_ps_v['reason']}")
 
 
 def cmd_plan_set(args):
@@ -2155,34 +2177,346 @@ def cmd_inject_show(args):
         print(f"  timeline ids      : {data['timeline_ids']}")
 
 
+# `inject-usage`'s observation window. It was an unnamed `limit=200` inside
+# the command, and the window is not a detail here: this command's entire
+# product is a count, and a count over a window nobody states cannot be read
+# as evidence of absence. A project whose Stop hook records many tool calls
+# per turn buries a handoff Read past 200 rows inside one long session, after
+# which the command reports "0 time(s)" for a file that WAS read.
+_INJECT_USAGE_WINDOW = 200
+
+# The recall manifest's filename, spelled once. `hooks/user_prompt.py` owns
+# the writer; this is the reader, and a second literal is how the .gitignore
+# line list came to need three hand-synced copies.
+_RECALL_MANIFEST_NAME = ".last_recall.json"
+
+
+def _assistant_texts(rec):
+    """Every assistant TEXT block of one transcript record.
+
+    `message.content` is a list of typed blocks on a current transcript
+    (verified first-party against a live JSONL) and a bare string on older
+    ones. `tool_use` blocks carry no reply text and are skipped on purpose:
+    without that, a tool argument that merely QUOTES the ack sentence — a
+    grep for it, an edit to the hook that emits it — would be counted as
+    Claude having stated it.
+    """
+    msg = rec.get("message")
+    if not isinstance(msg, dict):
+        return
+    content = msg.get("content")
+    if isinstance(content, str):
+        yield content
+        return
+    if not isinstance(content, list):
+        return
+    for block in content:
+        if isinstance(block, dict) and block.get("type") == "text":
+            text = block.get("text")
+            if isinstance(text, str):
+                yield text
+
+
+def _session_window(memory_dir, project):
+    """(sid, window, detail) for the session that received the last injection.
+
+    ONE resolver for the two questions this command asks about that session —
+    layer 1's ack signal and layer 2's judge — because two readers of one
+    manifest, each with its own spelling of "which session, which transcript",
+    is the shape `core.plan.guardian_verdict` was extracted to end in this same
+    release. It also means both layers report the same session, which a reader
+    comparing the two lines is entitled to assume.
+
+    `window` is None exactly when `detail` is non-empty, and every such branch
+    is the tri-state's UNMEASURABLE case, never a negative finding.
+
+    `load_transcript_window`'s head+tail shape is right for both callers: the
+    ack is demanded in the session's FIRST reply, which is in the head, and the
+    tail carries the recent turns. It is still a WINDOW, so a negative names
+    what it covered.
+    """
+    from core.extractor import find_session_transcript, load_transcript_window
+
+    manifest = memory_dir / ".last_inject.json"
+    if not manifest.exists():
+        return "", None, ("no injection recorded yet "
+                          "(.ccm/.last_inject.json absent)")
+    try:
+        data = json.loads(manifest.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return "", None, ".ccm/.last_inject.json is unreadable"
+    sid = str(data.get("session_id") or "") if isinstance(data, dict) else ""
+    if not sid:
+        return "", None, "the last injection recorded no session id"
+    jsonl = find_session_transcript(project, sid)
+    if jsonl is None:
+        return sid, None, f"no transcript on disk for session {sid[:8]}"
+    window = load_transcript_window(str(jsonl))
+    if not window.total_records:
+        # load_transcript_window never raises — an unreadable or empty
+        # transcript comes back as an EMPTY window, which is indistinguishable
+        # from "read it, found no ack" unless this branch exists.
+        return sid, None, f"transcript {jsonl.name[:8]} is empty or unreadable"
+    return sid, window, ""
+
+
+def _ack_signal(memory_dir, project):
+    """(state, detail) for the handoff ack `session_start` demands.
+
+    `state` is True / False / None, and None is NOT False: it means the signal
+    could not be COMPUTED — no injection recorded yet, no session id in the
+    manifest, no transcript on disk. Printing that as "not acknowledged" would
+    be the same class of untrue statement this command's docstring carried
+    through v2.14.1, pointed the other way.
+
+    The sentence is `core.progress.ACK_TEMPLATE` and the match is
+    `core.progress.ack_present` — the demand's own module, so the detector
+    cannot drift from the demand.
+    """
+    from core.progress import ack_present
+
+    sid, window, detail = _session_window(memory_dir, project)
+    if window is None:
+        return None, detail
+    for rec in reversed(window.messages):
+        if not isinstance(rec, dict) or rec.get("type") != "assistant":
+            continue
+        for text in _assistant_texts(rec):
+            if ack_present(text):
+                return True, (f"stated in session {sid[:8]} "
+                              f"at {rec.get('timestamp', '?')}")
+    scope = ("whole transcript" if not window.truncated
+             else f"head+tail window of {window.total_bytes} bytes")
+    return False, (f"not stated in {len(window.messages)} of "
+                   f"{window.total_records} records ({scope})")
+
+
 def cmd_inject_usage(args):
     """Deterministic read-signals: did Claude actually consult the injected
-    context this session? Reports ONLY signals that can't be faked:
-      - Read-tool observations targeting PROGRESS.md / MEMORY.md
-      - whether the forced-reminder ack string appears in the latest turn
-    (No per-memory #id guessing — ids are never shown to Claude, so that
-    would be a coincidence detector, not real usage.)"""
+    context? Reports ONLY signals that cannot be faked:
+
+      - Read-tool observations targeting PROGRESS.md / MEMORY.md, over the
+        most recent `--window` observations;
+      - whether the forced-reminder ack was STATED — the sentence
+        `hooks/session_start._build_forced_reminder` demands, matched through
+        its own constant (`core.progress.ACK_TEMPLATE` / `ack_present`).
+
+    Both signals name the window they were measured over. A count without one
+    reads as evidence of absence and is not: through v2.14.1 this docstring
+    promised the ack signal and NOTHING computed it, and the command printed
+    a 200-row count that never said 200.
+
+    Per-memory #id matching is NOT done, and the reason is not that ids are
+    unavailable — the docstring used to say "ids are never shown to Claude",
+    which is false: `session_start._build_timeline_layer` renders `#<id>` for
+    every timeline entry past the fifth. It is feasible and simply not
+    implemented. Doing it would need the injected ids from
+    `.last_inject.json`, matched against that layer's actual output rather
+    than the whole manifest — an id the injection never spelled cannot be
+    echoed, so counting it as unused would measure the injection's shape and
+    report it as Claude's behaviour.
+    """
     memory_dir, db_path, _ = _resolve_db(args.project)
     _require_db_path(db_path)
     db = MemoryDB(db_path)
     pid = db.upsert_project(str(Path(args.project).resolve()))
-    obs = db.get_recent_observations(pid, limit=200)
+    window = getattr(args, "window", None) or _INJECT_USAGE_WINDOW
+    obs = db.get_recent_observations(pid, limit=window)
     reads = [o for o in obs if o["tool_name"] == "Read" and o["tool_input"]]
     progress_reads = [o for o in reads if "PROGRESS.md" in o["tool_input"]]
     memory_reads = [o for o in reads if "MEMORY.md" in o["tool_input"]]
-    print("cc-memory usage signals (this project, recent observations):")
+    print(f"cc-memory usage signals (this project, "
+          f"newest {len(obs)} of the last {window} observations):")
     print(f"  PROGRESS.md Read by Claude : {len(progress_reads)} time(s)"
           + (f" — last {progress_reads[0]['timestamp']}" if progress_reads else ""))
     print(f"  MEMORY.md   Read by Claude : {len(memory_reads)} time(s)"
           + (f" — last {memory_reads[0]['timestamp']}" if memory_reads else ""))
     if not (progress_reads or memory_reads):
-        print("  (no handoff-file reads observed — either a fresh session, or "
-              "Claude hasn't consulted the injected context yet)")
+        print("  (no handoff-file reads in this window — a fresh session, a "
+              "window too short, or context Claude has not consulted)")
+    state, detail = _ack_signal(memory_dir, args.project)
+    label = {True: "yes", False: "no", None: "unmeasured"}[state]
+    print(f"  handoff ack stated         : {label} — {detail}")
+
+    # TWO CHANNELS, reported separately (v2.15.0). They answer different
+    # questions and averaging them would hide both:
+    #   BLIND    SessionStart ranks by importance + recency with no query in
+    #            existence yet. A high count here means the ranking is
+    #            confident, not that anything was needed.
+    #   QUERY    core/recall.py retrieved the row because a real user message
+    #            matched it. That is the one signal that means "someone
+    #            actually wanted this".
+    # 82.6% of this repository's own memories had never been injected at all
+    # when the recall channel was written; a single blended "usage" number
+    # would have made that look like a ranking problem forever.
+    print("\ncoverage by channel (which write paths produce memories anyone "
+          "needs):")
+    with db._connect() as conn:
+        total, injected, recalled = conn.execute(
+            "SELECT COUNT(*), "
+            "       SUM(CASE WHEN last_referenced_at IS NOT NULL THEN 1 ELSE 0 END), "
+            "       SUM(CASE WHEN recall_count > 0 THEN 1 ELSE 0 END) "
+            "FROM memories WHERE project_id = ? AND is_active = 1",
+            (pid,)).fetchone()
+    total = int(total or 0)
+    injected = int(injected or 0)
+    recalled = int(recalled or 0)
+
+    def _pct(n):
+        return f"{(100.0 * n / total):.1f}%" if total else "n/a"
+
+    print(f"  active memories            : {total}")
+    print(f"  ever reached a context     : {injected} ({_pct(injected)}) "
+          f"— blind injection OR query recall")
+    print(f"  ever RECALLED for a query  : {recalled} ({_pct(recalled)}) "
+          f"— matched something a user actually asked")
+    print(f"  never reached a context    : {total - injected} "
+          f"({_pct(total - injected)})")
+    rec_man = memory_dir / _RECALL_MANIFEST_NAME
+    if rec_man.exists():
+        try:
+            rd = json.loads(rec_man.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            # why: the manifest is a convenience record; the counts above come
+            # from the database and stand on their own
+            rd = {}
+        if isinstance(rd, dict):
+            print(f"  last recall                : {rd.get('n', 0)} memories "
+                  f"at {rd.get('ts','?')} ({rd.get('chars', 0)} chars)")
+
     man = memory_dir / ".last_inject.json"
     if man.exists():
-        d = json.loads(man.read_text(encoding="utf-8"))
-        print(f"  last injection             : {d.get('n_injected_memories', 0)} memories "
-              f"at {d.get('ts','?')} (see `/cc-mem inject-show`)")
+        try:
+            d = json.loads(man.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            # why: a malformed manifest already cost the ack signal above,
+            # where it is REPORTED; it must not also abort the command
+            d = {}
+        if isinstance(d, dict):
+            print(f"  last injection             : {d.get('n_injected_memories', 0)} memories "
+                  f"at {d.get('ts','?')} (see `/cc-mem inject-show`)")
+
+    if getattr(args, "judge", False):
+        _judge_usage_section(db, pid, memory_dir, args.project)
+
+
+def _delivered_ids(memory_dir, sid):
+    """(ids, note) — the memory ids delivered to session `sid`, both channels.
+
+    The BLIND ids are `.last_inject.json`'s own, so they belong to `sid` by
+    construction. The QUERY ids are `.last_recall.json`'s, and they are
+    included ONLY when that manifest records THIS session: judging a recall
+    that reached another session against this transcript would measure the
+    manifest's shape and report the result as Claude's behaviour — the exact
+    error `cmd_inject_usage`'s docstring refuses for per-id echo matching.
+    `note` says which channels the ids came from, because a verdict list that
+    silently covers one channel reads as covering both.
+    """
+    blind, query = [], []
+    try:
+        d = json.loads((memory_dir / ".last_inject.json")
+                       .read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        d = {}  # why: layer 1 has already REPORTED an unreadable manifest;
+        # the judge degrades to the other channel rather than repeating it
+    if isinstance(d, dict):
+        for key in ("critical_ids", "timeline_ids"):
+            for v in (d.get(key) or []) if isinstance(d.get(key), list) else []:
+                try:
+                    blind.append(int(v))
+                except (TypeError, ValueError):
+                    continue  # why: a hand-edited manifest is advisory data,
+                    # not a schema — one bad entry must not void the set
+    try:
+        r = json.loads((memory_dir / _RECALL_MANIFEST_NAME)
+                       .read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        r = {}  # why: no recall recorded yet is the ordinary early state
+    if isinstance(r, dict) and str(r.get("session_id") or "") == sid:
+        for v in (r.get("last_ids") or []) if isinstance(r.get("last_ids"), list) else []:
+            try:
+                query.append(int(v))
+            except (TypeError, ValueError):
+                continue  # why: as above — advisory data, not a schema
+    ids, seen = [], set()
+    for mid in query + blind:  # query first: it is the channel that had a
+        # question behind it, so it wins the per-call cap over blind ranking
+        if mid not in seen:
+            seen.add(mid)
+            ids.append(mid)
+    note = " + ".join([n for n, got in (("query recall", query),
+                                        ("blind injection", blind)) if got])
+    return ids, (note or "no channel recorded a delivery")
+
+
+def _judge_usage_section(db, pid, memory_dir, project):
+    """Layer 2 — printed under layer 1, only when `--judge` was passed.
+
+    Layer 1 above is deterministic, free and always runs; this one costs one
+    API call, which is why it is opt-in (`llm/usage_judge.py` states the
+    two-layer split and why both exist). Everything here degrades to
+    `unmeasured`: layer 1 has already printed by the time this runs, and a
+    judge that cannot judge must not cost the report that can.
+    """
+    from core.auth import get_api_key
+    from core.privacy import neutralize_inline, strip_private
+    from llm.ccl_backend import call_llm
+    from llm.usage_judge import (JUDGE_MAX_MEMORIES, VERDICT_UNKNOWN,
+                                 judge_usage)
+
+    print("\nlayer 2 — was it USED? (LLM-judged, --judge; layer 1 above is "
+          "deterministic and free):")
+    sid, window, detail = _session_window(memory_dir, project)
+    if window is None:
+        print(f"  unmeasured — {detail}")
+        return
+    ids, note = _delivered_ids(memory_dir, sid)
+    rows = []
+    for mid in ids[:JUDGE_MAX_MEMORIES]:
+        row = db.get_memory(mid)
+        if row is None:
+            continue
+        row = dict(row)
+        if row.get("project_id") != pid:
+            continue  # why: `memories.id` is global to the DB file and one
+            # file legitimately holds several projects (v2.9.0 rule 4)
+        # strip_private on the way OUT of the database as well as in: a row
+        # written before v2.5.0's fail-closed rewrite can still carry a span,
+        # and this text is about to become an Anthropic request.
+        rows.append({"id": mid,
+                     "content": strip_private(row.get("content") or "")})
+    turns = [strip_private(text) for rec in window.messages
+             if isinstance(rec, dict) and rec.get("type") == "assistant"
+             for text in _assistant_texts(rec)]
+    key, source = get_api_key()
+    if not key:
+        print("  unmeasured — no API credential "
+              f"({source or 'no ANTHROPIC_API_KEY, no Claude OAuth token'})")
+        return
+    verdicts, detail = judge_usage(rows, turns, call=call_llm, api_key=key)
+    if verdicts is None:
+        print(f"  unmeasured — {detail}")
+        return
+    counts = {"used": 0, "unused": 0, VERDICT_UNKNOWN: 0}
+    for mid in [r["id"] for r in rows]:
+        verdict, evidence = verdicts.get(mid, (VERDICT_UNKNOWN, ""))
+        counts[verdict] = counts.get(verdict, 0) + 1
+        # A one-line slot is an INLINE slot (v2.14.0 rule 14). This text is
+        # model-writable — `memory_add` is an MCP tool — and `/cc-mem` output
+        # is read by Claude whenever Claude is the one running the command, so
+        # a newline in a stored row would forge a second verdict here. The
+        # module `print` already neutralizes markers; newlines are this slot's
+        # own responsibility.
+        content = neutralize_inline(
+            next((r["content"] for r in rows if r["id"] == mid), ""))
+        print(f"  #{mid:<6} {verdict:<8} {content[:46]}")
+        if evidence:
+            print(f"           evidence: {evidence}")
+    print(f"  {counts['used']} used · {counts['unused']} unused · "
+          f"{counts[VERDICT_UNKNOWN]} unknown — session {sid[:8]}, "
+          f"delivered by {note}")
+    print("  ('unknown' is not 'unused': it is the judge declining to guess, "
+          "and a failure of ours is never evidence about Claude.)")
 
 
 # Tables scanned by encoding-check, with the text columns that matter. The
@@ -2476,7 +2810,22 @@ def make_parser():
 
     # ── observability + encoding (v2.3) ────────────────────────────────────
     sub.add_parser("inject-show", help="Show what the last SessionStart injected")
-    sub.add_parser("inject-usage", help="Deterministic signals: did Claude read the memory?")
+    piu = sub.add_parser("inject-usage",
+                         help="Deterministic signals: did Claude read the memory?")
+    piu.add_argument("--window", type=_bounded_limit,
+                     default=_INJECT_USAGE_WINDOW, metavar="N",
+                     help=f"observations to scan for handoff-file Reads "
+                          f"(default {_INJECT_USAGE_WINDOW}); widen it when a "
+                          f"long session may have buried the Read")
+    # Layer 2, OFF by default: every signal above is deterministic and free,
+    # this one is an LLM judgement and costs an API call. A measurement that
+    # spends money must be asked for; a measurement that is asked for must
+    # exist. Both, which is why the flag is here and not a config key.
+    piu.add_argument("--judge", action="store_true",
+                     help="ALSO ask an LLM whether the delivered memories were "
+                          "USED (one API call; layer 1 above is free and always "
+                          "runs). Reports 'unknown', never 'unused', when it "
+                          "cannot tell")
     pe = sub.add_parser("encoding-check", help="Scan for U+FFFD corruption (read-only)")
     pe.add_argument("--apply", action="store_true",
                     help="Quarantine corrupted memory rows (is_active=0, recoverable)")

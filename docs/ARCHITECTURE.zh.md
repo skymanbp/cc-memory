@@ -1,4 +1,4 @@
-<!-- i18n-source: ARCHITECTURE.md | sha256: 0f019ccb07a3cb6c | version: 2.14.0 | translated: 2026-09-03 | translation: 407737aa38f70879 -->
+<!-- i18n-source: ARCHITECTURE.md | sha256: add4be4d6460cc71 | version: 2.15.0 | translated: 2026-09-07 | translation: 0fbe8e792c9c8ec5 -->
 > [English](ARCHITECTURE.md) · **简体中文**
 
 # cc-memory — 架构
@@ -211,7 +211,7 @@ v2.4.3 把原本 5 份的 `docs/` 目录合并为 2 份。全部 79 处仓库内
 | `SessionStart` | [`cc_memory/hooks/session_start.py`](../cc_memory/hooks/session_start.py) | 15s | 注入分层上下文（长期指令 / 主题 / 关键项 / 时间线 / PROGRESS 预览 / 页脚——指令账本自 v2.12.2 起是第一层；在此之前没有任何东西注入它）；发出强制的 `<system-reminder>`，要求 Read `PROGRESS.md` + `MEMORY.md`；追溯保存未保存的 JSONL。 |
 | `Stop` | [`cc_memory/hooks/stop.py`](../cc_memory/hooks/stop.py) | 22s | 观察者：经 Haiku 从上一回合的 observations 抽取；每回合 `patch_progress(files_touched, ...)`；每 5 个回合运行 `idle.maybe_run_idle`（清理 + 重新生成 MEMORY.md）；探测整理积压，到期时拉起独立的异步工作者（v2.12.0）；当计划**在活**时，累加其回合计数器并**强制执行**——对未精炼的计划、未做漂移检查的计划或闲置的指令**拒绝收官**（`{"decision": "block"}`），逃生预算见 CONTRACTS.md（v2.11.0；本行从前描述的建议行已不存在）。 |
 | `PostToolUse` | [`cc_memory/hooks/post_tool_use.py`](../cc_memory/hooks/post_tool_use.py) | 8s | **先**做实时计划集成，且所有模式一视同仁：`ExitPlanMode` → `plan_active.raw`，`TodoWrite` → 机械式步骤同步，`Edit`/`Write`/`MultiEdit`/`NotebookEdit` → 漂移计数器 +1，敏感 Bash 调用 → +20。**然后**才为被观测的工具调用向 `observations` 插入一行（模式白名单 / 跳过列表——`core.modes.should_observe`）。不调用 LLM。端到端实测约 180-290 ms，其中约 75-120 ms 是解释器启动。 |
-| `UserPromptSubmit` | [`cc_memory/hooks/user_prompt.py`](../cc_memory/hooks/user_prompt.py) | 8s | 首次接触时自动初始化 `.ccm/`；跟踪回合数；为 Stop 观察者保存提示；在首条非脚手架提示时（每会话一次——与 `pre_compact._first_user_request` 共用的 `strip_scaffolding` 谓词，加上 `cc_mem_seeded_` 标记；v2.14.0）给会话打标签并为 `progress.current_request` 播种（依据双语恢复信号白名单，把触发类型判定为 `resume_request` 还是 `user_prompt`）。 |
+| `UserPromptSubmit` | [`cc_memory/hooks/user_prompt.py`](../cc_memory/hooks/user_prompt.py) | 8s | 首次接触时自动初始化 `.ccm/`；跟踪回合数；为 Stop 观察者保存提示；在首条非脚手架提示时（每会话一次——与 `pre_compact._first_user_request` 共用的 `strip_scaffolding` 谓词，加上 `cc_mem_seeded_` 标记；v2.14.0）给会话打标签并为 `progress.current_request` 播种（依据双语恢复信号白名单，把触发类型判定为 `resume_request` 还是 `user_prompt`）。**然后是查询时召回**（v2.15.0）：把清洗后的提示转成 FTS5 表达式，越过相关度地板的最佳匹配会被打进 stdout 的 `<cc-memory-recall>` 帧里，否则一个字节都不输出（`core/recall.py`）。 |
 
 ### 钩子 stdout 契约
 
@@ -222,7 +222,13 @@ v2.4.3 把原本 5 份的 `docs/` 目录合并为 2 份。全部 79 处仓库内
   （`stop.py:582-587`），外加至多一行 `[cc-memory.plan] …` 建议行。
 - `PreCompact`（同步）的 stdout → **一行**状态行（会出现在下一次会话的压缩后
   上下文中）。
-- `PreCompact`（异步）/ `PostToolUse` / `UserPromptSubmit` 的 stdout → 空。异步
+- `UserPromptSubmit` 的 stdout → **查询时召回块，或者什么都不输出**（v2.15.0）。
+  这条流是会被注入进 Claude 上下文的，而在 v2.15.0 之前，本插件是自己选择把它
+  留空的——于是自动路径上**唯一持有用户查询的那一刻**，什么也没送到模型面前。
+  `core/recall.py` 在候选越过相关度地板时，用一个 `<cc-memory-recall>` 帧
+  最多输出 `RECALL_MAX_ROWS` 条记忆，否则输出**零字节**：一条每回合都要说话的
+  通道，就是每回合都要交的税。
+- `PreCompact`（异步）/ `PostToolUse` 的 stdout → 空。异步
   支路的 stdout 根本不会内联显示（`consolidate_async.py:37`）。
 
 ### PreCompact：为什么是两条支路
@@ -320,35 +326,35 @@ SQLite 表（定义在 [`cc_memory/core/db.py`](../cc_memory/core/db.py)），�
 |-------|---------|
 | `projects` | 每个项目一行（`db.py:37`）——身份由它所在的数据库决定，而不是由行里记录的 `path` 字串决定：目录被移动或重命名后，重新挂接自己那一行，而不是再造一行（§7）；自迁移 `v2_project_mode` 起带有 `mode`（`db.py:130`），自 `v7_projects_obs_watermark` 起带有持久观察者游标 `obs_watermark` |
 | `sessions` | 每次压缩事件一行（`db.py:46`）；自 `v7_sessions_complete` 起带有 `complete`（已回填，v7 之前的行读作 complete） |
-| `memories` | 抽取出的事实（category、importance、topic、content_hash、**supersedes_id**、last_referenced_at）（`db.py:57`） |
+| `memories` | 抽取出的事实（category、importance、topic、content_hash、**supersedes_id**、last_referenced_at）（`db.py:57`）。自 `v10_memories_recall_count` 起带有 `recall_count`——当 `core/recall.py` 因为一次真实的用户提问检索到该行时递增。它与 `last_referenced_at` 记录的是**两件事**：后者说的是「SessionStart 的重要度/新近度排序在还没有任何查询时选中了它」，前者说的是「确实有人问起过它」。这一对正是 `/cc-mem inject-usage` 分两条通道报告的东西——但它们都只是**送达**事实。Claude 是否真的**用**了送达的那一行，是对文本的判断，因此属于第 2 层（`--judge`，需显式开启，`llm/usage_judge.py`）：对该会话自己的回复做一次 LLM 调用，逐行给出 `used` / `unused` / `unknown`；判不了的一律记 `unknown`，绝不写成 `unused` |
 | `topics` | 按主题名的整理摘要（带版本）（`db.py:71`） |
 | `keywords` | 自动检测的项目词汇（`db.py:81`） |
 | `plans` | 计划队列（draft → ready → done）（`db.py:90`） |
 | `observations` | 原始 PostToolUse 事件，抽取后清理（`db.py:131`） |
 | `session_summaries` | 每会话 6 字段结构化摘要（request / investigated / learned / completed / next_steps / notes）+ files_read/files_modified（`db.py:144`） |
 | **`progress`** | v2.1 新增——每项目一行。`.ccm/PROGRESS.md` 的唯一真相来源（`db.py:188`）。 |
-| **`plan_active`** | v2.2 新增——每项目一行。`.ccm/PLAN.md` 的唯一真相来源（`db.py:212`）。自 `v9_plan_turns_total` 起带有 `turns_total`：一个**单调**轮次计数，任何东西都不会重置它；与之相对的 `turns_since_last_guardian` 会被每次 guardian 检查和计划替换清零 |
+| **`plan_active`** | v2.2 新增——每项目一行。`.ccm/PLAN.md` 的唯一真相来源（`db.py:212`）。自 `v9_plan_turns_total` 起带有 `turns_total`：一个**单调**轮次计数，任何东西都不会重置它；与之相对的 `turns_since_last_guardian` 会被每次 guardian 检查和计划替换清零。自 `v10_plan_guardian_checked_at_turn` 起带有 `guardian_checked_at_turn`——最近一次 `/cc-mem plan-check` 时的 `turns_total` 值，在同一条 UPDATE 里就地写入——于是「就在本回合检查过」等价于 `turns_total == guardian_checked_at_turn + 1`，漂移闸门的**单回合豁免**因此是两个单调数字之间的比较。默认值是 `-1` 而不是 0：若为 0，一份全新计划的第一次 Stop 会读到 `1 == 0 + 1`，把豁免发给一次根本没人跑过的检查 |
 | **`directives`** | v2.11.0 新增——用户**意图**账本。`times_stated` 累加在同一 `slug` 的**一行**上；指令的寿命长于任何一份计划，这正是它不能被折叠成计划步骤的原因。自 `v9_directives_turns_at_touch` 起带有 `turns_at_touch`——最后一次写入时的 `turns_total` 值，因此闲置度是两个单调数字相减。自 v2.12.0 起 `status` 还可以是 `blocked`（停在用户那边，闲置豁免），`kind` 还可以是 `constraint`（长期禁令，闲置豁免）——只是词汇扩充，无 schema 变更；只有 `directive-add` 可以累加计数（`directive-edit` 修正字段但不碰它） |
-| `_migrations` | 记录已应用的迁移（`db.py:732`） |
+| `_migrations` | 记录已应用的迁移（`db.py:736`） |
 
 共十二张表，与 `CLAUDE.md` 的 §“Database schema (12 tables)” 一致。
 
 此外还有 `memories_fts`——一个建立在 `memories` 之上的 FTS5 虚拟表
-（`core/db.py:835-836`），由 `db._setup_fts5` 与它一并建出的三个触发器
-保持同步（`core/db.py:839-856`）；
+（`core/db.py:906-957`），由 `db._setup_fts5` 与它一并建出的三个触发器
+保持同步（`core/db.py:906-957`）；
 它的 `_MIGRATIONS` 条目是 `v2_fts5`（`db.py:163`）。
 它只在本地 SQLite 构建带 FTS5 时才会创建；否则
-`db.search_fts`（`core/db.py:3178-3212`）回退到 `LIKE ? ESCAPE '\'`
-（`core/db.py:3178-3212`）。FTS5 在 `.claude-plugin/plugin.json:4` 与 `:12` 中被
+`db.search_fts`（`core/db.py:3461-3509`）回退到 `LIKE ? ESCAPE '\'`
+（`core/db.py:3461-3509`）。FTS5 在 `.claude-plugin/plugin.json:4` 与 `:12` 中被
 宣传，`/cc-mem status` 会报告当前实际走哪条路径（`cli/mem.py` 的 `cmd_status`）。
 
-`memories` 上的 `supersedes_id` 列（迁移 `v3_supersedes`，`db.py:168`）把反补丁的
+`memories` 上的 `supersedes_id` 列（迁移 `v3_supersedes`，`db.py:172`）把反补丁的
 取代链显式化：当 `upsert_smart` 判定一条新记忆取代了一条旧记忆时，新行会回链到旧行
-的 ID（旧行被归档）。通过 `db.get_supersede_chain(memory_id)`（`db.py:1667-1682`）走一遍
+的 ID（旧行被归档）。通过 `db.get_supersede_chain(memory_id)`（`db.py:1895-1910`）走一遍
 链条，就能看到完整的更新历史。`content_hash`（迁移 `v2_content_hash`，位于
 `_MIGRATIONS`，`db.py:126`）是归一化内容的 `sha256[:16]`，用于廉价的精确重复检查
-（`db.compute_content_hash` 在 `db.py:2222-2224`，
-`db.find_by_hash` 在 `db.py:2235-2243`）。
+（`db.compute_content_hash` 在 `db.py:2480-2482`，
+`db.find_by_hash` 在 `db.py:2493-2501`）。
 
 迁移按 `_MIGRATIONS` 列表（`db.py:121-284`）的顺序应用，并记录在 `_migrations` 中。目前
 已交付的层级：**v1**（`topic` 列 + 索引）、**v2**（content_hash、observations、
@@ -428,9 +434,9 @@ regenerate_memory_index(db, project_id, memory_dir)   ← MEMORY.md 刷新
   所有钩子调用方都会传（`pre_compact.py:445`、`stop.py:279`、
   `session_start.py:1144`）；同步 PreCompact 支路还会在其余状态变更之后再刷一次
   （`pre_compact.py:806`）。
-- 单发调用方显式调用 `regenerate_memory_index`：`cli/mem.py:1207` 与 `:584`、
-  `mcp/server.py:647`、`ui/dashboard.py:1715`、`ui/web_viewer.py:1035`，外加
-  `skills/ccm-load` 的内联脚本（`skills/ccm-load/SKILL.md:308, 318`）。
+- 单发调用方显式调用 `regenerate_memory_index`：`cli/mem.py:1213` 与 `:584`、
+  `mcp/server.py:647`、`ui/dashboard.py:1716`、`ui/web_viewer.py:1035`，外加
+  `skills/ccm-load` 的内联脚本（`skills/ccm-load/SKILL.md:290, 307`）。
   `core/idle.py:96` 与 `hooks/consolidate_async.py:276` 也会在维护之后刷新它。
 
 （合并前的示意图把重新生成画成 `upsert_smart` 的无条件步骤，并省略了 `db` 参数；
@@ -523,7 +529,7 @@ SessionStart：
 上面的调用签名都是真实的：`write_progress_md(db, project_id, memory_dir)`
 （`core/progress.py:331-490`；调用点 `pre_compact.py:775`、`stop.py:523`、
 `user_prompt.py:133`、`session_start.py:1107`、`mcp/server.py:243`、
-`cli/mem.py:1298`）。PROGRESS.md 的结构规格见
+`cli/mem.py:1304`）。PROGRESS.md 的结构规格见
 [docs/CONTRACTS.md](CONTRACTS.md#handoff-contract)。
 
 ### 被杀运行检测（v2.4.2）
@@ -582,9 +588,11 @@ transcript 得到 0 条腿、0 条记忆。第 3 级从
 机械地同步步骤状态（不调用 LLM）；`Edit`/`Write`/`MultiEdit`/`NotebookEdit` 会累加
 `edits_since_last_guardian`，而敏感的 Bash 调用（`git push`、`rm -rf`、
 `DROP TABLE`、`npm publish`、`kubectl apply`、`terraform apply`……见
-`core.plan.is_sensitive_tool_call`，`plan.py:1375-1398`）一次加 20。一旦
+`core.plan.is_sensitive_tool_call`，`plan.py:1440-1463`）一次加 20。一旦
 `turns_since_last_guardian >= 8` 或 `edits_since_last_guardian >= 12`
-（`core.plan.should_nudge_guardian`，`plan.py:1339-1355`），Stop 钩子就**拒绝
+（`core.plan.guardian_verdict`——自 v2.15.0 起**唯一的策略点**，
+`should_nudge_guardian`、`blocking_reasons` 与 `/cc-mem plan-status` 全部读它，
+因此用户看到的数字和闸门据以拒绝的数字不可能分歧），Stop 钩子就**拒绝
 收官**而不是给建议（v2.11.0——这句话从前描述的那个限速提示已被删除；逃生预算见
 [CONTRACTS.md](CONTRACTS.md#the-stop-hook-can-refuse-the-turn-v2110)）。钩子自己
 绝不派生计划子代理——由拒绝理由指示主 Claude 去调用。
@@ -593,7 +601,7 @@ transcript 得到 0 条腿、0 条记忆。第 3 级从
 [observation 闸门](#observation-闸门不再遮蔽计划分支v25-已修)。
 
 尚未精炼的原始计划也不再是隐形的：`core.plan.raw_pending_refinement`
-（`plan.py:733-782`）是共享判据，`write_plan_md` 与 `/cc-mem plan-status` 都会以一条
+（`plan.py:783-832`）是共享判据，`write_plan_md` 与 `/cc-mem plan-status` 都会以一条
 PENDING REFINEMENT 横幅加逐字原文开头，并把更旧的结构化计划明确标注为已被取代。
 那段逐字块的围栏宽度会超过原始文本里最长的一串反引号，因为计划模式的输出里经常
 带有代码围栏。
@@ -650,8 +658,8 @@ BudgetGate 来说仍是已知量。候选顺序与传输格式（`core/auth.py:2
 `get_api_key()` 是同一份候选列表的单凭据向后兼容视图（它不重试，
 `core/auth.py:60-93`）；它同时承载 `oauth_expired` 信号，支撑 SessionStart 的
 “[WARNING: OAuth expired — LLM extraction disabled]” 页脚
-（`session_start.py:665`）。钩子调用方用它来*提供*传给 `call_llm` 的凭据：
-`pre_compact.py:94 → :166`、`stop.py:86`、`session_start.py:665`、
+（`session_start.py:670`）。钩子调用方用它来*提供*传给 `call_llm` 的凭据：
+`pre_compact.py:94 → :166`、`stop.py:86`、`session_start.py:670`、
 `core/consolidate.py:425, 549, 724`。
 
 逐级回退是 v2.3.4 为一个具体故障加入的：一个失效的环境变量密钥（例如额度为零 →
@@ -746,7 +754,7 @@ v2.4.2 才成立：`_extract_via_llm` 的 `except` 元组此前不包含 `Runtim
 写入方，便于溯源：`MEMORY.md` ← `memory_writer.regenerate_memory_index`
 （`memory_writer.py:261-370`）；`PROGRESS.md` ← `core.progress.write_progress_md`
 （`progress.py:331-490, 366`）；`PLAN.md` ← `core.plan.write_plan_md`
-（`plan.py:733-782`）；`.plan_history/` ← `plan.py:733-782`；`.last_save.json` ←
+（`plan.py:783-832`）；`.plan_history/` ← `plan.py:783-832`；`.last_save.json` ←
 `pre_compact.py:737, 771`；`.last_inject.json` ← `session_start.py:291-309`
 （临时文件 + `os.replace`，是真正原子的，不同于 `.last_save.json` 用的普通写）；
 `.last_consolidation.json` ← `core.consolidate.write_consolidation_marker`
@@ -791,7 +799,7 @@ agent 自己的 `cd` 走：一个在仓库根启动、却在 `cli/` 里跑过一
 共 **20** 个，其中 **4** 个是**合法地嵌套**在另一个项目里的——单是
 `Claude-Code-Local/companion` 就有 3725 条记忆，并且自带 `.git`。野生子库与刻意嵌套的
 子项目在磁盘上**逐字节不可区分**：两者都有 `.ccm/memory.db`，其 `projects` 行都写着
-自己那个目录，因为 `upsert_project`（`core/db.py:1172-1209`）记录的就是别人递给它的 cwd。
+自己那个目录，因为 `upsert_project`（`core/db.py:1371-1408`）记录的就是别人递给它的 cwd。
 "最外端胜"会把这种歧义无条件地朝毁数据的方向解决——升级后第一次在 `companion` 里开会话，
 3725 条记忆就会悄无声息地失联。
 
@@ -953,7 +961,7 @@ home 边界是双份的：环境所声称的（`HOME`/`USERPROFILE`/`Path.home()
 
 旧的 v2.0 `SESSION_HANDOFF.md` 文件会在 v2.1 下的首次 PreCompact 时被重命名为
 `SESSION_HANDOFF.md.v2.bak`（一次性迁移 `core.progress.migrate_legacy_handoff`，
-`progress.py:628-646`）。
+`progress.py:676-694`）。
 
 ---
 
@@ -1023,10 +1031,11 @@ MCP 服务器遵循同样的分岔。在市场类布局下，`.claude-plugin/plu
 ├── installed_surfaces.json  ← 写进了 ~/.claude 的东西（v2.5）
 ├── core/    atomic.py auth.py consolidate.py db.py encoding_setup.py
 │            extractor.py idle.py layout.py logger.py markers.py modes.py
-│            plan.py privacy.py progress.py roots.py textsim.py version.py
+│            plan.py privacy.py progress.py recall.py roots.py textsim.py
+│            version.py
 ├── hooks/   _entry.py consolidate_async.py post_tool_use.py pre_compact.py
 │            session_start.py stop.py user_prompt.py
-├── llm/     ccl_backend.py memory_writer.py parse.py
+├── llm/     ccl_backend.py memory_writer.py parse.py usage_judge.py
 ├── cli/     mem.py plan.py
 ├── mcp/     server.py
 ├── ui/      dashboard.py installer.py web_viewer.py

@@ -20,13 +20,17 @@ Memory hierarchy:
   L3 Archived          (is_active=0 — queryable but not injected)
 
 Anti-patch contract (v2.1):
-  Memory updates flow through llm.memory_writer.upsert_smart, which uses
-  `update_memory` (modify in place) or `supersede_memory` (archive+link)
-  instead of appending. The supersedes_id column forms the update chain.
+  Memory updates flow through llm.memory_writer.upsert_smart, which decides
+  inside `reconcile_upsert` instead of appending. Since v2.15.0 BOTH of its
+  rewriting branches — MERGE and SUPERSEDE — archive the old row and link the
+  new one to it, so the supersedes_id column forms an update chain that no
+  decision can break. (`update_memory` still modifies in place and is for the
+  explicit edit surfaces, not for reconciliation.)
 """
 import contextlib
 import hashlib
 import os
+import re
 import sqlite3
 import json
 from pathlib import Path
@@ -396,6 +400,50 @@ _MIGRATIONS = [
     ("v9_directives_turns_at_touch",
      "ALTER TABLE directives ADD COLUMN turns_at_touch INTEGER NOT NULL "
      "DEFAULT 0"),
+
+    # ── v10: the guardian remedy has to be able to CONVERGE ──────────────────
+    #
+    # `hooks/stop.py` bumps the turn counter and re-reads the row before it
+    # evaluates, and `hooks/post_tool_use.py` has ALREADY recorded this turn's
+    # edits by then (n=1 per Edit/Write, n=20 for a sensitive Bash call)
+    # against an `edit_threshold` of 12. So `/cc-mem plan-check` — the remedy
+    # the refusal names — resets the counters and then ANY subsequent tool
+    # call in the same turn re-arms the block, and a single sensitive call
+    # clears the threshold on its own. The user is told to run a remedy, runs
+    # it, and is refused again at the same Stop: a remedy that cannot converge
+    # is not a remedy, and an unbreakable block is the one thing v2.11.0 says
+    # this mechanism must never become (the escape budget then spends itself
+    # on a condition the user has actually fixed).
+    #
+    # `guardian_checked_at_turn` records `turns_total` at the moment of the
+    # check. Stop increments before evaluating, so "checked during this very
+    # turn" is exactly `turns_total == guardian_checked_at_turn + 1`, and the
+    # immunity therefore lasts EXACTLY one turn — drift on the next turn is
+    # refused normally. DEFAULT -1, not 0: with 0 a brand-new plan's first
+    # Stop reads `turns_total == 1 == 0 + 1` and would grant immunity to a
+    # check nobody ran. A sentinel outside the counter's range cannot collide.
+    ("v10_plan_guardian_checked_at_turn",
+     "ALTER TABLE plan_active ADD COLUMN guardian_checked_at_turn INTEGER "
+     "NOT NULL DEFAULT -1"),
+
+    # ── v10: which memories a real user question ever pulled up ─────────────
+    #
+    # `last_referenced_at` records that a row was INJECTED — chosen by
+    # SessionStart's importance/recency ranking, with no query in existence
+    # yet. It cannot distinguish "surfaced because it ranked high" from
+    # "surfaced because the user asked about it", and on this repository's own
+    # database 82.6% of memories had never been injected at all, which says
+    # something about the RANKING and nothing about the memories.
+    #
+    # `recall_count` is the other question, and the pair is sharp:
+    #   recall_count > 0            retrieved because it matched a real user
+    #                               query (core/recall.py) — earned its place
+    #   last_referenced_at IS NULL  never reached a context window by any path
+    # Together they answer "which write path produces memories nobody ever
+    # needs", which is the measurement this column exists for; `/cc-mem
+    # inject-usage` reports the two channels separately.
+    ("v10_memories_recall_count",
+     "ALTER TABLE memories ADD COLUMN recall_count INTEGER NOT NULL DEFAULT 0"),
 ]
 
 
@@ -759,6 +807,94 @@ class MemoryDB:
 
     _FTS_TRIGGERS = ("memories_fts_ai", "memories_fts_ad", "memories_fts_au")
 
+    # The tokenizer `memories_fts` is built with, and the ONE place it is
+    # named. fts5's default is unicode61, which treats Han / kana / Hangul as
+    # token characters and never segments them — so a whole Chinese clause, up
+    # to the next punctuation mark, is ONE token. Measured on this repo's own
+    # DDL (sqlite 3.49.1), against a row reading "用户要求把超时设为三十秒":
+    #     MATCH '超时'             0      MATCH '三十秒'      0
+    #     MATCH '超时设为三十秒'    0      MATCH the whole   1
+    #     MATCH 'vault' (English)  1      LIKE '%超时%'      1
+    # i.e. `search` answered "no such memory" for every substring a human
+    # would type, while `mcp/server.py:_is_failed_result` counts an empty
+    # result set as a SUCCESS — so the model was told the project has no such
+    # memory rather than that search cannot see Chinese.
+    #
+    # `trigram` indexes every 3-character window, so it segments CJK and keeps
+    # English working (measured: '三十秒' 1, '超时设为' 1, 'vault' 1,
+    # 'archiv*' 1, and external-content + `ORDER BY rank` + 'rebuild' all
+    # behave). Its floor is REAL and is not worked around here: a 1- or
+    # 2-character query still matches nothing, which is why `_match_fts`
+    # routes an empty result to the LIKE fallback.
+    _FTS_TOKENIZE = "trigram"
+
+    @classmethod
+    def _fts_ddl(cls, tokenize):
+        """The `memories_fts` DDL for a tokenizer name ('' = fts5's default).
+
+        `tokenize` is interpolated because a tokenizer is not a bindable
+        value in SQLite DDL — and it is safe because the only two values that
+        ever reach it are `cls._FTS_TOKENIZE` and `""`, both decided by
+        `_probe_tokenizer` from this class's own constant. No caller passes a
+        string from outside this module.
+        """
+        tok = f", tokenize='{tokenize}'" if tokenize else ""
+        return (f"CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts "
+                f"USING fts5(content, tags, topic, content=memories, "
+                f"content_rowid=id{tok})")
+
+    def _probe_tokenizer(self, conn):
+        """`_FTS_TOKENIZE` if this sqlite can build one, else '' (the default).
+
+        A SEPARATE probe from the fts5-module one, and the distinction is the
+        whole point. `trigram` needs sqlite >= 3.34; the module can be present
+        without it. Folding this into the module probe — or simply putting
+        `tokenize='trigram'` in the DDL and letting `_setup_fts5`'s handler
+        catch the failure — would send such a build down `_disable_fts5`,
+        i.e. degrade it to NO index at all. By this file's own measurement
+        that is strictly worse than what it has today: the LIKE fallback needs
+        a CONTIGUOUS substring, so ordinary multi-word ENGLISH queries return
+        nothing (`deploy rotated` FTS 1 / LIKE 0). A missing tokenizer costs
+        CJK segmentation; it must never cost the index.
+        """
+        try:
+            conn.execute(f"CREATE VIRTUAL TABLE IF NOT EXISTS _fts5_tok_probe "
+                         f"USING fts5(test_col, tokenize='{self._FTS_TOKENIZE}')")
+            conn.execute("DROP TABLE IF EXISTS _fts5_tok_probe")
+            return self._FTS_TOKENIZE
+        except sqlite3.DatabaseError:
+            # why: this build has fts5 but not the trigram tokenizer (< 3.34).
+            # Fall back to the fts5 DEFAULT, which is what every database
+            # before v2.15.0 was built with — English search is unchanged and
+            # CJK keeps the LIKE fallback it has always had.
+            self._db_warn(
+                f"sqlite {sqlite3.sqlite_version} has fts5 but no "
+                f"'{self._FTS_TOKENIZE}' tokenizer; building memories_fts "
+                f"with the default tokenizer (CJK search will answer through "
+                f"the LIKE fallback only)")
+            return ""
+
+    @staticmethod
+    def _index_tokenizer(conn):
+        """The tokenizer the STORED `memories_fts` was built with, or None.
+
+        Read from `sqlite_master.sql`, because the tokenizer is not exposed by
+        any pragma. None means the table does not exist; '' means it was built
+        with fts5's default — which is every database created before v2.15.0,
+        and the state `_detect_fts5` heals.
+        """
+        try:
+            row = conn.execute(
+                "SELECT sql FROM sqlite_master WHERE type = 'table' "
+                "AND name = 'memories_fts'").fetchone()
+        except sqlite3.DatabaseError:
+            return None
+        if row is None:
+            return None
+        sql = (row["sql"] if not isinstance(row, tuple) else row[0]) or ""
+        m = re.search(r"tokenize\s*=\s*['\"]([A-Za-z0-9_]+)", sql)
+        return m.group(1) if m else ""
+
     def _disable_fts5(self, conn, drop_triggers=False):
         """Declare FTS unavailable — and, for ONE condition, remove its triggers.
 
@@ -831,10 +967,7 @@ class MemoryDB:
             return
 
         try:
-            conn.execute("""
-                CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts
-                USING fts5(content, tags, topic, content=memories, content_rowid=id)
-            """)
+            conn.execute(self._fts_ddl(self._probe_tokenizer(conn)))
             conn.execute("""
                 CREATE TRIGGER IF NOT EXISTS memories_fts_ai AFTER INSERT ON memories BEGIN
                     INSERT INTO memories_fts(rowid, content, tags, topic)
@@ -906,6 +1039,8 @@ class MemoryDB:
                     "SELECT rowid FROM memories_fts "
                     "WHERE memories_fts MATCH ? LIMIT 1",
                     ("ccmemoryftshealthprobe",)).fetchall()
+                if self._retokenize_if_stale(conn):
+                    return
                 if self._fts_triggers_present(conn):
                     self._fts5_available = True
                     return
@@ -934,6 +1069,51 @@ class MemoryDB:
             # why: this sqlite genuinely has no FTS5, or the DDL raced. LIKE
             # search still answers; the next open probes again.
             self._fts5_available = False
+
+    def _retokenize_if_stale(self, conn) -> bool:
+        """Rebuild `memories_fts` when its tokenizer is not the one this
+        version builds. True iff a rebuild happened (and set the flag).
+
+        A tokenizer change CANNOT be a `_MIGRATIONS` entry: that ledger
+        records INTENT, not state — `_run_migrations` marks a row applied
+        after the `try` whether or not the work landed — so a rebuild that
+        failed once would never be retried, and the database would keep
+        answering Chinese queries out of a unicode61 index forever. This is
+        the presence-check-and-heal shape `_detect_fts5` and
+        `_ensure_active_hash_unique` already use, for the same reason.
+
+        THE SETTLED CASE COSTS ONE `sqlite_master` READ. The tokenizer probe
+        creates and drops a virtual table, and this runs on every `MemoryDB`
+        construction — i.e. on every hook, every CLI call and every MCP tool —
+        so it may only run when the stored spelling already disagrees.
+
+        DROP + CREATE + seed happen inside the CALLER'S transaction, never as
+        separate commits: the three triggers name `memories_fts`, so a window
+        between the drop and the create would fail every concurrent write to
+        `memories` with "no such table".
+        """
+        have = self._index_tokenizer(conn)
+        if have == self._FTS_TOKENIZE:
+            return False
+        want = self._probe_tokenizer(conn)
+        if have is None or have == want:
+            return False
+        self._db_warn(
+            f"memories_fts was built with tokenizer "
+            f"{have or 'unicode61 (default)'!r} and this version builds "
+            f"{want or 'unicode61 (default)'!r}; dropping and rebuilding the "
+            f"index so stored rows are re-tokenised")
+        conn.execute("DROP TABLE IF EXISTS memories_fts")
+        self._setup_fts5(conn)
+        if self._fts5_available:
+            # 'rebuild' rather than trusting _setup_fts5's INSERT OR IGNORE
+            # seed: the table is brand new here, and for an external-content
+            # table 'rebuild' is the operation that re-derives every row from
+            # `memories`. Idempotent, and the one that cannot leave a partial
+            # index behind.
+            conn.execute(
+                "INSERT INTO memories_fts(memories_fts) VALUES ('rebuild')")
+        return True
 
     def _backfill_content_hash(self, conn):
         rows = conn.execute(
@@ -1510,9 +1690,15 @@ class MemoryDB:
         write lock BEFORE the first read, so the decision and the write are
         one atom; cross-process waiters are bounded by busy_timeout.
 
-        The SUPERSEDE branch archives the old row BEFORE inserting the new
-        one — same reasoning as supersede_memory: the case-folding hash plus
-        the active-row unique index make insert-first illegal in one corner.
+        BOTH the MERGE and the SUPERSEDE branch archive the old row BEFORE
+        inserting the new one — same reasoning as supersede_memory: the
+        case-folding hash plus the active-row unique index make insert-first
+        illegal in one corner. MERGE did an in-place `SET content` through
+        v2.14.1 and so left nothing pointing at the text it replaced; the two
+        branches now differ only in their field policy (`merge_fields` vs
+        `supersede_fields`) and in MERGE carrying the archived row's
+        `created_at` forward. Every decision this method can reach is
+        recoverable through `supersedes_id`.
 
         sqlite3.IntegrityError (the unique-index backstop catching a path
         that raced around us — reachable only for non-transactional callers,
@@ -1559,14 +1745,56 @@ class MemoryDB:
                 similar, sim = pick(candidates) if candidates else (None, 0.0)
                 if similar is not None and sim >= high_sim:
                     f = merge_fields(similar)
+                    # ARCHIVE-then-INSERT, exactly as the SUPERSEDE branch
+                    # below — NOT the in-place `SET content = ?` this replaces.
+                    #
+                    # That overwrite destroyed the only copy of the old text:
+                    # no archived row, no `supersedes_id`, and the returned
+                    # `old_id` was the SAME id as `id`, so nothing in the
+                    # database pointed at what had been replaced.
+                    # `get_supersede_chain` could not walk it and `/cc-mem
+                    # supersedes` could not show it.
+                    #
+                    # It is worst exactly where it is most likely to fire.
+                    # `shingle_set` cannot tell "三十秒" from "六十秒", or
+                    # "120s" from "45s": the closer a WRONG correction is to
+                    # the original wording, the higher the score, so the more
+                    # certainly it took this branch and the less recoverable
+                    # the original became. Only the 0.50-0.80 band archived —
+                    # measured on a live 908-row database, 40 rows (4.4%)
+                    # carry a supersedes link, and every restatement above
+                    # HIGH_SIM had overwritten in place.
+                    #
+                    # Written INLINE rather than by calling `supersede_memory`:
+                    # that method opens its own `self._connect()`, and this
+                    # code already holds the BEGIN IMMEDIATE write lock, so
+                    # calling it here would have the transaction wait on
+                    # itself.
+                    #
+                    # `created_at` carries over from the archived row, and that
+                    # is the ONE place this branch deliberately differs from
+                    # SUPERSEDE. The in-place UPDATE never touched
+                    # `created_at`, and `core/consolidate._effective_age` reads
+                    # COALESCE(last_referenced_at, created_at); stamping `now`
+                    # here would reset the decay clock on every restatement,
+                    # which is a change to the staleness net, not to the
+                    # archiving this fix is about. MERGE still means "the same
+                    # fact, restated" — only its history is recoverable now.
                     conn.execute(
-                        """UPDATE memories SET content = ?, content_hash = ?,
-                           importance = ?, topic = ?, tags = ?, updated_at = ?
-                           WHERE id = ?""",
-                        (content, h, f["importance"], f["topic"],
-                         json.dumps(f["tags"], ensure_ascii=False), now,
-                         similar["id"]))
-                    return {"action": "merged", "id": similar["id"],
+                        "UPDATE memories SET is_active = 0, updated_at = ? "
+                        "WHERE id = ?", (now, similar["id"]))
+                    cur = conn.execute(
+                        """INSERT INTO memories
+                           (project_id, session_id, category, content,
+                            importance, tags, topic, content_hash,
+                            supersedes_id, created_at, updated_at)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        (project_id, session_id, category, content,
+                         f["importance"],
+                         json.dumps(f["tags"], ensure_ascii=False),
+                         f["topic"], h, similar["id"],
+                         similar.get("created_at") or now, now))
+                    return {"action": "merged", "id": cur.lastrowid,
                             "similarity": sim, "old_id": similar["id"]}
                 if similar is not None and sim >= mid_sim:
                     f = supersede_fields(similar)
@@ -2056,6 +2284,36 @@ class MemoryDB:
                 conn.execute(
                     f"UPDATE memories SET last_referenced_at = ? "
                     f"WHERE id IN ({ph})",
+                    [now] + chunk
+                )
+
+    def bump_recall_count(self, memory_ids):
+        """Record that these memories were RETRIEVED for a real user query.
+
+        The query-time twin of `bump_last_referenced`, and deliberately a
+        SEPARATE column rather than a second meaning for the same one: that
+        one records "SessionStart's importance/recency ranking chose this with
+        no query in existence", this one records "a user actually asked about
+        it". Collapsing them would destroy the only signal that distinguishes
+        a memory the ranking likes from a memory anyone needed.
+
+        `last_referenced_at` is bumped too, because a recall IS a reference —
+        the row reached a context window, so the staleness net must see it as
+        young by exactly the rule it already applies to the injected ones.
+        No-op on an empty list; chunked through `_id_chunks` like every other
+        `id IN (...)` writer (an unchunked statement raises `too many SQL
+        variables` past the cap).
+        """
+        ids = [i for i in (memory_ids or []) if i is not None]
+        if not ids:
+            return
+        now = self._now()
+        with self._connect() as conn:
+            for chunk in self._id_chunks(ids):
+                ph = ",".join("?" * len(chunk))
+                conn.execute(
+                    f"UPDATE memories SET recall_count = recall_count + 1, "
+                    f"last_referenced_at = ? WHERE id IN ({ph})",
                     [now] + chunk
                 )
 
@@ -2920,13 +3178,23 @@ class MemoryDB:
             )
 
     def reset_plan_guardian_counters(self, project_id):
-        """Mark a guardian check just happened: reset both counters + timestamp."""
+        """Mark a guardian check just happened: reset both counters + timestamp.
+
+        `guardian_checked_at_turn` is stamped from `turns_total` IN THE SAME
+        STATEMENT (v10), never read on one connection and written on another:
+        the Stop hook bumps `turns_total` on its own connection, so a
+        read-then-write here would stamp a turn number that had already moved
+        and grant the one-turn immunity to the wrong turn — the same
+        read-here-write-there shape `fill_empty_progress` was rewritten to
+        remove (CLAUDE.md v2.14.0 rule 12).
+        """
         now = self._now()
         with self._connect() as conn:
             conn.execute(
                 """UPDATE plan_active
                    SET edits_since_last_guardian = 0,
                        turns_since_last_guardian = 0,
+                       guardian_checked_at_turn = turns_total,
                        last_guardian_at = ?,
                        updated_at = ?
                    WHERE project_id = ?""",
@@ -3149,16 +3417,31 @@ class MemoryDB:
         for expr in (query, '"' + query.replace('"', '""') + '"'):
             try:
                 rows = conn.execute(sql, (expr, project_id, limit)).fetchall()
-                if not rows and not self._fts_triggers_present(conn):
-                    # An EMPTY match over an index nothing maintains is not an
-                    # answer. Another process — an fts5-less interpreter opening
-                    # this file is the deterministic case — can drop the
-                    # triggers while this handle still believes FTS is healthy;
-                    # every write since then bypassed the index, and a MATCH
-                    # that SUCCEEDS and returns nothing would be reported to the
-                    # caller as "no such memory". Returning None routes it to
-                    # the LIKE fallback instead. One sqlite_master read, and
-                    # only when the index already answered empty.
+                if not rows:
+                    # AN EMPTY MATCH IS NOT AN ANSWER — it is "the index had
+                    # nothing", and the index is the one thing here with known
+                    # blind spots. Route every empty result to the caller's
+                    # LIKE fallback instead of reporting "no such memory".
+                    #
+                    # Two distinct blind spots, one behaviour:
+                    #   * the TOKENIZER's floor. `trigram` indexes 3-character
+                    #     windows, so a 1- or 2-character query matches
+                    #     nothing however many rows contain it — and in
+                    #     Chinese two characters is an ordinary word
+                    #     (measured: '超时' MATCH 0, LIKE 1). This is a
+                    #     documented property of the tokenizer, not a fault to
+                    #     repair, so the fallback is the repair.
+                    #   * an index NOTHING MAINTAINS. Another process — an
+                    #     fts5-less interpreter opening this file is the
+                    #     deterministic case — can drop the triggers while
+                    #     this handle still believes FTS is healthy; every
+                    #     write since then bypassed the index.
+                    # Through v2.14.1 only the second was handled, behind a
+                    # `_fts_triggers_present` read, so the first reported
+                    # empty as fact. The trigger read is gone with it: the
+                    # branch it guarded is now unconditional, and the cost of
+                    # being wrong is one LIKE query on a query that already
+                    # found nothing.
                     return None
                 return [dict(r) for r in rows]
             except sqlite3.DatabaseError:
@@ -3187,6 +3470,20 @@ class MemoryDB:
         # `minLength: 1` a lone NUL satisfies. These characters tokenise to
         # nothing in fts5, so removing them changes no legitimate result.
         query = "".join(c for c in query if c >= " " or c in "\t\n\r")
+        # A query with no content is not a request for EVERYTHING. Stripped to
+        # empty (or whitespace), both `_match_fts` expressions raise out of the
+        # fts5 parser, the caller falls through to the LIKE arm, and the
+        # pattern there becomes `%%` — which matches every active row. Measured
+        # by tests/test_recall.py §2: `search_fts(pid, "\x00")` and
+        # `search_fts(pid, "")` each returned 20 of 20 rows. Both spellings are
+        # REACHABLE, and the comment above says so: the web viewer's `?q=%00`
+        # and the model-invokable `memory_search`, whose `minLength: 1` a lone
+        # NUL satisfies. A table dump is the same class of answer that made a
+        # bare `%` or `_` return everything before `_like_escape` — and this
+        # one lands in a context window. `list` is the surface that means
+        # "show me everything"; `search` answers a question, and there is none.
+        if not query.strip():
+            return []
         try:
             limit = min(max(1, int(limit)), self._MAX_SEARCH_LIMIT)
         except (TypeError, ValueError):

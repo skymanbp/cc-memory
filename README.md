@@ -13,7 +13,7 @@ before it does anything, and what is stored is *reconciled*, never stacked.
 [![license](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![python](https://img.shields.io/badge/python-3.8%2B-blue.svg)](pyproject.toml)
 [![dependencies](https://img.shields.io/badge/runtime%20deps-0-brightgreen.svg)](#requirements)
-[![release gates](https://img.shields.io/badge/release%20gates-11-orange.svg)](#release-gates)
+[![release gates](https://img.shields.io/badge/release%20gates-12-orange.svg)](#release-gates)
 [![platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg)](#requirements)
 
 </div>
@@ -399,8 +399,8 @@ specifics, each of which cost a measured defect to learn:
   permanent prompt injection. The privacy filter fails **closed** (a dangling
   `<private>` tag drops the remainder rather than leaking it), and so does an
   unreadable `config.json` (it excludes every project rather than guessing).
-- **The gates can go red, and that is checked.** Eleven release gates run on
-  every change — four test suites, four documentation gates, plus build
+- **The gates can go red, and that is checked.** Twelve release gates run on
+  every change — five test suites, four documentation gates, plus build
   checks. A falsification register (`tools/falsify_fixes.py`) reverts each
   registered fix on a temporary copy and asserts its gate actually FAILS
   there: a check that cannot go red is a comment that costs CI time. 238
@@ -785,11 +785,11 @@ specifications with their Chinese siblings.
 
 ### Release gates
 
-Eleven gates, all pure stdlib — no pytest, no pip dependencies. Run them all with
+Twelve gates, all pure stdlib — no pytest, no pip dependencies. Run them all with
 one command:
 
 ```bash
-python tests/run_gates.py           # runs all 11, prints a table, exits nonzero on any red
+python tests/run_gates.py           # runs all 12, prints a table, exits nonzero on any red
 python tests/run_gates.py --list    # show what each gate is
 ```
 
@@ -858,7 +858,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md). Security reports: [SECURITY.md](SECURITY
 Recorded rather than papered over — an unlisted limit is a limit someone else
 has to rediscover:
 
-- **macOS is unmeasured.** All eleven gates run on Windows (3.13) and on
+- **macOS is unmeasured.** All twelve gates run on Windows (3.13) and on
   Linux (3.11 and 3.13) in CI; macOS is expected to work (the same POSIX paths
   Linux exercises) but has not been measured, and this document will not say
   it has.
@@ -965,7 +965,7 @@ not what it used to be.
 - **Windows**: `python3` must resolve to a Python 3 interpreter (see
   [Troubleshooting](#troubleshooting))
 
-Developed Windows-first. **All eleven release gates run on Windows (Python
+Developed Windows-first. **All twelve release gates run on Windows (Python
 3.13) and on Linux (Python 3.11 and 3.13) in CI**; macOS is not covered by CI
 — it is expected to work but has not been measured, and this document will not
 say it has.

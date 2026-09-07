@@ -1,4 +1,4 @@
-<!-- i18n-source: README.md | sha256: ef1e16180e737dbc | version: 2.14.1 | translated: 2026-09-03 | translation: 8342ffac5feb484f -->
+<!-- i18n-source: README.md | sha256: c48a6e12e2748d9b | version: 2.15.0 | translated: 2026-09-07 | translation: 393299c5884bd8cf -->
 > [English](README.md) · **简体中文**
 
 <div align="center">
@@ -14,7 +14,7 @@
 [![license](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![python](https://img.shields.io/badge/python-3.8%2B-blue.svg)](pyproject.toml)
 [![dependencies](https://img.shields.io/badge/runtime%20deps-0-brightgreen.svg)](#运行要求)
-[![release gates](https://img.shields.io/badge/release%20gates-11-orange.svg)](#发布闸门)
+[![release gates](https://img.shields.io/badge/release%20gates-12-orange.svg)](#发布闸门)
 [![platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg)](#运行要求)
 
 </div>
@@ -376,7 +376,7 @@ importance 或新的 tags —— 不新增行，只把它们合入命中的那�
   会话的记忆行，就是一枚永久的提示注入。隐私过滤器**失败即关闭**（悬空的
   `<private>` 起始标签会丢弃剩余部分而不是泄漏它），读不了的 `config.json`
   同样如此（排除所有项目而不是靠猜）。
-- **闸门能变红，而且这一点本身被检查。** 每次改动跑十一道发布闸门——四个测试
+- **闸门能变红，而且这一点本身被检查。** 每次改动跑十二道发布闸门——五个测试
   套件、四道文档闸门，外加构建检查。一份可证伪登记册（`tools/falsify_fixes.py`）
   把每条已登记的修复在临时副本上撤销，断言它的闸门在那里确实**失败**：一个不
   可能变红的检查只是一条消耗 CI 时间的注释。截至 v2.14.0 已登记 238 个破坏
@@ -731,10 +731,10 @@ schema（含每张表的定义位置）见 [§4](docs/ARCHITECTURE.zh.md#4-数�
 
 ### 发布闸门
 
-十一道闸门，全部纯标准库——没有 pytest，没有 pip 依赖。一条命令跑完：
+十二道闸门，全部纯标准库——没有 pytest，没有 pip 依赖。一条命令跑完：
 
 ```bash
-python tests/run_gates.py           # 跑全部 11 道，打印表格，任一变红即非零退出
+python tests/run_gates.py           # 跑全部 12 道，打印表格，任一变红即非零退出
 python tests/run_gates.py --list    # 看每道闸门查什么
 ```
 
@@ -797,7 +797,7 @@ Release，附上两个 exe，并以对应的 CHANGELOG 段落作为正文。与 
 
 记录下来，而不是糊过去——没写出来的限制，就得由别人重新踩一遍才能发现：
 
-- **macOS 未测量。** 十一道闸门全部在 CI 的 Windows（3.13）上和 Linux
+- **macOS 未测量。** 十二道闸门全部在 CI 的 Windows（3.13）上和 Linux
   （3.11 与 3.13）上运行；macOS 预期可用（与 Linux 演练的是同一套 POSIX
   路径），但没有被测量过，本文档不会说它被验证过。
 - **步骤引用审计是词法层面的。** 它抓 `步骤 N` / `step #N` / `#N` 这些形状；
@@ -879,7 +879,7 @@ v2.13.0 把每个项目的状态从 `memory/` 挪到了 `.ccm/`——放在 `.gi
 - **PyInstaller** 只在构建可执行文件时需要
 - **Windows**：`python3` 必须能解析到一个 Python 3 解释器（见[故障排查](#故障排查)）
 
-以 Windows 为首要平台开发。**全部十一道发布闸门在 CI 的 Windows（Python 3.13）
+以 Windows 为首要平台开发。**全部十二道发布闸门在 CI 的 Windows（Python 3.13）
 上和 Linux（Python 3.11 与 3.13）上都跑一遍**；macOS 未被 CI 覆盖——预期可用但
 没有被测量过，本文档不会说它被验证过。
 

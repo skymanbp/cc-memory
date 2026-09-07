@@ -112,6 +112,8 @@ GATES = [
      [PY, "tests/test_surfaces.py"], None),
     ("directive", "directive ledger + Stop enforcement",
      [PY, "tests/test_directive_enforcement.py"], None),
+    ("recall",    "a stored fact is findable by a substring, in either language",
+     [PY, "tests/test_recall.py"], None),
     ("i18n",      "translation drift",
      [PY, "tools/i18n_check.py"], None),
     ("citations", "every file.py:LINE citation in the tracked docs",

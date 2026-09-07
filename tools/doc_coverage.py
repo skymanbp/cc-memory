@@ -83,12 +83,44 @@ def _read(rel: str) -> str:
 def _schema_tables() -> list[str]:
     """Every table the schema creates — `CREATE TABLE` and `CREATE VIRTUAL
     TABLE` alike (the FTS5 index `memories_fts` is schema a reader must know
-    about) — minus any name the same file also DROPs: `_fts5_probe` exists
-    for one statement, to learn whether this SQLite build has FTS5 at all."""
+    about) — minus the scaffolding tables that exist for one statement.
+
+    EPHEMERAL MEANS UNREFERENCED, NOT MERELY DROPPED. This used to compute
+    `created - dropped`, on the reasoning that a probe like `_fts5_probe`
+    (created and dropped to learn whether this SQLite build has FTS5 at all)
+    is the only thing a schema file would drop. v2.15.0 falsified that: the
+    tokenizer heal `core/db.py:_retokenize_if_stale` DROPs and recreates
+    `memories_fts` to re-tokenise stored rows, so the real FTS index
+    disappeared from this enumerator and the gate stopped requiring it to be
+    documented at all — silently, which is the exact "a gate's condition must
+    be SUFFICIENT for the sentence it certifies" failure v2.14.0 catalogued.
+
+    The property that actually separates a probe from schema is whether
+    anything ELSE names it: `_fts5_probe` and `_fts5_tok_probe` appear only
+    in their own CREATE and DROP, while `memories_fts` is named by three
+    triggers, every MATCH and the 'rebuild' command. So a created table is
+    scaffolding iff its every mention in the file IS one of those two
+    statements. This is deliberately not a name-prefix test — the same guess
+    that made `_mcp_tools` enumerate nothing outside `memory_`.
+    """
     src = _read("cc_memory/core/db.py")
     created = set(re.findall(r"CREATE (?:VIRTUAL )?TABLE IF NOT EXISTS (\w+)", src))
-    dropped = set(re.findall(r"DROP TABLE (?:IF EXISTS )?(\w+)", src))
-    return sorted(created - dropped)
+    out = []
+    for name in created:
+        n = re.escape(name)
+        mentions = len(re.findall(r"\b" + n + r"\b", src))
+        creates = len(re.findall(
+            r"CREATE (?:VIRTUAL )?TABLE IF NOT EXISTS\s+" + n + r"\b", src))
+        drops = len(re.findall(r"DROP TABLE(?: IF EXISTS)?\s+" + n + r"\b", src))
+        # A table nobody drops is schema whatever else the file says about it —
+        # asking for a second mention would demote a table that is only ever
+        # written through `**fields` or an f-string. Scaffolding has to clear
+        # BOTH bars: it is torn down, AND nothing but its own two statements
+        # ever names it.
+        if drops and mentions == creates + drops:
+            continue
+        out.append(name)
+    return sorted(out)
 
 
 def _schema_columns() -> list[str]:

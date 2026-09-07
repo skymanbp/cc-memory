@@ -2,18 +2,161 @@
 
 ## Project: cc-memory
 
-**Claude Code persistent memory plugin (v2.14.1)** — anti-patch reconcile-on-write
+**Claude Code persistent memory plugin (v2.15.0)** — anti-patch reconcile-on-write
 + LLM-judged semantic de-duplication with **backpressure-triggered
 consolidation**, forced PROGRESS.md handoff with per-session annotation, live
 PLAN.md anchor with plan-refiner / plan-guardian subagents + mandatory
 carryover gate, **an enforced directive ledger**, bounded transcript reads,
-injection observability, FTS5 search, AI-judged extraction with Haiku
+injection observability, **query-time recall**, CJK-capable FTS5 search,
+AI-judged extraction with Haiku
 (optional local Ollama fallback).
 
 - **Language**: Python 3.8+ (pure stdlib, zero pip dependencies at runtime)
-- **Version**: 2.14.1
+- **Version**: 2.15.0
 - **License**: MIT
 - **Platform**: Windows-primary, cross-platform compatible (Tkinter required for GUI)
+
+## What changed in v2.15.0 (over v2.14.1)
+
+**The channel that had a query, and the search that could not read Chinese.**
+Six defects reported from a consuming session, each reproduced here before it
+was touched, plus the feature the first two made possible. Rules a future
+change must not break:
+
+1. **`memories_fts` is built with `tokenize='trigram'`, and an empty MATCH is
+   never an answer.** The index shipped with no `tokenize=`, so fts5 used
+   unicode61, which treats Han / kana / Hangul as token characters and never
+   segments them — a whole Chinese clause was ONE token. Measured against a
+   row reading `用户要求把超时设为三十秒`: `MATCH '超时'` 0, `MATCH '三十秒'`
+   0, the whole clause 1, `LIKE '%超时%'` 1. `_match_fts` routed an empty
+   result to the LIKE fallback only when the FTS TRIGGERS were missing, so in
+   the healthy case "the index found nothing" was returned as fact — and
+   `mcp/server.py:_is_failed_result` counts an empty result set as SUCCESS, so
+   the model was told the project has no such memory. That branch is
+   unconditional now: the tokenizer's 3-character floor is a documented
+   property, not a fault to repair, so the fallback IS the repair. The
+   tokenizer is chosen by a runtime PROBE and a stale index self-heals
+   (`_retokenize_if_stale`) — a `_MIGRATIONS` entry could not do this, because
+   that ledger records INTENT, not state. Gate: `tests/test_recall.py`;
+   `falsify --case r8ftsempty`.
+
+2. **A MERGE archives the row it replaces and links to it.** Both rewriting
+   branches now leave the old text recoverable and the chain walkable;
+   previously MERGE overwrote in place, so the superseded wording was gone
+   with no record that it had ever been different. Gate: `smoke_test.py`
+   § C3/C4.
+
+3. **`/cc-mem inject-usage` computes the signals it promises, and says which
+   window it measured over.** Its docstring promised "whether the
+   forced-reminder ack string appears in the latest turn" and NO LINE OF CODE
+   computed it, and asserted "ids are never shown to Claude" while
+   `session_start._build_timeline_layer` renders `#<id>` for every timeline
+   entry past the fifth. The ack is now measured from the transcript of the
+   session that received the last injection, through the constant that EMITS
+   it (`core.progress.ACK_TEMPLATE` / `ack_present`, one demand and one
+   detector), and it is **tri-state**: `unmeasured` is never printed as `no`.
+   The observation window is `--window` and is stated in the output. Gate:
+   `smoke_test.py` § v2.15.0 ack; `falsify --case r15ackspell` /
+   `r15acktemplate` / `r15acktristate` / `r15acktoolarg`.
+
+   **The measurement is TWO LAYERS, and the expensive one is opt-in.**
+   Everything above proves DELIVERY and costs nothing; whether a delivered
+   memory changed a word Claude wrote is a judgement about text, so
+   `--judge` (`llm/usage_judge.py`) reads that session's assistant replies
+   and answers `used` / `unused` / `unknown` per delivered memory, over both
+   channels — the recall manifest records `session_id` for exactly this, so
+   the judge never has to ASSUME a recall belongs to the last injection's
+   session. Layer 1 default-ON and deterministic, layer 2 default-OFF and
+   billed: a read-only status command must not spend an API call nobody
+   asked for, and a project whose central claim is that these memories are
+   worth injecting must not rest that claim on delivery counts forever.
+   `unknown` — no credential, a refused call, an unparsable answer, an id
+   the judge skipped — is NEVER rendered as `unused`, which would turn an
+   outage of ours into a finding about Claude. Both sides of the payload are
+   bounded in `usage_judge.py` (not at the caller), `strip_private` runs on
+   the memory rows and the replies alike because this is an Anthropic
+   request, and `call_llm` is an ARGUMENT to `judge_usage`, which is what
+   lets the gate drive every branch with no network. `cli/mem.py:
+   _session_window` is the ONE resolver both layers ask "which session,
+   which transcript" — two private spellings of that is the shape
+   `guardian_verdict` was extracted to end in this same release. Gate:
+   `smoke_test.py` § v2.15.0 judge; `falsify --case r15judgedefault` /
+   `r15judgetristate`.
+
+4. **QUERY-TIME RECALL: `UserPromptSubmit` stdout is no longer empty.** This
+   plugin had two moments at which it could put memories in front of Claude
+   and used one — SessionStart, where there is no query yet. The only
+   automatic moment that HAS a user query wrote to the database and printed
+   nothing, by the plugin's own choice. So "should this adopt a vector
+   database" was the wrong question: 82.6% of stored memories had never
+   reached a context window because the selector never knew what was being
+   asked. `core/recall.py` retrieves with FTS5 BM25 plus this project's
+   CJK-aware similarity — no embeddings, no index server, no pip dependency,
+   which is the first development rule rather than a compromise. Four
+   properties, each measured:
+   - **It is CONSERVATIVE by design and emits ZERO BYTES when nothing clears
+     the bar** (user decision). The floor is 0.45 on an overlap coefficient,
+     calibrated on 22 prompts against this repository's own 734-memory
+     database: coincidence tops out at 0.400, and 0.45 fires on 9 of 12
+     on-topic prompts with 0 of 10 false positives.
+   - **`textsim.jaccard` cannot be that floor.** Its denominator is the UNION,
+     so a query fully contained in a longer memory scores near zero — 0.087
+     where the overlap coefficient scores 0.960 for the same pair.
+   - **A multi-word FTS5 query is an implicit AND**, under both tokenizers, so
+     a whole user sentence must be reduced to OR-ed terms or the channel never
+     fires while looking installed. CJK terms are 3-character windows, because
+     `word_set` shingles CJK as BIGRAMS and every bigram is below the trigram
+     floor — built from bigrams, the Chinese path retrieved NOTHING.
+   - **The block is a RENDER PATH.** `cc-memory-recall` is registered in
+     `privacy._MARKER_TAG_RE` with every other frame this plugin emits, not
+     escaped by its own renderer; `tests/test_recall.py` §3e caught a stored
+     memory closing the frame and opening a `<system-reminder>` outside it on
+     the first run.
+
+   `memories.recall_count` (v10) records it, and it is deliberately NOT a
+   second meaning for `last_referenced_at`: that one says the ranking chose a
+   row with no query in existence, this one says somebody asked. `/cc-mem
+   inject-usage` reports the two channels separately. Gate:
+   `tests/test_recall.py` §3; `falsify --case r15recallchannel` and its
+   siblings.
+
+5. **The drift remedy CONVERGES, and the display cannot disagree with the
+   gate.** `hooks/stop.py` bumps the turn counter and re-reads before it
+   judges, and `hooks/post_tool_use.py` has already recorded this turn's edits
+   by then (n=1 per edit, n=20 for a sensitive Bash call, against a threshold
+   of 12) — so running `/cc-mem plan-check`, the remedy the refusal NAMES, and
+   then touching one more file re-armed the same block at the same Stop, and
+   one sensitive call did it alone. `plan_active.guardian_checked_at_turn`
+   (v10, `DEFAULT -1` so it cannot collide with turn 1) grants immunity for
+   EXACTLY the turn the check happened in — the next turn is refused normally,
+   because an immunity that outlives its turn is worse than no enforcement: it
+   still looks enforced. The remedy text now runs the guardian FIRST and
+   records it LAST, so nothing accrues after the reset. Gate:
+   `test_directive_enforcement.py` §10; `falsify --case r15driftconverge` /
+   `r15driftescape` / `r15remedyorder`.
+
+6. **`core.plan.guardian_verdict` is THE guardian policy point.**
+   `should_nudge_guardian`, `blocking_reasons` AND `/cc-mem plan-status` all
+   read it. `plan-status` used to print the two counters raw and name no
+   threshold while the Stop gate applied its own — one row, two private
+   interpretations, so a user could read the status screen, see nothing
+   alarming, and be refused the next turn by the numbers it had just shown
+   them. The attribution in the original report is corrected on record:
+   `get_plan_active` is `SELECT *`, so the column was always present; the
+   defect was two readers with no shared policy, not a missing column. Gate:
+   `test_directive_enforcement.py` §10(a)(d); `falsify --case
+   r15statusverdict`.
+
+Also swept, because adding a fifth copy would have been the patch-style move:
+the `~/.claude/projects` slug ladder had **four** verbatim spellings
+(`extractor.find_latest_transcript`, `session_start._find_transcript_dir`,
+`ui/dashboard._find_transcript_dir` — which re-spelled the convention as a
+hand-written `re.sub` instead of calling `mangle_project_path` — and
+`cli/mem.py` was about to add one). `core.extractor.find_transcript_dir` is
+the ladder now, with the `Path.home()` guard none of the copies had.
+CLAUDE.md's v2.5.0 entry had already recorded the dashboard's copy as deleted,
+which is exactly how a copy survives a sweep: the sweep gets written down as
+finished. Gate: `smoke_test.py` § v2.15.0 ack (f); `falsify --case r15ladder`.
 
 ## What changed in v2.14.1 (over v2.14.0)
 
@@ -1306,7 +1449,7 @@ not be imported at all — `cli/plan.py` now has a `main()`.
 
 **Residual limits, recorded rather than papered over:**
 
-- `core/db.py`'s three plan mutators — `update_plan_status` (`db.py:3341-3385`),
+- `core/db.py`'s three plan mutators — `update_plan_status` (`db.py:3638-3682`),
   `delete_plan` (`:1410`) and `update_plan_content` (`:1427`) — all accept
   `project_id`, and `cli/plan.py` + `ui/dashboard.py` pass it at every call
   site, but none of them *requires* it (it defaults to `None`). An unscoped raw
@@ -1572,12 +1715,14 @@ cc-memory/
 │   ├── hooks/                   _entry (shared entry ladder, v2.10.0),
 │   │                            post_tool_use, pre_compact, consolidate_async,
 │   │                            session_start, stop, user_prompt
-│   ├── llm/                     ccl_backend, memory_writer, parse
+│   ├── llm/                     ccl_backend, memory_writer, parse,
+│   │                            usage_judge (layer 2 of the injection-usage
+│   │                            measurement, v2.15.0 — opt-in, LLM-judged)
 │   ├── cli/                     mem, plan
 │   ├── mcp/                     server
 │   └── ui/                      installer, dashboard, web_viewer
 ├── tests/
-│   ├── run_gates.py             ← THE gate runner: one command, all 11
+│   ├── run_gates.py             ← THE gate runner: one command, all 12
 │   ├── smoke_test.py            end-to-end anti-patch + PROGRESS.md +
 │   │                            tier-3 transcript + layout-inspector +
 │   │                            live-plan + i18n gate + bounded-window tests
@@ -1585,8 +1730,10 @@ cc-memory/
 │   ├── test_surfaces.py         installer surfaces + settings shapes + timeout
 │   │                            lockstep, MCP stdio, web-viewer guards, hook
 │   │                            LLM deadline (v2.5.0)
-│   └── test_directive_enforcement.py
-│                                directive ledger + Stop enforcement (v2.11.0)
+│   ├── test_directive_enforcement.py
+│   │                            directive ledger + Stop enforcement (v2.11.0)
+│   └── test_recall.py           a stored fact is findable by a substring, in
+│                                either language (v2.15.0)
 ├── scripts/                     ← build + release helpers (off the root, v2.11.1)
 │   ├── build_exe.py             PyInstaller build
 │   └── release_notes.py         CHANGELOG section → GitHub Release body
@@ -1614,7 +1761,7 @@ blocking sync leg + a background `async` leg.
 | `SessionStart` | `cc_memory/hooks/session_start.py` | 15s | Inject layered context (the directive ledger FIRST, v2.12.2) + FORCED `<system-reminder>` to Read PROGRESS.md |
 | `Stop` | `cc_memory/hooks/stop.py` | 22s | Observer (Haiku) + per-turn PROGRESS.md patch + idle reorg every 5 turns + consolidation backpressure probe (v2.12.0) + plan enforcement |
 | `PostToolUse` | `cc_memory/hooks/post_tool_use.py` | 8s | Live plan anchor in EVERY mode (ExitPlanMode capture / TodoWrite step sync / drift counters), THEN an observation row for observed tools only (no LLM) |
-| `UserPromptSubmit` | `cc_memory/hooks/user_prompt.py` | 8s | Auto-init `.ccm/` (migrating a pre-v2.13.0 `memory/`) + turn count + seed `progress.current_request` on the first NON-scaffolding prompt, once per session (v2.14.0) |
+| `UserPromptSubmit` | `cc_memory/hooks/user_prompt.py` | 8s | Auto-init `.ccm/` (migrating a pre-v2.13.0 `memory/`) + turn count + seed `progress.current_request` on the first NON-scaffolding prompt, once per session (v2.14.0) + **query-time recall** on stdout (v2.15.0) |
 
 Hook contract (NEVER violate):
 - Hooks must NEVER write to stderr (Claude Code shows stderr as error UI).
@@ -1624,7 +1771,9 @@ Hook contract (NEVER violate):
   - `SessionStart` stdout → injected context (read by Claude)
   - `Stop` stdout → status line (read by Claude)
   - `PreCompact` (sync) stdout → ONE status line (shows in next session's compacted context)
-  - `PreCompact` (async) / `PostToolUse` / `UserPromptSubmit` stdout → empty
+  - `UserPromptSubmit` stdout → the query-time recall block, or NOTHING (v2.15.0;
+    this stream is injected into Claude's context — see § *Query-time recall*)
+  - `PreCompact` (async) / `PostToolUse` stdout → empty
 
 ## Database schema (12 tables)
 
@@ -1801,15 +1950,15 @@ standalone installs.
 
 ## Tests
 
-**ELEVEN release gates, and there is ONE command that runs them:**
+**TWELVE release gates, and there is ONE command that runs them:**
 
 ```bash
-python tests/run_gates.py          # all 11; prints a table, exits nonzero on any red
+python tests/run_gates.py          # all 12; prints a table, exits nonzero on any red
 python tests/run_gates.py --list   # what each gate checks
 python tests/run_gates.py --fast   # skips the 2 slow suites — NOT a release run
 ```
 
-Eleven = four suites, four dev checkers, `compileall`, a `tomllib` parse of
+Twelve = five suites, four dev checkers, `compileall`, a `tomllib` parse of
 `pyproject.toml`, and version-site agreement. `tests/smoke_test.py` asserts
 that this section names every gate script, that every suite/checker ON DISK is
 on that list, and that `run_gates.py` actually runs each one — so the list
@@ -1842,6 +1991,46 @@ the three plan mutators, and the two DOC gates below.
 
 `tests/test_plan_carryover.py` covers the v2.4.0 carryover gate (20 checks) —
 the only coverage of that feature.
+
+`tests/test_recall.py` (v2.15.0) asks the one question `search` exists for:
+type a substring of a stored memory, get the memory back. Nothing did until
+now, and for Chinese the answer was NO — `memories_fts` was built with no
+`tokenize=`, so unicode61 treated a whole Chinese clause as ONE token
+(measured: `'超时'` 0, `'三十秒'` 0, the whole clause 1, `'vault'` 1), and
+`_match_fts` routed an empty result to the LIKE fallback only when the FTS
+TRIGGERS were missing — so in the healthy case an empty answer came back as
+fact, and `mcp/server.py:_is_failed_result` reports an empty result set as a
+SUCCESS. The model was told the project has no such memory. §1 drives ten
+Chinese and ten English fixtures through the real `search_fts`: 2-character
+CJK (below the trigram floor, so the LIKE fallback is what answers it), 3-,
+4- and 5-character CJK, an English stem, a NON-CONTIGUOUS multi-word query
+that only FTS can answer, a negative case, project scoping, and an archived
+row. §2 drives eleven hostile query shapes and requires that none raises and
+none returns the whole table — which is how it found that a query stripped to
+empty (`"\x00"` from the web viewer's `?q=%00`, or `""`) fell through to a
+LIKE pattern of `%%` and dumped all 20 rows. The gate is BEHAVIOURAL on
+purpose: it never asserts "the DDL says trigram", because that would pass on
+a tokenizer that indexes nothing.
+
+**§3 drives the query-time recall channel, and it carries a rule worth
+generalising: a ZERO-BYTES assertion is evidence only when it is paired with a
+control that EMITS.** The pure core is driven first, then the real hook as a
+subprocess, because a correct logic core with a hook that never calls it is
+the shape v2.5.0 found in the plan anchor. §3f asserts silence on four
+prompts, three of which are input-side gates — the signal gate,
+`strip_scaffolding`, the privacy gate — and the `<private>` one was silent for
+the WRONG reason on its first run: the fire before it had already recalled the
+only row that could match, so `_already_shown` excluded it, and `falsify
+--case r15recallprivate` (retrieve against the raw, un-cleaned prompt) ran
+GREEN. Each input-side gate is a PAIR now — guarded text silent, the same text
+past the guard emitting — in a project of its own, with the recall manifest
+cleared between pairs so de-duplication cannot be what makes a probe pass. The
+same class one rung up: `is_query_like` is THREE tests, every §3a probe was
+refused by one of the other two, and `--case r15recallgate` (drop the
+minimum-length half) ran GREEN until §3a gained a probe that only the length
+test refuses — with its precondition asserted rather than assumed, so lowering
+the constant past it reports that the probe stopped isolating anything instead
+of quietly certifying nothing.
 
 `tests/test_surfaces.py` (v2.5.0, nine sections since v2.9.0) covers the
 surfaces neither of the others touches: §1 the MCP stdio server, §2 the web
@@ -1984,7 +2173,7 @@ output.
 
 ```bash
 python tests/run_gates.py
-# THE command. expect: "[OK] all 11 gates green"
+# THE command. expect: "[OK] all 12 gates green"
 # Individually, when you need one gate's own output:
 python tests/smoke_test.py
 # expect: [OK] lines ending with "===== ALL SMOKE TESTS PASSED ====="
@@ -1994,6 +2183,8 @@ python tests/test_surfaces.py
 # expect: "===== ALL SURFACE TESTS PASSED ====="  (§1-§9)
 python tests/test_directive_enforcement.py
 # expect: "ALL CHECKS PASSED"
+python tests/test_recall.py
+# expect: "===== ALL RECALL TESTS PASSED ====="  (§1 recall, §2 hostile queries)
 python tools/i18n_check.py
 # expect: "3 in-sync", exit 0
 python tools/citation_check.py
@@ -2076,7 +2267,7 @@ file and non-blank, NOT verified against a symbol — and the summary says so
 in those words since v2.14.0 (261 of 631 at v2.14.0; the class was 253 of
 594 as `SKIP` at v2.5.4, down from 370 once v2.5.3 taught it to anchor
 CROSS-FILE citations on the text of the cited range — the
-`` `db.tag_progress_session(...)` (`user_prompt.py:276`) `` shape, which is
+`` `db.tag_progress_session(...)` (`user_prompt.py:392`) `` shape, which is
 the commonest in these docs). A bounds-only citation can rot silently: six
 had, all in prose that names a section rather than a symbol, and were
 repointed by hand in v2.14.0. `--fix`

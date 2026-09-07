@@ -564,36 +564,68 @@ def mangle_project_path(path: str) -> str:
     return re.sub(r"[^A-Za-z0-9]", "-", path)
 
 
+def find_transcript_dir(cwd: str) -> Optional["Path"]:
+    """`~/.claude/projects/<slug>/` for this project, or None. THE ladder.
+
+    EXACT slug match, then ONE case-insensitive pass, then None. There is
+    deliberately NO fuzzy/substring fallback and there must never be one
+    again: the transcripts found here are LLM-extracted, persisted, and
+    re-injected at every future SessionStart, so a wrong directory
+    permanently contaminates this project's memory with another project's
+    content. The removed branch accepted any slug merely CONTAINING the
+    project's basename — measured on the reference machine (179 slug dirs):
+    basename 'core' matched 131 of them, 'app' 141, 'proj' 33.
+
+    FOUR spellings of this ladder shipped through v2.14.1: the body of
+    `find_latest_transcript` below, `hooks/session_start._find_transcript_dir`,
+    `ui/dashboard._find_transcript_dir` — which re-spelled the slug convention
+    by hand as a literal `re.sub` instead of calling `mangle_project_path` —
+    and `cli/mem.py` was about to add a fifth. They all delegate here now.
+    CLAUDE.md's v2.5.0 entry had already claimed the dashboard's copy was
+    deleted, which is exactly how a copy survives a sweep: the sweep gets
+    written down as finished.
+
+    `Path.home()` is guarded, unlike every copy it replaces. It raises
+    RuntimeError when no home resolves (measured on Windows with
+    USERPROFILE/HOMEPATH/HOMEDRIVE/HOME unset), and `find_latest_transcript`
+    is called from the SessionStart hook — the failure class CLAUDE.md rule 8
+    records for `core/auth._credentials_path`. A hook must never raise.
+    """
+    from pathlib import Path
+    try:
+        claude_projects = Path.home() / ".claude" / "projects"
+    except RuntimeError:
+        # why: no resolvable home is "no transcripts", never an exception on
+        # a hook path (CLAUDE.md v2.14.0 rule 8)
+        return None
+    if not claude_projects.is_dir():
+        return None
+    slug = mangle_project_path(str(Path(cwd).resolve()))
+    candidate = claude_projects / slug
+    if candidate.is_dir():
+        return candidate
+    slug_lower = slug.lower()
+    for d in claude_projects.iterdir():
+        if d.is_dir() and d.name.lower() == slug_lower:
+            return d
+    return None
+
+
 def find_latest_transcript(cwd: str,
                            exclude_session_id: Optional[str] = None) -> Optional["Path"]:
     """Locate the newest .jsonl transcript for this project (by mtime).
 
-    Resolves `~/.claude/projects/<slug>/` via mangle_project_path() above —
-    the same convention as session_start.py:_find_transcript_dir, which shares
-    that helper. Exact match, then ONE case-insensitive pass, then None; there
-    is deliberately no fuzzy fallback.
+    Resolves `~/.claude/projects/<slug>/` through `find_transcript_dir` above,
+    which owns the slug convention and the no-fuzzy-fallback rule.
 
     Pass `exclude_session_id` (the current Claude session UUID) to avoid
     picking the freshly-opened transcript for the current session — we want
     to mine the PREVIOUS session's history, not the empty one just starting.
     Returns None if no project transcript directory or no .jsonl exists.
     """
-    from pathlib import Path
-    claude_projects = Path.home() / ".claude" / "projects"
-    if not claude_projects.exists():
+    transcript_dir = find_transcript_dir(cwd)
+    if transcript_dir is None:
         return None
-    path_str = str(Path(cwd).resolve())
-    hash_candidate = mangle_project_path(path_str)
-    transcript_dir = claude_projects / hash_candidate
-    if not transcript_dir.exists():
-        hash_lower = hash_candidate.lower()
-        transcript_dir = None
-        for d in claude_projects.iterdir():
-            if d.is_dir() and d.name.lower() == hash_lower:
-                transcript_dir = d
-                break
-        if transcript_dir is None:
-            return None
     jsonls = sorted(transcript_dir.glob("*.jsonl"),
                     key=lambda f: f.stat().st_mtime, reverse=True)
     for jsonl in jsonls:
@@ -601,6 +633,29 @@ def find_latest_transcript(cwd: str,
             continue
         return jsonl
     return None
+
+
+def find_session_transcript(cwd: str, session_id: str) -> Optional["Path"]:
+    """The transcript of ONE NAMED session, or None.
+
+    Claude Code names a transcript `<session-uuid>.jsonl`, so a session id is
+    a filename, not a search. `/cc-mem inject-usage` needs THIS session's
+    replies — `find_latest_transcript` answers "the newest", which is a
+    different question and silently the wrong one whenever a second session
+    has opened since the injection being reported on.
+
+    The id is used as ONE path component and is refused if it could be
+    anything else: it arrives from `.ccm/.last_inject.json`, a plain file in
+    the project, so `..` in it would otherwise walk out of the directory.
+    """
+    if not session_id or any(c in session_id for c in "/\\") or \
+            session_id in (".", "..") or ":" in session_id:
+        return None
+    transcript_dir = find_transcript_dir(cwd)
+    if transcript_dir is None:
+        return None
+    candidate = transcript_dir / f"{session_id}.jsonl"
+    return candidate if candidate.is_file() else None
 
 
 def extract_file_changes(messages: List[Dict]) -> List[str]:

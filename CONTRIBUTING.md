@@ -8,7 +8,7 @@ that are actually enforced, because in this repository most of them are.
 ```bash
 git clone https://github.com/skymanbp/cc-memory.git
 cd cc-memory
-python tests/run_gates.py          # all 11 gates; nothing to install first
+python tests/run_gates.py          # all 12 gates; nothing to install first
 ```
 
 There is no `pip install -r requirements.txt` step, and adding one would be a

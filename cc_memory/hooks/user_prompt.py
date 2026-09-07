@@ -137,6 +137,122 @@ def _init_project_if_needed(cwd):
         return False
 
 
+_RECALL_MANIFEST = ".last_recall.json"
+
+
+def _already_shown(state_dir):
+    """Memory ids Claude has already been given this session.
+
+    Two sources, both artifacts this plugin already writes:
+      * `.last_inject.json` — what SessionStart put in the context window;
+      * `.last_recall.json` — what earlier turns of THIS session recalled.
+    Re-emitting either spends the budget telling the model something already
+    in front of it, which is exactly what would make this channel read as
+    noise rather than as help.
+
+    Best-effort by construction: an unreadable manifest means "exclude
+    nothing", never "recall nothing" — degrading toward a duplicate line is
+    strictly better than degrading toward silence.
+    """
+    import json
+    shown = set()
+    for name, key in ((".last_inject.json", None), (_RECALL_MANIFEST, "ids")):
+        try:
+            data = json.loads((state_dir / name).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue  # why: a missing or malformed manifest is a normal early
+            # state and must cost only the de-duplication it would have given
+        if not isinstance(data, dict):
+            continue
+        if key:
+            values = data.get(key) or []
+        else:
+            values = ((data.get("critical_ids") or [])
+                      + (data.get("timeline_ids") or []))
+        for v in values if isinstance(values, list) else []:
+            try:
+                shown.add(int(v))
+            except (TypeError, ValueError):
+                continue  # why: a hand-edited manifest is advisory data, not
+                # a schema — one unusable entry must not void the whole set
+    return shown
+
+
+def _emit_recall(cwd, prompt, session_id=""):
+    """Retrieve, print and record. Everything here is best-effort.
+
+    Prints to STDOUT, which for `UserPromptSubmit` is injected into Claude's
+    context — the whole point of the channel. Emits ZERO BYTES when nothing
+    clears the relevance floor, which is the conservative half of the design:
+    a channel that speaks on every turn is a per-turn tax and teaches the
+    reader to skip it on the turns it is right.
+    """
+    import json
+    from core.recall import (build_query, is_query_like, render_recall_block,
+                             select_recalls, RECALL_CANDIDATES)
+    if not is_query_like(prompt):
+        return
+    query = build_query(prompt)
+    if not query:
+        return
+    state_dir = memory_dir(cwd)
+    from core.db import MemoryDB
+    db = MemoryDB(state_dir / DB_FILENAME)
+    pid = db.find_project_id(cwd)
+    if pid is None:
+        # find_project_id, never upsert_project: this is a READ on the user's
+        # behalf, and a question must not mint a project row — the rule
+        # `cli/mem.py:_require_db_path` states for the six commands that used
+        # to create a database as a side effect of being asked something.
+        return
+    rows = select_recalls(db.search_fts(pid, query, limit=RECALL_CANDIDATES),
+                          prompt, exclude_ids=_already_shown(state_dir))
+    if not rows:
+        return
+    block = render_recall_block(rows, prompt)
+    if not block:
+        return
+    sys.stdout.write(block)
+    sys.stdout.flush()
+    ids = [int(r["id"]) for r in rows]
+    # AFTER the write and the flush. The block is this function's product, and
+    # a bookkeeping failure must not cost the thing that already reached the
+    # model — the same ordering rule the PROGRESS seed above follows.
+    try:
+        db.bump_recall_count(ids)
+    except Exception:
+        pass  # why: the counter is a measurement; losing one tick must never
+        # cost the recall already emitted (hook contract: never raise)
+    try:
+        from datetime import datetime
+        prev = []
+        try:
+            old = json.loads((state_dir / _RECALL_MANIFEST)
+                             .read_text(encoding="utf-8"))
+            if isinstance(old, dict) and isinstance(old.get("ids"), list):
+                prev = [int(i) for i in old["ids"]][-200:]
+        except (OSError, ValueError, TypeError):
+            prev = []  # why: a fresh or unreadable manifest starts an empty
+            # history — the cost is one possible repeat, not a failed recall
+        (state_dir / _RECALL_MANIFEST).write_text(
+            # `session_id` binds THIS emission to the transcript that received
+            # it. `/cc-mem inject-usage --judge` reads Claude's replies to
+            # decide whether a recalled memory was used, and without the
+            # binding it would have to ASSUME the recall belongs to the last
+            # injection's session — an assumption that is wrong exactly when
+            # the answer matters, and one that would report the manifest's
+            # shape as Claude's behaviour.
+            json.dumps({"ts": datetime.now().isoformat(timespec="seconds"),
+                        "n": len(ids), "ids": sorted(set(prev) | set(ids)),
+                        "last_ids": ids, "chars": len(block),
+                        "session_id": session_id},
+                       ensure_ascii=False, indent=2),
+            encoding="utf-8")
+    except OSError:
+        pass  # why: the manifest only powers de-duplication and inject-usage
+        # reporting; a project on a read-only volume still gets its recall
+
+
 def main():
     # Silent (no logger): this hook fires on every user message.
     data = parse_payload()
@@ -301,6 +417,21 @@ def main():
                     # why: PROGRESS seeding is best-effort; PreCompact will
                     # overwrite it with a full state anyway
                     pass
+
+        # ── Job 4 (v2.15.0): QUERY-TIME RECALL ─────────────────────────────
+        # The one moment on the automatic path that HAS a query, and this
+        # hook's stdout was empty by contract until now. Runs LAST, after
+        # every write above, and inside its own handler: recall is
+        # enrichment, and a failure here must cost the recall block only —
+        # never the turn counter, the observer's prompt file or the
+        # PROGRESS.md seed, all of which are already committed by this point.
+        #
+        # `prompt` is the CLEANED, scaffolding-stripped text: a `<private>`
+        # span is already gone (clean_for_storage, fail-closed) and a slash
+        # command already reduced to "". Retrieval must never run on the raw
+        # prompt — that would search on text the user marked private, and the
+        # retrieved rows go into the model's context.
+        _emit_recall(cwd, prompt, session_id)
 
     except Exception:
         try:

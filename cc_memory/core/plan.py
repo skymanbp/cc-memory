@@ -487,19 +487,29 @@ def blocking_reasons(plan_row: Optional[Dict],
                 "then `/cc-mem plan-set --from-refiner` with its JSON.",
             ))
         else:
-            should, reason = should_nudge_guardian(plan_row)
-            if should:
+            verdict = guardian_verdict(plan_row)
+            if verdict["should"]:
                 out.append((
                     "plan-drift",
-                    f"The live plan has not been drift-checked ({reason}).",
+                    f"The live plan has not been drift-checked "
+                    f"({verdict['reason']}).",
                     # ONE sequence, not an "or" (Autoshop field report 7a):
                     # `plan-check` resets the counters AND prints the exact
-                    # guardian Task(...) call, then ends "Now invoke the
-                    # plan-guardian subagent" — so offering the two as
+                    # guardian Task(...) call, so offering the two as
                     # alternatives contradicted the command's own output.
-                    "Run `/cc-mem plan-check` (it resets these counters and "
-                    "prints the guardian invocation), then invoke the "
-                    "@plan-guardian subagent it names.",
+                    #
+                    # GUARDIAN FIRST, RESET LAST (v2.15.0). The old order put
+                    # the reset first, and everything after it re-armed the
+                    # condition the reset had just cleared: PostToolUse counts
+                    # the guardian's own tool calls and every edit that
+                    # follows, all before this turn's Stop evaluates. Making
+                    # the reset the FINAL act of the remedy is what lets the
+                    # remedy converge; the v10 one-turn immunity closes the
+                    # other half, for the work that comes after it.
+                    "Invoke the @plan-guardian subagent on .ccm/PLAN.md, then "
+                    "record the check with `/cc-mem plan-check` — in that "
+                    "order, so nothing accrues against the counters after "
+                    "they are reset.",
                 ))
     for row in (directives or []):
         if row.get("status") != "active":
@@ -1336,23 +1346,78 @@ def apply_todowrite_sync(db, project_id: int, todos: List[Dict],
 
 # ── Drift / guardian-nudge logic ────────────────────────────────────────────
 
+def guardian_verdict(plan_row: Optional[Dict], *,
+                     turn_threshold: int = 8,
+                     edit_threshold: int = 12) -> Dict:
+    """THE guardian decision, as data. ONE policy point (v2.15.0).
+
+    Returns a dict with `should`, `reason`, `turns`, `edits`,
+    `checked_this_turn` and both thresholds. `should_nudge_guardian`,
+    `blocking_reasons` and `/cc-mem plan-status` all read THIS and nothing
+    else, so the number a user is shown and the number the gate acts on are
+    the same number by construction.
+
+    They were not. `plan-status` printed `turns_since_last_guardian` and
+    `edits_since_last_guardian` raw and never mentioned a threshold, while
+    `should_nudge_guardian` applied its own defaults on the Stop path — two
+    readers of one row, each interpreting it privately, which is the shape
+    v2.14.0 rule 15 records for the consolidation lock (`stop.py` held a copy
+    of the policy minus its staleness rule and vetoed the only process that
+    could clear it). A display that cannot disagree with the gate is worth
+    more than a display that is merely correct today.
+
+    `checked_this_turn` is the v10 one-turn immunity. The Stop hook bumps
+    `turns_total` and re-reads before it evaluates, and PostToolUse has
+    already recorded this turn's edits by then — so without it, running the
+    remedy the refusal names (`/cc-mem plan-check`) and then touching one more
+    file re-arms the same block at the same Stop, and one sensitive Bash call
+    (n=20 against a threshold of 12) does it alone. The immunity covers
+    exactly the turn the check happened in.
+    """
+    turns = int((plan_row or {}).get("turns_since_last_guardian") or 0)
+    edits = int((plan_row or {}).get("edits_since_last_guardian") or 0)
+    verdict = {"should": False, "reason": "no_active_plan",
+               "turns": turns, "edits": edits, "checked_this_turn": False,
+               "threshold_turns": turn_threshold,
+               "threshold_edits": edit_threshold}
+    if not plan_row or not is_valid_structured(plan_row.get("structured")):
+        return verdict
+    if plan_row.get("needs_refine"):
+        # raw plan captured but not yet refined — different nudge, not guardian
+        verdict["reason"] = "needs_refine_first"
+        return verdict
+    # DEFAULT -1 (v10), so an unstamped row and a pre-v10 database can never
+    # collide with turn 1. `turns_total` is the monotonic clock; both sides of
+    # this compare only ever increase.
+    checked_at = int(plan_row.get("guardian_checked_at_turn", -1) or -1)
+    total = int(plan_row.get("turns_total") or 0)
+    if checked_at >= 0 and total == checked_at + 1:
+        verdict["checked_this_turn"] = True
+        verdict["reason"] = "checked_this_turn"
+        return verdict
+    if turns >= turn_threshold:
+        verdict.update(should=True,
+                       reason=f"turn_threshold ({turns} >= {turn_threshold})")
+        return verdict
+    if edits >= edit_threshold:
+        verdict.update(should=True,
+                       reason=f"edit_threshold ({edits} >= {edit_threshold})")
+        return verdict
+    verdict["reason"] = "below_thresholds"
+    return verdict
+
+
 def should_nudge_guardian(plan_row: Dict, *,
                           turn_threshold: int = 8,
                           edit_threshold: int = 12) -> Tuple[bool, str]:
-    """Return (should_nudge, reason). Caller (Stop hook) uses this to decide
-    whether to print the guardian-recommendation status line."""
-    if not plan_row or not is_valid_structured(plan_row.get("structured")):
-        return False, "no_active_plan"
-    if plan_row.get("needs_refine"):
-        # raw plan captured but not yet refined — different nudge, not guardian
-        return False, "needs_refine_first"
-    turns = int(plan_row.get("turns_since_last_guardian") or 0)
-    edits = int(plan_row.get("edits_since_last_guardian") or 0)
-    if turns >= turn_threshold:
-        return True, f"turn_threshold ({turns} >= {turn_threshold})"
-    if edits >= edit_threshold:
-        return True, f"edit_threshold ({edits} >= {edit_threshold})"
-    return False, "below_thresholds"
+    """(should_nudge, reason) — the tuple view of `guardian_verdict`.
+
+    Kept as the name the Stop hook and the tests are written against; the
+    POLICY is one function up. Do not re-implement the thresholds here.
+    """
+    v = guardian_verdict(plan_row, turn_threshold=turn_threshold,
+                         edit_threshold=edit_threshold)
+    return v["should"], v["reason"]
 
 
 # Tool names that are "sensitive" and warrant an immediate guardian nudge

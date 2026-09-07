@@ -49,6 +49,7 @@ from core.layout import (DB_FILENAME, canonical_path, find_db_path,
 from core.encoding_setup import enable_utf8_io
 from core.extractor import (
     build_extraction,
+    find_transcript_dir,
     group_sentences,
     load_transcript,
 )
@@ -2600,26 +2601,16 @@ def _find_transcript_dir(project_path: Path) -> "Path | None":
     stored — an unrelated project's transcript. Guessing is never safe in a
     tool that persists what it reads and re-injects it every session. The
     sibling `extractor.find_latest_transcript` follows the same rule.
+
+    Since v2.15.0 the RULE and this function are the same object: the body was
+    a fourth verbatim copy of the ladder, and it re-spelled the slug
+    convention as a hand-written `re.sub` rather than calling
+    `mangle_project_path` — so the one place a future change to that
+    convention would have been missed was the copy CLAUDE.md's v2.5.0 entry
+    already recorded as deleted. `tests/test_surfaces.py` §8 monkeypatches
+    this NAME, so it stays.
     """
-    claude_projects = Path.home() / ".claude" / "projects"
-    if not claude_projects.exists():
-        return None
-
-    # e.g. d:\Projects\cc-memory → d--Projects-cc-memory
-    slug = re.sub(r"[^A-Za-z0-9]", "-", str(project_path.resolve()))
-
-    # Try exact match first
-    candidate = claude_projects / slug
-    if candidate.is_dir():
-        return candidate
-
-    # Case-insensitive match (Windows paths may differ in casing)
-    slug_lower = slug.lower()
-    for d in claude_projects.iterdir():
-        if d.is_dir() and d.name.lower() == slug_lower:
-            return d
-
-    return None
+    return find_transcript_dir(project_path)
 
 
 # ---------------------------------------------------------------------------

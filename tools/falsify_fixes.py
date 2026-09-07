@@ -1336,11 +1336,19 @@ def _break_r8ftsdrop(root):
 
 
 @case("r8ftsempty", ["tests/smoke_test.py"],
-      "trust an empty MATCH -> a frozen index reports the memory does not exist")
+      "trust an empty MATCH -> a frozen index reports the memory does not "
+      "exist, and (v2.15.0) a 1- or 2-character CJK query reports zero rows "
+      "for text the database plainly contains, because trigram's floor is 3")
 def _break_r8ftsempty(root):
+    # anchor repaired 2026-09-07 (v2.15.0): the branch used to be guarded by
+    # `and not self._fts_triggers_present(conn)`, which handled only the
+    # frozen-index blind spot. The tokenizer's 3-character floor is the
+    # second, and it is not a fault to repair — so the fallback is now
+    # UNCONDITIONAL and the guard is gone. Same breakage, one condition wider:
+    # making an empty MATCH authoritative again.
     _patch(root, f"{PKG}/core/db.py",
-           "                if not rows and not self._fts_triggers_present(conn):",
-           "                if False:  # BREAKAGE")
+           "                if not rows:\n",
+           "                if False:  # BREAKAGE: an empty MATCH is an answer\n")
 
 
 @case("r8idxmem", ["tests/smoke_test.py"],
@@ -2747,6 +2755,260 @@ def _break_r12canoncase(root):
     _patch(root, f"{PKG}/core/layout.py",
            "        return os.path.normcase(str(Path(text).resolve()))",
            "        return str(Path(text).resolve()).lower()  # BREAKAGE")
+
+
+# ── v2.15.0: the ack that was promised and never computed, and the drift ────
+# remedy that could not converge.
+
+@case("r15ackspell", ["tests/smoke_test.py"],
+      "let the ack detector carry its own spelling of the sentence -> the "
+      "DEMAND and the DETECTOR drift the day the wording is edited, and "
+      "inject-usage reports 'never acknowledged' for a session that "
+      "acknowledged every time")
+def _break_r15ackspell(root):
+    _patch(root, f"{PKG}/core/progress.py",
+           'ACK_PREFIX = "Read PROGRESS.md — prior progress:"',
+           'ACK_PREFIX = "Read PROGRESS.md - progress so far:"  # BREAKAGE')
+
+
+@case("r15acktemplate", ["tests/smoke_test.py"],
+      "count the template itself as an acknowledgement -> a reply QUOTING the "
+      "reminder (including one saying it had NOT read PROGRESS.md) scores as "
+      "an ack, which is the exact inverse of the signal")
+def _break_r15acktemplate(root):
+    _patch(root, f"{PKG}/core/progress.py",
+           "        if rest and not rest.startswith(placeholder):\n"
+           "            return True",
+           "        return True  # BREAKAGE: the placeholder is not checked")
+
+
+@case("r15acktristate", ["tests/smoke_test.py"],
+      "render an UNMEASURABLE ack as a negative -> 'no transcript on disk' "
+      "prints as 'Claude did not acknowledge', the same untrue statement the "
+      "fix removed, pointed the other way")
+def _break_r15acktristate(root):
+    _patch(root, f"{PKG}/cli/mem.py",
+           '        return sid, None, f"no transcript on disk for session {sid[:8]}"',
+           '        return sid, False, "no transcript"  # BREAKAGE: None is not False')
+
+
+@case("r15acktoolarg", ["tests/smoke_test.py"],
+      "read the ack out of ANY content block instead of assistant TEXT blocks "
+      "-> a grep FOR the sentence, or an edit to the hook that emits it, "
+      "counts as Claude having stated it")
+def _break_r15acktoolarg(root):
+    _patch(root, f"{PKG}/cli/mem.py",
+           '        if isinstance(block, dict) and block.get("type") == "text":\n'
+           "            text = block.get(\"text\")\n"
+           "            if isinstance(text, str):\n"
+           "                yield text",
+           "        if isinstance(block, dict):  # BREAKAGE: any block counts\n"
+           "            yield json.dumps(block, ensure_ascii=False)")
+
+
+@case("r15ladder", ["tests/smoke_test.py"],
+      "re-spell the ~/.claude/projects slug ladder in a second module -> the "
+      "copy is where the next change to the convention is missed, which is "
+      "how the dashboard's survived a sweep that recorded itself as finished")
+def _break_r15ladder(root):
+    _patch(root, f"{PKG}/ui/dashboard.py",
+           "    return find_transcript_dir(project_path)",
+           '    claude_projects = Path.home() / ".claude" / "projects"\n'
+           "    if not claude_projects.is_dir():\n"
+           "        return None\n"
+           '    slug = re.sub(r"[^A-Za-z0-9]", "-", str(project_path.resolve()))\n'
+           "    cand = claude_projects / slug  # BREAKAGE: a fourth copy\n"
+           "    return cand if cand.is_dir() else None")
+
+
+@case("r15driftconverge", ["tests/test_directive_enforcement.py"],
+      "drop the v10 one-turn immunity -> running the remedy the refusal names "
+      "and then touching one more file re-arms the same block at the same "
+      "Stop, and one sensitive Bash call (+20 against a threshold of 12) does "
+      "it alone: a remedy that cannot converge")
+def _break_r15driftconverge(root):
+    _patch(root, f"{PKG}/core/plan.py",
+           "    if checked_at >= 0 and total == checked_at + 1:",
+           "    if False:  # BREAKAGE: no one-turn immunity")
+
+
+@case("r15driftescape", ["tests/test_directive_enforcement.py"],
+      "make the guardian immunity permanent instead of one turn -> a single "
+      "`plan-check` disables drift enforcement for the rest of the plan's "
+      "life, which is worse than not enforcing at all because it still looks "
+      "enforced")
+def _break_r15driftescape(root):
+    _patch(root, f"{PKG}/core/plan.py",
+           "    if checked_at >= 0 and total == checked_at + 1:",
+           "    if checked_at >= 0 and total >= checked_at + 1:  # BREAKAGE")
+
+
+@case("r15statusverdict", ["tests/test_directive_enforcement.py"],
+      "let plan-status interpret the counters privately again -> the screen a "
+      "user reads and the gate that refuses their next turn answer from one "
+      "row with two policies")
+def _break_r15statusverdict(root):
+    _patch(root, f"{PKG}/cli/mem.py",
+           '    if _ps_v["should"]:\n'
+           '        print(f"Drift gate: WOULD REFUSE THE NEXT TURN',
+           "    if False:  # BREAKAGE: the display states no verdict\n"
+           '        print(f"Drift gate: WOULD REFUSE THE NEXT TURN')
+
+
+@case("r15remedyorder", ["tests/test_directive_enforcement.py"],
+      "put the counter reset back FIRST in the remedy text -> everything the "
+      "remedy does after it re-arms the condition the reset just cleared")
+def _break_r15remedyorder(root):
+    _patch(root, f"{PKG}/core/plan.py",
+           '                    "Invoke the @plan-guardian subagent on '
+           '.ccm/PLAN.md, then "',
+           '                    "Run `/cc-mem plan-check` first, then invoke "  '
+           "# BREAKAGE")
+
+
+# ── v2.15.0: the query-time recall channel ─────────────────────────────────
+
+@case("r15recallchannel", ["tests/test_recall.py"],
+      "leave UserPromptSubmit's stdout empty again -> the ONLY automatic "
+      "moment that has a query goes back to injecting nothing, which is why "
+      "82.6% of stored memories had never once reached a context window")
+def _break_r15recallchannel(root):
+    _patch(root, f"{PKG}/hooks/user_prompt.py",
+           "        _emit_recall(cwd, prompt, session_id)",
+           "        pass  # BREAKAGE: the query-bearing channel stays empty")
+
+
+@case("r15recallfloor", ["tests/test_recall.py"],
+      "drop the relevance floor -> BM25 returns its best candidate for ANY "
+      "prompt, so a question about lunch injects a memory about hooks; BM25 "
+      "scores are not comparable across queries, which is why the absolute "
+      "bar has to exist")
+def _break_r15recallfloor(root):
+    _patch(root, f"{PKG}/core/recall.py",
+           "RECALL_MIN_RELEVANCE = 0.45",
+           "RECALL_MIN_RELEVANCE = 0.0  # BREAKAGE: no absolute bar")
+
+
+@case("r15recallgate", ["tests/test_recall.py"],
+      "drop the MINIMUM-LENGTH half of the signal gate -> a two-word fragment "
+      "is retrieved against, reaching rows through the LIKE fallback on three "
+      "or four characters. The other two halves (the resume-token list, the "
+      "content-word count) still refuse 'ok' and '继续', so this case ran "
+      "GREEN until §3a gained a probe that only the length test refuses")
+def _break_r15recallgate(root):
+    _patch(root, f"{PKG}/core/recall.py",
+           "    text = (prompt or \"\").strip()\n"
+           "    if len(text) < RECALL_MIN_PROMPT_CHARS:\n"
+           "        return False",
+           "    text = (prompt or \"\").strip()\n"
+           "    if False:  # BREAKAGE: no minimum length\n"
+           "        return False")
+
+
+@case("r15recallcjk", ["tests/test_recall.py"],
+      "build CJK query terms from word_set's BIGRAMS again -> every term is "
+      "below the trigram tokenizer's 3-character floor and the Chinese recall "
+      "path retrieves NOTHING, silently, which looks exactly like 'no "
+      "relevant memories'")
+def _break_r15recallcjk(root):
+    _patch(root, f"{PKG}/core/recall.py",
+           "        for i in range(len(run) - 2):\n"
+           "            w = run[i:i + 3]",
+           "        for i in range(len(run) - 1):  # BREAKAGE: bigrams\n"
+           "            w = run[i:i + 2]")
+
+
+@case("r15recalland", ["tests/test_recall.py"],
+      "join the query terms with AND (the bare multi-word form) -> one word "
+      "absent from a row excludes it, so a whole user sentence retrieves "
+      "nothing and the channel looks installed while never firing")
+def _break_r15recalland(root):
+    _patch(root, f"{PKG}/core/recall.py",
+           '    return " OR ".join(\'"\' + t.replace(\'"\', \'""\') + \'"\' '
+           "for t in terms)",
+           '    return " ".join(\'"\' + t.replace(\'"\', \'""\') + \'"\' '
+           "for t in terms)  # BREAKAGE: implicit AND")
+
+
+@case("r15recallframe", ["tests/test_recall.py"],
+      "stop registering the recall frame as an authority marker -> a stored "
+      "memory closes </cc-memory-recall> and opens a <system-reminder> "
+      "OUTSIDE it, and memory_add is a model-invokable MCP tool")
+def _break_r15recallframe(root):
+    _patch(root, f"{PKG}/core/privacy.py",
+           '    r"|cc-memory-recall"\n',
+           "")
+
+
+@case("r15recalldedup", ["tests/test_recall.py"],
+      "stop excluding memories already shown this session -> the same rows "
+      "are re-injected every turn, spending the budget to tell the model what "
+      "is already in front of it")
+def _break_r15recalldedup(root):
+    _patch(root, f"{PKG}/hooks/user_prompt.py",
+           "                          prompt, exclude_ids=_already_shown(state_dir))",
+           "                          prompt, exclude_ids=())  # BREAKAGE")
+
+
+@case("r15recallprivate", ["tests/test_recall.py"],
+      "retrieve against the RAW prompt instead of the cleaned one -> text the "
+      "user wrapped in <private> is used as a search query and the rows it "
+      "matches are injected into the model's context")
+def _break_r15recallprivate(root):
+    _patch(root, f"{PKG}/hooks/user_prompt.py",
+           "        _emit_recall(cwd, prompt, session_id)",
+           '        _emit_recall(cwd, data.get("prompt", ""), session_id)'
+           "  # BREAKAGE: raw")
+
+
+@case("r15recallcount", ["tests/test_recall.py"],
+      "stop incrementing recall_count -> the one signal that distinguishes "
+      "'the ranking liked this row' from 'a user actually asked about it' is "
+      "never recorded, and inject-usage reports 0% forever")
+def _break_r15recallcount(root):
+    _patch(root, f"{PKG}/core/db.py",
+           "                    f\"UPDATE memories SET recall_count = recall_count + 1, \"",
+           "                    f\"UPDATE memories SET recall_count = recall_count + 0, \""
+           "  # BREAKAGE")
+
+
+@case("r15judgedefault", ["tests/smoke_test.py"],
+      "run the LLM judge whether or not --judge was passed -> a read-only "
+      "status command about the user's own database silently spends an "
+      "Anthropic call every time it is run, which is why layer 2 is opt-in "
+      "and layer 1 is not")
+def _break_r15judgedefault(root):
+    _patch(root, f"{PKG}/cli/mem.py",
+           '    if getattr(args, "judge", False):\n'
+           "        _judge_usage_section(db, pid, memory_dir, args.project)",
+           "    _judge_usage_section(db, pid, memory_dir, args.project)"
+           "  # BREAKAGE: always")
+
+
+@case("r15judgetristate", ["tests/smoke_test.py"],
+      "render a judge that could not RUN as 'unused' -> an outage of ours "
+      "(no credential, a refused call, an unparsable answer) is reported as a "
+      "finding about Claude's behaviour — the same untrue statement the ack "
+      "signal's tri-state exists to refuse, with an API bill attached")
+def _break_r15judgetristate(root):
+    _patch(root, f"{PKG}/llm/usage_judge.py",
+           "    out: Dict[int, Tuple[str, str]] = {\n"
+           "        int(i): (VERDICT_UNKNOWN, \"\") for i in ids}",
+           "    out: Dict[int, Tuple[str, str]] = {\n"
+           "        int(i): (VERDICT_UNUSED, \"\") for i in ids}  # BREAKAGE")
+
+
+@case("r15judgeforge", ["tests/smoke_test.py"],
+      "print the judged memory's content RAW instead of through "
+      "neutralize_inline -> a newline in a stored row forges an extra verdict "
+      "line, in output Claude reads whenever Claude is the one running "
+      "/cc-mem, and `memory_add` is a model-invokable MCP tool")
+def _break_r15judgeforge(root):
+    _patch(root, f"{PKG}/cli/mem.py",
+           "        content = neutralize_inline(\n"
+           '            next((r["content"] for r in rows if r["id"] == mid), ""))',
+           '        content = next((r["content"] for r in rows '
+           'if r["id"] == mid), "")  # BREAKAGE')
 
 
 def verify_anchors():
