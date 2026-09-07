@@ -9,7 +9,7 @@ Your project's decisions, results, bugs and plans survive compaction, session
 boundaries, and closed terminals — the next session is *forced* to read them
 before it does anything, and what is stored is *reconciled*, never stacked.
 
-[![version](https://img.shields.io/badge/version-2.14.1-blue.svg)](CHANGELOG.md)
+[![version](https://img.shields.io/badge/version-2.15.0-blue.svg)](CHANGELOG.md)
 [![license](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![python](https://img.shields.io/badge/python-3.8%2B-blue.svg)](pyproject.toml)
 [![dependencies](https://img.shields.io/badge/runtime%20deps-0-brightgreen.svg)](#requirements)
@@ -25,7 +25,7 @@ before it does anything, and what is stored is *reconciled*, never stacked.
 - [What this is](#what-this-is)
 - [The problem it attacks](#the-problem-it-attacks)
 - [Before and after](#before-and-after)
-- [What it does — six capabilities](#what-it-does--six-capabilities)
+- [What it does — seven capabilities](#what-it-does--seven-capabilities)
 - [How it works](#how-it-works)
 - [Why this one is different](#why-this-one-is-different)
 - [Quick start](#quick-start)
@@ -42,7 +42,7 @@ before it does anything, and what is stored is *reconciled*, never stacked.
 - [Development](#development)
 - [Troubleshooting](#troubleshooting)
 - [Roadmap and known limits](#roadmap-and-known-limits)
-- [What's new in v2.14.0](#whats-new-in-v2140)
+- [What's new in v2.15.0](#whats-new-in-v2150)
 - [Documentation map](#documentation-map)
 - [License](#license)
 
@@ -283,7 +283,7 @@ by being injected", and nothing injected it. That finding became the v2.12.2
 fix (see [CHANGELOG.md](CHANGELOG.md)); these captures are the v2.12.2
 re-run, and the ledger layer above is what it buys.
 
-## What it does — six capabilities
+## What it does — seven capabilities
 
 **Capability 1 — capture.** Memories are extracted at every conversation
 boundary: per turn (a Haiku observer reads that turn's tool observations),
@@ -338,6 +338,21 @@ compact: this repository measured 349 memories accumulated in one month
 against a 17-day-old consolidation marker. `/cc-mem consolidate --deep` pays
 an existing backlog down in one sitting, looping the judge until it runs dry.
 
+**Capability 7 — query-time recall (v2.15.0).** Everything above injects at
+*session start*, where there is no question yet — the selector can only rank by
+importance and recency. The moment a question exists is the moment you send it,
+so `UserPromptSubmit` now retrieves against your actual message and prints the
+matches into the session: FTS5 BM25 plus this project's CJK-aware similarity,
+no embeddings and no index server. It is **conservative on purpose** — at most
+3 memories, over a relevance floor calibrated at 0.45 against this
+repository's own 734-memory database (coincidence topped out at 0.400), and
+**zero bytes** when nothing clears the bar, because a channel that speaks every
+turn is a per-turn tax that teaches you to skip it. `memories.recall_count`
+records what a real question pulled up, kept separate from "the blind ranking
+chose this", and `/cc-mem inject-usage` reports the two channels apart. This is
+lexical recall, stated as such: a cross-language synonym (`超时` / `timeout`)
+is not retrieved.
+
 ## How it works
 
 ```
@@ -345,6 +360,8 @@ an existing backlog down in one sitting, looping the judge until it runs dry.
 │                                                                           │
 │  UserPromptSubmit ──▶ create .ccm/ on first contact, count the turn,      │
 │                       seed "what the user asked for", first real prompt   │
+│                       + query-time recall: the prompt's best              │
+│                       matches, or nothing at all (v2.15.0)                │
 │                                                                           │
 │  PostToolUse     ──▶ live plan anchor (ExitPlanMode → captured plan,      │
 │                       TodoWrite → step sync, edits → drift counters)      │
@@ -570,7 +587,9 @@ Inside Claude Code (path-agnostic — the wrapper resolves the plugin root):
 /cc-mem observations                Raw PostToolUse rows awaiting extraction
 
 # ── reading memory ─────────────────────────────────────────────────────────
-/cc-mem search "<query>"            FTS5 search
+/cc-mem search "<query>"            FTS5 search (trigram-tokenized, so CJK
+                                    segments; a query under 3 CJK chars is
+                                    answered by the substring fallback)
 /cc-mem list [category]             Recent memories, optionally by category
 /cc-mem topics                      Topic summaries
 /cc-mem keywords                    Project vocabulary by frequency
@@ -588,7 +607,12 @@ Inside Claude Code (path-agnostic — the wrapper resolves the plugin root):
 # ── handoff ────────────────────────────────────────────────────────────────
 /cc-mem progress                    Regenerate .ccm/PROGRESS.md and print it
 /cc-mem inject-show                 What the last SessionStart injected
-/cc-mem inject-usage                Did Claude actually read PROGRESS.md / MEMORY.md
+/cc-mem inject-usage [--window N] [--judge]
+                                    Layer 1 (free, deterministic): did Claude
+                                    read PROGRESS.md / MEMORY.md, was the ack
+                                    stated, which memories reached a context.
+                                    --judge adds layer 2: one LLM call judging
+                                    whether a delivered memory was USED
 
 # ── live plan anchor ───────────────────────────────────────────────────────
 /cc-mem plan-status                 Counters + freshness summary
@@ -710,7 +734,7 @@ Six hook commands <!--ce:hooks--> across five Claude Code events, declared in
 
 | Event | Script | Timeout | Job |
 |---|---|---|---|
-| `UserPromptSubmit` | `hooks/user_prompt.py` | 8 s | Auto-init `.ccm/`, count the turn, seed the first real request once per session |
+| `UserPromptSubmit` | `hooks/user_prompt.py` | 8 s | Auto-init `.ccm/`, count the turn, seed the first real request once per session, then **query-time recall** on stdout (v2.15.0) |
 | `PostToolUse` | `hooks/post_tool_use.py` | 8 s | Live plan anchor **in every mode**, then one observation row per observed tool |
 | `Stop` | `hooks/stop.py` | 22 s | Haiku observer, per-turn PROGRESS patch, idle reorg every 5 turns, backpressure probe, plan enforcement |
 | `PreCompact` (sync) | `hooks/pre_compact.py` | 120 s | Extract → reconcile → full-rewrite PROGRESS.md → archive |
@@ -891,63 +915,69 @@ has to rediscover:
 
 ---
 
-## What's new in v2.14.0
+## What's new in v2.15.0
 
-**A project's identity is its database, not the path string inside it.** A
-whole-repository debug pass (six read-only reviewers, every finding reproduced
-before it was reported) found that `projects.path` *was* the identity, and
-every surface decided "which project is this" with its own path arithmetic.
-Moving or renaming a project directory minted a second row, and every memory,
-session, progress row, plan and directive went dark on every surface.
+**The channel that had a query, and the search that could not read Chinese.**
+Six defects arrived from a project using this plugin, each with a `file:line`
+and a reading; each was reproduced here before it was touched, and two of them
+turned out to be halves of a missing feature.
 
-- **One comparable spelling of a path** — `core.layout.canonical_path`. A
-  moved project keeps its row, a sibling's row is never taken, and `status` /
-  `list` never create a row just to answer a question.
-- **The consolidation marker follows the row**, so a manual `/cc-mem
-  consolidate --project .` is no longer followed by a redundant background run.
-- **A handle opened on a pre-v2.13.0 `memory/` follows the rename to
-  `.ccm/`** — one way, and only after a connect has failed — instead of
-  failing on every operation once another surface completes the move
-  (Windows, where an open handle refuses the rename).
-- **Four more findings closed at their own root:** `<PRIVATE>…</PRIVATE>`
-  is stripped and escaped like its lowercase form; the Stop hook's escape
-  budget resets when a refused condition is resolved, instead of turning
-  enforcement advisory for the rest of the session after three refusals; a
-  missing home directory no longer discards an explicit `ANTHROPIC_API_KEY`;
-  `/save-memories` writes to the database the hooks read.
-- **Four gate checkers stopped certifying what they had not checked** — a
-  documentation surface must be *named*, not merely contained; a count with
-  two modifier words is still a count; a citation the checker could only
-  bounds-check is reported in those words; and `--emit-marker` refuses to
-  re-stamp a translation nobody translated (`--translation-unchanged "<why>"`
-  for an English-only edit).
-- **The rest of the debug pass, closed — twenty-seven findings, each at its
-  own cause.** The full report is in the tree:
-  [docs/debug-pass-2026-09.md](docs/debug-pass-2026-09.md) (an evidence
-  record, untranslated). Among them:
-  - *State directory:* a transient probe failure no longer orphans a
-    pre-v2.13.0 `memory/` for good, and a linked `.ccm` is never followed or
-    written through.
-  - *Project root:* a project called `external` resolves, and a WSL-mounted
-    profile is a boundary.
-  - *Handoff:* the SessionStart refresh decides fill-only-empty inside the
-    write and no longer re-mines an empty todo list from another session's
-    transcript; `/ccm-load` is no longer the session's request.
-  - *Writer and hooks:* a restated fact keeps its higher importance
-    (`reinforced`), the Stop advisory is neutralised, and a stale
-    consolidation lock no longer vetoes backpressure forever.
-  - *Surfaces:* the CLI answers bad input with one line instead of seventeen
-    tracebacks; the shipped exe's "Open Dashboard" starts; a dotfiles-managed
-    `settings.json` keeps its hooks; a stranger's `package.json` cannot write
-    sections into a generated CLAUDE.md.
-  - *Gates:* markers never land in the repository, and the falsification
-    suite gained the negative control it never had.
+- **Search can see Chinese.** `memories_fts` shipped with no `tokenize=`, so
+  fts5 used `unicode61`, which never segments Han, kana or Hangul — a whole
+  Chinese clause indexed as ONE token. Measured against a row reading
+  `用户要求把超时设为三十秒`: `MATCH '超时'` returned 0, the whole clause
+  returned 1. The index is `tokenize='trigram'` now, chosen by a runtime probe
+  (older SQLite has no trigram tokenizer), and an index built by an earlier
+  version re-tokenises itself on open.
+- **An empty search result is never an answer.** The `LIKE` fallback used to
+  run only when the FTS triggers were missing, so in the healthy case "the
+  index found nothing" came back as fact — and the MCP layer reports an empty
+  result set as a SUCCESS, so the model was told the project has no such
+  memory. That branch is unconditional now. Two more, found by the new gate on
+  its first run: `search ""` and `search "\x00"` each returned every active
+  row, and both spellings are reachable from the web viewer and from the
+  model-invokable `memory_search`.
+- **Query-time recall — and why this project does not need a vector database.**
+  The report asked which write path produces the least-used memories, with the
+  reading that 82.6 % of stored rows had never been injected. The instrument
+  for that (`memories.recall_count`) exposed the real finding: this plugin had
+  **two** moments at which it could put memories in front of Claude and used
+  one. The only automatic moment that HAS a user query wrote to the database
+  and printed nothing. See [Capability 7](#what-it-does--seven-capabilities).
+- **`/cc-mem inject-usage` computes the signals it promised.** Its docstring
+  advertised an ack measurement no line of code performed. The ack is measured
+  now, from the transcript of the session that received the last injection,
+  through the same constant the hook EMITS — one demand, one detector — and it
+  is **tri-state**: `unmeasured` is never printed as `no`. The observation
+  window is `--window` and the output states it. **`--judge`** adds an opt-in
+  second layer: one LLM call that reads that session's own replies and judges,
+  per delivered memory, whether it was `used` / `unused` / `unknown`. Layer 1
+  is free and always runs; layer 2 costs an API call and is therefore asked
+  for, never assumed — and `unknown` is never rendered as `unused`, because an
+  outage of ours is not evidence about Claude.
+- **A MERGE stopped destroying the text it replaced** — both rewriting
+  branches archive the old row and link the new one to it, so the superseded
+  wording stays recoverable.
+- **The drift remedy converges.** Running `/cc-mem plan-check` — the remedy the
+  refusal itself names — and then touching one more file used to re-arm the
+  same block at the same Stop; one sensitive Bash call did it alone. A guardian
+  check now grants immunity for exactly the turn it happened in, and the remedy
+  text runs the guardian FIRST, records it LAST, so nothing accrues after the
+  reset. Separately, `plan-status` and the Stop gate read **one** verdict
+  function, so the screen can no longer disagree with the refusal.
 
-v2.13.0 moved per-project state from `memory/` to `.ccm/` — dotted state
-beside `.git`, migrated one way on first write and identified by content,
-never by name. v2.12.x brought backpressure-triggered consolidation,
-`directive-edit`, the step-reference audit, `paths` / `--json` / `--full`,
-CI-built releases and the [Before and after](#before-and-after) captures.
+Two of the release's own falsification cases ran GREEN on their first drive,
+and the **checks** were fixed rather than the cases: a zero-byte assertion is
+evidence only when paired with a control that emits, and a gate made of three
+tests is only measured by a probe that isolates each one.
+
+v2.14.x closed a 38-finding debug pass at its roots — a project's identity
+became its database rather than the path string inside it — and tightened four
+gate checkers that had been certifying what they never checked. v2.13.0 moved
+per-project state from `memory/` to `.ccm/`, migrated one way on first write
+and identified by content, never by name. v2.12.x brought
+backpressure-triggered consolidation, the step-reference audit, CI-built
+releases and the [Before and after](#before-and-after) captures.
 
 Every earlier release is in **[CHANGELOG.md](CHANGELOG.md)**, which is the
 single history of this project — this README documents what the software *is*,
