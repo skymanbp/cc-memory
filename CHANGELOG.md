@@ -7,7 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [Unreleased]
+## [2.15.1] — 2026-09-18
+
+### PROGRESS.md § 4 rendered a column that no longer has a writer
+
+§ 4 read `progress.plan`, a free-text column the structured plan store replaced and
+left with no writer. On a live project holding a 31-step plan it printed
+*"(no plan recorded)"* on every regeneration — measured at 0 characters in the same
+second `plan-status` reported *"6/31 steps done · active step #5"*. Two readers of one
+concept, one of them pointed at a dead field, so the generated handoff said "nothing
+here" where the truth was "here, and this far along". A session reading PROGRESS.md to
+find out where the work stood was told the project had no plan at all.
+
+`core/progress.py` gains `_render_plan_section`, which reads `get_plan_active` and
+renders a SUMMARY: the goal, N/M steps done, the active step marked, then the steps
+still to do. PROGRESS.md is the handoff view and step notes carry a long project's
+running commentary (85 KiB on the plan that surfaced this), so the list is capped by
+`_MAX_PLAN_STEPS_RENDERED` and the cap announces itself, like the § 3 todo cap beside
+it. PLAN.md remains the full document. A legacy free-text plan, if any project still
+has one, is kept below the summary rather than dropped, and an unreadable plan store
+degrades to a note instead of taking the whole rewrite down.
+
+Found by the plan-guardian subagent, which reported two drifts; the other one — *"step
+5 is marked `[ ]` but is in progress"* — was checked and REJECTED, because the checkbox
+only ever means not-done and in-progress lives in the DB. A guardian's finding is a
+lead, not a verdict.
+
+Gate: `tests/test_plan_carryover.py` § 8, eight checks — § 4 no longer claims there is
+no plan, it carries the goal and the progress line, it marks the active step, a finished
+step is not listed as work still to do, the reverse control (a project with NO plan
+still says so), a legacy free-text plan survives, the cap announces itself, and a broken
+store degrades. Verified RED without the fix: the first four fail on *"(no plan
+recorded)"*. It lands in the carryover gate rather than as a thirteenth gate file
+because this is plan-store behaviour and the carryover gate IS the plan-store gate — a
+new gate file would have moved the gate count through CLAUDE.md, both READMEs,
+CONTRIBUTING, the PR template and two CI labels for one function.
 
 ### The gate count nothing was standing behind
 

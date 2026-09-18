@@ -2,7 +2,7 @@
 
 ## Project: cc-memory
 
-**Claude Code persistent memory plugin (v2.15.0)** — anti-patch reconcile-on-write
+**Claude Code persistent memory plugin (v2.15.1)** — anti-patch reconcile-on-write
 + LLM-judged semantic de-duplication with **backpressure-triggered
 consolidation**, forced PROGRESS.md handoff with per-session annotation, live
 PLAN.md anchor with plan-refiner / plan-guardian subagents + mandatory
@@ -12,9 +12,25 @@ AI-judged extraction with Haiku
 (optional local Ollama fallback).
 
 - **Language**: Python 3.8+ (pure stdlib, zero pip dependencies at runtime)
-- **Version**: 2.15.0
+- **Version**: 2.15.1
 - **License**: MIT
 - **Platform**: Windows-primary, cross-platform compatible (Tkinter required for GUI)
+
+## What changed in v2.15.1 (over v2.15.0)
+
+**Two generated surfaces that were reporting on fields nobody writes any more.**
+Both were found by reading what the tree actually prints rather than what it claims.
+Rules a future change must not break:
+
+1. **A generated document reads the STORE, not the column the store replaced.**
+   `core/progress.py:_render_plan_section` renders § 4 from `get_plan_active`.
+   `progress.plan` is a free-text column with no writer; reading it printed
+   *"(no plan recorded)"* over a live 31-step plan. Gate:
+   `tests/test_plan_carryover.py` § 8.
+2. **A count a reader can see is bound to the set it counts.** Every gate count in
+   `README.md`, `README.zh.md`, `CONTRIBUTING.md` and the PR template is checked
+   against `len(GATES)`, in both languages, fenced command comments included. Gate:
+   `tests/smoke_test.py` § v2.15.1 gate count.
 
 ## What changed in v2.15.0 (over v2.14.1)
 

@@ -1,4 +1,4 @@
-<!-- i18n-source: README.md | sha256: 46c3a068531e4cd3 | version: 2.15.0 | translated: 2026-09-07 | translation: 9cec7c685c6d89a0 -->
+<!-- i18n-source: README.md | sha256: d261b35641aa3941 | version: 2.15.1 | translated: 2026-09-18 | translation: f41198cf3a57467d -->
 > [English](README.md) · **简体中文**
 
 <div align="center">
@@ -10,7 +10,7 @@
 下一个会话在动手之前会被**强制**先读它们，而存下来的东西是**被调和过的**，
 绝不是堆叠出来的。
 
-[![version](https://img.shields.io/badge/version-2.15.0-blue.svg)](CHANGELOG.md)
+[![version](https://img.shields.io/badge/version-2.15.1-blue.svg)](CHANGELOG.md)
 [![license](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![python](https://img.shields.io/badge/python-3.8%2B-blue.svg)](pyproject.toml)
 [![dependencies](https://img.shields.io/badge/runtime%20deps-0-brightgreen.svg)](#运行要求)
