@@ -1,4 +1,4 @@
-<!-- i18n-source: ARCHITECTURE.md | sha256: add4be4d6460cc71 | version: 2.15.0 | translated: 2026-09-07 | translation: 0fbe8e792c9c8ec5 -->
+<!-- i18n-source: ARCHITECTURE.md | sha256: aa4067504e8d1c1e | version: 2.15.0 | translated: 2026-09-18 | translation: 9e5261dfc14c7e87 -->
 > [English](ARCHITECTURE.md) · **简体中文**
 
 # cc-memory — 架构
@@ -527,7 +527,7 @@ SessionStart：
 ```
 
 上面的调用签名都是真实的：`write_progress_md(db, project_id, memory_dir)`
-（`core/progress.py:331-490`；调用点 `pre_compact.py:775`、`stop.py:523`、
+（`core/progress.py:498-677`；调用点 `pre_compact.py:775`、`stop.py:523`、
 `user_prompt.py:133`、`session_start.py:1107`、`mcp/server.py:243`、
 `cli/mem.py:1304`）。PROGRESS.md 的结构规格见
 [docs/CONTRACTS.md](CONTRACTS.md#handoff-contract)。
@@ -753,7 +753,7 @@ v2.4.2 才成立：`_extract_via_llm` 的 `except` 元组此前不包含 `Runtim
 
 写入方，便于溯源：`MEMORY.md` ← `memory_writer.regenerate_memory_index`
 （`memory_writer.py:261-370`）；`PROGRESS.md` ← `core.progress.write_progress_md`
-（`progress.py:331-490, 366`）；`PLAN.md` ← `core.plan.write_plan_md`
+（`progress.py:498-677, 366`）；`PLAN.md` ← `core.plan.write_plan_md`
 （`plan.py:783-832`）；`.plan_history/` ← `plan.py:783-832`；`.last_save.json` ←
 `pre_compact.py:737, 771`；`.last_inject.json` ← `session_start.py:291-309`
 （临时文件 + `os.replace`，是真正原子的，不同于 `.last_save.json` 用的普通写）；
@@ -961,7 +961,7 @@ home 边界是双份的：环境所声称的（`HOME`/`USERPROFILE`/`Path.home()
 
 旧的 v2.0 `SESSION_HANDOFF.md` 文件会在 v2.1 下的首次 PreCompact 时被重命名为
 `SESSION_HANDOFF.md.v2.bak`（一次性迁移 `core.progress.migrate_legacy_handoff`，
-`progress.py:676-694`）。
+`progress.py:735-753`）。
 
 ---
 

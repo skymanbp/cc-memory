@@ -1,4 +1,4 @@
-<!-- i18n-source: CONTRACTS.md | sha256: 7dd620777b68bac4 | version: 2.15.0 | translated: 2026-09-07 | translation: c4513f66c04cdf36 -->
+<!-- i18n-source: CONTRACTS.md | sha256: c2dacb797374dcc2 | version: 2.15.0 | translated: 2026-09-18 | translation: 8ff1dc5265acacac -->
 > [English](CONTRACTS.md) · **简体中文**
 
 # cc-memory — 契约（Contracts）
@@ -333,7 +333,7 @@ v2.0 把 `memory/SESSION_HANDOFF.md` 写成一份*追加式*文档——每次 P
 v2.1 用 **PROGRESS.md**（始终从一条 SQL 行整篇重写）+ **SessionStart 处强制注入的
 `<system-reminder>`** 修掉了这一点。旧的 `SESSION_HANDOFF.md` 会在 v2.1+ 下的首次
 PreCompact 时被重命名为 `SESSION_HANDOFF.md.v2.bak`（一次性迁移
-`migrate_legacy_handoff`，`core/progress.py:676-694`，从 `hooks/pre_compact.py:560`
+`migrate_legacy_handoff`，`core/progress.py:735-753`，从 `hooks/pre_compact.py:560`
 调用）。
 
 ### PROGRESS.md 就是唯一真相来源（SOT）
@@ -341,7 +341,7 @@ PreCompact 时被重命名为 `SESSION_HANDOFF.md.v2.bak`（一次性迁移
 `.ccm/PROGRESS.md` 由 `cc_memory/core/progress.py:write_progress_md` 从 `progress`
 SQL 行生成。Schema 见 `cc_memory/core/db.py:_MIGRATIONS:v3_progress`（`db.py:176-190`），
 外加 `db.py:2925-2979` 处的两个 v5 会话标注列。§0 还会经 `db.get_recent_sessions`
-读取 `sessions` / `session_summaries` 表（`core/progress.py:373`；`core/db.py:2925-2979`）：
+读取 `sessions` / `session_summaries` 表（`core/progress.py:432`；`core/db.py:2925-2979`）：
 
 | 列 | 类型 | 主来源 · 兜底 |
 |--------|------|---------------------------|
@@ -349,8 +349,8 @@ SQL 行生成。Schema 见 `cc_memory/core/db.py:_MIGRATIONS:v3_progress`（`db.
 | `current_request` | TEXT | UserPromptSubmit 首条非脚手架提示、每会话一次（`user_prompt.py:330`）→ PreCompact 的 `_first_user_request(window.head)`（`pre_compact.py:269-311`）—— 它会扫描至多 200 条记录，越过开头的 `queue-operation` / `attachment` 元数据行，并跳过内容为空的 user 行（`pre_compact.py:269-311`，v2.4.2）→ `session_summaries.request`（`progress.py:241`） |
 | `status_done` | TEXT | `session_summaries.completed`（`progress.py:236`），PreCompact 用抽取结果里 `result` / `decision` 类的记忆填充（`pre_compact.py:307-364`），仅当抽取没给出任何结论时才退回到观察到的 Edit/Write 路径列表。v2.8.0 以前**永远**走那条路径列表，于是 §2 的 “Done” 渲染出来是一份文件清单，而不是“做完了什么”。若为空，SessionStart 会补上（`session_start.py:589-590`） |
 | `status_in_flight` | TEXT | `session_summaries.learned`，由抽取结果里 `arch` / `config` / `bug` 类的记忆填充（`pre_compact.py:666-700`）。v2.8.0 以前 PreCompact 把它硬编码成 `""`，所以 §2 的 “In-flight” 无条件渲染成 `*(none active)*` —— 那是结构性的，不是因为真的没有在办事项 |
-| `status_blocked` | TEXT | 显式的 `patch_progress(status_blocked=...)` —— 今天树内没有任何调用方这样做；它是留给外部工具的 API。全仓库 grep 只能找到 schema 默认值（`core/db.py:2806-2845,853`）、空播种（`core/progress.py:278`）和读取处（`core/progress.py:278`） |
-| `open_todos` | JSON | PreCompact 经 `ext["latest_todos"]` 调用 `extract_latest_todo_state(window)`（`core/extractor.py:478-513,558`；`pre_compact.py:630,656`）→ SessionStart 第 3 级：挖掘上一次会话的 transcript（`session_start.py:965`）→ **最后手段**：把 `session_summary.next_steps` 按 `;` 切分（`session_start.py:965`）。只保留非 `completed` 的 todo（`progress.py:278`） |
+| `status_blocked` | TEXT | 显式的 `patch_progress(status_blocked=...)` —— 今天树内没有任何调用方这样做；它是留给外部工具的 API。全仓库 grep 只能找到 schema 默认值（`core/db.py:2806-2845,853`）、空播种（`core/progress.py:282`）和读取处（`core/progress.py:282`） |
+| `open_todos` | JSON | PreCompact 经 `ext["latest_todos"]` 调用 `extract_latest_todo_state(window)`（`core/extractor.py:478-513,558`；`pre_compact.py:630,656`）→ SessionStart 第 3 级：挖掘上一次会话的 transcript（`session_start.py:965`）→ **最后手段**：把 `session_summary.next_steps` 按 `;` 切分（`session_start.py:965`）。只保留非 `completed` 的 todo（`progress.py:282`） |
 | `plan` | TEXT | `session_summaries.next_steps` —— 若有最新 TodoWrite 的 pending 项则取自它，否则取自 LLM 抽取出的 `task` 类记忆（`pre_compact.py:462-468`）；在 `progress.py:255` 传播，在 `session_start.py:965` 按“空则填”补齐 |
 | `critical_context` | JSON | importance ≥ 4 的前 10 条记忆，内容截断到 200 字符（`progress.py:107-113`；`session_start.py:966`） |
 | `files_touched` | JSON | `observations` 表（`pre_compact.py:446-453` → `progress.py:128-134`；Stop 每回合打补丁 `stop.py:193-211`；SessionStart 第 2C 级 `session_start.py:966`）→ 第 3 级：对上一次会话 transcript 跑 `extract_file_changes`（`session_start.py:966`） |
@@ -402,7 +402,7 @@ sid），每一行形如
    - 触发：Claude Code 的自动压缩，或手动 `/compact`。
    - `collect_progress_state(...)` 从
      `extracted_memories + observations + session_summaries` 构建完整状态
-     （`progress.py:404`）。
+     （`progress.py:463`）。
    - `db.tag_progress_session(...)` **先**运行，这样标签才能存活
      （`pre_compact.py:773`；保留逻辑见 `db.py:2899-2923`）。
    - `db.upsert_progress(**all_fields)` 覆盖整行（`pre_compact.py:768`）。

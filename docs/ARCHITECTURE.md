@@ -580,7 +580,7 @@ SessionStart:
 ```
 
 Call signatures above are the real ones: `write_progress_md(db, project_id,
-memory_dir)` (`core/progress.py:331-490`; call sites `pre_compact.py:775`,
+memory_dir)` (`core/progress.py:498-677`; call sites `pre_compact.py:775`,
 `stop.py:473`, `user_prompt.py:52`, `session_start.py:944`, `mcp/server.py:243`,
 `cli/mem.py:1304`). See
 [docs/CONTRACTS.md](CONTRACTS.md#handoff-contract) for the PROGRESS.md
@@ -834,7 +834,7 @@ Per-project state lives at `<project>/.ccm/`:
 
 Writers, for traceability: `MEMORY.md` ← `memory_writer.regenerate_memory_index`
 (`memory_writer.py:261-370`); `PROGRESS.md` ← `core.progress.write_progress_md`
-(`progress.py:331-490, 366`); `PLAN.md` ← `core.plan.write_plan_md`
+(`progress.py:498-677, 366`); `PLAN.md` ← `core.plan.write_plan_md`
 (`plan.py:783-832`); `.plan_history/` ← `plan.py:783-832`; `.last_save.json` ←
 `pre_compact.py:737, 771`; `.last_inject.json` ← `session_start.py:291-309`
 (tempfile + `os.replace`, genuinely atomic, unlike the plain write used for
@@ -1118,7 +1118,7 @@ exist because they cannot import this module and must be kept in sync:
 
 Old v2.0 `SESSION_HANDOFF.md` files are renamed to `SESSION_HANDOFF.md.v2.bak`
 on first PreCompact under v2.1 (one-shot migration
-`core.progress.migrate_legacy_handoff`, `progress.py:676-694`).
+`core.progress.migrate_legacy_handoff`, `progress.py:735-753`).
 
 ---
 

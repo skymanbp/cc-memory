@@ -13,6 +13,8 @@ pins the mandatory gate:
   §5 disposition without a reason → REFUSED
   §6 CLI plan-clear with unfinished steps → exit 1 without --reason,
      OK with --reason, archive written
+  §8 PROGRESS.md §4 renders the plan STORE — it read a free-text column the store
+     replaced, so a project with a plan loaded still printed "(no plan recorded)"
 
 Run:  python tests/test_plan_carryover.py
 """
@@ -97,6 +99,7 @@ sys.path.insert(0, str(REPO / "cc_memory"))
 from core.db import MemoryDB          # noqa: E402  -- why: imports must follow the sys.path bootstrap above; repo tests run as plain scripts
 from core.layout import MEMORY_DIRNAME as _MEM  # noqa: E402  -- why: same bootstrap ordering
 from core import plan as plan_mod     # noqa: E402  -- why: same bootstrap ordering
+from core import progress as prog_mod  # noqa: E402  -- why: same bootstrap ordering (§8)
 from core.encoding_setup import enable_utf8_io  # noqa: E402  -- why: same bootstrap ordering
 
 # Every section header below contains non-ASCII (§, →, 换计划不许丢步骤). Under
@@ -310,6 +313,60 @@ def main() -> None:
           "carryover advisory" in out7 and "XXXXXX" in out7, out7[:400])
     check("advisory says context is not compared at all",
           "`context` is free text" in out7, out7[:400])
+
+    print("§8 PROGRESS.md §4 reads the plan STORE, not the dead free-text column")
+    # §4 rendered `progress.plan`, a column the structured store replaced and left with no
+    # writer. On a live project holding a 31-step plan with an active step, §4 still printed
+    # "(no plan recorded)" on every regeneration — measured at 0 characters in the same
+    # second `plan-status` reported "6/31 steps done · active step #5". Two readers of one
+    # concept, one pointed at a dead field, and the generated artifact says "nothing here"
+    # where the truth is "here, and this far along". It lived because no gate had ever
+    # rendered §4 for a project that HAS a plan.
+    root8, mem8, db8, pid8 = _mk_project()
+    titles8 = ["wire the token refresh flow", "ship the export panel",
+               "retire the legacy importer", "document the gate"]
+    plan8 = _plan("goal eight", titles8)
+    plan8["steps"][0]["status"] = "done"
+    plan_mod.apply_refined_plan(db8, pid8, plan8, memory_dir=mem8)
+    db8.upsert_plan_active(pid8, active_step=2)
+
+    def _section4(db, pid, memory_dir):
+        text = prog_mod.write_progress_md(db, pid, memory_dir).read_text(encoding="utf-8")
+        assert "## 4. Plan" in text, "PROGRESS.md has no §4 at all"
+        return text.split("## 4. Plan")[1].split("## 5.")[0]
+
+    sec8 = _section4(db8, pid8, mem8)
+    check("§4 no longer claims there is no plan",
+          "(no plan recorded)" not in sec8, sec8[:200])
+    check("§4 carries the goal and the progress line",
+          "goal eight" in sec8 and "1/4 steps done" in sec8, sec8[:200])
+    check("§4 marks the active step",
+          "active step #2" in sec8 and "← ACTIVE" in sec8, sec8[:300])
+    check("the finished step is not listed as work still to do",
+          titles8[0] not in sec8 and all(t in sec8 for t in titles8[1:]), sec8[:300])
+
+    root8b, mem8b, db8b, pid8b = _mk_project()
+    check("reverse control: a project with NO plan still says so",
+          "(no plan recorded)" in _section4(db8b, pid8b, mem8b))
+    db8b.upsert_progress(pid8b, plan="1. the old free-text plan line")
+    check("a legacy free-text plan is still shown, not dropped",
+          "the old free-text plan line" in _section4(db8b, pid8b, mem8b))
+
+    many8 = [f"step number {i}" for i in range(1, 21)]
+    root8c, mem8c, db8c, pid8c = _mk_project()
+    plan_mod.apply_refined_plan(db8c, pid8c, _plan("a long plan", many8), memory_dir=mem8c)
+    sec8c = _section4(db8c, pid8c, mem8c)
+    check("the render cap announces itself instead of truncating in silence",
+          sec8c.count("\n- [") <= prog_mod._MAX_PLAN_STEPS_RENDERED
+          and "more (render capped at" in sec8c, sec8c[-200:])
+
+    class _BrokenStore:
+        def get_plan_active(self, _pid):
+            raise sqlite3.OperationalError("no such table: plan_active")
+
+    check("an unreadable plan store degrades to a note instead of taking §4 down",
+          any("plan unavailable" in line
+              for line in prog_mod._render_plan_section(_BrokenStore(), pid8, {})))
 
     print(f"\n{'=' * 60}\nRESULT: {PASS} passed, {FAIL} failed\n{'=' * 60}")
 

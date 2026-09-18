@@ -388,7 +388,7 @@ v2.1 fixed this with **PROGRESS.md** (always-full-rewrite from a SQL row) +
 a **forced `<system-reminder>` injection at SessionStart**. The legacy
 `SESSION_HANDOFF.md` is renamed to `SESSION_HANDOFF.md.v2.bak` on the first
 PreCompact under v2.1+ (one-shot migration `migrate_legacy_handoff`,
-`core/progress.py:676-694`, called from `hooks/pre_compact.py:560`).
+`core/progress.py:735-753`, called from `hooks/pre_compact.py:560`).
 
 ### PROGRESS.md is the SOT
 
@@ -396,7 +396,7 @@ PreCompact under v2.1+ (one-shot migration `migrate_legacy_handoff`,
 from the `progress` SQL row. Schema (`cc_memory/core/db.py:_MIGRATIONS:v3_progress`
 at `db.py:176-190`, plus the two v5 session-annotation columns at `db.py:219-222`).
 §0 additionally reads the `sessions` / `session_summaries` tables via
-`db.get_recent_sessions` (`core/progress.py:373`; `core/db.py:2925-2979`):
+`db.get_recent_sessions` (`core/progress.py:432`; `core/db.py:2925-2979`):
 
 | Column | Type | Primary source · Fallbacks |
 |--------|------|---------------------------|
@@ -404,8 +404,8 @@ at `db.py:176-190`, plus the two v5 session-annotation columns at `db.py:219-222
 | `current_request` | TEXT | UserPromptSubmit, first non-scaffolding prompt, once per session (`user_prompt.py:330`) → PreCompact `_first_user_request(window.head)` (`pre_compact.py:269-311`) — scans up to 200 records past the leading `queue-operation` / `attachment` meta rows and skips empty-content user rows (`pre_compact.py:269-311`, v2.4.2) → `session_summaries.request` (`progress.py:241`) |
 | `status_done` | TEXT | `session_summaries.completed` (`progress.py:236`), which PreCompact fills from the extraction's `result` / `decision` memories (`pre_compact.py:307-364`), falling back to the observed Edit/Write paths only when the extractor returned no outcome. Before v2.8.0 it was ALWAYS that path list, so §2 "Done" rendered a file dump instead of what was accomplished. SessionStart fills it if empty (`session_start.py:589-590`) |
 | `status_in_flight` | TEXT | `session_summaries.learned`, filled from the extraction's `arch` / `config` / `bug` memories (`pre_compact.py:666-700`). Before v2.8.0 PreCompact hard-coded it to `""`, so §2 "In-flight" rendered `*(none active)*` unconditionally — structurally, not because nothing was in flight |
-| `status_blocked` | TEXT | Explicit `patch_progress(status_blocked=...)` — no in-tree caller does this today; it is an API for external tooling. A repo-wide grep finds only the schema default (`core/db.py:2806-2845,853`), the empty seed (`core/progress.py:278`) and the read (`core/progress.py:278`) |
-| `open_todos` | JSON | PreCompact `extract_latest_todo_state(window)` via `ext["latest_todos"]` (`core/extractor.py:478-513,558`; `pre_compact.py:630,656`) → SessionStart tier-3 prior-transcript mine (`session_start.py:965`) → LAST RESORT `session_summary.next_steps` split by `;` (`session_start.py:965`). Only non-`completed` todos are kept (`progress.py:278`) |
+| `status_blocked` | TEXT | Explicit `patch_progress(status_blocked=...)` — no in-tree caller does this today; it is an API for external tooling. A repo-wide grep finds only the schema default (`core/db.py:2806-2845,853`), the empty seed (`core/progress.py:282`) and the read (`core/progress.py:282`) |
+| `open_todos` | JSON | PreCompact `extract_latest_todo_state(window)` via `ext["latest_todos"]` (`core/extractor.py:478-513,558`; `pre_compact.py:630,656`) → SessionStart tier-3 prior-transcript mine (`session_start.py:965`) → LAST RESORT `session_summary.next_steps` split by `;` (`session_start.py:965`). Only non-`completed` todos are kept (`progress.py:282`) |
 | `plan` | TEXT | `session_summaries.next_steps` — sourced from the latest TodoWrite pending items if any, else from LLM-extracted `task` memories (`pre_compact.py:462-468`); propagated at `progress.py:255`, filled-if-empty at `session_start.py:965` |
 | `critical_context` | JSON | Top 10 memories with importance ≥ 4, content truncated to 200 chars (`progress.py:107-113`; `session_start.py:966`) |
 | `files_touched` | JSON | `observations` table (`pre_compact.py:446-453` → `progress.py:128-134`; Stop per-turn patch `stop.py:193-211`; SessionStart tier-2C `session_start.py:966`) → tier-3 prior-transcript `extract_file_changes` (`session_start.py:966`) |
@@ -460,7 +460,7 @@ whitespace-flattened and truncated at 100 chars (`:210-234`).
    - Triggered: Claude Code's automatic compaction OR manual `/compact`.
    - `collect_progress_state(...)` builds the full state from
      `extracted_memories + observations + session_summaries`
-     (`progress.py:404`).
+     (`progress.py:463`).
    - `db.tag_progress_session(...)` runs FIRST so the tag survives
      (`pre_compact.py:773`; see the preservation logic at `db.py:2899-2923`).
    - `db.upsert_progress(**all_fields)` overwrites the row (`pre_compact.py:768`).

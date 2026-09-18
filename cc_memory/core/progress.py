@@ -190,6 +190,10 @@ _log = get_logger("progress")
 # Both caps announce themselves in the output — no silent truncation.
 _MAX_TODOS_RENDERED = 50
 _MAX_PROGRESS_BYTES = 256 * 1024
+# §4 summarises the plan; PLAN.md is the full document. Step NOTES carry the
+# running commentary of a long project (85 KiB on one live plan), so rendering
+# whole steps here would bury the handoff it exists to be.
+_MAX_PLAN_STEPS_RENDERED = 8
 
 
 def _coerce_entries(value, str_key: str) -> List[Dict]:
@@ -365,6 +369,61 @@ _atomic_write = write_atomic
 _neutralize_block = neutralize_block
 
 
+def _render_plan_section(db: MemoryDB, project_id: int, prog: Dict) -> List[str]:
+    """§4, read from the LIVE plan store rather than a column nothing writes any more.
+
+    This section rendered `progress.plan`, a free-text column the structured plan store
+    replaced. On a project with a 31-step plan loaded and an active step, §4 still said
+    "(no plan recorded)" on every regeneration, because that column is empty — measured at
+    0 characters on 2026-09-18 while `plan-status` reported "6/31 steps done · active step
+    #5". Two readers of the same concept, one of them reading a field with no writer: the
+    artifact says "nothing here" where the truth is "here, and this far along".
+
+    The summary is deliberately short. PLAN.md is the full document; this is the handoff
+    view, so it carries the goal, how far along, and the steps still to do — capped, and
+    the cap announces itself. A legacy free-text plan, if some project still has one, is
+    kept below the summary rather than silently dropped.
+    """
+    legacy = _neutralize_block((prog.get("plan") or "").strip())
+    try:
+        row = db.get_plan_active(project_id) or {}
+    except Exception as error:  # why: PROGRESS.md must still render when the plan store cannot be read
+        _log.debug(f"progress: plan store unreadable: {error}")
+        return [legacy or f"*(plan unavailable: {type(error).__name__})*"]
+
+    structured = row.get("structured") or {}
+    steps = [s for s in (structured.get("steps") or []) if isinstance(s, dict)]
+    if not steps:
+        return [legacy or "*(no plan recorded)*"]
+
+    active_id = row.get("active_step") or 0
+    done = sum(1 for s in steps if s.get("status") == "done")
+    goal = neutralize_inline(str(structured.get("goal") or "").strip())
+    out = [f"**Goal** — {goal}" if goal else "**Goal** — *(none stated)*", ""]
+    out.append(f"**Progress** — {done}/{len(steps)} steps done"
+               + (f" · active step #{active_id}" if active_id else " · no active step"))
+    out.append("")
+
+    shown = 0
+    for step in steps:
+        if step.get("status") == "done":
+            continue
+        if shown >= _MAX_PLAN_STEPS_RENDERED:
+            break
+        active = step.get("id") == active_id
+        out.append(f"- [{'~' if active else ' '}] {step.get('id', '?')}. "
+                   f"{neutralize_inline(str(step.get('title') or ''))}"
+                   + ("  ← ACTIVE" if active else ""))
+        shown += 1
+    remaining = (len(steps) - done) - shown
+    if remaining > 0:
+        out.append(f"- … {remaining} more (render capped at "
+                   f"{_MAX_PLAN_STEPS_RENDERED}; PLAN.md holds the full plan)")
+    if legacy:
+        out += ["", "*(a legacy free-text plan is also set on this project:)*", legacy]
+    return out
+
+
 def _render_session_section(db: MemoryDB, project_id: int, prog: Dict) -> List[str]:
     """Build the §0 Session block.
 
@@ -529,8 +588,7 @@ def write_progress_md(db: MemoryDB, project_id: int, memory_dir: Path) -> Path:
 
     # --- Plan ----------------------------------------------------------------
     lines += ["## 4. Plan (sequenced next steps)", ""]
-    plan = _neutralize_block((prog.get("plan") or "").strip())
-    lines.append(plan or "*(no plan recorded)*")
+    lines += _render_plan_section(db, project_id, prog)
     lines += [""]
 
     # --- Critical Context ----------------------------------------------------
