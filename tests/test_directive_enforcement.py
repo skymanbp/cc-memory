@@ -532,6 +532,13 @@ def section_6():
     refs = plan_mod.directive_step_refs("先做步骤 12，再看 step #3 和 #7 与 #7")
     check("ordinal references parse (CJK + EN + bare #, deduped)",
           refs == [12, 3, 7], str(refs))
+    # a long issue number is NOT a step number: the bare-# branch used to
+    # match "#437832" as 437, so every PR reference of four digits or more
+    # cried wolf on a warning whose whole job is to be believed.
+    long_refs = plan_mod.directive_step_refs(
+        "撤掉 microsoft/winget-pkgs#437832 与 #430572，改钉 步骤 2 与 issue #99")
+    check("a 4+ digit issue number is not read as a step (#99 still is)",
+          long_refs == [2, 99], str(long_refs))
     old_p = {"goal": "g", "steps": [
         {"id": 1, "title": "collect the dataset", "status": "done"},
         {"id": 2, "title": "expand style retrieval", "status": "pending"}]}

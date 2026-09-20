@@ -2,7 +2,7 @@
 
 ## Project: cc-memory
 
-**Claude Code persistent memory plugin (v2.15.1)** — anti-patch reconcile-on-write
+**Claude Code persistent memory plugin (v2.15.2)** — anti-patch reconcile-on-write
 + LLM-judged semantic de-duplication with **backpressure-triggered
 consolidation**, forced PROGRESS.md handoff with per-session annotation, live
 PLAN.md anchor with plan-refiner / plan-guardian subagents + mandatory
@@ -12,9 +12,26 @@ AI-judged extraction with Haiku
 (optional local Ollama fallback).
 
 - **Language**: Python 3.8+ (pure stdlib, zero pip dependencies at runtime)
-- **Version**: 2.15.1
+- **Version**: 2.15.2
 - **License**: MIT
 - **Platform**: Windows-primary, cross-platform compatible (Tkinter required for GUI)
+
+## What changed in v2.15.2 (over v2.15.1)
+
+**A guard that cried wolf at every issue number.** The directive step-reference
+audit read `#437832` as a reference to step 437, so any GitHub issue or PR number
+of four digits or more raised a false alarm. Rules a future change must not break:
+
+1. **A pattern that matches a bounded number needs a boundary on BOTH sides.**
+   `core/plan.py:_STEP_REF_RE` bounds step ids at three digits; without `(?!\d)`
+   on the right, the bare-`#` branch matched the first three digits of a longer
+   number and reported a step that was never referenced. The comment above it
+   shows the trap half-seen — it had already excluded the spaced form `PR # 12`,
+   and stopped there.
+2. **A warning that fires on ordinary prose stops being read.** This audit exists
+   because a long-lived directive pinned to a short-lived step number is the shape
+   that reads correctly and executes the wrong work. Every false positive spends
+   the attention the true ones need.
 
 ## What changed in v2.15.1 (over v2.15.0)
 

@@ -3023,6 +3023,20 @@ def _break_r15gatecount(root):
            "Four of the eleven gates are documentation gates")
 
 
+@case("steprefdigits", ["tests/test_directive_enforcement.py"],
+      "drop the right-hand digit boundary again -> a four-digit issue number "
+      "reads as a step reference and the audit cries wolf on ordinary prose")
+def _break_steprefdigits(root):
+    # The pattern bounds a step id at three digits. With nothing on its right
+    # the bare-# branch matched the FIRST three digits of a longer number, so
+    # "#437832" was reported as step 437. The check this drives asks for
+    # [2, 99] from text carrying two long PR numbers; the broken pattern
+    # answers [437, 430, 2, 99].
+    _patch(root, "cc_memory/core/plan.py",
+           '    r"(?:\u6b65\u9aa4?|step)\\s*#?\\s*(\\d{1,3})(?!\\d)|#(\\d{1,3})(?!\\d)",',
+           '    r"(?:\u6b65\u9aa4?|step)\\s*#?\\s*(\\d{1,3})|#(\\d{1,3})",  # BREAKAGE')
+
+
 @case("r15gatecountcjk", ["tests/smoke_test.py"],
       "guard the CJK numerals with the ASCII word-boundary rule again -> "
       "every Chinese gate claim stops being scanned and the check reports "

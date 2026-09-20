@@ -1540,9 +1540,17 @@ def unmatched_criteria(old_structured: Optional[Dict],
 
 # Ordinal step references in free text: "步骤 12" / "步12" / "step #3" / "#7".
 # The bare-# alternative deliberately requires the digits to follow the mark
-# immediately, so issue numbers written "PR # 12" are not matched.
-_STEP_REF_RE = re.compile(r"(?:步骤?|step)\s*#?\s*(\d{1,3})|#(\d{1,3})",
-                          re.IGNORECASE)
+# immediately, so issue numbers written "PR # 12" are not matched. That
+# guard only covered the SPACED form: without a boundary on the right,
+# "#437832" matched its first three digits and reported step 437, so every
+# issue or PR reference of four digits or more raised a false alarm — and a
+# warning that fires on ordinary prose is one readers learn to scroll past,
+# which is exactly how the references it exists to catch get missed. Plans
+# do not reach 1000 steps, so the {1,3} bound stands and only its right
+# edge is closed.
+_STEP_REF_RE = re.compile(
+    r"(?:步骤?|step)\s*#?\s*(\d{1,3})(?!\d)|#(\d{1,3})(?!\d)",
+    re.IGNORECASE)
 
 
 def directive_step_refs(text: str) -> List[int]:

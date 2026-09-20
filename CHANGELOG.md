@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [2.15.2] — 2026-09-20
+
+### A guard that cried wolf at every issue number
+
+The directive step-reference audit exists to catch a long-lived directive pinned to
+a short-lived coordinate — "see step 12" still reads correctly after a replan, while
+naming different work. It was reporting step 437 for text that said
+`microsoft/winget-pkgs#437832`.
+
+`_STEP_REF_RE` bounds a step id at three digits, and its bare-`#` branch had nothing
+on its right, so it matched the first three digits of any longer number. The comment
+above the pattern records the trap being half-seen: the digits must follow the mark
+immediately "so issue numbers written `PR # 12` are not matched" — the spaced form
+was considered, the long form was not. Every issue or PR reference of four digits or
+more therefore raised a false alarm, on a warning whose whole value is being believed.
+
+Both alternatives now require a non-digit boundary. `步骤 12`, `步12`, `step #3`, `#7`
+and `issue #99` still parse; `#437832` and `#430572` no longer do. The three-digit
+bound stands — plans do not reach 1000 steps — and only its right edge is closed.
+
+Pinned by `tests/test_directive_enforcement.py` § (f): restoring the old pattern makes
+the new check report `[437, 430, 2, 99]` where it must report `[2, 99]`.
+
+---
+
 ## [2.15.1] — 2026-09-18
 
 ### PROGRESS.md § 4 rendered a column that no longer has a writer
