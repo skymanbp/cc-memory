@@ -7593,6 +7593,25 @@ def main():
           "Recent nor excluded from recall; shown_ids is the one set; another "
           "session's manifest excludes nothing")
 
+    # ── v2.16.0 · B3: the handshake demands PROGRESS.md and nothing else ─────
+    _b3_dir = Path(tempfile.mkdtemp(prefix="cc-memory-b3-", dir=str(_SANDBOX)))
+    (_b3_dir / "MEMORY.md").write_text("# m\n", encoding="utf-8")
+    assert _hooks_ss._build_forced_reminder(_b3_dir) == "", \
+        "no PROGRESS.md -> no block (v2.15.2 demanded the index alone)"
+    (_b3_dir / "PROGRESS.md").write_text("# p\n", encoding="utf-8")
+    _b3_rem = _hooks_ss._build_forced_reminder(_b3_dir)
+    assert f"1. Use the Read tool on `{_MEM}/PROGRESS.md`" in _b3_rem, _b3_rem[:400]
+    assert "MEMORY.md" not in _b3_rem and "2. Use the Read tool" not in _b3_rem, (
+        "v2.15.2 demanded a second Read of MEMORY.md — an index whose facts "
+        "the layers above already carry", _b3_rem[:400])
+    assert ACK_TEMPLATE in _b3_rem and "RESUME PROTOCOL" in _b3_rem
+    _b3_quiet = _hooks_ss._build_forced_reminder(_b3_dir, demand_ack=False)
+    assert ACK_TEMPLATE not in _b3_quiet and "RESUME PROTOCOL" in _b3_quiet \
+        and "<system-reminder>" in _b3_quiet, _b3_quiet[:400]
+    shutil.rmtree(_b3_dir, ignore_errors=True)
+    print("[OK] v2.16.0 B3: the handshake demands PROGRESS.md alone; no PROGRESS.md "
+          "-> no block; demand_ack=False keeps the RESUME PROTOCOL and drops the ack")
+
     # ── v2.16.0 · PreCompact feeds only rows ABOVE the observer cursor ──────
     # Every observation used to reach a model twice: the Stop observer fed it
     # and advanced `projects.obs_watermark`, then PreCompact fed EVERYTHING

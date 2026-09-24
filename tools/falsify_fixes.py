@@ -3204,6 +3204,19 @@ def _break_r16seenset(root):
            "        db, project_id, budget, shown_ids, mode_name)  # BREAKAGE")
 
 
+@case("r16memoryread", ["tests/smoke_test.py"],
+      "demand a second Read of MEMORY.md again -> every session pays a tool "
+      "call and an index's worth of context for facts the layers already carry")
+def _break_r16memoryread(root):
+    _patch(root, f"{PKG}/hooks/session_start.py",
+           "    lines.append(HANDSHAKE_READ_STEP.format(\n"
+           "        n=1, rel=f\"{MEMORY_DIRNAME}/PROGRESS.md\", abs=progress.as_posix()))\n",
+           "    lines.append(HANDSHAKE_READ_STEP.format(\n"
+           "        n=1, rel=f\"{MEMORY_DIRNAME}/PROGRESS.md\", abs=progress.as_posix()))\n"
+           "    lines.append(HANDSHAKE_READ_STEP.format(  # BREAKAGE\n"
+           "        n=2, rel=f\"{MEMORY_DIRNAME}/MEMORY.md\", abs=\"x\"))\n")
+
+
 def verify_anchors():
     """Count every registered case's breakage anchors WITHOUT running a gate.
 

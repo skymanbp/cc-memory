@@ -8,8 +8,10 @@ Fires on every new session (startup, resume, post-compaction). Three jobs:
      handoff summary, footer).
 
   2. EMIT A FORCED <system-reminder> directing Claude to Read PROGRESS.md
-     and MEMORY.md BEFORE responding. This is the hook-level enforcement
-     of the handoff contract (see docs/CONTRACTS.md#handoff-contract).
+     BEFORE responding — the ONE file the handshake demands since v2.16.0
+     (MEMORY.md's facts already ride the layers above). This is the
+     hook-level enforcement of the handoff contract
+     (see docs/CONTRACTS.md#handoff-contract).
 
   3. Best-effort RETROACTIVE SAVE — if previous JSONL transcripts were
      never compacted, extract memories from them now via Haiku. Since
@@ -524,18 +526,25 @@ def _build_footer(db, project_id, memory_dir, budget=None):
     return text
 
 
-def _build_forced_reminder(memory_dir):
+def _build_forced_reminder(memory_dir, demand_ack=True):
     """Emit a <system-reminder> that FORCES the next response to Read PROGRESS.md.
 
     This is the core of the v2.1 forced-handoff mechanism. Soft reminders
     were unreliable (cf. v2.0 SESSION_HANDOFF.md drift). The system-reminder
     block is honored as authoritative context by Claude.
+
+    PROGRESS.md is the ONE file demanded (v2.16.0, B3). MEMORY.md was a
+    second mandatory Read of an index whose facts the injection's own layers
+    already carry (topics, critical, timeline), so every session paid a tool
+    call and a context window's worth of index for nothing the handoff
+    needed; `/cc-mem inject-usage` still counts a Read of it. No PROGRESS.md
+    -> no block: a reminder that demanded only the index was the whole
+    handshake on a project that had never compacted. `demand_ack=False`
+    omits the first-reply ack sentence — the compact path (B4), where there
+    is no first reply for the ack to appear in.
     """
     progress = memory_dir / "PROGRESS.md"
-    memory_md = memory_dir / "MEMORY.md"
-    has_progress = progress.exists()
-    has_memory = memory_md.exists()
-    if not (has_progress or has_memory):
+    if not progress.exists():
         return ""
 
     # Every sentence below is a `core.prompts` constant (v2.16.0): this block
@@ -547,24 +556,20 @@ def _build_forced_reminder(memory_dir):
         "",
         HANDSHAKE_LEAD,
     ]
-    n = 1
-    if has_progress:
-        lines.append(HANDSHAKE_READ_STEP.format(
-            n=n, rel=f"{MEMORY_DIRNAME}/PROGRESS.md", abs=progress.as_posix()))
-        n += 1
-    if has_memory:
-        lines.append(HANDSHAKE_READ_STEP.format(
-            n=n, rel=f"{MEMORY_DIRNAME}/MEMORY.md", abs=memory_md.as_posix()))
-        n += 1
+    lines.append(HANDSHAKE_READ_STEP.format(
+        n=1, rel=f"{MEMORY_DIRNAME}/PROGRESS.md", abs=progress.as_posix()))
+    if demand_ack:
+        lines += [
+            "",
+            HANDSHAKE_ACK_LEAD,
+            # The sentence is `core.progress.ACK_TEMPLATE`, not a literal: this
+            # is the DEMAND, and `/cc-mem inject-usage` is the DETECTOR that
+            # measures whether it was stated. Two spellings drift, and the
+            # drift is silent in the direction that matters — the detector
+            # reports "never acknowledged" and the reader believes it.
+            f"  {ACK_TEMPLATE}",
+        ]
     lines += [
-        "",
-        HANDSHAKE_ACK_LEAD,
-        # The sentence is `core.progress.ACK_TEMPLATE`, not a literal: this is
-        # the DEMAND, and `/cc-mem inject-usage` is the DETECTOR that measures
-        # whether it was stated. Two spellings drift, and the drift is silent
-        # in the direction that matters — the detector reports "never
-        # acknowledged" and the reader believes it.
-        f"  {ACK_TEMPLATE}",
         "",
         RESUME_PROTOCOL_HEAD,
         # i18n Tier 3: bilingual resume tokens INTENTIONAL. The vocabulary is
