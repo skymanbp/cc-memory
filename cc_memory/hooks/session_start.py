@@ -1537,7 +1537,6 @@ def main():
         # The injection is complete and irreplaceable — get it out of the
         # buffer before any further work can run us into the 15s timeout.
         _flush_stdout()
-        stats = db.get_stats(project_id)
         # v2.3 observability: user-visible one-liner of WHAT was injected, read
         # from the manifest build_context just wrote (ground truth, not a guess).
         try:
@@ -1567,6 +1566,10 @@ def main():
             )
         except (OSError, json.JSONDecodeError, ValueError, TypeError,
                 AttributeError):
+            # Read only on THIS path (v2.16.0, A7): the manifest line above
+            # needs none of these counts, and `get_stats` is four queries
+            # that every start paid for a fallback it did not take.
+            stats = db.get_stats(project_id)
             print(
                 f"[cc-memory OK] Context loaded: "
                 f"{stats['n_memories']} memories, {stats.get('n_topics', 0)} topics"

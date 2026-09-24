@@ -453,6 +453,13 @@ def raw_pending_refinement(row: Optional[Dict]) -> bool:
 # Kill switch: CC_MEMORY_PLAN_ENFORCE=0.
 
 _BLOCK_MAX_CONSECUTIVE = 3
+# The per-session refusal marker `hooks/stop.py` counts the escape budget
+# in. Named here (v2.16.0, D8) because `hooks/user_prompt.py` reads it too:
+# the advisory a Stop cannot deliver — its stdout never reaches the model —
+# is parked on the marker's second line for the next UserPromptSubmit to
+# print. `ui/installer.py:_TEMP_MARKER_PREFIXES` keeps its literal copy
+# (a stdlib-only bootstrap); the smoke gate holds the two equal.
+BLOCK_MARKER_PREFIX = "cc_mem_block_"
 
 
 def enforcement_enabled() -> bool:

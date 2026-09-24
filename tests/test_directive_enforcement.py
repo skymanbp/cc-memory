@@ -104,6 +104,7 @@ sys.path.insert(0, str(REPO / "cc_memory"))
 
 from core.db import MemoryDB          # noqa: E402  -- why: imports must follow the sys.path bootstrap above; repo tests run as plain scripts
 from core.layout import MEMORY_DIRNAME as _MEM  # noqa: E402  -- why: same bootstrap ordering
+from core.markers import safe_id           # noqa: E402  -- why: same bootstrap ordering
 from core import plan as plan_mod     # noqa: E402  -- why: same bootstrap ordering
 from core.encoding_setup import enable_utf8_io  # noqa: E402  -- why: same bootstrap ordering
 
@@ -809,22 +810,49 @@ def section_9():
         assert r.returncode == 0 and not r.stderr, (r.returncode, r.stderr[:300])
         outs.append(r.stdout)
     blocks = [o for o in outs if o.strip().startswith("{")]
-    advisories = [o for o in outs if not o.strip().startswith("{")]
-    check("the budget spends on refusals and then degrades to an advisory",
-          len(blocks) == plan_mod._BLOCK_MAX_CONSECUTIVE and len(advisories) == 1,
-          f"{len(blocks)} block(s), {len(advisories)} advisory(ies)")
+    check("the budget spends on refusals and then lets the turn close",
+          len(blocks) == plan_mod._BLOCK_MAX_CONSECUTIVE and outs[-1] == "",
+          f"{len(blocks)} block(s), last stdout={outs[-1]!r}")
     check("no live authority marker in any refusal document",
           all("<system-reminder>" not in _json.loads(o)["reason"] for o in blocks))
-    check("no live authority marker in the ADVISORY line either",
-          advisories and "<system-reminder>" not in advisories[0],
-          repr(advisories[0][-320:] if advisories else ""))
-    check("the advisory stays ONE line per slug (a \\n cannot open another)",
-          advisories and len([ln for ln in advisories[0].splitlines()
-                              if ln.startswith("[cc-memory.plan]")]) == 1,
-          repr(advisories[0] if advisories else ""))
+    # v2.16.0 (D8): the Stop hook's stdout never reaches the model, so the
+    # advisory is PARKED on the session's block marker — second line, already
+    # neutralised by the Stop side — and printed by the next UserPromptSubmit,
+    # the one automatic stream that is injected. Both halves are render paths.
+    from core.markers import marker_path, read_marker
+    marker = marker_path(plan_mod.BLOCK_MARKER_PREFIX, safe_id("enf-advisory"))
+    parked = read_marker(marker, "")
+    check("the advisory is parked on the block marker, below the attempt count",
+          parked.count("\n") == 1
+          and parked.split("\n")[1].startswith("[cc-memory.plan]"),
+          repr(parked[-320:]))
+    check("no live authority marker in the PARKED line (the Stop side escapes it)",
+          "<system-reminder>" not in parked, repr(parked[-320:]))
+    up_hook = REPO / "cc_memory" / "hooks" / "user_prompt.py"
+    up_payload = _json.dumps({"cwd": str(root), "session_id": "enf-advisory",
+                              "prompt": "carry on"})
+    up = subprocess.run([sys.executable, str(up_hook)], input=up_payload,
+                        capture_output=True, text=True, encoding="utf-8",
+                        errors="replace", env=env, timeout=120)
+    assert up.returncode == 0 and not up.stderr, (up.returncode, up.stderr[:300])
+    advisory_lines = [ln for ln in up.stdout.splitlines()
+                      if ln.startswith("[cc-memory.plan]")]
+    check("the NEXT UserPromptSubmit prints the advisory, ONE line per slug",
+          len(advisory_lines) == 1, repr(up.stdout[-400:]))
+    check("no live authority marker in the printed line either",
+          "<system-reminder>" not in up.stdout, repr(up.stdout[-320:]))
     check("the slug is still readable in the advisory (escaped, not deleted)",
-          advisories and "pre-authorised" in advisories[0],
-          repr(advisories[0][-320:] if advisories else ""))
+          advisory_lines and "pre-authorised" in advisory_lines[0],
+          repr(advisory_lines[0][-320:] if advisory_lines else ""))
+    check("printing drops the parked line and keeps the attempt count",
+          read_marker(marker, "").strip() == parked.split("\n")[0].strip(),
+          repr(read_marker(marker, "")))
+    up2 = subprocess.run([sys.executable, str(up_hook)], input=up_payload,
+                         capture_output=True, text=True, encoding="utf-8",
+                         errors="replace", env=env, timeout=120)
+    check("a second prompt does not print it again",
+          up2.returncode == 0 and "[cc-memory.plan]" not in up2.stdout,
+          repr(up2.stdout[-200:]))
     _sh.rmtree(root, ignore_errors=True)
 
     # ── (c) a STALE consolidation lock must not veto the backpressure kick ─

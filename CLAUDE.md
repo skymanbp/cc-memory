@@ -1794,7 +1794,7 @@ blocking sync leg + a background `async` leg.
 | `SessionStart` | `cc_memory/hooks/session_start.py` | 15s | Inject layered context (the directive ledger FIRST, v2.12.2) + FORCED `<system-reminder>` to Read PROGRESS.md |
 | `Stop` | `cc_memory/hooks/stop.py` | 22s | Observer (Haiku) + per-turn PROGRESS.md patch + idle reorg every 5 turns + consolidation backpressure probe (v2.12.0) + plan enforcement |
 | `PostToolUse` | `cc_memory/hooks/post_tool_use.py` | 8s | Live plan anchor in EVERY mode (ExitPlanMode capture / TodoWrite step sync / drift counters), THEN an observation row for observed tools only (no LLM) |
-| `UserPromptSubmit` | `cc_memory/hooks/user_prompt.py` | 8s | Auto-init `.ccm/` (migrating a pre-v2.13.0 `memory/`) + turn count + seed `progress.current_request` on the first NON-scaffolding prompt, once per session (v2.14.0) + **query-time recall** on stdout (v2.15.0) |
+| `UserPromptSubmit` | `cc_memory/hooks/user_prompt.py` | 8s | Auto-init `.ccm/` (migrating a pre-v2.13.0 `memory/`) + turn count + seed `progress.current_request` on the first NON-scaffolding prompt, once per session (v2.14.0) + **query-time recall** on stdout (v2.15.0) + the plan advisory a Stop parked for this session (v2.16.0) |
 
 Hook contract (NEVER violate):
 - Hooks must NEVER write to stderr (Claude Code shows stderr as error UI).
@@ -1802,8 +1802,9 @@ Hook contract (NEVER violate):
 - Hooks must NEVER raise an unhandled exception. Always `sys.exit(0)`.
 - Each hook's stdout has a specific role:
   - `SessionStart` stdout → injected context (read by Claude)
-  - `Stop` stdout → status line (read by Claude)
-  - `PreCompact` (sync) stdout → ONE status line (shows in next session's compacted context)
+  - `Stop` stdout → NOTHING on a turn that may close (v2.16.0 — it never reached
+    the model; the status line is logged), or the `{"decision": "block"}` document
+  - `PreCompact` (sync) stdout → NOTHING (v2.16.0; the status line is logged)
   - `UserPromptSubmit` stdout → the query-time recall block, or NOTHING (v2.15.0;
     this stream is injected into Claude's context — see § *Query-time recall*)
   - `PreCompact` (async) / `PostToolUse` stdout → empty
@@ -2329,7 +2330,7 @@ file and non-blank, NOT verified against a symbol — and the summary says so
 in those words since v2.14.0 (261 of 631 at v2.14.0; the class was 253 of
 594 as `SKIP` at v2.5.4, down from 370 once v2.5.3 taught it to anchor
 CROSS-FILE citations on the text of the cited range — the
-`` `db.tag_progress_session(...)` (`user_prompt.py:392`) `` shape, which is
+`` `db.tag_progress_session(...)` (`user_prompt.py:421`) `` shape, which is
 the commonest in these docs). A bounds-only citation can rot silently: six
 had, all in prose that names a section rather than a symbol, and were
 repointed by hand in v2.14.0. `--fix`

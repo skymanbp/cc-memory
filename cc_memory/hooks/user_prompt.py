@@ -178,6 +178,35 @@ def _already_shown(state_dir):
     return shown
 
 
+def _emit_block_advisory(session_id):
+    """Print the plan advisory a Stop parked for this session, once. Never raises.
+
+    v2.16.0 (D8). The Stop hook's stdout never reaches the model, so the
+    advisory it degrades to once the escape budget is spent — "still
+    unresolved after N refusals; degrading to advisory so you are not
+    trapped" — was silent in fact from v2.11.0 on. It rides the session's
+    block marker (`core.plan.BLOCK_MARKER_PREFIX`; first line the attempt
+    count, second line the advisory, written by `stop.py:_note_advisory`),
+    and this hook, whose stdout IS injected, prints it and drops it,
+    keeping the count. `neutralize_inline` again at the sink: the Stop
+    side escaped it too, and a render path escapes what it prints.
+    """
+    try:
+        from core.plan import BLOCK_MARKER_PREFIX
+        from core.privacy import neutralize_inline
+        f = marker_path(BLOCK_MARKER_PREFIX, _safe_id(session_id))
+        head, _sep, note = read_marker(f, "").strip().partition("\n")
+        note = note.strip()
+        if not note:
+            return
+        print(neutralize_inline(note))
+        write_marker(f, head.strip())
+    except Exception:
+        # why: the advisory is a courtesy; a failure here must cost the line,
+        # never the turn counter, the prompt marker or the recall block
+        pass
+
+
 def _emit_recall(cwd, prompt, session_id=""):
     """Retrieve, print and record. Everything here is best-effort.
 
@@ -431,6 +460,7 @@ def main():
         # command already reduced to "". Retrieval must never run on the raw
         # prompt — that would search on text the user marked private, and the
         # retrieved rows go into the model's context.
+        _emit_block_advisory(session_id)
         _emit_recall(cwd, prompt, session_id)
 
     except Exception:

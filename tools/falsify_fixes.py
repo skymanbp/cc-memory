@@ -3129,6 +3129,27 @@ def _break_r16retrospawn(root):
            "        return False")
 
 
+@case("r16advisorychannel", ["tests/test_directive_enforcement.py"],
+      "drop the UserPromptSubmit half of the advisory channel -> the line a "
+      "spent escape budget degrades to is parked and never printed anywhere "
+      "the model reads (the v2.11.0 silence, back)")
+def _break_r16advisorychannel(root):
+    _patch(root, "cc_memory/hooks/user_prompt.py",
+           "        _emit_block_advisory(session_id)\n",
+           "        _ = session_id  # BREAKAGE: the parked advisory is never printed\n")
+
+
+@case("r16noregen", ["tests/smoke_test.py"],
+      "render MEMORY.md after every batch again -> a batch of pure skips "
+      "re-reads the whole table for a byte-identical file, on every observer "
+      "call that found nothing new")
+def _break_r16noregen(root):
+    _patch(root, "cc_memory/llm/memory_writer.py",
+           "    if memory_dir is not None and any(\n"
+           '            counts[k] for k in ("inserted", "merged", "superseded", "reinforced")):',
+           "    if memory_dir is not None:  # BREAKAGE: render regardless")
+
+
 def verify_anchors():
     """Count every registered case's breakage anchors WITHOUT running a gate.
 

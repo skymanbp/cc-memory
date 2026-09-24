@@ -36,8 +36,8 @@ _HERE = Path(__file__).resolve().parent
 _PKG_ROOT = _HERE.parent
 sys.path.insert(0, str(_PKG_ROOT))
 
-# Force UTF-8 on stdio (Stop hook's status line can contain ↻ via the
-# observer's supersede-count print); avoid gbk crashes on Windows.
+# Force UTF-8 on stdio (the refusal document carries directive slugs and
+# plan text, which can be non-ASCII); avoid gbk crashes on Windows.
 from core.encoding_setup import enable_utf8_io
 enable_utf8_io()
 
@@ -167,7 +167,7 @@ def _read_turn_count(session_id):
 # older installs wrote.)
 
 
-_BLOCK_MARKER_PREFIX = "cc_mem_block_"
+_BLOCK_MARKER_PREFIX = plan_mod.BLOCK_MARKER_PREFIX
 
 
 def _block_attempt(session_id, keys):
@@ -184,7 +184,11 @@ def _block_attempt(session_id, keys):
     digest = hashlib.sha256("|".join(sorted(keys)).encode()).hexdigest()[:12]
     f = marker_path(_BLOCK_MARKER_PREFIX, _safe_id(session_id))
     prev_digest, prev_n = "", 0
-    raw = read_marker(f, "").strip()
+    # FIRST line only: the second line, when present, is the advisory a
+    # previous Stop parked for the next UserPromptSubmit (v2.16.0, D8), and
+    # reading it into `n_text` would restart the count — re-arming the
+    # block on the turn after the budget was spent.
+    raw = read_marker(f, "").strip().split("\n", 1)[0].strip()
     if ":" in raw:
         try:
             prev_digest, n_text = raw.split(":", 1)
@@ -213,6 +217,25 @@ def _block_attempt(session_id, keys):
     return n
 
 
+def _note_advisory(session_id, line):
+    """Park `line` for the next UserPromptSubmit to print. Never raises.
+
+    v2.16.0 (D8). A Stop hook's stdout is shown in the transcript view and
+    reaches neither the model nor the user's terminal (verified against the
+    hooks documentation, docs/plans/2026-09-24), so the "loud advisory" the
+    spent escape budget degraded to since v2.11.0 was silent in fact. The
+    one automatic stream that IS injected and has a turn to attach to is
+    UserPromptSubmit's, so the line rides the session's block marker —
+    second line, below the attempt count `_block_attempt` keeps on the
+    first — and `hooks/user_prompt.py:_emit_block_advisory` prints it once
+    and drops it. `write_marker` never raises; a marker that cannot be
+    written costs the advisory, which is what a Stop print cost anyway.
+    """
+    f = marker_path(_BLOCK_MARKER_PREFIX, _safe_id(session_id))
+    head = read_marker(f, "").strip().split("\n", 1)[0].strip()
+    write_marker(f, head + "\n" + line.strip())
+
+
 def _block_reset(session_id):
     """End the refusal streak the moment a turn is allowed to close. Never raises.
 
@@ -239,7 +262,7 @@ def _block_reset(session_id):
         write_marker(f, "")
 
 
-def _idle_directives(db, project_id, idle_turns=25):
+def _idle_directives(db, project_id, idle_turns=25, plan_row=None):
     """Active directives that have gone `idle_turns` turns untouched.
 
     Idleness is measured from the plan's own turn counter rather than from
@@ -272,7 +295,11 @@ def _idle_directives(db, project_id, idle_turns=25):
         # a newer one has not opened yet. No ledger simply means no directive
         # conditions — never a crash in the Stop path.
         return []
-    plan_row = db.get_plan_active(project_id) or {}
+    # The caller's row when it holds one (v2.16.0, A7): main() had already
+    # read it, this function read it again, and main() re-read it after
+    # the bump — one row, three SELECTs per turn.
+    plan_row = plan_row if plan_row is not None else (
+        db.get_plan_active(project_id) or {})
     turns_total = int(plan_row.get("turns_total") or 0)
     out = []
     for row in rows:
@@ -702,7 +729,6 @@ def main():
         project_id = db.upsert_project(cwd)
     except Exception:
         _log.error_tb("stop hook: database unavailable")
-        print("\n[cc-memory] stop hook ran (degraded)")
         sys.exit(0)
 
     # Job 1: the observer, as a DETACHED worker (v2.16.0, A1) — not on a
@@ -732,29 +758,20 @@ def main():
             _patch_progress_from_recent_obs(db, project_id, memory_dir)
 
             # Job 3.5: consolidation backpressure (v2.12.0). Own try: a probe
-            # failure must cost neither the status line nor plan enforcement.
+            # failure must not cost plan enforcement below.
             try:
                 _maybe_kick_consolidation(cwd, memory_dir, db, project_id)
             except Exception:
                 _log.error_tb("backpressure probe failed")
 
-        # Compact status line for Claude (one line, every turn).
-        #
-        # BUILT, NOT PRINTED YET. When this hook refuses a turn it must write
-        # a JSON DOCUMENT to stdout and nothing else — `{"decision": "block"}`
-        # preceded by a human status line is not JSON, and a harness that
-        # parses stdout as JSON sees no decision at all, which silently
-        # restores the advisory-that-never-fires this release exists to end.
-        # So enforcement is evaluated FIRST and the status line is emitted
-        # only on the path where the turn is allowed to close.
-        stats = db.get_stats(project_id)
-        n_obs = db.get_observation_count(project_id)
-        status_line = (
-            f"\n[cc-memory] {stats['n_memories']} memories"
-            f" | {n_obs} obs"
-            f" | {stats.get('n_topics', 0)} topics"
-            f" | PROGRESS.md fresh"
-        )
+        # NO status line (v2.16.0, A7). A Stop hook's stdout is shown in
+        # the transcript view only and never reaches the model, so the
+        # per-turn "[cc-memory] N memories | ..." line was six queries a
+        # turn for a line nobody read. On the path where the turn may close
+        # this hook prints NOTHING now; when it refuses, it prints the JSON
+        # document and nothing else, exactly as before — `{"decision":
+        # "block"}` preceded by prose is not JSON, and a harness that cannot
+        # parse it sees no decision at all.
         advisory = ""
 
         # Job 4: live plan enforcement.
@@ -781,7 +798,8 @@ def main():
 
             reasons = plan_mod.blocking_reasons(
                 plan_row,
-                _idle_directives(db, project_id, _BLOCK_STALE_DIRECTIVE_TURNS),
+                _idle_directives(db, project_id, _BLOCK_STALE_DIRECTIVE_TURNS,
+                                 plan_row=plan_row),
                 stale_turns=_BLOCK_STALE_DIRECTIVE_TURNS)
             if reasons:
                 attempt = _block_attempt(session_id, [r[0] for r in reasons])
@@ -815,12 +833,15 @@ def main():
             # any condition set starts at attempt 1 again. Without this the
             # budget was per session, not per episode — see _block_reset.
             _block_reset(session_id)
-        print(status_line + advisory)
+        if advisory:
+            # Parked for the next UserPromptSubmit (v2.16.0, D8): printing
+            # it here reached nobody. The line is already neutralised.
+            _note_advisory(session_id, advisory)
+            _log.info("plan advisory parked for the next prompt")
     except SystemExit:
         raise
     except Exception:
         _log.error_tb("stop hook tail")
-        print("\n[cc-memory] stop hook ran (degraded)")
 
     sys.exit(0)
 

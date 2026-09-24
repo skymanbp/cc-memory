@@ -1746,7 +1746,7 @@ def test_excluded_projects():
     #    every assertion above also passes for a hook that no-ops for an
     #    unrelated reason (missing DB, closed interval gate, empty transcript).
     ctrl_sid = "ctrl-seeded-0001"
-    ctrl_out, ctrl_obs = {}, {}
+    ctrl_out, ctrl_obs, ctrl_trigger = {}, {}, {}
     for hook in _HOOK_ORDER:
         rc, out, err = _run_hook(pkg, hook, control, ctrl_sid, transcript)
         assert rc == 0 and err == "", f"control: {hook} rc={rc} {err[:300]!r}"
@@ -1754,12 +1754,17 @@ def test_excluded_projects():
         # sampled per hook: PreCompact CLEANS observations after extracting,
         # so a count taken at the end would read 0 for a healthy run.
         ctrl_obs[hook] = ctrl_db.get_observation_count(ctrl_pid)
+        ctrl_trigger[hook] = (ctrl_db.get_progress(ctrl_pid) or {}).get("trigger_type")
     assert ctrl_obs["post_tool_use"] >= 1, \
         "control: PostToolUse stored no observation, so 'no observations' above proves nothing"
     assert "[cc-memory]" in ctrl_out["session_start"], \
         "control: SessionStart injected nothing, so 'no injection' above is vacuous"
-    assert "[cc-memory]" in ctrl_out["stop"], \
-        "control: Stop printed no status line"
+    # Since v2.16.0 the Stop hook prints NOTHING on a turn that may close (its
+    # stdout never reached the model), so the control for "an excluded Stop
+    # writes nothing" is the per-turn PROGRESS patch it stamps instead.
+    assert ctrl_out["stop"] == "" and ctrl_trigger["stop"] == "stop", \
+        (f"control: Stop stdout={ctrl_out['stop']!r}, progress.trigger_type="
+         f"{ctrl_trigger['stop']!r} — the per-turn patch must have run")
     assert ctrl_db.get_progress(ctrl_pid) is not None, \
         "control: no progress row, so 'no progress row' above is vacuous"
     assert (control / _MEM / "PROGRESS.md").is_file(), \

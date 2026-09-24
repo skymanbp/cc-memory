@@ -233,19 +233,27 @@ would falsify the record.
 | `SessionStart` | [`cc_memory/hooks/session_start.py`](../cc_memory/hooks/session_start.py) | 15s | Inject layered context (standing directives / topics / critical / timeline / PROGRESS preview / footer — the directive ledger is the first layer since v2.12.2; before that nothing injected it); emit the FORCED `<system-reminder>` to Read `PROGRESS.md` + `MEMORY.md`; start the DETACHED `--retro` worker that saves unsaved prior JSONLs (v2.16.0 — decided by a stat()-only scan, never on a resumed or forked start; a failed call backs it off through `.llm_backoff.json`, a running one holds `.retro.lock`). |
 | `Stop` | [`cc_memory/hooks/stop.py`](../cc_memory/hooks/stop.py) | 22s | Observer: spawn the DETACHED `stop.py --observe` worker that extracts from this turn's observations via Haiku (v2.16.0 — the hook never waits on the model; a failed call backs the worker off through `.llm_backoff.json`, a running one holds `.observer.lock`); per-turn `patch_progress(files_touched, ...)`; every 5 turns run `idle.maybe_run_idle` (cleanup + MEMORY.md regen); probe the consolidation backlog and spawn the detached async worker when it is due (v2.12.0); when a plan is LIVE, bump its turn counter and **enforce** — refuse the turn (`{"decision": "block"}`) over an unrefined plan, an undrift-checked plan, or an idle directive, with the escape budget CONTRACTS.md specifies (v2.11.0; the advisory nudge this row used to describe is gone). A continuation Stop (`stop_hook_active`, v2.16.0) skips every job but enforcement. |
 | `PostToolUse` | [`cc_memory/hooks/post_tool_use.py`](../cc_memory/hooks/post_tool_use.py) | 8s | Live-plan integration FIRST, in every mode: `ExitPlanMode` → `plan_active.raw`, `TodoWrite` → mechanical step sync, `Edit`/`Write`/`MultiEdit`/`NotebookEdit` → +1 drift counter, sensitive Bash call → +20. THEN one row into `observations`, for OBSERVED tool calls only (mode allowlist / skip list — `core.modes.should_observe`). No LLM. Measured ~180-290 ms end to end, of which ~75-120 ms is interpreter start-up. |
-| `UserPromptSubmit` | [`cc_memory/hooks/user_prompt.py`](../cc_memory/hooks/user_prompt.py) | 8s | Auto-init `.ccm/` on first contact; track turn count; save prompt for the Stop observer; on the first non-scaffolding prompt (once per session — `strip_scaffolding`, shared with `pre_compact._first_user_request`, and the `cc_mem_seeded_` marker; v2.14.0), tag the session and seed `progress.current_request` (typing the trigger `resume_request` vs `user_prompt` from the bilingual resume-signal whitelist). **Then QUERY-TIME RECALL** (v2.15.0): the cleaned prompt is turned into an FTS5 expression, the best matches that clear the relevance floor are printed to stdout inside a `<cc-memory-recall>` frame, and nothing at all is printed otherwise (`core/recall.py`). |
+| `UserPromptSubmit` | [`cc_memory/hooks/user_prompt.py`](../cc_memory/hooks/user_prompt.py) | 8s | Auto-init `.ccm/` on first contact; track turn count; save prompt for the Stop observer; on the first non-scaffolding prompt (once per session — `strip_scaffolding`, shared with `pre_compact._first_user_request`, and the `cc_mem_seeded_` marker; v2.14.0), tag the session and seed `progress.current_request` (typing the trigger `resume_request` vs `user_prompt` from the bilingual resume-signal whitelist). **Then QUERY-TIME RECALL** (v2.15.0): the cleaned prompt is turned into an FTS5 expression, the best matches that clear the relevance floor are printed to stdout inside a `<cc-memory-recall>` frame, and nothing at all is printed otherwise (`core/recall.py`) — preceded by the plan advisory the previous Stop parked for this session, when there is one (v2.16.0, `_emit_block_advisory`). |
 
 ### Hook stdout contract
 
 Each hook's stdout has a specific role, and violating it is a user-visible bug:
 
 - `SessionStart` stdout → injected context (read by Claude).
-- `Stop` stdout → status line(s): one `[cc-memory] …` line every turn
-  (`stop.py:582-587`), plus at most one `[cc-memory.plan] …` advisory line.
-- `PreCompact` (sync) stdout → ONE status line (shows in the next session's
-  compacted context).
-- `UserPromptSubmit` stdout → **the query-time recall block, or nothing**
-  (v2.15.0). This stream IS injected into Claude's context, and until v2.15.0
+- `Stop` stdout → **nothing on a turn that may close** (v2.16.0). A Stop
+  hook's stdout is shown in the transcript view only and never reaches the
+  model, so the per-turn `[cc-memory] …` status line goes to the log now. A
+  refusal writes the `{"decision": "block"}` document and nothing else, and
+  the `[cc-memory.plan] …` advisory a spent escape budget degrades to is
+  PARKED on the session's block marker (`stop.py:_note_advisory`) for the
+  next `UserPromptSubmit` to print — the one automatic stream that is
+  injected and has a turn to attach to.
+- `PreCompact` (sync) stdout → nothing (v2.16.0); its one-line status goes
+  to the log. It was printed as "visible in the next session's compacted
+  context", and it never was.
+- `UserPromptSubmit` stdout → **the query-time recall block, the parked plan
+  advisory, or nothing** (v2.15.0; the advisory since v2.16.0). This stream
+  IS injected into Claude's context, and until v2.15.0
   the plugin left it empty by its own choice — so the only automatic moment
   that HAS a user query put nothing in front of the model. `core/recall.py`
   emits at most `RECALL_MAX_ROWS` memories inside a
@@ -477,7 +485,7 @@ caller's responsibility, and there are exactly two shapes:
   (`memory_writer.py:334`). All hook callers pass it
   (`pre_compact.py:716`, `stop.py:166`, `session_start.py:1144`); the sync
   PreCompact leg additionally touches it again after the rest of its state
-  changes (`pre_compact.py:841`).
+  changes (`pre_compact.py:850`).
 - Single-shot callers call `regenerate_memory_index` explicitly:
   `cli/mem.py:1213` and `:584`, `mcp/server.py:647`, `ui/dashboard.py:1716`,
   `ui/web_viewer.py:1034`, plus the `skills/ccm-load` inline script
@@ -580,8 +588,8 @@ SessionStart:
 ```
 
 Call signatures above are the real ones: `write_progress_md(db, project_id,
-memory_dir)` (`core/progress.py:498-677`; call sites `pre_compact.py:801`,
-`stop.py:492`, `user_prompt.py:52`, `session_start.py:955`, `mcp/server.py:243`,
+memory_dir)` (`core/progress.py:498-677`; call sites `pre_compact.py:808`,
+`stop.py:519`, `user_prompt.py:52`, `session_start.py:955`, `mcp/server.py:243`,
 `cli/mem.py:1304`). See
 [docs/CONTRACTS.md](CONTRACTS.md#handoff-contract) for the PROGRESS.md
 schema.
@@ -731,7 +739,7 @@ while the same token via Bearer + beta gets HTTP 200 (`core/auth.py:14-15`).
 does not retry, `core/auth.py:60-93`); it also carries the `oauth_expired`
 signal behind SessionStart's "[WARNING: OAuth expired — LLM extraction
 disabled]" footer (`session_start.py:674`). Hook callers use it to *supply*
-the credential passed into `call_llm`: `pre_compact.py:94 → :166`,
+the credential passed into `call_llm`: `pre_compact.py:96 → :166`,
 `stop.py:99`, `session_start.py:674`, `core/consolidate.py:426, 549, 724`.
 
 Fall-through was added in v2.3.4 for a concrete failure: a dead env key (e.g.
@@ -837,7 +845,7 @@ Per-project state lives at `<project>/.ccm/`:
 ```
 
 Writers, for traceability: `MEMORY.md` ← `memory_writer.regenerate_memory_index`
-(`memory_writer.py:261-370`); `PROGRESS.md` ← `core.progress.write_progress_md`
+(`memory_writer.py:384-421`); `PROGRESS.md` ← `core.progress.write_progress_md`
 (`progress.py:498-677, 366`); `PLAN.md` ← `core.plan.write_plan_md`
 (`plan.py:783-832`); `.plan_history/` ← `plan.py:783-832`; `.last_save.json` ←
 `pre_compact.py:737, 771`; `.last_inject.json` ← `session_start.py:291-309`

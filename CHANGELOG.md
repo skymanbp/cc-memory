@@ -3395,7 +3395,7 @@ Two of the six turned out to be worse than they were written up as.
 - **Doc citation coverage nearly doubled.** `tools/citation_check.py` could only
   anchor a citation when the symbol was defined in the *cited* file, so the most
   common shape in these docs — a call site, `` `db.tag_progress_session(...)`
-  (`user_prompt.py:392`) `` — went unchecked: 370 of 594, 62 %. It now anchors
+  (`user_prompt.py:421`) `` — went unchecked: 370 of 594, 62 %. It now anchors
   cross-file citations on the text of the cited range, and **341 of 594 are
   checked** (was 224).
 

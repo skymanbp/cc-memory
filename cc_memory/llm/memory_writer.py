@@ -363,7 +363,13 @@ def upsert_batch(db: MemoryDB,
 
     counts["results"] = results
 
-    if memory_dir is not None:
+    # Only when something LANDED (v2.16.0, A7): a batch of pure skips leaves
+    # every row as it was, so re-rendering MEMORY.md over it was one full
+    # read of the table for a byte-identical file — paid by every observer
+    # call that found nothing new. A reinforced row counts: its importance
+    # or tags changed, and the index orders by importance.
+    if memory_dir is not None and any(
+            counts[k] for k in ("inserted", "merged", "superseded", "reinforced")):
         try:
             regenerate_memory_index(db, project_id, memory_dir)
         except Exception as e:

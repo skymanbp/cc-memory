@@ -734,7 +734,7 @@ Six hook commands <!--ce:hooks--> across five Claude Code events, declared in
 
 | Event | Script | Timeout | Job |
 |---|---|---|---|
-| `UserPromptSubmit` | `hooks/user_prompt.py` | 8 s | Auto-init `.ccm/`, count the turn, seed the first real request once per session, then **query-time recall** on stdout (v2.15.0) |
+| `UserPromptSubmit` | `hooks/user_prompt.py` | 8 s | Auto-init `.ccm/`, count the turn, seed the first real request once per session, then **query-time recall** on stdout (v2.15.0), preceded by any plan advisory the previous Stop parked (v2.16.0) |
 | `PostToolUse` | `hooks/post_tool_use.py` | 8 s | Live plan anchor **in every mode**, then one observation row per observed tool |
 | `Stop` | `hooks/stop.py` | 22 s | Detached Haiku observer (v2.16.0), per-turn PROGRESS patch, idle reorg every 5 turns, backpressure probe, plan enforcement |
 | `PreCompact` (sync) | `hooks/pre_compact.py` | 120 s | Extract → reconcile → full-rewrite PROGRESS.md → archive |
@@ -909,8 +909,8 @@ has to rediscover:
   progress row that the next Stop patch un-settles, two v2.13 rules with no
   gate assertion to anchor a case on — is listed in `CHANGELOG.md`
   § *Recorded, not redesigned*.
-- **Candidate future work:** surfacing `inject-usage` signals in the Stop
-  status line; a `directive-*` surface in the dashboard; richer `paths`-style
+- **Candidate future work:** surfacing `inject-usage` signals in the
+  SessionStart status line; a `directive-*` surface in the dashboard; richer `paths`-style
   diagnostics for multi-database machines.
 
 ---

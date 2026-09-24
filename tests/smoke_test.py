@@ -7281,11 +7281,48 @@ def main():
         f"the Stop hook constructed MemoryDB {_sh1_n['init']} times on one "
         f"turn (v2.15.2: 2 — idle reorg and the PROGRESS patch each opened "
         f"their own); one handle per hook")
-    assert "[cc-memory]" in _sh1_out.getvalue(), \
-        f"the status line must still be emitted: {_sh1_out.getvalue()!r}"
+    assert _sh1_out.getvalue() == "", (
+        f"a Stop that may close prints NOTHING since v2.16.0 (its stdout never "
+        f"reached the model): {_sh1_out.getvalue()!r}")
     shutil.rmtree(_sh1_root)
     print("[OK] v2.16.0 one handle: Stop constructs MemoryDB exactly once "
           "with the idle reorg due (v2.15.2: twice)")
+
+    # ── v2.16.0 · A7: no MEMORY.md render for a batch that wrote nothing ────
+    _a7_root = Path(tempfile.mkdtemp(prefix="cc-memory-noregen-"))
+    (_a7_root / _MEM).mkdir(parents=True)
+    _a7_db = MemoryDB(_a7_root / _MEM / "memory.db")
+    _a7_pid = _a7_db.upsert_project(str(_a7_root))
+    from llm.memory_writer import upsert_batch as _a7_ub
+    _a7_item = [{"category": "config", "content": "the batch timeout is 30 s exactly",
+                 "importance": 3}]
+    _a7_ub(_a7_db, _a7_pid, None, _a7_item, memory_dir=_a7_root / _MEM)
+    _a7_md = _a7_root / _MEM / "MEMORY.md"
+    assert _a7_md.is_file(), "a batch that inserted must render MEMORY.md"
+    _a7_md.write_text("SENTINEL: untouched", encoding="utf-8")
+    _a7_c = _a7_ub(_a7_db, _a7_pid, None, _a7_item, memory_dir=_a7_root / _MEM)
+    assert _a7_c["skipped"] == 1 and _a7_c["inserted"] == 0, _a7_c
+    assert _a7_md.read_text(encoding="utf-8") == "SENTINEL: untouched", (
+        "a batch of pure skips re-rendered MEMORY.md: one full read of the "
+        "table for a byte-identical file, on every observer call that found "
+        "nothing new (v2.15.2)")
+    _a7_c2 = _a7_ub(_a7_db, _a7_pid, None,
+                    [dict(_a7_item[0], importance=5)], memory_dir=_a7_root / _MEM)
+    assert _a7_c2["reinforced"] == 1 and \
+        _a7_md.read_text(encoding="utf-8") != "SENTINEL: untouched", (
+        "a REINFORCED row changed its importance, which the index orders by: "
+        "that batch must render")
+    from core.plan import BLOCK_MARKER_PREFIX as _a7_bp
+    from ui.installer import _TEMP_MARKER_PREFIXES as _a7_tp
+    assert _a7_bp in _a7_tp, \
+        "the block marker prefix must stay in the installer's sweep list (literal copy)"
+    _a7_stop_src = (_REPO / "cc_memory" / "hooks" / "stop.py").read_text(encoding="utf-8")
+    assert "_BLOCK_MARKER_PREFIX = plan_mod.BLOCK_MARKER_PREFIX" in _a7_stop_src \
+        and 'BLOCK_MARKER_PREFIX = "cc_mem_block_"' not in _a7_stop_src, \
+        "stop.py must take the block-marker prefix from core.plan, not re-spell it"
+    shutil.rmtree(_a7_root, ignore_errors=True)
+    print("[OK] v2.16.0 A7: a batch of pure skips does not render MEMORY.md; "
+          "a reinforced row does; the block-marker prefix is single-sourced")
 
     # ── v2.16.0 · PreCompact feeds only rows ABOVE the observer cursor ──────
     # Every observation used to reach a model twice: the Stop observer fed it

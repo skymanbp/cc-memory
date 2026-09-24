@@ -1,4 +1,4 @@
-<!-- i18n-source: README.md | sha256: 30bb6a166c561e2d | version: 2.15.2 | translated: 2026-09-24 | translation: 431534188c61990a -->
+<!-- i18n-source: README.md | sha256: 1a37f279c8a19dab | version: 2.15.2 | translated: 2026-09-24 | translation: e5f8817a25de176f -->
 > [English](README.md) · **简体中文**
 
 <div align="center">
@@ -683,7 +683,7 @@ schema（含每张表的定义位置）见 [§4](docs/ARCHITECTURE.zh.md#4-数�
 
 | 事件 | 脚本 | 超时 | 职责 |
 |---|---|---|---|
-| `UserPromptSubmit` | `hooks/user_prompt.py` | 8 秒 | 自动初始化 `.ccm/`、计轮次、在首条真实提示时播种请求（每会话一次），然后是**查询时召回**写到 stdout（v2.15.0） |
+| `UserPromptSubmit` | `hooks/user_prompt.py` | 8 秒 | 自动初始化 `.ccm/`、计轮次、在首条真实提示时播种请求（每会话一次），然后是**查询时召回**写到 stdout（v2.15.0），前面带上上一个 Stop 寄存的计划建议行（若有，v2.16.0） |
 | `PostToolUse` | `hooks/post_tool_use.py` | 8 秒 | **在每种模式下**维护实时计划锚点，然后为被观察的工具各写一行 observation |
 | `Stop` | `hooks/stop.py` | 22 秒 | 分离的 Haiku 观察者（v2.16.0）、按轮增量更新 PROGRESS、每 5 轮空闲整理、背压探针、计划强制执行 |
 | `PreCompact`（同步） | `hooks/pre_compact.py` | 120 秒 | 抽取 → 调和 → 全量重写 PROGRESS.md → 归档 |
@@ -834,7 +834,7 @@ Release，附上两个 exe，并以对应的 CHANGELOG 段落作为正文。与 
   在 reconcile 事务之外进行的精确哈希折叠、会被下一次 Stop 补丁抹掉的
   「已由整篇重写定稿」标记、两条没有闸门断言可供锚定证伪案例的 v2.13 规则
   ——列在 `CHANGELOG.md` § *Recorded, not redesigned*。
-- **候选的后续工作：** 在 Stop 状态行里呈现 `inject-usage` 信号；看板里的
+- **候选的后续工作：** 在 SessionStart 状态行里呈现 `inject-usage` 信号；看板里的
   `directive-*` 界面；面向多数据库机器的更丰富的 `paths` 式诊断。
 
 ---

@@ -1,4 +1,4 @@
-<!-- i18n-source: ARCHITECTURE.md | sha256: e2159f52c18966a1 | version: 2.15.2 | translated: 2026-09-24 | translation: 3d3dcbf8f4b6db22 -->
+<!-- i18n-source: ARCHITECTURE.md | sha256: af9160d9a4e95acb | version: 2.15.2 | translated: 2026-09-24 | translation: 3c4b7d25a2a7e557 -->
 > [English](ARCHITECTURE.md) · **简体中文**
 
 # cc-memory — 架构
@@ -211,18 +211,23 @@ v2.4.3 把原本 5 份的 `docs/` 目录合并为 2 份。全部 79 处仓库内
 | `SessionStart` | [`cc_memory/hooks/session_start.py`](../cc_memory/hooks/session_start.py) | 15s | 注入分层上下文（长期指令 / 主题 / 关键项 / 时间线 / PROGRESS 预览 / 页脚——指令账本自 v2.12.2 起是第一层；在此之前没有任何东西注入它）；发出强制的 `<system-reminder>`，要求 Read `PROGRESS.md` + `MEMORY.md`；拉起分离的 `--retro` 工作进程去追溯保存未保存的既往 JSONL（v2.16.0——只凭 stat() 扫描决定，续接或分叉的启动不拉起；调用失败后通过 `.llm_backoff.json` 退避，运行中的工作进程持有 `.retro.lock`）。 |
 | `Stop` | [`cc_memory/hooks/stop.py`](../cc_memory/hooks/stop.py) | 22s | 观察者：拉起分离的 `stop.py --observe` 工作进程，由它经 Haiku 从本回合的 observations 抽取（v2.16.0——钩子本身从不等模型；调用失败后工作进程通过 `.llm_backoff.json` 退避，运行中的工作进程持有 `.observer.lock`）；每回合 `patch_progress(files_touched, ...)`；每 5 个回合运行 `idle.maybe_run_idle`（清理 + 重新生成 MEMORY.md）；探测整理积压，到期时拉起独立的异步工作者（v2.12.0）；当计划**在活**时，累加其回合计数器并**强制执行**——对未精炼的计划、未做漂移检查的计划或闲置的指令**拒绝收官**（`{"decision": "block"}`），逃生预算见 CONTRACTS.md（v2.11.0；本行从前描述的建议行已不存在）。续发的 Stop（`stop_hook_active`，v2.16.0）除强制执行外跳过所有工作。 |
 | `PostToolUse` | [`cc_memory/hooks/post_tool_use.py`](../cc_memory/hooks/post_tool_use.py) | 8s | **先**做实时计划集成，且所有模式一视同仁：`ExitPlanMode` → `plan_active.raw`，`TodoWrite` → 机械式步骤同步，`Edit`/`Write`/`MultiEdit`/`NotebookEdit` → 漂移计数器 +1，敏感 Bash 调用 → +20。**然后**才为被观测的工具调用向 `observations` 插入一行（模式白名单 / 跳过列表——`core.modes.should_observe`）。不调用 LLM。端到端实测约 180-290 ms，其中约 75-120 ms 是解释器启动。 |
-| `UserPromptSubmit` | [`cc_memory/hooks/user_prompt.py`](../cc_memory/hooks/user_prompt.py) | 8s | 首次接触时自动初始化 `.ccm/`；跟踪回合数；为 Stop 观察者保存提示；在首条非脚手架提示时（每会话一次——与 `pre_compact._first_user_request` 共用的 `strip_scaffolding` 谓词，加上 `cc_mem_seeded_` 标记；v2.14.0）给会话打标签并为 `progress.current_request` 播种（依据双语恢复信号白名单，把触发类型判定为 `resume_request` 还是 `user_prompt`）。**然后是查询时召回**（v2.15.0）：把清洗后的提示转成 FTS5 表达式，越过相关度地板的最佳匹配会被打进 stdout 的 `<cc-memory-recall>` 帧里，否则一个字节都不输出（`core/recall.py`）。 |
+| `UserPromptSubmit` | [`cc_memory/hooks/user_prompt.py`](../cc_memory/hooks/user_prompt.py) | 8s | 首次接触时自动初始化 `.ccm/`；跟踪回合数；为 Stop 观察者保存提示；在首条非脚手架提示时（每会话一次——与 `pre_compact._first_user_request` 共用的 `strip_scaffolding` 谓词，加上 `cc_mem_seeded_` 标记；v2.14.0）给会话打标签并为 `progress.current_request` 播种（依据双语恢复信号白名单，把触发类型判定为 `resume_request` 还是 `user_prompt`）。**然后是查询时召回**（v2.15.0）：把清洗后的提示转成 FTS5 表达式，越过相关度地板的最佳匹配会被打进 stdout 的 `<cc-memory-recall>` 帧里，否则一个字节都不输出（`core/recall.py`）；若上一个 Stop 为本会话寄存了计划建议行，则先打印它（v2.16.0，`_emit_block_advisory`）。 |
 
 ### 钩子 stdout 契约
 
 每个钩子的 stdout 都有特定角色，违反它就是一个用户可见的 bug：
 
 - `SessionStart` 的 stdout → 注入的上下文（由 Claude 读取）。
-- `Stop` 的 stdout → 状态行：每回合一行 `[cc-memory] …`
-  （`stop.py:582-587`），外加至多一行 `[cc-memory.plan] …` 建议行。
-- `PreCompact`（同步）的 stdout → **一行**状态行（会出现在下一次会话的压缩后
-  上下文中）。
-- `UserPromptSubmit` 的 stdout → **查询时召回块，或者什么都不输出**（v2.15.0）。
+- `Stop` 的 stdout → **允许收官的回合什么都不输出**（v2.16.0）。Stop 钩子的
+  stdout 只出现在 transcript 视图里，从不进入模型，所以每回合那行 `[cc-memory] …`
+  状态行现在只写日志。拒绝时写出 `{"decision": "block"}` 文档且不写别的；逃生预算
+  用尽后降级成的那行 `[cc-memory.plan] …` 建议则**寄存**在本会话的 block 标记上
+  （`stop.py:_note_advisory`），由下一次 `UserPromptSubmit` 打印——那是唯一会被
+  注入、且有一个回合可挂靠的自动流。
+- `PreCompact`（同步）的 stdout → 什么都不输出（v2.16.0）；那一行状态改写日志。
+  它曾被当作"下一次会话的压缩后上下文里可见"，实际上从来不可见。
+- `UserPromptSubmit` 的 stdout → **查询时召回块、寄存的计划建议，或者什么都不输出**
+  （v2.15.0；建议行自 v2.16.0 起）。
   这条流是会被注入进 Claude 上下文的，而在 v2.15.0 之前，本插件是自己选择把它
   留空的——于是自动路径上**唯一持有用户查询的那一刻**，什么也没送到模型面前。
   `core/recall.py` 在候选越过相关度地板时，用一个 `<cc-memory-recall>` 帧
@@ -431,9 +436,9 @@ regenerate_memory_index(db, project_id, memory_dir)   ← MEMORY.md 刷新
 
 - `upsert_batch`（`memory_writer.py:318-360`）逐条循环调用 `upsert_smart`，并在最后
   重新生成**一次**，但仅当传入了 `memory_dir` 时才会（`memory_writer.py:318-360`）。
-  所有钩子调用方都会传（`pre_compact.py:442`、`stop.py:298`、
+  所有钩子调用方都会传（`pre_compact.py:444`、`stop.py:325`、
   `session_start.py:1144`）；同步 PreCompact 支路还会在其余状态变更之后再刷一次
-  （`pre_compact.py:841`）。
+  （`pre_compact.py:850`）。
 - 单发调用方显式调用 `regenerate_memory_index`：`cli/mem.py:1213` 与 `:584`、
   `mcp/server.py:647`、`ui/dashboard.py:1716`、`ui/web_viewer.py:1035`，外加
   `skills/ccm-load` 的内联脚本（`skills/ccm-load/SKILL.md:290, 307`）。
@@ -527,7 +532,7 @@ SessionStart：
 ```
 
 上面的调用签名都是真实的：`write_progress_md(db, project_id, memory_dir)`
-（`core/progress.py:498-677`；调用点 `pre_compact.py:801`、`stop.py:635`、
+（`core/progress.py:498-677`；调用点 `pre_compact.py:808`、`stop.py:662`、
 `user_prompt.py:133`、`session_start.py:1107`、`mcp/server.py:243`、
 `cli/mem.py:1304`）。PROGRESS.md 的结构规格见
 [docs/CONTRACTS.md](CONTRACTS.md#handoff-contract)。
@@ -659,7 +664,7 @@ BudgetGate 来说仍是已知量。候选顺序与传输格式（`core/auth.py:2
 `core/auth.py:60-93`）；它同时承载 `oauth_expired` 信号，支撑 SessionStart 的
 “[WARNING: OAuth expired — LLM extraction disabled]” 页脚
 （`session_start.py:674`）。钩子调用方用它来*提供*传给 `call_llm` 的凭据：
-`pre_compact.py:94 → :166`、`stop.py:99`、`session_start.py:674`、
+`pre_compact.py:96 → :166`、`stop.py:99`、`session_start.py:674`、
 `core/consolidate.py:425, 549, 724`。
 
 逐级回退是 v2.3.4 为一个具体故障加入的：一个失效的环境变量密钥（例如额度为零 →
@@ -756,7 +761,7 @@ v2.4.2 才成立：`_extract_via_llm` 的 `except` 元组此前不包含 `Runtim
 ```
 
 写入方，便于溯源：`MEMORY.md` ← `memory_writer.regenerate_memory_index`
-（`memory_writer.py:261-370`）；`PROGRESS.md` ← `core.progress.write_progress_md`
+（`memory_writer.py:384-421`）；`PROGRESS.md` ← `core.progress.write_progress_md`
 （`progress.py:498-677, 366`）；`PLAN.md` ← `core.plan.write_plan_md`
 （`plan.py:783-832`）；`.plan_history/` ← `plan.py:783-832`；`.last_save.json` ←
 `pre_compact.py:737, 771`；`.last_inject.json` ← `session_start.py:291-309`
