@@ -428,6 +428,71 @@ def _render_plan_section(db: MemoryDB, project_id: int, prog: Dict) -> List[str]
     return out
 
 
+def _render_request_lines(prog: Dict) -> List[str]:
+    """§1 body — one multi-line slot."""
+    cr = _neutralize_block((prog.get("current_request") or "").strip())
+    return [cr or "*(no request recorded yet)*"]
+
+
+def _render_status_lines(prog: Dict) -> List[str]:
+    """§2 body — three multi-line slots."""
+    done = _neutralize_block((prog.get("status_done") or "").strip())
+    in_flight = _neutralize_block((prog.get("status_in_flight") or "").strip())
+    blocked = _neutralize_block((prog.get("status_blocked") or "").strip())
+    return [f"**Done** —    {done or '*(none yet)*'}",
+            "",
+            f"**In-flight** — {in_flight or '*(none active)*'}",
+            "",
+            f"**Blocked** —  {blocked or '*(none)*'}"]
+
+
+def _render_todo_lines(prog: Dict, max_todos: int = _MAX_TODOS_RENDERED) -> List[str]:
+    """§3 body — capped, and the cap announces itself."""
+    # _coerce_entries: these JSON columns are shared write surfaces (see its
+    # docstring) — a bare string entry must degrade, never raise.
+    todos = _coerce_entries(prog.get("open_todos"), "content")
+    if not todos:
+        return ["*(no open todos)*"]
+    out = []
+    for t in todos[:max_todos]:
+        prio = neutralize_inline(str(t.get("priority", "medium")))
+        status = t.get("status", "pending")
+        mark = "[ ]" if status == "pending" else "[~]"
+        out.append(f"- {mark} `{prio}` "
+                   f"{neutralize_inline(str(t.get('content','')))}")
+    if len(todos) > max_todos:
+        out.append(f"- … {len(todos) - max_todos} more "
+                   f"(render capped at {max_todos}; the "
+                   f"`progress` row holds the full list)")
+    return out
+
+
+def render_progress_digest(db: MemoryDB, project_id: int, prog: Dict,
+                           max_todos: int = 10) -> str:
+    """§1–§4 of PROGRESS.md as ONE block, for the SessionStart injection.
+
+    v2.16.0 (B1). The injection used to embed the WHOLE file (byte-identical
+    below 4 000 characters) and then demand a Read of the same file — the
+    same text in the context twice, plus a tool call. The digest is the
+    handoff view: the request, the status, the open todos (capped, and the
+    cap announces itself) and the plan summary `_render_plan_section` draws
+    from the live store. No §0 (the injection header names the project), no
+    §5 (the Critical layer carries those rows), no §6/§7 (files touched and
+    the transcript pointer are what the Read is for). The same slot
+    renderers as the file, so the two cannot disagree, and the assembled
+    text is swept exactly as the file is.
+    """
+    lines = ["## 1. Current Request", ""]
+    lines += _render_request_lines(prog)
+    lines += ["", "## 2. Status", ""]
+    lines += _render_status_lines(prog)
+    lines += ["", "## 3. Open Todos", ""]
+    lines += _render_todo_lines(prog, max_todos=max_todos)
+    lines += ["", "## 4. Plan (sequenced next steps)", ""]
+    lines += _render_plan_section(db, project_id, prog)
+    return neutralize_document("\n".join(lines))
+
+
 def _render_session_section(db: MemoryDB, project_id: int, prog: Dict) -> List[str]:
     """Build the §0 Session block.
 
@@ -551,42 +616,17 @@ def write_progress_md(db: MemoryDB, project_id: int, memory_dir: Path) -> Path:
     #   (b) what did the prior sessions accomplish (project-wide context)?
     lines += _render_session_section(db, project_id, prog)
 
-    # --- Current Request -----------------------------------------------------
+    # --- §1–§3: the slot renderers the SessionStart digest shares (B1) ------
     lines += ["## 1. Current Request", ""]
-    cr = _neutralize_block((prog.get("current_request") or "").strip())
-    lines.append(cr or "*(no request recorded yet)*")
+    lines += _render_request_lines(prog)
     lines += [""]
 
-    # --- Status --------------------------------------------------------------
     lines += ["## 2. Status", ""]
-    done = _neutralize_block((prog.get("status_done") or "").strip())
-    in_flight = _neutralize_block((prog.get("status_in_flight") or "").strip())
-    blocked = _neutralize_block((prog.get("status_blocked") or "").strip())
-    lines.append(f"**Done** —    {done or '*(none yet)*'}")
-    lines.append("")
-    lines.append(f"**In-flight** — {in_flight or '*(none active)*'}")
-    lines.append("")
-    lines.append(f"**Blocked** —  {blocked or '*(none)*'}")
+    lines += _render_status_lines(prog)
     lines += [""]
 
-    # --- Open Todos ----------------------------------------------------------
-    # _coerce_entries: these three JSON columns are shared write surfaces (see
-    # its docstring) — a bare string entry must degrade, never raise.
     lines += ["## 3. Open Todos", ""]
-    todos = _coerce_entries(prog.get("open_todos"), "content")
-    if not todos:
-        lines.append("*(no open todos)*")
-    else:
-        for t in todos[:_MAX_TODOS_RENDERED]:
-            prio = neutralize_inline(str(t.get("priority", "medium")))
-            status = t.get("status", "pending")
-            mark = "[ ]" if status == "pending" else "[~]"
-            lines.append(f"- {mark} `{prio}` "
-                         f"{neutralize_inline(str(t.get('content','')))}")
-        if len(todos) > _MAX_TODOS_RENDERED:
-            lines.append(f"- … {len(todos) - _MAX_TODOS_RENDERED} more "
-                         f"(render capped at {_MAX_TODOS_RENDERED}; the "
-                         f"`progress` row holds the full list)")
+    lines += _render_todo_lines(prog)
     lines += [""]
 
     # --- Plan ----------------------------------------------------------------

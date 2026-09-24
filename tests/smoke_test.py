@@ -7477,6 +7477,74 @@ def main():
           "MEMORY.md's notice is three lines; one directive renderer; Recent by "
           "id; observer rows carry their session; handshake Reads are not fed")
 
+    # ── v2.16.0 · B1: the PROGRESS layer is a DIGEST of the row, not the file ─
+    _b1_root = Path(tempfile.mkdtemp(prefix="cc-memory-b1-"))
+    (_b1_root / _MEM).mkdir(parents=True)
+    _b1_db = MemoryDB(_b1_root / _MEM / "memory.db")
+    _b1_pid = _b1_db.upsert_project(str(_b1_root))
+    _b1_bud = int(_hooks_ss._DEFAULT_BUDGET * _hooks_ss._LAYER_BUDGETS["progress"])
+    assert abs(sum(_hooks_ss._LAYER_BUDGETS.values()) - 1.0) < 1e-9, \
+        "the six layer shares must still sum to 1.0"
+    # no row, a file on disk -> the file preview, labelled as such
+    (_b1_root / _MEM / "PROGRESS.md").write_text(
+        "# PROGRESS\n\n## 1. Current Request\n\nB1FILEONLY from the file\n",
+        encoding="utf-8")
+    _b1_txt, _b1_layer = _hooks_ss._build_progress_digest(
+        _b1_db, _b1_pid, _b1_root / _MEM, _b1_bud)
+    assert _b1_layer == "file" and "B1FILEONLY" in _b1_txt, (_b1_layer, _b1_txt[:120])
+    # a row + a refined plan -> the digest: §1–§4 and nothing of §0/§5–§7
+    _b1_db.upsert_progress(
+        _b1_pid, current_request="B1REQ: wire the exporter",
+        status_done="B1DONE parsed the config",
+        open_todos=[{"content": f"B1TODO {_i}", "priority": "high",
+                     "status": "pending"} for _i in range(12)],
+        critical_context=[{"id": 1, "category": "note",
+                           "content": "B1CRIT must not appear"}],
+        files_touched=[{"path": "B1FILE.py", "action": "edit"}],
+        transcript_ptr="B1PTR.jsonl")
+    from core import plan as _b1_plan
+    _b1_plan.apply_refined_plan(
+        _b1_db, _b1_pid,
+        {"version": 1, "goal": "B1GOAL ship it", "success_criteria": ["c"],
+         "steps": [{"id": 1, "title": "B1STEP one", "status": "pending", "notes": ""}],
+         "context": "", "refined_by": "test"},
+        memory_dir=_b1_root / _MEM)
+    _b1_txt, _b1_layer = _hooks_ss._build_progress_digest(
+        _b1_db, _b1_pid, _b1_root / _MEM, _b1_bud)
+    assert _b1_layer == "digest", _b1_layer
+    for _needle in ("## 1. Current Request", "B1REQ", "## 2. Status", "B1DONE",
+                    "## 3. Open Todos", "B1TODO 0", "… 2 more", "## 4. Plan",
+                    "B1GOAL", "B1STEP one"):
+        assert _needle in _b1_txt, (_needle, _b1_txt)
+    for _absent in ("## 5. Critical Context", "B1CRIT", "## 6.", "B1FILE",
+                    "## 7.", "B1PTR", "SINGLE SOURCE OF TRUTH", "## 0.",
+                    "B1FILEONLY"):
+        assert _absent not in _b1_txt, (
+            f"{_absent!r} in the digest — v2.15.2 embedded the whole file, "
+            f"which the forced reminder then demanded a Read of")
+    # the file keeps every section (the same slot renderers draw both)
+    from core.progress import write_progress_md as _b1_wpm
+    _b1_md = _b1_wpm(_b1_db, _b1_pid, _b1_root / _MEM).read_text(encoding="utf-8")
+    for _needle in ("## 1. Current Request", "B1REQ", "B1DONE", "B1TODO 11",
+                    "## 5. Critical Context", "B1CRIT", "B1FILE", "B1PTR",
+                    "SINGLE SOURCE OF TRUTH"):
+        assert _needle in _b1_md, _needle
+    # the whole injection carries the digest and the manifest records the layer
+    _b1_ctx = _hooks_ss.build_context(_b1_root / _MEM, _b1_db, _b1_pid, "b1", "b1-sess")
+    _b1_man = _json8.loads((_b1_root / _MEM / ".last_inject.json").read_text(encoding="utf-8"))
+    assert _b1_man.get("progress_layer") == "digest" \
+        and _b1_man.get("progress_preview_included") is True, _b1_man
+    assert "B1REQ" in _b1_ctx and "B1CRIT must not appear" not in _b1_ctx \
+        and "(digest" in _b1_ctx, _b1_ctx[-600:]
+    _b1_helpers = _ss_src[:_ss_src.index("def build_context(")]
+    assert "neutralize_document(" not in _b1_helpers \
+        and _b1_helpers.count("continue   # skip THIS entry") == 3, \
+        "the digest helper must not escape again nor add a fourth skip site"
+    shutil.rmtree(_b1_root, ignore_errors=True)
+    print("[OK] v2.16.0 B1: the PROGRESS layer is a §1–§4 digest of the row "
+          "(the file preview only without a row), the manifest names the "
+          "layer, and the shares still sum to 1.0")
+
     # ── v2.16.0 · PreCompact feeds only rows ABOVE the observer cursor ──────
     # Every observation used to reach a model twice: the Stop observer fed it
     # and advanced `projects.obs_watermark`, then PreCompact fed EVERYTHING

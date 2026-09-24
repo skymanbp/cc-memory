@@ -230,7 +230,7 @@ would falsify the record.
 |------|-------|---------|-----|
 | `PreCompact` (sync) | [`cc_memory/hooks/pre_compact.py`](../cc_memory/hooks/pre_compact.py) | 120s | Read a BOUNDED head+tail transcript window (`extractor.load_transcript_window`); LLM extract memories via Haiku; route through `memory_writer.upsert_batch`; FULL-REWRITE `.ccm/PROGRESS.md`; archive session. Writes a start marker so a killed run is detectable. |
 | `PreCompact` (async) | [`cc_memory/hooks/consolidate_async.py`](../cc_memory/hooks/consolidate_async.py) | 300s, `async: true` | LLM consolidation, moved OFF the blocking compaction path in v2.3.2 (interval marker + lock, budget-gated). Due every Nth session OR when the write backlog says so (v2.12.0); also spawnable standalone (`--cwd <root>`) by the Stop hook's backpressure probe. |
-| `SessionStart` | [`cc_memory/hooks/session_start.py`](../cc_memory/hooks/session_start.py) | 15s | Inject layered context (standing directives / topics / critical / timeline / PROGRESS preview / footer — the directive ledger is the first layer since v2.12.2; before that nothing injected it); emit the FORCED `<system-reminder>` to Read `PROGRESS.md` + `MEMORY.md`; start the DETACHED `--retro` worker that saves unsaved prior JSONLs (v2.16.0 — decided by a stat()-only scan, never on a resumed or forked start; a failed call backs it off through `.llm_backoff.json`, a running one holds `.retro.lock`). |
+| `SessionStart` | [`cc_memory/hooks/session_start.py`](../cc_memory/hooks/session_start.py) | 15s | Inject layered context (standing directives / topics / critical / timeline / PROGRESS digest / footer — the directive ledger is the first layer since v2.12.2; before that nothing injected it. The PROGRESS layer is §1–§4 rendered from the `progress` row since v2.16.0, with the file preview only for a project that has a file but no row; embedding the whole file put the same text in the context twice, once more on the forced Read); emit the FORCED `<system-reminder>` to Read `PROGRESS.md` + `MEMORY.md`; start the DETACHED `--retro` worker that saves unsaved prior JSONLs (v2.16.0 — decided by a stat()-only scan, never on a resumed or forked start; a failed call backs it off through `.llm_backoff.json`, a running one holds `.retro.lock`). |
 | `Stop` | [`cc_memory/hooks/stop.py`](../cc_memory/hooks/stop.py) | 22s | Observer: spawn the DETACHED `stop.py --observe` worker that extracts from this turn's observations via Haiku (v2.16.0 — the hook never waits on the model; a failed call backs the worker off through `.llm_backoff.json`, a running one holds `.observer.lock`); per-turn `patch_progress(files_touched, ...)`; every 5 turns run `idle.maybe_run_idle` (cleanup + MEMORY.md regen); probe the consolidation backlog and spawn the detached async worker when it is due (v2.12.0); when a plan is LIVE, bump its turn counter and **enforce** — refuse the turn (`{"decision": "block"}`) over an unrefined plan, an undrift-checked plan, or an idle directive, with the escape budget CONTRACTS.md specifies (v2.11.0; the advisory nudge this row used to describe is gone). A continuation Stop (`stop_hook_active`, v2.16.0) skips every job but enforcement. |
 | `PostToolUse` | [`cc_memory/hooks/post_tool_use.py`](../cc_memory/hooks/post_tool_use.py) | 8s | Live-plan integration FIRST, in every mode: `ExitPlanMode` → `plan_active.raw`, `TodoWrite` → mechanical step sync, `Edit`/`Write`/`MultiEdit`/`NotebookEdit` → +1 drift counter, sensitive Bash call → +20. THEN one row into `observations`, for OBSERVED tool calls only (mode allowlist / skip list — `core.modes.should_observe`). No LLM. Measured ~180-290 ms end to end, of which ~75-120 ms is interpreter start-up. |
 | `UserPromptSubmit` | [`cc_memory/hooks/user_prompt.py`](../cc_memory/hooks/user_prompt.py) | 8s | Auto-init `.ccm/` on first contact; track turn count; save prompt for the Stop observer; on the first non-scaffolding prompt (once per session — `strip_scaffolding`, shared with `pre_compact._first_user_request`, and the `cc_mem_seeded_` marker; v2.14.0), tag the session and seed `progress.current_request` (typing the trigger `resume_request` vs `user_prompt` from the bilingual resume-signal whitelist). **Then QUERY-TIME RECALL** (v2.15.0): the cleaned prompt is turned into an FTS5 expression, the best matches that clear the relevance floor are printed to stdout inside a `<cc-memory-recall>` frame, and nothing at all is printed otherwise (`core/recall.py`) — preceded by the plan advisory the previous Stop parked for this session, when there is one (v2.16.0, `_emit_block_advisory`). |
@@ -575,8 +575,8 @@ UserPromptSubmit (first non-scaffolding prompt, once per session):
   write_progress_md(db, project_id, memory_dir)
 
 SessionStart:
-  inject context blob (standing directives 10% + topics 25% + critical 15% +
-                       timeline 15% + PROGRESS preview 25% + footer 10% of a
+  inject context blob (standing directives 10% + topics 25% + critical 20% +
+                       timeline 20% + PROGRESS digest 15% + footer 10% of a
                        ~16000-char budget — session_start.py:48-56)
   footer may carry: killed-PreCompact warning (surviving .pre_compact_attempt.json,
                     after a 10-minute grace window), OAuth/api-key warnings, counts
@@ -591,7 +591,7 @@ SessionStart:
 
 Call signatures above are the real ones: `write_progress_md(db, project_id,
 memory_dir)` (`core/progress.py:498-677`; call sites `pre_compact.py:814`,
-`stop.py:540`, `user_prompt.py:52`, `session_start.py:959`, `mcp/server.py:243`,
+`stop.py:540`, `user_prompt.py:52`, `session_start.py:1009`, `mcp/server.py:243`,
 `cli/mem.py:1311`). See
 [docs/CONTRACTS.md](CONTRACTS.md#handoff-contract) for the PROGRESS.md
 schema.
@@ -635,10 +635,10 @@ Three changes close it:
 2. The fuzzy fallback is **deleted**. A miss returns `None`. Callers must treat
    that as "no transcript", never as licence to guess.
 3. Ownership is checked positively. `_transcript_belongs_to`
-   (`session_start.py:739-756`) reads the `cwd` the transcript's own records carry
+   (`session_start.py:802-819`) reads the `cwd` the transcript's own records carry
    and is **fail-closed** — no `cwd`, no ingest — and gates `retroactive_save`
    after the bounded window load. The tier-3 mine uses the deliberately weaker
-   `_transcript_is_foreign` (`session_start.py:759-786`): absent `cwd` is allowed,
+   `_transcript_is_foreign` (`session_start.py:822-849`): absent `cwd` is allowed,
    a *different* `cwd` is refused. The two differ on purpose — retroactive save
    persists LLM-extracted memories forever and should demand proof, while
    tier-3 must still work for the cwd-less transcript shape
@@ -740,9 +740,9 @@ while the same token via Bearer + beta gets HTTP 200 (`core/auth.py:14-15`).
 `get_api_key()` is the single-credential back-compat view of that same list (it
 does not retry, `core/auth.py:60-93`); it also carries the `oauth_expired`
 signal behind SessionStart's "[WARNING: OAuth expired — LLM extraction
-disabled]" footer (`session_start.py:678`). Hook callers use it to *supply*
+disabled]" footer (`session_start.py:728`). Hook callers use it to *supply*
 the credential passed into `call_llm`: `pre_compact.py:96 → :166`,
-`stop.py:99`, `session_start.py:678`, `core/consolidate.py:427, 549, 724`.
+`stop.py:99`, `session_start.py:728`, `core/consolidate.py:427, 549, 724`.
 
 Fall-through was added in v2.3.4 for a concrete failure: a dead env key (e.g.
 zero credit → HTTP 400) used to blackhole the healthy subscription token behind
@@ -1137,7 +1137,7 @@ exist because they cannot import this module and must be kept in sync:
 
 Old v2.0 `SESSION_HANDOFF.md` files are renamed to `SESSION_HANDOFF.md.v2.bak`
 on first PreCompact under v2.1 (one-shot migration
-`core.progress.migrate_legacy_handoff`, `progress.py:735-753`).
+`core.progress.migrate_legacy_handoff`, `progress.py:774-792`).
 
 ---
 

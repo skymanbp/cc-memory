@@ -3171,6 +3171,16 @@ def _break_r16fallbackcover(root):
            '            topic_names.add(t["name"])')
 
 
+@case("r16digest", ["tests/smoke_test.py"],
+      "embed the whole PROGRESS.md file again -> the same text sits in the "
+      "context twice (three times after the forced Read) and §5-§7 ride along")
+def _break_r16digest(root):
+    _patch(root, "cc_memory/hooks/session_start.py",
+           "    if not prog:\n        text = _build_progress_preview(memory_dir, budget)",
+           "    if True:  # BREAKAGE: the whole file, always\n"
+           "        text = _build_progress_preview(memory_dir, budget)")
+
+
 def verify_anchors():
     """Count every registered case's breakage anchors WITHOUT running a gate.
 

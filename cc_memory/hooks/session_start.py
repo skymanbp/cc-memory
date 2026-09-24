@@ -54,7 +54,7 @@ from core.logger import get_logger
 from hooks._entry import parse_payload, resolve_project, spawn_detached
 from core.privacy import (neutralize_document, neutralize_inline,
                           neutralize_markers)
-from core.progress import ACK_TEMPLATE, write_progress_md
+from core.progress import ACK_TEMPLATE, render_progress_digest, write_progress_md
 from core.prompts import (FALLBACK_SUMMARY_PREFIX, HANDSHAKE_ACK_LEAD,
                           HANDSHAKE_LEAD, HANDSHAKE_READ_STEP, HANDSHAKE_TITLE,
                           HANDSHAKE_WHY, RESUME_PROTOCOL_HEAD,
@@ -74,11 +74,15 @@ _LAYER_BUDGETS = {
     # one and measured it reaching the model zero times. Its share is taken
     # from topics (0.30 → 0.25) and timeline (0.20 → 0.15); the six shares
     # still sum to 1.0.
+    # v2.16.0 (B1): the PROGRESS layer is a §1–§4 DIGEST of the row rather
+    # than the whole file, so its share drops (0.25 → 0.15) and the two
+    # memory layers grow (critical 0.15 → 0.20, timeline 0.15 → 0.20). The
+    # six shares still sum to 1.0.
     "directives": 0.10,
     "topics":   0.25,
-    "critical": 0.15,
-    "timeline": 0.15,
-    "progress": 0.25,  # PROGRESS.md preview gets a larger share now
+    "critical": 0.20,
+    "timeline": 0.20,
+    "progress": 0.15,
     "footer":   0.10,
 }
 
@@ -266,20 +270,29 @@ def _build_progress_preview(memory_dir, budget):
     # Trim to budget
     if len(text) > budget:
         text = text[:budget].rsplit("\n", 1)[0] + "\n…[truncated, read .ccm/PROGRESS.md]"
-    # Balance code fences (register E4): PROGRESS.md legitimately contains a
-    # fenced block (§7's transcript pointer), and a budget cut landing inside
-    # it left an ODD number of fence lines — everything concatenated after
-    # the preview, including the FORCED reminder, then rendered as code and
-    # was never read as an instruction (measured: fence count 1 before the
-    # reminder). §7 widens its fence past any backtick run in the content,
-    # so counting lines that OPEN with a fence is exact for this document.
-    # A fence STATE MACHINE, not a raw line count (register r6-B6): inside an
-    # open fence, only a run AT LEAST as long as the opener closes it — a
-    # literal three-backtick line inside a widened four-backtick block is
-    # content, and counting it flipped parity so the balancer APPENDED a
-    # fence after an already-balanced preview, re-opening a block around the
-    # forced reminder. Track the open run's length; append a closer of that
-    # exact length only when the document ends still open.
+    text = _balance_fences(text)
+    return "### Last Session PROGRESS (preview)\n\n" + text + "\n"
+
+
+def _balance_fences(text):
+    """Close a code fence a budget cut left open. Shared by the file preview
+    and the digest (v2.16.0, B1).
+
+    Register E4: PROGRESS.md legitimately contains a fenced block (§7's
+    transcript pointer), and a budget cut landing inside it left an ODD
+    number of fence lines — everything concatenated after the preview,
+    including the FORCED reminder, then rendered as code and was never read
+    as an instruction (measured: fence count 1 before the reminder). §7
+    widens its fence past any backtick run in the content, so counting lines
+    that OPEN with a fence is exact for this document. A fence STATE
+    MACHINE, not a raw line count (register r6-B6): inside an open fence,
+    only a run AT LEAST as long as the opener closes it — a literal
+    three-backtick line inside a widened four-backtick block is content, and
+    counting it flipped parity so the balancer APPENDED a fence after an
+    already-balanced preview, re-opening a block around the forced reminder.
+    Track the open run's length; append a closer of that exact length only
+    when the document ends still open.
+    """
     open_len = 0
     for ln in text.split("\n"):
         s = ln.lstrip()
@@ -292,7 +305,42 @@ def _build_progress_preview(memory_dir, budget):
             open_len = 0
     if open_len:
         text += "\n" + "`" * open_len
-    return "### Last Session PROGRESS (preview)\n\n" + text + "\n"
+    return text
+
+
+def _build_progress_digest(db, project_id, memory_dir, budget):
+    """The PROGRESS layer: §1–§4 from the `progress` ROW, or the file preview
+    when there is no row. Returns `(text, layer)`, `layer` one of "digest",
+    "file", "".
+
+    v2.16.0 (B1). `_build_progress_preview` embedded the WHOLE file — below
+    4 000 characters byte-identical to the one the forced reminder then
+    demands a Read of, so the same text sat in the context twice plus a
+    tool call. The row is the store the file is rendered from, and
+    `core.progress.render_progress_digest` draws §1–§4 with the file's own
+    slot renderers (already neutralised there; nothing here escapes again,
+    which is the source rule the smoke gate holds for every helper above
+    `build_context`). The preview stays for a project whose file exists but
+    whose row does not — the `previewdecode` shape, a GBK byte in a file
+    the user edited by hand.
+    """
+    try:
+        prog = db.get_progress(project_id)
+    except Exception as e:
+        # why: an unreadable progress row must cost this layer's digest
+        # only, never the injection it sits in (hook contract: never raise)
+        _log.error(f"progress digest skipped: {e}")
+        prog = None
+    if not prog:
+        text = _build_progress_preview(memory_dir, budget)
+        return text, ("file" if text else "")
+    text = render_progress_digest(db, project_id, prog, max_todos=10)
+    if len(text) > budget:
+        text = (text[:budget].rsplit("\n", 1)[0]
+                + f"\n…[truncated, read {MEMORY_DIRNAME}/PROGRESS.md]")
+    text = _balance_fences(text)
+    return (f"### Last Session PROGRESS (digest — read {MEMORY_DIRNAME}/PROGRESS.md "
+            f"for §0/§5-§7)\n\n" + text + "\n"), "digest"
 
 
 def _build_directives_layer(db, project_id, budget):
@@ -583,7 +631,8 @@ def build_context(memory_dir, db, project_id, project_name, current_session_id="
         parts.append(timeline_text)
 
     budget = int(total_budget * _LAYER_BUDGETS["progress"])
-    progress_text = _build_progress_preview(memory_dir, budget)
+    progress_text, progress_layer = _build_progress_digest(
+        db, project_id, memory_dir, budget)
     if progress_text:
         parts.append(progress_text)
 
@@ -650,6 +699,7 @@ def build_context(memory_dir, db, project_id, project_name, current_session_id="
         "directive_slugs": directive_slugs,
         "n_injected_directives": len(directive_slugs),
         "progress_preview_included": bool(progress_text),
+        "progress_layer": progress_layer,   # "digest" | "file" | "" (v2.16.0)
         "total_chars": len(result),
         "est_tokens": len(result) // 4,
     }

@@ -2189,7 +2189,12 @@ def cmd_inject_show(args):
     # reached the model at all, and nothing here could have told you so.
     print(f"  directives        : {data.get('n_injected_directives', 0)} "
           f"({', '.join(data.get('directive_slugs', [])) or 'none'})")
-    print(f"  PROGRESS.md preview: {'yes' if data.get('progress_preview_included') else 'no'}")
+    # `progress_layer` since v2.16.0 (digest of the row, or the file preview
+    # for a project with no row); an older manifest only says whether one
+    # was included at all.
+    _layer = data.get("progress_layer") or (
+        "file" if data.get("progress_preview_included") else "none")
+    print(f"  PROGRESS layer    : {_layer}")
     print(f"  size              : {data.get('total_chars', 0)} chars "
           f"(~{data.get('est_tokens', 0)} tokens)")
     if data.get("critical_ids"):

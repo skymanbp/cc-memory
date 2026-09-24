@@ -1,4 +1,4 @@
-<!-- i18n-source: README.md | sha256: 1a37f279c8a19dab | version: 2.15.2 | translated: 2026-09-24 | translation: e5f8817a25de176f -->
+<!-- i18n-source: README.md | sha256: 9dac5c12e65bef58 | version: 2.15.2 | translated: 2026-09-24 | translation: e73b1bf6a63a08ad -->
 > [English](README.md) · **简体中文**
 
 <div align="center">
@@ -312,7 +312,8 @@ importance 或新的 tags —— 不新增行，只把它们合入命中的那�
 结束这一轮——带保证释放的逃生预算，因为一个逃不出去的拦截比没有拦截更糟。
 
 **能力五——检索与注入。** FTS5 全文检索、主题摘要、关键词词汇表，以及各层带
-预算的分层 SessionStart 注入（主题 + 关键记忆 + 近期时间线 + PROGRESS 预览）。
+预算的分层 SessionStart 注入（主题 + 关键记忆 + 近期时间线 + PROGRESS 摘要——自
+v2.16.0 起是 `progress` 行的 §1–§4，而不是整个文件）。
 `.last_inject.json` 精确记录注入了什么，所以注入是可观测的，不是想当然的。
 
 **能力六——带背压的整理（v2.12.0）。** 后台维护——LLM 判定的同事实换述去重、

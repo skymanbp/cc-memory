@@ -324,8 +324,8 @@ guaranteed escape budget, because an unbreakable block is worse than no block.
 
 **Capability 5 — retrieval and injection.** FTS5 full-text search, topic
 summaries, a keyword vocabulary, and a layered SessionStart injection (topics
-+ critical memories + recent timeline + PROGRESS preview) under per-layer
-budgets. `.last_inject.json` records exactly what was injected, so the
++ critical memories + recent timeline + a PROGRESS digest, §1–§4 of the row
+rather than the whole file since v2.16.0) under per-layer budgets. `.last_inject.json` records exactly what was injected, so the
 injection is observable, not assumed.
 
 **Capability 6 — consolidation with backpressure (v2.12.0).** Background
