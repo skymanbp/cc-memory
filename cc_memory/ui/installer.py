@@ -1412,6 +1412,7 @@ def _init_project(project_path, log_fn=print):
         ".last_save.json", ".last_inject.json", ".last_recall.json",
         ".last_consolidation.json",
         ".consolidation.lock", ".consolidation.kick",
+        ".observer.lock", ".retro.lock", ".llm_backoff.json",
         ".pre_compact_attempt.json",
         ".plan_raw.md", ".plan_history/", "*.tmp",
     ]

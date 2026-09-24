@@ -24,6 +24,8 @@ This suite pins the two halves of the fix:
      (a stale lock must not veto the backpressure spawn forever)
   §11 a continuation Stop (`stop_hook_active`) is the same turn judged again:
      enforcement runs and the budget counts down, nothing else runs
+  §12 a failed LLM call backs the observer off (doubling, capped), the cursor
+     stays put, and the first successful call clears the backoff
 
 Run:  python tests/test_directive_enforcement.py
 """
@@ -1066,6 +1068,91 @@ def section_11():
     _sh.rmtree(root, ignore_errors=True)
 
 
+# ── §12 v2.16.0: a failed LLM call backs the observer off; a success clears it ─
+# `call_llm` folds every failed leg into ONE RuntimeError, and the observer's
+# except tuple did not name it: the exception escaped `_observer_evaluate`,
+# the cursor never advanced, and the same 20 observations were sent again on
+# every Stop for the length of the outage. Driven in-process against the
+# real `_observer_evaluate` with `call_llm` stubbed — a gate never reaches
+# the network — and the credential resolver stubbed for the same reason.
+def section_12():
+    print("\n§12 v2.16.0：LLM 调用失败后观察者退避；成功即清除")
+    import shutil as _sh
+    import tempfile as _tf
+    import time as _time
+    from core import auth as auth_mod
+    from llm import ccl_backend as llm_mod
+    import hooks.stop as stop_mod
+    root = Path(_tf.mkdtemp(prefix="ccm-enf-backoff-"))
+    mem = root / _MEM
+    db = MemoryDB(mem / "memory.db")
+    pid = db.upsert_project(str(root))
+    for i in range(3):
+        db.insert_observation(pid, "enf-backoff", "Edit", f"src/f{i}.py", "")
+    top = max(o["id"] for o in db.get_observations_since(pid, 0))
+    calls = {"n": 0}
+
+    def _down(*_a, **_k):
+        calls["n"] += 1
+        raise RuntimeError("All LLM backends failed: anthropic: URLError: down")
+
+    def _empty(*_a, **_k):
+        calls["n"] += 1
+        return "[]"
+
+    real_key, real_call = auth_mod.get_api_key, llm_mod.call_llm
+    # why: a placeholder, not a credential — call_llm is stubbed above and
+    # below, so nothing built from this string ever reaches the network
+    auth_mod.get_api_key = lambda: ("placeholder-key", "env")
+    llm_mod.call_llm = _down
+    try:
+        try:
+            n = stop_mod._observer_evaluate(str(root), "enf-backoff", mem, db=db)
+        except RuntimeError as exc:
+            n = exc
+        check("a failed call returns 0 instead of escaping the observer",
+              n == 0, f"got {n!r}: RuntimeError was outside the except tuple")
+        active, info = auth_mod.llm_backoff(mem)
+        check("the failure is recorded and the backoff is active",
+              active and info.get("failures") == 1
+              and float(info.get("until", 0)) > _time.time()
+              and "down" in str(info.get("reason", "")),
+              f"active={active} info={info}")
+        check("the cursor did not advance over rows the model never saw",
+              db.observer_cursor(pid) == 0, f"cursor={db.observer_cursor(pid)}")
+        seen = calls["n"]
+        stop_mod._observer_evaluate(str(root), "enf-backoff", mem, db=db)
+        check("while backed off the observer does not call the model",
+              calls["n"] == seen, f"calls {seen} -> {calls['n']}")
+        # escalation is the record's own arithmetic: 1 min, 2, 4 ... 30 max
+        second = auth_mod.note_llm_failure(mem, "again")
+        _a2, info2 = auth_mod.llm_backoff(mem)
+        check("a consecutive failure doubles the delay",
+              second == 2 and 119.0 <= float(info2["until"]) - float(info2["ts"]) <= 121.0,
+              f"failures={second} delay={float(info2['until']) - float(info2['ts'])}")
+        for _ in range(8):
+            auth_mod.note_llm_failure(mem, "storm")
+        _a3, info3 = auth_mod.llm_backoff(mem)
+        check("the delay is capped at 30 minutes",
+              float(info3["until"]) - float(info3["ts"]) <= 1800.0 + 1.0,
+              f"delay={float(info3['until']) - float(info3['ts'])}")
+        # a success ends it: the cursor advances and the record is gone
+        auth_mod.clear_llm_backoff(mem)
+        check("clear_llm_backoff removes the record",
+              auth_mod.llm_backoff(mem) == (False, {}))
+        llm_mod.call_llm = _empty
+        stop_mod._observer_evaluate(str(root), "enf-backoff", mem, db=db)
+        check("after a successful call the cursor is at the highest fed row",
+              db.observer_cursor(pid) == top,
+              f"cursor={db.observer_cursor(pid)} top={top}")
+        (mem / auth_mod.BACKOFF_FILE).write_text("{not json", encoding="utf-8")
+        check("a corrupt record reads as NOT backed off",
+              auth_mod.llm_backoff(mem) == (False, {}))
+    finally:
+        auth_mod.get_api_key, llm_mod.call_llm = real_key, real_call
+    _sh.rmtree(root, ignore_errors=True)
+
+
 def main():
     print("=" * 66)
     print("v2.11.0 enforcement gate — plan + directive ledger")
@@ -1082,6 +1169,7 @@ def main():
         section_9()
         section_10()
         section_11()
+        section_12()
     finally:
         _cleanup_sandbox()
     print("\n" + "=" * 66)

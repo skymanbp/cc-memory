@@ -114,3 +114,93 @@ def get_api_key() -> tuple:
             pass
 
     return "", ""
+
+
+# ── LLM backoff (v2.16.0) ─────────────────────────────────────────────────
+# A hook whose LLM call failed used to send the same prompt again on the
+# very next turn, and every turn after, for the length of the outage:
+# `llm.ccl_backend.call_llm` folds every failed leg into ONE RuntimeError,
+# the Stop observer's except tuple did not name it, so the exception escaped
+# `_observer_evaluate`, the cursor never advanced, and the same 20
+# observations left the machine on every Stop. `.ccm/.llm_backoff.json` is
+# the project's shared "do not call the model before" note, read by every
+# LLM-calling hook through `llm_backoff` and written by `note_llm_failure`
+# alone: 1 min after the first failure, doubling to a 30-minute ceiling,
+# forgotten by the first success (`clear_llm_backoff`). Wall-clock on
+# purpose — the record is compared across processes and sessions, which a
+# monotonic clock cannot do. A failure that arrives more than one ceiling
+# after the previous backoff ended is a NEW outage and starts over at 1 min.
+BACKOFF_FILE = ".llm_backoff.json"
+_BACKOFF_BASE_S = 60.0
+_BACKOFF_CAP_S = 1800.0
+
+
+def _backoff_path(state_dir) -> Path:
+    return Path(state_dir) / BACKOFF_FILE
+
+
+def llm_backoff(state_dir):
+    """(active, info): is the project's LLM path backed off right now?
+
+    Never raises. `info` is the last record whether or not it is still
+    active — the caller logs `until` / `failures` / `reason` from it — and
+    `{}` when the file is missing, unreadable or malformed, all of which
+    read as "not active": the backoff is a courtesy to the API and to the
+    hook's own budget, never a reason to lose a hook.
+    """
+    try:
+        info = json.loads(_backoff_path(state_dir).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False, {}
+    if not isinstance(info, dict):
+        return False, {}
+    try:
+        until = float(info.get("until", 0))
+    except (TypeError, ValueError):
+        return False, {}
+    return time.time() < until, info
+
+
+def note_llm_failure(state_dir, reason) -> int:
+    """Record one failed LLM call; the backoff doubles per consecutive failure.
+
+    Delay = min(60 * 2 ** (failures - 1), 1800) seconds. Returns the number
+    of consecutive failures now on record, or 0 when the record could not be
+    written — which costs exactly the pre-v2.16.0 behaviour (one call per
+    turn) and never the hook. Written through `core.atomic.write_atomic` so
+    a concurrent reader sees the previous record or this one, never a torn
+    file; imported lazily because this module sits on every hook's
+    credential path and the failure path is the only one that needs it.
+    """
+    _active, info = llm_backoff(state_dir)
+    now = time.time()
+    try:
+        failures = int(info.get("failures", 0))
+        ended = float(info.get("until", 0))
+    except (TypeError, ValueError):
+        failures, ended = 0, 0.0
+    if now - ended > _BACKOFF_CAP_S:
+        failures = 0                     # a new outage, not the old one
+    failures += 1
+    delay = min(_BACKOFF_BASE_S * (2 ** (failures - 1)), _BACKOFF_CAP_S)
+    record = {"until": now + delay, "failures": failures,
+              "reason": str(reason)[:200], "ts": now}
+    try:
+        from core.atomic import write_atomic
+        write_atomic(_backoff_path(state_dir), json.dumps(record))
+    except Exception:
+        # why: a backoff that cannot be written costs one extra LLM call per
+        # turn — the v2.15.2 behaviour — and must not cost the hook that
+        # tried to record it (read-only state dir, a link, disk full)
+        return 0
+    return failures
+
+
+def clear_llm_backoff(state_dir) -> None:
+    """Forget the backoff after a successful call. Never raises."""
+    try:
+        _backoff_path(state_dir).unlink()
+    except OSError:
+        # why: absent already, or unremovable; the next failure rewrites it
+        # and the next expiry ends it, so nothing is lost either way
+        pass

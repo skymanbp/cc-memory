@@ -3099,6 +3099,15 @@ def _break_r16continuation(root):
            '    continuation = False  # BREAKAGE: the flag is parsed, then ignored')
 
 
+@case("r16obsbackoff", ["tests/test_directive_enforcement.py"],
+      "let call_llm's RuntimeError escape the observer again -> no backoff is "
+      "recorded, the cursor stays put, and the same prompt goes out next turn")
+def _break_r16obsbackoff(root):
+    _patch(root, "cc_memory/hooks/stop.py",
+           "    except RuntimeError as e:",
+           "    except () as e:  # BREAKAGE: nothing catches the outage signal")
+
+
 def verify_anchors():
     """Count every registered case's breakage anchors WITHOUT running a gate.
 

@@ -292,6 +292,7 @@ if not db_path.exists():
             'memory.db-shm', 'sessions/', '.last_save.json', '.last_inject.json',
             '.last_recall.json',
             '.last_consolidation.json', '.consolidation.lock', '.consolidation.kick',
+            '.observer.lock', '.retro.lock', '.llm_backoff.json',
             '.pre_compact_attempt.json', '.plan_raw.md', '.plan_history/', '*.tmp']
     # errors='replace', mirroring core/progress.py's canonical read: a user
     # line appended from a GBK editor or a PowerShell redirect makes strict

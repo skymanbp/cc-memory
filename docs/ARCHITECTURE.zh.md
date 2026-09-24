@@ -1,4 +1,4 @@
-<!-- i18n-source: ARCHITECTURE.md | sha256: be21a4f6d750b079 | version: 2.15.2 | translated: 2026-09-24 | translation: f6730b5fe5661033 -->
+<!-- i18n-source: ARCHITECTURE.md | sha256: 49b5e191bc0491ea | version: 2.15.2 | translated: 2026-09-24 | translation: 965197af0a02acf6 -->
 > [English](ARCHITECTURE.md) · **简体中文**
 
 # cc-memory — 架构
@@ -527,7 +527,7 @@ SessionStart：
 ```
 
 上面的调用签名都是真实的：`write_progress_md(db, project_id, memory_dir)`
-（`core/progress.py:498-677`；调用点 `pre_compact.py:801`、`stop.py:525`、
+（`core/progress.py:498-677`；调用点 `pre_compact.py:801`、`stop.py:548`、
 `user_prompt.py:133`、`session_start.py:1107`、`mcp/server.py:243`、
 `cli/mem.py:1304`）。PROGRESS.md 的结构规格见
 [docs/CONTRACTS.md](CONTRACTS.md#handoff-contract)。
@@ -741,6 +741,8 @@ v2.4.2 才成立：`_extract_via_llm` 的 `except` 元组此前不包含 `Runtim
 │                                （v2.3.2；水位线 v2.12.0）
 ├── .consolidation.lock          防止异步工作者重叠（v2.3.2）
 ├── .consolidation.kick          背压拉起冷却（v2.12.0）
+├── .llm_backoff.json            调用失败后的"暂不再调模型"记录；一次成功即
+│                                删除（v2.16.0）
 ├── .pre_compact_attempt.json    起始标记；残留 ⇒ 上一次运行被杀（v2.4.2）
 ├── .plan_raw.md                 最近一次 ExitPlanMode 原始捕获（v2.2）
 ├── .plan_history/               被替换/清除计划的只追加归档（v2.4.0）
@@ -760,7 +762,9 @@ v2.4.2 才成立：`_extract_via_llm` 的 `except` 元组此前不包含 `Runtim
 `.last_consolidation.json` ← `core.consolidate.write_consolidation_marker`
 （唯一写入方，异步钩子 + CLI 共用）；`.consolidation.lock` ← `_acquire_lock`
 （`consolidate_async.py:121-155`）；`.consolidation.kick` ←
-`stop.py:_maybe_kick_consolidation`；`.pre_compact_attempt.json` ←
+`stop.py:_maybe_kick_consolidation`；`.llm_backoff.json` ←
+`core.auth.note_llm_failure`（唯一写入方；每个调用 LLM 的钩子都通过
+`core.auth.llm_backoff` 读它，第一次成功的调用即删除它）；`.pre_compact_attempt.json` ←
 `pre_compact.py:284-311`。`sessions/` 与 `topics/` 由最先接触该项目的那条路径创建
 ——自动初始化时是 `user_prompt.py:57-63`，否则是 `pre_compact.py:342-343`。
 

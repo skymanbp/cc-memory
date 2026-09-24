@@ -581,7 +581,7 @@ SessionStart:
 
 Call signatures above are the real ones: `write_progress_md(db, project_id,
 memory_dir)` (`core/progress.py:498-677`; call sites `pre_compact.py:801`,
-`stop.py:475`, `user_prompt.py:52`, `session_start.py:944`, `mcp/server.py:243`,
+`stop.py:469`, `user_prompt.py:52`, `session_start.py:944`, `mcp/server.py:243`,
 `cli/mem.py:1304`). See
 [docs/CONTRACTS.md](CONTRACTS.md#handoff-contract) for the PROGRESS.md
 schema.
@@ -822,6 +822,8 @@ Per-project state lives at `<project>/.ccm/`:
 │                                consolidation (v2.3.2; watermark v2.12.0)
 ├── .consolidation.lock          prevents overlapping async workers (v2.3.2)
 ├── .consolidation.kick          backpressure spawn cooldown (v2.12.0)
+├── .llm_backoff.json            "do not call the model before" note after a
+│                                failed call; a success removes it (v2.16.0)
 ├── .pre_compact_attempt.json    start marker; survives ⇒ last run was killed (v2.4.2)
 ├── .plan_raw.md                 last raw ExitPlanMode capture (v2.2)
 ├── .plan_history/               append-only archive of replaced/cleared plans (v2.4.0)
@@ -842,7 +844,9 @@ Writers, for traceability: `MEMORY.md` ← `memory_writer.regenerate_memory_inde
 `core.consolidate.write_consolidation_marker` (one writer, async hook + CLI);
 `.consolidation.lock` ← `_acquire_lock` (`consolidate_async.py:121-155`);
 `.consolidation.kick` ← `stop.py:_maybe_kick_consolidation`;
-`.pre_compact_attempt.json` ←
+`.llm_backoff.json` ← `core.auth.note_llm_failure` (one writer; every
+LLM-calling hook reads it through `core.auth.llm_backoff` and the first
+successful call unlinks it); `.pre_compact_attempt.json` ←
 `pre_compact.py:284-311`. `sessions/` and `topics/` are created by whichever
 path touches the project first — `user_prompt.py:57-63` on auto-init, or
 `pre_compact.py:342-343`.

@@ -277,7 +277,8 @@ def _emit_block(reason_text):
 
 
 def _observer_evaluate(cwd, session_id, memory_dir, db=None):
-    from core.auth import get_api_key
+    from core.auth import (clear_llm_backoff, get_api_key, llm_backoff,
+                           note_llm_failure)
     from core.privacy import clean_for_storage
 
     db_path = memory_dir / DB_FILENAME
@@ -286,6 +287,15 @@ def _observer_evaluate(cwd, session_id, memory_dir, db=None):
 
     api_key, _ = get_api_key()
     if not api_key:
+        return 0
+    # Backed off after a failed call (v2.16.0): the same prompt used to go
+    # out again on the very next turn, every turn, for the length of an
+    # outage. `core.auth.llm_backoff` is the one reader of the record.
+    backed_off, backoff = llm_backoff(memory_dir)
+    if backed_off:
+        _log.info(f"observer: backed off after {backoff.get('failures')} "
+                  f"failure(s) until {backoff.get('until')}: "
+                  f"{backoff.get('reason', '')!r}")
         return 0
 
     # The caller's handle when it has one (v2.16.0, one handle per hook);
@@ -399,6 +409,8 @@ def _observer_evaluate(cwd, session_id, memory_dir, db=None):
         # keep higher ids and are picked up next turn.
         db.advance_observer_watermark(
             project_id, max((o["id"] for o in obs_fed), default=0))
+        # A call that came back ends the outage, whatever the answer held.
+        clear_llm_backoff(memory_dir)
 
         if n_total:
             _log.info(
@@ -409,6 +421,17 @@ def _observer_evaluate(cwd, session_id, memory_dir, db=None):
             )
         return n_total
 
+    except RuntimeError as e:
+        # `call_llm` folds every failed leg into ONE RuntimeError: that is the
+        # "the model could not be reached" signal, and until v2.16.0 the tuple
+        # below did not name it, so it escaped this function, the cursor
+        # stayed put, and the same prompt went out again next turn. Recorded
+        # once here; the Stops that follow skip the call until the backoff
+        # expires. A parsed-but-useless answer (`extract_json` -> None) is a
+        # bad answer, not an outage, and writes no backoff.
+        n = note_llm_failure(memory_dir, str(e))
+        _log.error(f"observer evaluation failed: {e} (backoff #{n})")
+        return 0
     except (urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError,
             TimeoutError, OSError, KeyError, ValueError) as e:
         _log.error(f"observer evaluation failed: {e}")
