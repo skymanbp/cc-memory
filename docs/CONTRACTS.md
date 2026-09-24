@@ -411,8 +411,8 @@ at `db.py:176-190`, plus the two v5 session-annotation columns at `db.py:219-222
 | `files_touched` | JSON | `observations` table (`pre_compact.py:446-453` → `progress.py:128-134`; Stop per-turn patch `stop.py:193-211`; SessionStart tier-2C `session_start.py:966`) → tier-3 prior-transcript `extract_file_changes` (`session_start.py:966`) |
 | `transcript_ptr` | TEXT | PreCompact `transcript_path` resolved absolute (`pre_compact.py:794`) → tier-3 `find_latest_transcript(cwd, exclude_session_id=...)` (`session_start.py:929`) |
 | `updated_at` | TEXT | ISO timestamp, stamped by `upsert_progress` / `patch_progress` (`db.py:2769-2845`, `:937-943`) |
-| `trigger_type` | TEXT | "auto" \| "manual" (PreCompact passes the host's own trigger string through — `pre_compact.py:799,492`; `"precompact"` is only `collect_progress_state`'s default kwarg at `progress.py:200-260` and is always overridden) \| "stop" (`stop.py:598`) \| "user_prompt" \| "resume_request" (`user_prompt.py:392`) \| "session_start_refresh" (`session_start.py:991`) |
-| `current_session_id` | TEXT | `db.tag_progress_session` only (`db.py:2958-2982`) — tagged by PreCompact (`pre_compact.py:799`), Stop (`stop.py:598`), SessionStart (`session_start.py:991`), UserPromptSubmit (`user_prompt.py:392`) |
+| `trigger_type` | TEXT | "auto" \| "manual" (PreCompact passes the host's own trigger string through — `pre_compact.py:799,492`; `"precompact"` is only `collect_progress_state`'s default kwarg at `progress.py:200-260` and is always overridden) \| "stop" (`stop.py:613`) \| "user_prompt" \| "resume_request" (`user_prompt.py:392`) \| "session_start_refresh" (`session_start.py:991`) |
+| `current_session_id` | TEXT | `db.tag_progress_session` only (`db.py:2958-2982`) — tagged by PreCompact (`pre_compact.py:799`), Stop (`stop.py:613`), SessionStart (`session_start.py:991`), UserPromptSubmit (`user_prompt.py:392`) |
 | `session_started_at` | TEXT | `db.tag_progress_session` — reset only when the stored sid changes; `upsert_progress` preserves both across a full rewrite (`db.py:2769-2845`) |
 
 The rendered Markdown (sections 0-7 in

@@ -1,4 +1,4 @@
-<!-- i18n-source: CONTRACTS.md | sha256: 823abb9577549ccc | version: 2.15.2 | translated: 2026-09-24 | translation: 05f1e06456aa95a7 -->
+<!-- i18n-source: CONTRACTS.md | sha256: f09884ae6461bc4d | version: 2.15.2 | translated: 2026-09-24 | translation: 3c4ebe24fafaa7e2 -->
 > [English](CONTRACTS.md) · **简体中文**
 
 # cc-memory — 契约（Contracts）
@@ -356,8 +356,8 @@ SQL 行生成。Schema 见 `cc_memory/core/db.py:_MIGRATIONS:v3_progress`（`db.
 | `files_touched` | JSON | `observations` 表（`pre_compact.py:446-453` → `progress.py:128-134`；Stop 每回合打补丁 `stop.py:193-211`；SessionStart 第 2C 级 `session_start.py:966`）→ 第 3 级：对上一次会话 transcript 跑 `extract_file_changes`（`session_start.py:966`） |
 | `transcript_ptr` | TEXT | PreCompact 解析为绝对路径的 `transcript_path`（`pre_compact.py:794`）→ 第 3 级 `find_latest_transcript(cwd, exclude_session_id=...)`（`session_start.py:929`） |
 | `updated_at` | TEXT | ISO 时间戳，由 `upsert_progress` / `patch_progress` 打戳（`db.py:2769-2845`、`:937-943`） |
-| `trigger_type` | TEXT | "auto" \| "manual"（PreCompact 把宿主自己的触发字符串原样透传 —— `pre_compact.py:84,492`；`"precompact"` 只是 `collect_progress_state` 在 `progress.py:200-260` 的默认关键字参数，且总会被覆盖）\| "stop"（`stop.py:598`）\| "user_prompt" \| "resume_request"（`user_prompt.py:392`）\| "session_start_refresh"（`session_start.py:991`） |
-| `current_session_id` | TEXT | 只由 `db.tag_progress_session` 写入（`db.py:2958-2982`）—— 由 PreCompact（`pre_compact.py:799`）、Stop（`stop.py:598`）、SessionStart（`session_start.py:991`）、UserPromptSubmit（`user_prompt.py:392`）打标签 |
+| `trigger_type` | TEXT | "auto" \| "manual"（PreCompact 把宿主自己的触发字符串原样透传 —— `pre_compact.py:84,492`；`"precompact"` 只是 `collect_progress_state` 在 `progress.py:200-260` 的默认关键字参数，且总会被覆盖）\| "stop"（`stop.py:613`）\| "user_prompt" \| "resume_request"（`user_prompt.py:392`）\| "session_start_refresh"（`session_start.py:991`） |
+| `current_session_id` | TEXT | 只由 `db.tag_progress_session` 写入（`db.py:2958-2982`）—— 由 PreCompact（`pre_compact.py:799`）、Stop（`stop.py:613`）、SessionStart（`session_start.py:991`）、UserPromptSubmit（`user_prompt.py:392`）打标签 |
 | `session_started_at` | TEXT | `db.tag_progress_session` —— 只在存储的 sid 发生变化时重置；`upsert_progress` 在整篇重写时会把这两个字段一并保留（`db.py:2958-2982`） |
 
 渲染出的 Markdown（[`cc_memory/core/progress.py`](../cc_memory/core/progress.py)

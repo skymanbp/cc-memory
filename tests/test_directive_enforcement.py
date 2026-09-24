@@ -22,6 +22,8 @@ This suite pins the two halves of the fix:
   §9 the ADVISORY line is a render path too (the slug reached Claude raw once
      the budget was spent), and the consolidation lock has ONE policy point
      (a stale lock must not veto the backpressure spawn forever)
+  §11 a continuation Stop (`stop_hook_active`) is the same turn judged again:
+     enforcement runs and the budget counts down, nothing else runs
 
 Run:  python tests/test_directive_enforcement.py
 """
@@ -976,6 +978,94 @@ def section_10():
     _sh.rmtree(root, ignore_errors=True)
 
 
+# ── §11 v2.16.0: a continuation Stop is the same turn, judged again ──────────
+# `stop_hook_active` is true when the harness re-fires Stop because the
+# previous Stop refused the turn and Claude has just answered the refusal. The
+# hook never read it: every refusal re-ran the observer, the idle reorg, the
+# PROGRESS patch, the backpressure probe and the plan turn bump, so one refused
+# turn counted as two (turns_total +1 per refusal, measured) and the drift
+# counter the refusal was ABOUT kept climbing while the user answered it.
+# Enforcement still runs on a continuation — it IS the next attempt, so the
+# escape budget counts down and a resolved condition releases — and nothing
+# else does. Driven through the real hook, with an ordinary Stop as the
+# control so "nothing bumped" is not vacuous.
+def section_11():
+    print("\n§11 v2.16.0：续发的 Stop 是同一回合的再判定，不是新一回合")
+    import json as _json
+    import shutil as _sh
+    import subprocess
+    import tempfile as _tf
+    root = Path(_tf.mkdtemp(prefix="ccm-enf-continuation-"))
+    db = MemoryDB(root / _MEM / "memory.db")
+    pid = db.upsert_project(str(root))
+    structured = {"version": 1, "goal": "g", "success_criteria": ["c"],
+                  "steps": [{"id": 1, "title": "s", "status": "pending",
+                             "notes": ""}],
+                  "context": "", "refined_by": "test"}
+    plan_mod.apply_refined_plan(db, pid, structured, memory_dir=root / _MEM)
+    # the drift threshold is ALREADY crossed, so a Stop that does not bump
+    # still has a real condition to refuse
+    with db._connect() as conn:
+        conn.execute("UPDATE plan_active SET turns_since_last_guardian = 8, "
+                     "turns_total = 40 WHERE project_id = ?", (pid,))
+    db.insert_observation(pid, "enf-cont", "Edit", "src/a.py", "")
+    hook = REPO / "cc_memory" / "hooks" / "stop.py"
+    env = {k: v for k, v in os.environ.items() if k != "ANTHROPIC_API_KEY"}
+    env["PYTHONIOENCODING"] = "utf-8"
+
+    def _stop(active):
+        payload = _json.dumps({"cwd": str(root), "session_id": "enf-cont",
+                               "hook_event_name": "Stop",
+                               "stop_hook_active": active})
+        r = subprocess.run([sys.executable, str(hook)], input=payload,
+                           capture_output=True, text=True, encoding="utf-8",
+                           errors="replace", env=env, timeout=120)
+        doc = {}
+        lines = [ln for ln in r.stdout.splitlines() if ln.strip()]
+        if lines and lines[-1].lstrip().startswith("{"):
+            doc = _json.loads(lines[-1])
+        return r, doc.get("decision"), str(doc.get("reason", ""))
+
+    before = db.get_plan_active(pid)
+    r1, d1, why1 = _stop(True)
+    r2, d2, why2 = _stop(True)
+    after = db.get_plan_active(pid)
+    check("a continuation is still refused while the drift is real, and it "
+          "counts as the next attempt",
+          d1 == "block" and "2 more refusal" in why1
+          and d2 == "block" and "1 more refusal" in why2,
+          f"d={d1}/{d2} why1={why1[-160:]!r} why2={why2[-160:]!r} "
+          f"err={r1.stderr[-200:]!r}")
+    check("a continuation does not bump the plan's turn counters",
+          after["turns_total"] == before["turns_total"]
+          and after["turns_since_last_guardian"]
+          == before["turns_since_last_guardian"],
+          f"turns_total {before['turns_total']} -> {after['turns_total']}, "
+          f"drift {before['turns_since_last_guardian']} -> "
+          f"{after['turns_since_last_guardian']}: each refusal counted as a "
+          f"turn of its own (v2.15.2: +1 per continuation)")
+    prog = db.get_progress(pid)
+    check("a continuation does not patch PROGRESS.md",
+          prog is None or prog.get("trigger_type") != "stop",
+          f"progress.trigger_type={(prog or {}).get('trigger_type')!r}: the "
+          f"per-turn patch ran again on the same turn")
+    check("the hook wrote nothing to stderr on either continuation",
+          r1.stderr == "" and r2.stderr == "",
+          repr((r1.stderr + r2.stderr)[-300:]))
+    # control: an ORDINARY Stop still does everything — the bump lands and
+    # the patch stamps — so the two negatives above are not vacuous
+    r3, d3, _why3 = _stop(False)
+    now = db.get_plan_active(pid)
+    prog3 = db.get_progress(pid)
+    check("control: an ordinary Stop bumps the counters and patches PROGRESS.md",
+          now["turns_total"] == before["turns_total"] + 1
+          and prog3 is not None and prog3.get("trigger_type") == "stop",
+          f"turns_total {before['turns_total']} -> {now['turns_total']}, "
+          f"trigger_type={(prog3 or {}).get('trigger_type')!r} "
+          f"d={d3} err={r3.stderr[-200:]!r}")
+    _sh.rmtree(root, ignore_errors=True)
+
+
 def main():
     print("=" * 66)
     print("v2.11.0 enforcement gate — plan + directive ledger")
@@ -991,6 +1081,7 @@ def main():
         section_8()
         section_9()
         section_10()
+        section_11()
     finally:
         _cleanup_sandbox()
     print("\n" + "=" * 66)

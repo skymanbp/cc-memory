@@ -3089,6 +3089,16 @@ def _break_r16prefeed(root):
            '    unfed = list(observations)  # BREAKAGE: the cursor is read, then ignored')
 
 
+@case("r16continuation", ["tests/test_directive_enforcement.py"],
+      "ignore stop_hook_active -> every refused turn re-runs the observer, "
+      "the idle reorg, the PROGRESS patch and the plan turn bump, so one turn "
+      "counts as two and the drift counter climbs while the user answers")
+def _break_r16continuation(root):
+    _patch(root, "cc_memory/hooks/stop.py",
+           '    continuation = bool(data.get("stop_hook_active"))',
+           '    continuation = False  # BREAKAGE: the flag is parsed, then ignored')
+
+
 def verify_anchors():
     """Count every registered case's breakage anchors WITHOUT running a gate.
 

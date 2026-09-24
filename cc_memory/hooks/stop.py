@@ -544,6 +544,18 @@ def main():
         sys.exit(0)
     if not isinstance(session_id, str) or not session_id:
         sys.exit(0)
+    # A CONTINUATION Stop (v2.16.0, A3). `stop_hook_active` is true when the
+    # harness re-fires this hook because the previous Stop refused the turn
+    # and Claude has just answered the refusal. Nothing happened in the
+    # project between the two that the first Stop did not already see, so
+    # the observer, the idle reorg, the PROGRESS patch, the backpressure
+    # probe and the plan turn bump are skipped: the hook never read the
+    # flag, so every refusal re-ran all five and one turn counted as two
+    # (measured: turns_total +1 per refusal, and the drift counter the
+    # refusal was ABOUT kept climbing while the user answered it).
+    # Enforcement still runs — a continuation IS the next attempt, so the
+    # escape budget counts down and a resolved condition still releases.
+    continuation = bool(data.get("stop_hook_active"))
 
     # Opt-out gate + root anchor via the ONE shared gate (hooks/_entry.py).
     # An exclusion gates BEFORE any project work: for a project initialised
@@ -576,34 +588,37 @@ def main():
         print("\n[cc-memory] stop hook ran (degraded)")
         sys.exit(0)
 
-    # Job 1: observer evaluation
-    try:
-        _observer_evaluate(cwd, session_id, memory_dir, db=db)
-    except Exception:
-        _log.error_tb("observer error")
-
-    # Job 2: idle reorg (every 5 turns)
-    turn_count = _read_turn_count(session_id)
-    try:
-        maybe_run_idle(cwd, session_id, turn_count, db=db)
-    except Exception as e:
-        _log.error(f"idle reorg failed: {e}")
-
-    # Job 3: per-turn PROGRESS.md files_touched patch
-    try:
-        # v5: tag the session BEFORE patching files_touched so PROGRESS.md §0
-        # attributes "Files Touched This Session" to the right session.
-        # Idempotent — only writes if this session_id differs from the stored
-        # current_session_id.
-        db.tag_progress_session(project_id, session_id)
-        _patch_progress_from_recent_obs(db, project_id, memory_dir)
-
-        # Job 3.5: consolidation backpressure (v2.12.0). Own try: a probe
-        # failure must cost neither the status line nor plan enforcement.
+    # Job 1: observer evaluation — not on a continuation (v2.16.0, A3)
+    if not continuation:
         try:
-            _maybe_kick_consolidation(cwd, memory_dir, db, project_id)
+            _observer_evaluate(cwd, session_id, memory_dir, db=db)
         except Exception:
-            _log.error_tb("backpressure probe failed")
+            _log.error_tb("observer error")
+
+    # Job 2: idle reorg (every 5 turns) — not on a continuation
+    turn_count = _read_turn_count(session_id)
+    if not continuation:
+        try:
+            maybe_run_idle(cwd, session_id, turn_count, db=db)
+        except Exception as e:
+            _log.error(f"idle reorg failed: {e}")
+
+    # Job 3: per-turn PROGRESS.md files_touched patch — not on a continuation
+    try:
+        if not continuation:
+            # v5: tag the session BEFORE patching files_touched so PROGRESS.md
+            # §0 attributes "Files Touched This Session" to the right
+            # session. Idempotent — only writes if this session_id differs
+            # from the stored current_session_id.
+            db.tag_progress_session(project_id, session_id)
+            _patch_progress_from_recent_obs(db, project_id, memory_dir)
+
+            # Job 3.5: consolidation backpressure (v2.12.0). Own try: a probe
+            # failure must cost neither the status line nor plan enforcement.
+            try:
+                _maybe_kick_consolidation(cwd, memory_dir, db, project_id)
+            except Exception:
+                _log.error_tb("backpressure probe failed")
 
         # Compact status line for Claude (one line, every turn).
         #
@@ -640,9 +655,11 @@ def main():
         # also what makes opting in the thing that turns enforcement on.
         reasons = []
         if plan_mod.is_live_plan(plan_row):
-            # Always bump turn counter so guardian thresholds accrue
-            db.bump_plan_turn_counter(project_id, n=1)
-            plan_row = db.get_plan_active(project_id)  # re-read post-bump
+            if not continuation:
+                # Bump the turn counters so guardian thresholds accrue — ONCE
+                # per turn: a continuation is the same turn, judged again.
+                db.bump_plan_turn_counter(project_id, n=1)
+                plan_row = db.get_plan_active(project_id)  # re-read post-bump
 
             reasons = plan_mod.blocking_reasons(
                 plan_row,
