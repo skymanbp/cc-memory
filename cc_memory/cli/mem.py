@@ -2201,6 +2201,10 @@ def cmd_inject_show(args):
         print(f"  critical ids      : {data['critical_ids']}")
     if data.get("timeline_ids"):
         print(f"  timeline ids      : {data['timeline_ids']}")
+    if data.get("topic_covered_ids"):
+        # v2.16.0: rows a topic summary stood in for — not rendered, and not
+        # excluded from the recall channel (a topic line is not the fact)
+        print(f"  topic-covered ids : {data['topic_covered_ids']}")
 
 
 # `inject-usage`'s observation window. It was an unnamed `limit=200` inside
@@ -2446,7 +2450,11 @@ def _delivered_ids(memory_dir, sid):
         d = {}  # why: layer 1 has already REPORTED an unreadable manifest;
         # the judge degrades to the other channel rather than repeating it
     if isinstance(d, dict):
-        for key in ("critical_ids", "timeline_ids"):
+        # v2.16.0: `shown_ids` is the one set; an older manifest carries the
+        # two layer lists only
+        keys = (("shown_ids",) if isinstance(d.get("shown_ids"), list)
+                else ("critical_ids", "timeline_ids"))
+        for key in keys:
             for v in (d.get(key) or []) if isinstance(d.get(key), list) else []:
                 try:
                     blind.append(int(v))

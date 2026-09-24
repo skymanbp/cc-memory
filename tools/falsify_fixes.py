@@ -2945,8 +2945,9 @@ def _break_r15recallframe(root):
       "are re-injected every turn, spending the budget to tell the model what "
       "is already in front of it")
 def _break_r15recalldedup(root):
+    # anchor repaired 2026-09-24: v2.16.0 (B2) passes the session id through
     _patch(root, f"{PKG}/hooks/user_prompt.py",
-           "                          prompt, exclude_ids=_already_shown(state_dir))",
+           "                          prompt, exclude_ids=_already_shown(state_dir, session_id))",
            "                          prompt, exclude_ids=())  # BREAKAGE")
 
 
@@ -3179,6 +3180,28 @@ def _break_r16digest(root):
            "    if not prog:\n        text = _build_progress_preview(memory_dir, budget)",
            "    if True:  # BREAKAGE: the whole file, always\n"
            "        text = _build_progress_preview(memory_dir, budget)")
+
+
+@case("r16recallscope", ["tests/test_recall.py"],
+      "honour another session's manifests again -> a second session on the "
+      "same project silences the first's recall channel for every row the "
+      "second has seen")
+def _break_r16recallscope(root):
+    _patch(root, f"{PKG}/hooks/user_prompt.py",
+           "        if theirs and session_id and theirs != session_id:\n"
+           "            continue  # why: another session's context window",
+           "        if False:  # BREAKAGE: every manifest is this session's\n"
+           "            continue  # why: another session's context window")
+
+
+@case("r16seenset", ["tests/smoke_test.py"],
+      "hand the timeline the rendered set only -> a critical row whose topic "
+      "summary already covers it is dropped by the critical layer and then "
+      "listed again under Recent")
+def _break_r16seenset(root):
+    _patch(root, f"{PKG}/hooks/session_start.py",
+           "        db, project_id, budget, shown_ids | covered, mode_name)",
+           "        db, project_id, budget, shown_ids, mode_name)  # BREAKAGE")
 
 
 def verify_anchors():

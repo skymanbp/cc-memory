@@ -591,7 +591,7 @@ SessionStart:
 
 Call signatures above are the real ones: `write_progress_md(db, project_id,
 memory_dir)` (`core/progress.py:498-677`; call sites `pre_compact.py:814`,
-`stop.py:540`, `user_prompt.py:52`, `session_start.py:1009`, `mcp/server.py:243`,
+`stop.py:540`, `user_prompt.py:52`, `session_start.py:1029`, `mcp/server.py:243`,
 `cli/mem.py:1311`). See
 [docs/CONTRACTS.md](CONTRACTS.md#handoff-contract) for the PROGRESS.md
 schema.
@@ -635,7 +635,7 @@ Three changes close it:
 2. The fuzzy fallback is **deleted**. A miss returns `None`. Callers must treat
    that as "no transcript", never as licence to guess.
 3. Ownership is checked positively. `_transcript_belongs_to`
-   (`session_start.py:802-819`) reads the `cwd` the transcript's own records carry
+   (`session_start.py:822-839`) reads the `cwd` the transcript's own records carry
    and is **fail-closed** — no `cwd`, no ingest — and gates `retroactive_save`
    after the bounded window load. The tier-3 mine uses the deliberately weaker
    `_transcript_is_foreign` (`session_start.py:822-849`): absent `cwd` is allowed,
@@ -740,9 +740,9 @@ while the same token via Bearer + beta gets HTTP 200 (`core/auth.py:14-15`).
 `get_api_key()` is the single-credential back-compat view of that same list (it
 does not retry, `core/auth.py:60-93`); it also carries the `oauth_expired`
 signal behind SessionStart's "[WARNING: OAuth expired — LLM extraction
-disabled]" footer (`session_start.py:728`). Hook callers use it to *supply*
+disabled]" footer (`session_start.py:748`). Hook callers use it to *supply*
 the credential passed into `call_llm`: `pre_compact.py:96 → :166`,
-`stop.py:99`, `session_start.py:728`, `core/consolidate.py:427, 549, 724`.
+`stop.py:99`, `session_start.py:748`, `core/consolidate.py:427, 549, 724`.
 
 Fall-through was added in v2.3.4 for a concrete failure: a dead env key (e.g.
 zero credit → HTTP 400) used to blackhole the healthy subscription token behind

@@ -167,12 +167,20 @@ def _build_topics_layer(db, project_id, budget):
     return "\n".join(lines), topic_names
 
 
-def _build_critical_layer(db, project_id, budget, topic_names):
+def _build_critical_layer(db, project_id, budget, topic_names, covered_out=None):
     critical = db.get_critical_memories(project_id, min_importance=5)
     unmerged = [
         m for m in critical
         if not m.get("topic") or m.get("topic") not in topic_names
     ]
+    if covered_out is not None:
+        # v2.16.0 (B2): the rows this layer DROPS because a topic summary
+        # already stands in for them. They are not rendered, so they are not
+        # "shown" — but the timeline must not re-list a fact the topic line
+        # just summarised, so `build_context` folds them into its `seen` set
+        # (measured before: dropped here, then listed under "### Recent").
+        covered_out.update(int(m["id"]) for m in critical
+                           if m.get("topic") and m.get("topic") in topic_names)
     if not unmerged:
         return "", set()
     lines = ["### Critical (unmerged)", ""]
@@ -620,13 +628,19 @@ def build_context(memory_dir, db, project_id, project_name, current_session_id="
         parts.append(topics_text)
 
     budget = int(total_budget * _LAYER_BUDGETS["critical"])
-    critical_text, shown_ids = _build_critical_layer(db, project_id, budget, topic_names)
+    covered = set()
+    critical_text, shown_ids = _build_critical_layer(
+        db, project_id, budget, topic_names, covered_out=covered)
     if critical_text:
         parts.append(critical_text)
 
     budget = int(total_budget * _LAYER_BUDGETS["timeline"])
+    # ONE `seen` set (v2.16.0, B2): what the critical layer rendered AND what
+    # a topic summary already covered. With the rendered set alone, a ≥5 row
+    # whose topic had rendered was dropped by the critical layer and then
+    # listed again under "### Recent" — the same fact twice, in two layers.
     timeline_text, timeline_ids = _build_timeline_layer(
-        db, project_id, budget, shown_ids, mode_name)
+        db, project_id, budget, shown_ids | covered, mode_name)
     if timeline_text:
         parts.append(timeline_text)
 
@@ -695,6 +709,12 @@ def build_context(memory_dir, db, project_id, project_name, current_session_id="
         "topic_names": sorted(topic_names),
         "critical_ids": critical_ids,
         "timeline_ids": timeline_ids,
+        # v2.16.0 (B2): `shown_ids` is THE set the recall channel excludes
+        # (`user_prompt._already_shown`); the two lists above stay for older
+        # readers. `topic_covered_ids` is recorded and deliberately NOT fed to
+        # the recall channel: a topic line is not the fact it summarises.
+        "shown_ids": all_ids,
+        "topic_covered_ids": sorted(covered),
         "n_injected_memories": len(all_ids),
         "directive_slugs": directive_slugs,
         "n_injected_directives": len(directive_slugs),

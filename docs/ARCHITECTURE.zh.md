@@ -1,4 +1,4 @@
-<!-- i18n-source: ARCHITECTURE.md | sha256: 1f5fa6104b003496 | version: 2.15.2 | translated: 2026-09-24 | translation: 455c70256e1e2e21 -->
+<!-- i18n-source: ARCHITECTURE.md | sha256: 7c431042ec3f56ca | version: 2.15.2 | translated: 2026-09-24 | translation: d184fb8fbfe595a9 -->
 > [English](ARCHITECTURE.md) · **简体中文**
 
 # cc-memory — 架构
@@ -571,7 +571,7 @@ slug 约定是：把 `[A-Za-z0-9]` 之外的**每一个**字符替换成 `-`。c
    —— 后者此前逐字复制了旧解析器，连模糊分支一起。
 2. 模糊兜底被**删除**。未命中返回 `None`。调用方必须把它当作「没有 transcript」，
    绝不能当成可以猜的许可。
-3. 归属改为正向校验。`_transcript_belongs_to`（`session_start.py:802-819`）读取
+3. 归属改为正向校验。`_transcript_belongs_to`（`session_start.py:822-839`）读取
    transcript 自身记录携带的 `cwd`，并且是**失败闭合**的 —— 没有 `cwd` 就不摄取 ——
    它在有界窗口加载之后为 `retroactive_save` 把关。第 3 级挖掘则使用故意更弱的
    `_transcript_is_foreign`（`session_start.py:822-849`）：缺失 `cwd` 放行，`cwd`
@@ -664,8 +664,8 @@ BudgetGate 来说仍是已知量。候选顺序与传输格式（`core/auth.py:2
 `get_api_key()` 是同一份候选列表的单凭据向后兼容视图（它不重试，
 `core/auth.py:60-93`）；它同时承载 `oauth_expired` 信号，支撑 SessionStart 的
 “[WARNING: OAuth expired — LLM extraction disabled]” 页脚
-（`session_start.py:728`）。钩子调用方用它来*提供*传给 `call_llm` 的凭据：
-`pre_compact.py:96 → :166`、`stop.py:99`、`session_start.py:728`、
+（`session_start.py:748`）。钩子调用方用它来*提供*传给 `call_llm` 的凭据：
+`pre_compact.py:96 → :166`、`stop.py:99`、`session_start.py:748`、
 `core/consolidate.py:425, 549, 724`。
 
 逐级回退是 v2.3.4 为一个具体故障加入的：一个失效的环境变量密钥（例如额度为零 →

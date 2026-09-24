@@ -7545,6 +7545,54 @@ def main():
           "(the file preview only without a row), the manifest names the "
           "layer, and the shares still sum to 1.0")
 
+    # ── v2.16.0 · B2: ONE seen set; the manifest's shown_ids; session scope ─
+    _b2_root = Path(tempfile.mkdtemp(prefix="cc-memory-b2-"))
+    (_b2_root / _MEM).mkdir(parents=True)
+    _b2_db = MemoryDB(_b2_root / _MEM / "memory.db")
+    _b2_pid = _b2_db.upsert_project(str(_b2_root))
+    _b2_cov = _b2_db.insert_memory(_b2_pid, None, "decision",
+                                   "B2COVERED the exporter listens on port 9100",
+                                   5, [], "exporter")
+    _b2_crit = _b2_db.insert_memory(_b2_pid, None, "decision",
+                                    "B2CRIT the exporter has no topic summary yet",
+                                    5, [], "")
+    _b2_db.upsert_topic(_b2_pid, "exporter",
+                        "B2TOPIC the exporter's port and its retry policy are settled.")
+    _b2_ctx = _hooks_ss.build_context(_b2_root / _MEM, _b2_db, _b2_pid, "b2", "b2-sess")
+    _b2_man = _json8.loads((_b2_root / _MEM / ".last_inject.json").read_text(encoding="utf-8"))
+    assert "B2TOPIC" in _b2_ctx and "B2CRIT" in _b2_ctx, _b2_ctx[-800:]
+    assert _b2_cov not in _b2_man["critical_ids"] and _b2_crit in _b2_man["critical_ids"], _b2_man
+    assert _b2_cov not in _b2_man["timeline_ids"] and "B2COVERED" not in _b2_ctx, (
+        "Recent re-listed a row whose topic summary already stood in for it "
+        "(v2.15.2: the critical layer dropped it, the timeline saw only the "
+        "rendered set)")
+    assert _b2_man["topic_covered_ids"] == [_b2_cov] \
+        and _b2_man["shown_ids"] == sorted(set(_b2_man["critical_ids"])
+                                           | set(_b2_man["timeline_ids"])) \
+        and _b2_crit in _b2_man["shown_ids"], _b2_man
+    import hooks.user_prompt as _b2_up
+    _b2_seen = _b2_up._already_shown(_b2_root / _MEM, "b2-sess")
+    assert set(_b2_man["shown_ids"]) <= _b2_seen and _b2_cov not in _b2_seen, (
+        "a topic-covered row must stay recallable (a topic line is not the "
+        "fact); the rendered rows must not", _b2_seen)
+    assert _b2_up._already_shown(_b2_root / _MEM, "another-session") == set(), \
+        "another session's inject manifest must not exclude anything"
+    assert _b2_up._already_shown(_b2_root / _MEM) == _b2_seen, \
+        "no session id given -> the manifest is honoured (degrade toward a repeat)"
+    # an older manifest shape (the two layer lists, no shown_ids) still counts
+    (_b2_root / _MEM / ".last_inject.json").write_text(_json8.dumps(
+        {"session_id": "b2-sess", "critical_ids": [_b2_crit], "timeline_ids": []}),
+        encoding="utf-8")
+    assert _b2_up._already_shown(_b2_root / _MEM, "b2-sess") == {_b2_crit}
+    import cli.mem as _b2_mem
+    (_b2_root / _MEM / ".last_inject.json").write_text(_json8.dumps(_b2_man), encoding="utf-8")
+    assert _b2_mem._delivered_ids(_b2_root / _MEM, "b2-sess")[0] == _b2_man["shown_ids"], \
+        "the usage judge must read shown_ids"
+    shutil.rmtree(_b2_root, ignore_errors=True)
+    print("[OK] v2.16.0 B2: a topic-covered critical row is neither re-listed by "
+          "Recent nor excluded from recall; shown_ids is the one set; another "
+          "session's manifest excludes nothing")
+
     # ── v2.16.0 · PreCompact feeds only rows ABOVE the observer cursor ──────
     # Every observation used to reach a model twice: the Stop observer fed it
     # and advanced `projects.obs_watermark`, then PreCompact fed EVERYTHING

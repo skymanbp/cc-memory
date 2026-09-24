@@ -141,8 +141,8 @@ def _init_project_if_needed(cwd):
 _RECALL_MANIFEST = ".last_recall.json"
 
 
-def _already_shown(state_dir):
-    """Memory ids Claude has already been given this session.
+def _already_shown(state_dir, session_id=""):
+    """Memory ids Claude has already been given THIS session.
 
     Two sources, both artifacts this plugin already writes:
       * `.last_inject.json` — what SessionStart put in the context window;
@@ -151,13 +151,21 @@ def _already_shown(state_dir):
     in front of it, which is exactly what would make this channel read as
     noise rather than as help.
 
+    SESSION-SCOPED (v2.16.0, B2): both manifests name the session that
+    received them, and one naming a DIFFERENT session is another context
+    window's — nothing in it is in front of this one. Measured before: two
+    sessions on one project, and the second's recall manifest silenced the
+    first's channel for every row the second had seen. A manifest with no
+    `session_id` (older plugin, or none passed) is still honoured: it
+    degrades toward a duplicate line, never toward silence.
+
     Best-effort by construction: an unreadable manifest means "exclude
     nothing", never "recall nothing" — degrading toward a duplicate line is
     strictly better than degrading toward silence.
     """
     import json
     shown = set()
-    for name, key in ((".last_inject.json", None), (_RECALL_MANIFEST, "ids")):
+    for name, key in ((".last_inject.json", "shown_ids"), (_RECALL_MANIFEST, "ids")):
         try:
             data = json.loads((state_dir / name).read_text(encoding="utf-8"))
         except (OSError, ValueError):
@@ -165,9 +173,12 @@ def _already_shown(state_dir):
             # state and must cost only the de-duplication it would have given
         if not isinstance(data, dict):
             continue
-        if key:
-            values = data.get(key) or []
-        else:
+        theirs = str(data.get("session_id") or "")
+        if theirs and session_id and theirs != session_id:
+            continue  # why: another session's context window — see the docstring
+        values = data.get(key)
+        if key == "shown_ids" and not isinstance(values, list):
+            # a pre-v2.16.0 inject manifest carries the two layer lists only
             values = ((data.get("critical_ids") or [])
                       + (data.get("timeline_ids") or []))
         for v in values if isinstance(values, list) else []:
@@ -236,7 +247,7 @@ def _emit_recall(cwd, prompt, session_id=""):
         # to create a database as a side effect of being asked something.
         return
     rows = select_recalls(db.search_fts(pid, query, limit=RECALL_CANDIDATES),
-                          prompt, exclude_ids=_already_shown(state_dir))
+                          prompt, exclude_ids=_already_shown(state_dir, session_id))
     if not rows:
         return
     block = render_recall_block(rows, prompt)
@@ -259,8 +270,12 @@ def _emit_recall(cwd, prompt, session_id=""):
         try:
             old = json.loads((state_dir / _RECALL_MANIFEST)
                              .read_text(encoding="utf-8"))
-            if isinstance(old, dict) and isinstance(old.get("ids"), list):
-                prev = [int(i) for i in old["ids"]][-200:]
+            # The history is THIS session's (v2.16.0, B2): another session's
+            # manifest is superseded, not extended, or its rows would be
+            # excluded here without ever having been in front of this one.
+            if (isinstance(old, dict) and isinstance(old.get("ids"), list)
+                    and str(old.get("session_id") or "") in ("", session_id)):
+                prev = [int(i) for i in old["ids"]]
         except (OSError, ValueError, TypeError):
             prev = []  # why: a fresh or unreadable manifest starts an empty
             # history — the cost is one possible repeat, not a failed recall
@@ -273,7 +288,12 @@ def _emit_recall(cwd, prompt, session_id=""):
             # the answer matters, and one that would report the manifest's
             # shape as Claude's behaviour.
             json.dumps({"ts": datetime.now().isoformat(timespec="seconds"),
-                        "n": len(ids), "ids": sorted(set(prev) | set(ids)),
+                        # emission order, newest LAST, last 200 kept
+                        # (v2.16.0): `sorted(set(...))` sank a small id to
+                        # the front, so the cap dropped the newest, not the
+                        # oldest, and the order no longer said what was seen
+                        # when
+                        "n": len(ids), "ids": (prev + ids)[-200:],
                         "last_ids": ids, "chars": len(block),
                         "session_id": session_id},
                        ensure_ascii=False, indent=2),

@@ -478,6 +478,83 @@ def section3_query_time_recall(tmp):
         _check(".last_recall.json" in _src,
                f"§3h {_rel} carries the line too (deliberate literal copy)")
 
+    # (i) SESSION SCOPE (v2.16.0, B2). Both manifests name the session that
+    #     received them, and one another session wrote must not silence this
+    #     one — measured before: two sessions on one project, and the
+    #     second's recall manifest excluded, for the first, every row the
+    #     second had seen. A project of its own, one matching row.
+    root_s = tmp / "s3s"
+    (root_s / _MEM).mkdir(parents=True)
+    db_s = MemoryDB(root_s / _MEM / "memory.db")
+    pid_s = db_s.upsert_project(str(root_s))
+    _row_s = db_s.insert_memory(pid_s, None, "bug", facts[0][1], importance=3,
+                                tags=["test"], topic="timeout")
+    _man_s = root_s / _MEM / ".last_recall.json"
+    _inj_s = root_s / _MEM / ".last_inject.json"
+
+    def _fire_s(prompt, sid):
+        payload = json.dumps({"cwd": str(root_s), "session_id": sid,
+                              "prompt": prompt,
+                              "hook_event_name": "UserPromptSubmit"})
+        return subprocess.run([sys.executable, str(hook)], input=payload,
+                              capture_output=True, text=True,
+                              encoding="utf-8", errors="replace", env=env,
+                              timeout=120)
+
+    def _clear(*paths):
+        for p in paths:
+            try:
+                p.unlink()
+            except OSError:
+                pass  # why: absent when the previous fire was silent — the
+                # clear only has to guarantee the manifest is not there
+
+    _man_s.write_text(json.dumps({"ids": [_row_s], "last_ids": [_row_s], "n": 1,
+                                  "session_id": "other-session", "ts": ""}),
+                      encoding="utf-8")
+    _o = _fire_s(_subject, sid="mine").stdout
+    _check("<cc-memory-recall>" in _o,
+           "§3i another session's recall manifest does not silence this one",
+           repr(_o[:200]))
+    _o2 = _fire_s(_subject, sid="mine").stdout
+    _check(_o2 == "", "§3i the same session IS de-duplicated", repr(_o2[:200]))
+    _man_now = json.loads(_man_s.read_text(encoding="utf-8"))
+    _check(_man_now.get("session_id") == "mine" and _man_now.get("ids") == [_row_s],
+           "§3i the history restarts for the new session",
+           str(_man_now)[:200])
+    for _label, _inj in (("shown_ids", {"session_id": "mine", "shown_ids": [_row_s]}),
+                         ("legacy critical_ids", {"session_id": "mine",
+                                                  "critical_ids": [_row_s],
+                                                  "timeline_ids": []})):
+        _clear(_man_s)
+        _inj_s.write_text(json.dumps(_inj), encoding="utf-8")
+        _q = _fire_s(_subject, sid="mine").stdout
+        _check(_q == "", f"§3i an inject manifest ({_label}) for THIS session "
+                         f"excludes its rows", repr(_q[:200]))
+    _clear(_man_s)
+    _inj_s.write_text(json.dumps({"session_id": "other-session",
+                                  "shown_ids": [_row_s]}), encoding="utf-8")
+    _q2 = _fire_s(_subject, sid="mine").stdout
+    _check("<cc-memory-recall>" in _q2,
+           "§3i another session's inject manifest does not silence this one",
+           repr(_q2[:200]))
+
+    # (j) the history is the last 200 EMISSIONS, newest last. v2.15.x wrote
+    #     `sorted(set(prev) | set(ids))`, so a small id sank to the front and
+    #     the cap dropped the newest entry, not the oldest.
+    _clear(_man_s, _inj_s)
+    _man_s.write_text(json.dumps({"ids": list(range(1000, 1205)),
+                                  "last_ids": [1204], "n": 1,
+                                  "session_id": "mine", "ts": ""}),
+                      encoding="utf-8")
+    _e = _fire_s(_subject, sid="mine").stdout
+    _check("<cc-memory-recall>" in _e, "§3j a row outside the history is recalled",
+           repr(_e[:200]))
+    _hist = json.loads(_man_s.read_text(encoding="utf-8")).get("ids") or []
+    _check(len(_hist) == 200 and _hist[-1] == _row_s and _hist[0] == 1006,
+           "§3j the history keeps the last 200 emissions in order, newest last",
+           f"len={len(_hist)} first={_hist[:2]} last={_hist[-2:]}")
+
 
 def main():
     tmp = Path(tempfile.mkdtemp(prefix="cc-memory-recall-"))
