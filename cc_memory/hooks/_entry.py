@@ -25,6 +25,7 @@ Hook contract: nothing in this module raises. A `None` return means
 """
 
 import json
+import subprocess
 import sys
 
 from core.modes import is_excluded
@@ -105,3 +106,34 @@ def resolve_project(cwd, *, log=None):
     if is_excluded(cwd):
         return None
     return str(project_root(cwd, log=log))
+
+
+def spawn_detached(argv):
+    """Start `argv` as a DETACHED child; True when it started, else False.
+
+    No inherited stdio (an inherited pipe makes the harness wait on the
+    child), its own process group on Windows and its own session on POSIX,
+    `close_fds`. Never raises: an OS that refuses the spawn costs the
+    caller one background job, never the hook. `Popen` is looked up on the
+    `subprocess` module at call time so a test can replace it and read the
+    argv — tests/smoke_test.py does exactly that for the backpressure kick.
+
+    v2.16.0: the shape `stop.py:_maybe_kick_consolidation` carried inline
+    since v2.12.0 (and `cli/mem.py:cmd_dashboard` before it), hoisted here
+    because the observer worker (A1) and the retroactive-save worker (A2)
+    spawn the same way — three inline copies of a detach recipe is the shape
+    the per-hook entry ladders drifted in before this module existed.
+    """
+    kwargs = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL,
+              "stderr": subprocess.DEVNULL, "close_fds": True}
+    if sys.platform == "win32":
+        kwargs["creationflags"] = (
+            getattr(subprocess, "DETACHED_PROCESS", 0x00000008)
+            | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200))
+    else:
+        kwargs["start_new_session"] = True
+    try:
+        subprocess.Popen([str(a) for a in argv], **kwargs)
+    except OSError:
+        return False
+    return True

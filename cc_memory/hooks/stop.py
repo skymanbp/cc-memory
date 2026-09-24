@@ -4,11 +4,16 @@ Stop hook — fires after each Claude response.
 
 Three jobs:
   1. OBSERVER: extract memories from this turn's tool observations via Haiku.
-     Saves through llm.memory_writer.upsert_smart (anti-patch).
+     Saves through llm.memory_writer.upsert_smart (anti-patch). Since
+     v2.16.0 the LLM call runs in a DETACHED worker (`stop.py --observe
+     <cwd> <session_id>`, spawned by _maybe_spawn_observer) so the harness
+     never waits on it; the hook itself pays one cursor read and a Popen.
   2. IDLE REORG: every 5 turns, run lightweight no-LLM cleanup +
      MEMORY.md regen + PROGRESS.md patch.
   3. PROGRESS.md PATCH: every turn, update files_touched and open_todos
      based on observations.
+A continuation Stop (`stop_hook_active`, v2.16.0) skips all three and only
+re-judges plan enforcement.
 
 NOTE: The previous "save-memories reminder" text spam has been REMOVED.
 The forced <system-reminder> in SessionStart and the auto-saves above do
@@ -48,7 +53,7 @@ from core.markers import marker_path, read_marker, safe_id as _safe_id, write_ma
 # Shared entry ladder (v2.10.0): stdin parsing + the opt-out→anchor gate,
 # once, in hooks/_entry.py — six hand-rolled copies is how guard drift
 # between hooks kept becoming shipped defects.
-from hooks._entry import parse_payload, resolve_project
+from hooks._entry import parse_payload, resolve_project, spawn_detached
 from core.idle import maybe_run_idle
 from core.progress import write_progress_md
 from core import plan as plan_mod
@@ -62,6 +67,14 @@ _MIN_OBS_FOR_EVAL = 3
 # two literal 20s in two branches they silently disagreed about which end
 # of the queue they meant (register r7-B2).
 _OBS_FED_PER_STOP = 20
+# The detached observer worker's lock (v2.16.0, A1), taken through
+# `consolidate_async._acquire_lock` — the lock's ONE policy point — with its
+# own horizon: one worker holds it for at most _LLM_DEADLINE_S plus the
+# upsert, so a lock older than a minute belongs to a worker that died. Not
+# named `_STALE_LOCK_S`: that name is the consolidation worker's, imported
+# below, and the gate refuses a second spelling of it in this file.
+OBSERVER_LOCK = ".observer.lock"
+_OBSERVER_STALE_LOCK_S = 60.0
 _TURN_FILE_PREFIX = "cc_mem_turns_"
 _PROMPT_FILE_PREFIX = "cc_mem_prompt_"
 # (the observer watermark used to live in a `cc_mem_eval_` marker here; it is
@@ -106,6 +119,12 @@ _BLOCK_STALE_DIRECTIVE_TURNS = 25
 # overrun = 14 + 0.48*7 = 17.4s, leaving ~4.6s for the idle reorg, the
 # PROGRESS.md patch and interpreter teardown (measured non-LLM cost: 0.24s on
 # a small project). Same stall run, measured after: 16.05s total.
+#
+# Since v2.16.0 (A1) the call runs in the DETACHED worker, so this deadline
+# bounds the worker's own wall-clock and no longer the hook's: the hook
+# returns in the non-LLM cost alone. The numbers stay as calibrated — the
+# worker still holds `.observer.lock` for exactly this long at most, which
+# is what _OBSERVER_STALE_LOCK_S is sized against.
 _API_TIMEOUT = 7
 _FALLBACK_TIMEOUT = 3
 _LLM_DEADLINE_S = 14.0
@@ -274,6 +293,83 @@ def _emit_block(reason_text):
     sys.stdout.write(json.dumps(payload, ensure_ascii=False) + "\n")
     sys.stdout.flush()
     sys.exit(0)
+
+
+def _maybe_spawn_observer(cwd, session_id, memory_dir, db, project_id):
+    """Spawn the DETACHED observer worker when there is something to observe.
+
+    v2.16.0 (A1). The observer's LLM call used to run INSIDE this hook —
+    up to _LLM_DEADLINE_S of the 22 s envelope, every turn, with Claude Code
+    waiting on it — so a project with a credential paid the whole call at
+    every Stop. The call now runs in `stop.py --observe <cwd> <session_id>`,
+    spawned detached exactly like the backpressure worker, and this hook
+    pays for one cursor read, one bounded SELECT and a Popen.
+
+    No LLM and no marker read, in THIS order, so a test without a
+    credential can never spawn: no key -> False; fewer than
+    _MIN_OBS_FOR_EVAL rows above the cursor -> False (the worker would
+    return at once); backed off after a failed call -> False; a
+    `.observer.lock` younger than _OBSERVER_STALE_LOCK_S (a worker is still
+    running) -> False. No kick-style cooldown: a failing worker writes the
+    backoff, a crashed one leaves a lock that expires in a minute. Returns
+    True when a worker was started.
+    """
+    from core.auth import get_api_key, llm_backoff
+    api_key, _ = get_api_key()
+    if not api_key:
+        return False
+    last_eval = db.observer_watermark(project_id, window=_OBS_FED_PER_STOP)
+    pending = db.get_observations_since(project_id, last_eval or 0,
+                                        limit=_MIN_OBS_FOR_EVAL)
+    if len(pending) < _MIN_OBS_FOR_EVAL:
+        return False
+    if llm_backoff(memory_dir)[0]:
+        return False
+    try:
+        lock_age = time.time() - (memory_dir / OBSERVER_LOCK).stat().st_mtime
+    except OSError:
+        # why: no lock (the common case) or an unstatable one; the worker's
+        # own O_CREAT|O_EXCL acquire is the real guard and exits if it loses
+        lock_age = None
+    if lock_age is not None and lock_age < _OBSERVER_STALE_LOCK_S:
+        return False
+    return spawn_detached([sys.executable, str(_HERE / "stop.py"),
+                           "--observe", str(cwd), str(session_id)])
+
+
+def _observe_worker(cwd, session_id):
+    """`stop.py --observe <cwd> <session_id>`: the detached observer (v2.16.0).
+
+    Everything the inline observer did, in a process the harness does not
+    wait for: the hook's own ladder (opt-out -> anchor -> state directory),
+    `.observer.lock` through `consolidate_async._acquire_lock` with the
+    60 s horizon, then `_observer_evaluate`, which re-checks the backoff
+    under the lock, records a failure and advances the cursor only after
+    its upsert. Never raises; the caller exits 0 either way.
+    """
+    try:
+        if not isinstance(cwd, str) or not cwd \
+                or not isinstance(session_id, str) or not session_id:
+            return
+        resolved = resolve_project(cwd)
+        if resolved is None:
+            return
+        cwd = resolved
+        memory_dir = resolve_memory_dir(cwd)
+        db_path = memory_dir / DB_FILENAME
+        if not db_path.exists():
+            return
+        from hooks.consolidate_async import _acquire_lock, _release_lock
+        lock = memory_dir / OBSERVER_LOCK
+        if not _acquire_lock(lock, stale_s=_OBSERVER_STALE_LOCK_S):
+            return
+        try:
+            _observer_evaluate(cwd, session_id, memory_dir,
+                               db=MemoryDB(db_path))
+        finally:
+            _release_lock(lock)
+    except Exception:
+        _log.error_tb("observer worker")
 
 
 def _observer_evaluate(cwd, session_id, memory_dir, db=None):
@@ -513,20 +609,11 @@ def _maybe_kick_consolidation(cwd, memory_dir, db, project_id):
         # cannot rate-limit is a spawn storm waiting for a failing worker;
         # the PreCompact leg still consolidates on its own cadence.
         return False
-    import subprocess
     worker = _PKG_ROOT / "hooks" / "consolidate_async.py"
-    kwargs = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL,
-              "stderr": subprocess.DEVNULL, "close_fds": True}
-    # Detach exactly as cli/mem.py:cmd_dashboard does, for the same reason:
-    # an inherited pipe would make the harness wait on the worker.
-    if sys.platform == "win32":
-        kwargs["creationflags"] = (
-            getattr(subprocess, "DETACHED_PROCESS", 0x00000008)
-            | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200))
-    else:
-        kwargs["start_new_session"] = True
-    subprocess.Popen([sys.executable, str(worker), "--cwd", str(cwd)],
-                     **kwargs)
+    # Detached through the ONE spawn helper (hooks/_entry.py, v2.16.0): an
+    # inherited pipe would make the harness wait on the worker.
+    if not spawn_detached([sys.executable, str(worker), "--cwd", str(cwd)]):
+        return False
     _log.info(f"backpressure: spawned background consolidation — {reason}")
     return True
 
@@ -551,6 +638,13 @@ def _patch_progress_from_recent_obs(db, project_id, memory_dir):
 
 
 def main():
+    # Detached worker mode (v2.16.0, A1): `stop.py --observe <cwd>
+    # <session_id>`, launched by _maybe_spawn_observer with no stdin — the
+    # same shape as consolidate_async.py's `--cwd`.
+    if sys.argv[1:2] == ["--observe"]:
+        args = sys.argv[2:4] + ["", ""]
+        _observe_worker(args[0], args[1])
+        sys.exit(0)
     # Silent (no logger): Stop fires every turn.
     data = parse_payload()
     if data is None:
@@ -611,12 +705,13 @@ def main():
         print("\n[cc-memory] stop hook ran (degraded)")
         sys.exit(0)
 
-    # Job 1: observer evaluation — not on a continuation (v2.16.0, A3)
+    # Job 1: the observer, as a DETACHED worker (v2.16.0, A1) — not on a
+    # continuation (A3)
     if not continuation:
         try:
-            _observer_evaluate(cwd, session_id, memory_dir, db=db)
+            _maybe_spawn_observer(cwd, session_id, memory_dir, db, project_id)
         except Exception:
-            _log.error_tb("observer error")
+            _log.error_tb("observer spawn")
 
     # Job 2: idle reorg (every 5 turns) — not on a continuation
     turn_count = _read_turn_count(session_id)

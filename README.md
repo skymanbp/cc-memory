@@ -736,7 +736,7 @@ Six hook commands <!--ce:hooks--> across five Claude Code events, declared in
 |---|---|---|---|
 | `UserPromptSubmit` | `hooks/user_prompt.py` | 8 s | Auto-init `.ccm/`, count the turn, seed the first real request once per session, then **query-time recall** on stdout (v2.15.0) |
 | `PostToolUse` | `hooks/post_tool_use.py` | 8 s | Live plan anchor **in every mode**, then one observation row per observed tool |
-| `Stop` | `hooks/stop.py` | 22 s | Haiku observer, per-turn PROGRESS patch, idle reorg every 5 turns, backpressure probe, plan enforcement |
+| `Stop` | `hooks/stop.py` | 22 s | Detached Haiku observer (v2.16.0), per-turn PROGRESS patch, idle reorg every 5 turns, backpressure probe, plan enforcement |
 | `PreCompact` (sync) | `hooks/pre_compact.py` | 120 s | Extract → reconcile → full-rewrite PROGRESS.md → archive |
 | `PreCompact` (async) | `hooks/consolidate_async.py` | 300 s | Budget-gated consolidation, off the blocking path; also the standalone backpressure worker |
 | `SessionStart` | `hooks/session_start.py` | 15 s | Inject layered context + the forced `<system-reminder>` |

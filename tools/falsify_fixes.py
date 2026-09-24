@@ -3108,6 +3108,15 @@ def _break_r16obsbackoff(root):
            "    except () as e:  # BREAKAGE: nothing catches the outage signal")
 
 
+@case("r16obslock", ["tests/test_directive_enforcement.py"],
+      "ignore a live .observer.lock -> every Stop spawns another observer "
+      "worker while one is still running, each holding the same rows")
+def _break_r16obslock(root):
+    _patch(root, "cc_memory/hooks/stop.py",
+           "    if lock_age is not None and lock_age < _OBSERVER_STALE_LOCK_S:",
+           "    if False:  # BREAKAGE: a running worker no longer defers the spawn")
+
+
 def verify_anchors():
     """Count every registered case's breakage anchors WITHOUT running a gate.
 

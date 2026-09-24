@@ -1,4 +1,4 @@
-<!-- i18n-source: ARCHITECTURE.md | sha256: 49b5e191bc0491ea | version: 2.15.2 | translated: 2026-09-24 | translation: 965197af0a02acf6 -->
+<!-- i18n-source: ARCHITECTURE.md | sha256: c21d1b476189cd49 | version: 2.15.2 | translated: 2026-09-24 | translation: e4a7d1b4de25b006 -->
 > [English](ARCHITECTURE.md) · **简体中文**
 
 # cc-memory — 架构
@@ -209,7 +209,7 @@ v2.4.3 把原本 5 份的 `docs/` 目录合并为 2 份。全部 79 处仓库内
 | `PreCompact`（同步） | [`cc_memory/hooks/pre_compact.py`](../cc_memory/hooks/pre_compact.py) | 120s | 读取**有界**的 head+tail transcript 窗口（`extractor.load_transcript_window`）；经 Haiku 用 LLM 抽取记忆；经 `memory_writer.upsert_batch` 路由；**整篇重写** `.ccm/PROGRESS.md`；归档会话。写入一个起始标记，使被杀死的运行可被检测。 |
 | `PreCompact`（异步） | [`cc_memory/hooks/consolidate_async.py`](../cc_memory/hooks/consolidate_async.py) | 300s，`async: true` | LLM 整理，在 v2.3.2 中被移出阻塞式压缩路径（间隔标记 + 锁，受预算门约束）。每 N 次会话到期，**或**写入积压判定到期（v2.12.0）；也可由 Stop 钩子的背压探针以独立进程方式拉起（`--cwd <root>`）。 |
 | `SessionStart` | [`cc_memory/hooks/session_start.py`](../cc_memory/hooks/session_start.py) | 15s | 注入分层上下文（长期指令 / 主题 / 关键项 / 时间线 / PROGRESS 预览 / 页脚——指令账本自 v2.12.2 起是第一层；在此之前没有任何东西注入它）；发出强制的 `<system-reminder>`，要求 Read `PROGRESS.md` + `MEMORY.md`；追溯保存未保存的 JSONL。 |
-| `Stop` | [`cc_memory/hooks/stop.py`](../cc_memory/hooks/stop.py) | 22s | 观察者：经 Haiku 从上一回合的 observations 抽取；每回合 `patch_progress(files_touched, ...)`；每 5 个回合运行 `idle.maybe_run_idle`（清理 + 重新生成 MEMORY.md）；探测整理积压，到期时拉起独立的异步工作者（v2.12.0）；当计划**在活**时，累加其回合计数器并**强制执行**——对未精炼的计划、未做漂移检查的计划或闲置的指令**拒绝收官**（`{"decision": "block"}`），逃生预算见 CONTRACTS.md（v2.11.0；本行从前描述的建议行已不存在）。 |
+| `Stop` | [`cc_memory/hooks/stop.py`](../cc_memory/hooks/stop.py) | 22s | 观察者：拉起分离的 `stop.py --observe` 工作进程，由它经 Haiku 从本回合的 observations 抽取（v2.16.0——钩子本身从不等模型；调用失败后工作进程通过 `.llm_backoff.json` 退避，运行中的工作进程持有 `.observer.lock`）；每回合 `patch_progress(files_touched, ...)`；每 5 个回合运行 `idle.maybe_run_idle`（清理 + 重新生成 MEMORY.md）；探测整理积压，到期时拉起独立的异步工作者（v2.12.0）；当计划**在活**时，累加其回合计数器并**强制执行**——对未精炼的计划、未做漂移检查的计划或闲置的指令**拒绝收官**（`{"decision": "block"}`），逃生预算见 CONTRACTS.md（v2.11.0；本行从前描述的建议行已不存在）。续发的 Stop（`stop_hook_active`，v2.16.0）除强制执行外跳过所有工作。 |
 | `PostToolUse` | [`cc_memory/hooks/post_tool_use.py`](../cc_memory/hooks/post_tool_use.py) | 8s | **先**做实时计划集成，且所有模式一视同仁：`ExitPlanMode` → `plan_active.raw`，`TodoWrite` → 机械式步骤同步，`Edit`/`Write`/`MultiEdit`/`NotebookEdit` → 漂移计数器 +1，敏感 Bash 调用 → +20。**然后**才为被观测的工具调用向 `observations` 插入一行（模式白名单 / 跳过列表——`core.modes.should_observe`）。不调用 LLM。端到端实测约 180-290 ms，其中约 75-120 ms 是解释器启动。 |
 | `UserPromptSubmit` | [`cc_memory/hooks/user_prompt.py`](../cc_memory/hooks/user_prompt.py) | 8s | 首次接触时自动初始化 `.ccm/`；跟踪回合数；为 Stop 观察者保存提示；在首条非脚手架提示时（每会话一次——与 `pre_compact._first_user_request` 共用的 `strip_scaffolding` 谓词，加上 `cc_mem_seeded_` 标记；v2.14.0）给会话打标签并为 `progress.current_request` 播种（依据双语恢复信号白名单，把触发类型判定为 `resume_request` 还是 `user_prompt`）。**然后是查询时召回**（v2.15.0）：把清洗后的提示转成 FTS5 表达式，越过相关度地板的最佳匹配会被打进 stdout 的 `<cc-memory-recall>` 帧里，否则一个字节都不输出（`core/recall.py`）。 |
 
@@ -431,7 +431,7 @@ regenerate_memory_index(db, project_id, memory_dir)   ← MEMORY.md 刷新
 
 - `upsert_batch`（`memory_writer.py:318-360`）逐条循环调用 `upsert_smart`，并在最后
   重新生成**一次**，但仅当传入了 `memory_dir` 时才会（`memory_writer.py:318-360`）。
-  所有钩子调用方都会传（`pre_compact.py:442`、`stop.py:279`、
+  所有钩子调用方都会传（`pre_compact.py:442`、`stop.py:298`、
   `session_start.py:1144`）；同步 PreCompact 支路还会在其余状态变更之后再刷一次
   （`pre_compact.py:841`）。
 - 单发调用方显式调用 `regenerate_memory_index`：`cli/mem.py:1213` 与 `:584`、
@@ -527,7 +527,7 @@ SessionStart：
 ```
 
 上面的调用签名都是真实的：`write_progress_md(db, project_id, memory_dir)`
-（`core/progress.py:498-677`；调用点 `pre_compact.py:801`、`stop.py:548`、
+（`core/progress.py:498-677`；调用点 `pre_compact.py:801`、`stop.py:635`、
 `user_prompt.py:133`、`session_start.py:1107`、`mcp/server.py:243`、
 `cli/mem.py:1304`）。PROGRESS.md 的结构规格见
 [docs/CONTRACTS.md](CONTRACTS.md#handoff-contract)。
@@ -659,7 +659,7 @@ BudgetGate 来说仍是已知量。候选顺序与传输格式（`core/auth.py:2
 `core/auth.py:60-93`）；它同时承载 `oauth_expired` 信号，支撑 SessionStart 的
 “[WARNING: OAuth expired — LLM extraction disabled]” 页脚
 （`session_start.py:670`）。钩子调用方用它来*提供*传给 `call_llm` 的凭据：
-`pre_compact.py:94 → :166`、`stop.py:86`、`session_start.py:670`、
+`pre_compact.py:94 → :166`、`stop.py:99`、`session_start.py:670`、
 `core/consolidate.py:425, 549, 724`。
 
 逐级回退是 v2.3.4 为一个具体故障加入的：一个失效的环境变量密钥（例如额度为零 →
@@ -741,6 +741,7 @@ v2.4.2 才成立：`_extract_via_llm` 的 `except` 元组此前不包含 `Runtim
 │                                （v2.3.2；水位线 v2.12.0）
 ├── .consolidation.lock          防止异步工作者重叠（v2.3.2）
 ├── .consolidation.kick          背压拉起冷却（v2.12.0）
+├── .observer.lock               分离的 Stop 观察者工作进程的锁（v2.16.0）
 ├── .llm_backoff.json            调用失败后的"暂不再调模型"记录；一次成功即
 │                                删除（v2.16.0）
 ├── .pre_compact_attempt.json    起始标记；残留 ⇒ 上一次运行被杀（v2.4.2）
@@ -762,7 +763,8 @@ v2.4.2 才成立：`_extract_via_llm` 的 `except` 元组此前不包含 `Runtim
 `.last_consolidation.json` ← `core.consolidate.write_consolidation_marker`
 （唯一写入方，异步钩子 + CLI 共用）；`.consolidation.lock` ← `_acquire_lock`
 （`consolidate_async.py:121-155`）；`.consolidation.kick` ←
-`stop.py:_maybe_kick_consolidation`；`.llm_backoff.json` ←
+`stop.py:_maybe_kick_consolidation`；`.observer.lock` ← `stop.py:_observe_worker`，
+经同一个 `_acquire_lock`、60 秒过期；`.llm_backoff.json` ←
 `core.auth.note_llm_failure`（唯一写入方；每个调用 LLM 的钩子都通过
 `core.auth.llm_backoff` 读它，第一次成功的调用即删除它）；`.pre_compact_attempt.json` ←
 `pre_compact.py:284-311`。`sessions/` 与 `topics/` 由最先接触该项目的那条路径创建

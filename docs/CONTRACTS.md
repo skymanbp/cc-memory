@@ -222,7 +222,7 @@ r8antipatch` proves the assertion goes red when a bypass caller appears.
 | Save path | Entry function |
 |-----------|---------------|
 | `PreCompact` hook | `upsert_batch(db, pid, sid, extracted_list, memory_dir)` (`hooks/pre_compact.py:716`) |
-| `Stop` observer | `upsert_batch(db, pid, None, observer_list, memory_dir)` (`hooks/stop.py:396`) |
+| `Stop` observer | `upsert_batch(db, pid, None, observer_list, memory_dir)` (`hooks/stop.py:492`) |
 | `SessionStart` retroactive save | `upsert_batch(db, pid, sid, memories, memory_dir=memory_dir)` — un-saved prior sessions (`hooks/session_start.py:1125`) |
 | `/save-memories` skill | `upsert_batch(db, pid, None, memories, memory_dir=mem_dir)` — `mem_dir` is `core.layout.memory_dir(project)`, never a hand-spelled join (`skills/save-memories/SKILL.md:180`) |
 | `mem.py add` CLI | `upsert_smart(...)` + `regenerate_memory_index(...)` (`cli/mem.py:1213,524`) |
@@ -411,8 +411,8 @@ at `db.py:176-190`, plus the two v5 session-annotation columns at `db.py:219-222
 | `files_touched` | JSON | `observations` table (`pre_compact.py:446-453` → `progress.py:128-134`; Stop per-turn patch `stop.py:193-211`; SessionStart tier-2C `session_start.py:966`) → tier-3 prior-transcript `extract_file_changes` (`session_start.py:966`) |
 | `transcript_ptr` | TEXT | PreCompact `transcript_path` resolved absolute (`pre_compact.py:794`) → tier-3 `find_latest_transcript(cwd, exclude_session_id=...)` (`session_start.py:929`) |
 | `updated_at` | TEXT | ISO timestamp, stamped by `upsert_progress` / `patch_progress` (`db.py:2769-2845`, `:937-943`) |
-| `trigger_type` | TEXT | "auto" \| "manual" (PreCompact passes the host's own trigger string through — `pre_compact.py:799,492`; `"precompact"` is only `collect_progress_state`'s default kwarg at `progress.py:200-260` and is always overridden) \| "stop" (`stop.py:636`) \| "user_prompt" \| "resume_request" (`user_prompt.py:392`) \| "session_start_refresh" (`session_start.py:991`) |
-| `current_session_id` | TEXT | `db.tag_progress_session` only (`db.py:2958-2982`) — tagged by PreCompact (`pre_compact.py:799`), Stop (`stop.py:636`), SessionStart (`session_start.py:991`), UserPromptSubmit (`user_prompt.py:392`) |
+| `trigger_type` | TEXT | "auto" \| "manual" (PreCompact passes the host's own trigger string through — `pre_compact.py:799,492`; `"precompact"` is only `collect_progress_state`'s default kwarg at `progress.py:200-260` and is always overridden) \| "stop" (`stop.py:731`) \| "user_prompt" \| "resume_request" (`user_prompt.py:392`) \| "session_start_refresh" (`session_start.py:991`) |
+| `current_session_id` | TEXT | `db.tag_progress_session` only (`db.py:2958-2982`) — tagged by PreCompact (`pre_compact.py:799`), Stop (`stop.py:731`), SessionStart (`session_start.py:991`), UserPromptSubmit (`user_prompt.py:392`) |
 | `session_started_at` | TEXT | `db.tag_progress_session` — reset only when the stored sid changes; `upsert_progress` preserves both across a full rewrite (`db.py:2769-2845`) |
 
 The rendered Markdown (sections 0-7 in
@@ -421,7 +421,7 @@ from this row. Hand-editing PROGRESS.md is pointless: any of the four automatic
 update paths (PreCompact / Stop / UserPromptSubmit / SessionStart refresh) —
 plus the two manual regenerators, `/cc-mem progress` (`cli/mem.py:1238`) and the
 MCP `progress_regenerate` tool (`mcp/server.py:745`) — will overwrite it.
-All six `write_progress_md` call sites: `pre_compact.py:801`, `stop.py:548`,
+All six `write_progress_md` call sites: `pre_compact.py:801`, `stop.py:635`,
 `user_prompt.py:384`, `session_start.py:1125`, `cli/mem.py:1458`,
 `mcp/server.py:243`.
 
@@ -469,7 +469,7 @@ whitespace-flattened and truncated at 100 chars (`:210-234`).
 2. **Stop** (partial update, every turn):
    - `db.tag_progress_session(...)` then
      `db.patch_progress(files_touched=<from observations>, trigger_type="stop")`
-     (`stop.py:534`, `:211`).
+     (`stop.py:621`, `:211`).
    - `write_progress_md(...)` rewrites the file with the patched state (`:213`).
    - This keeps "Files Touched This Session" current without waiting for the
      next compaction.

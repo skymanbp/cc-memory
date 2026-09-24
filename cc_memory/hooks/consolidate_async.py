@@ -119,17 +119,22 @@ def _auto_interval():
         return _DEFAULT_INTERVAL
 
 
-def _acquire_lock(lock_path):
+def _acquire_lock(lock_path, stale_s=_STALE_LOCK_S):
     """Atomic best-effort lock. Returns True if acquired. Reclaims a stale lock.
 
     Uses O_CREAT|O_EXCL so only one process wins the create race. If the lock
-    already exists and is older than _STALE_LOCK_S, it's treated as abandoned
-    (owner was killed) and reclaimed.
+    already exists and is older than `stale_s` (this worker's _STALE_LOCK_S
+    by default), it's treated as abandoned (owner was killed) and reclaimed.
+    THE lock policy point: the observer worker (`.observer.lock`, v2.16.0)
+    and the retroactive-save worker (`.retro.lock`) take theirs through this
+    function with their own horizon, so a second copy of the reclaim rule
+    never gets a chance to drift — the Stop probe already carried one copy
+    minus the staleness rule once (v2.14.0, rule 15).
     """
     try:
         if lock_path.exists():
             age = time.time() - lock_path.stat().st_mtime
-            if age < _STALE_LOCK_S:
+            if age < stale_s:
                 return False
             # Stale — a previous worker died holding it. Reclaim ATOMICALLY:
             # os.replace of the lock onto a tomb name succeeds for exactly ONE
@@ -148,7 +153,7 @@ def _acquire_lock(lock_path):
                 # why: the tomb is inert debris carrying this pid; the next
                 # reclaim by this pid overwrites it via os.replace anyway
                 pass
-            _log.info(f"reclaimed stale consolidation lock (age {age:.0f}s)")
+            _log.info(f"reclaimed stale lock {lock_path.name} (age {age:.0f}s)")
         fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             fh.write(f"{os.getpid()} {datetime.now().isoformat(timespec='seconds')}")

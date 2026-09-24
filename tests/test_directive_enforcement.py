@@ -26,6 +26,10 @@ This suite pins the two halves of the fix:
      enforcement runs and the budget counts down, nothing else runs
   §12 a failed LLM call backs the observer off (doubling, capped), the cursor
      stays put, and the first successful call clears the backoff
+  §13 the observer is a DETACHED worker: the hook spawns it only when there
+     is a credential, enough observations, no backoff and no live lock; the
+     worker path (`--observe`) records a failure, honours the backoff, and
+     advances the cursor only after a call that came back
 
 Run:  python tests/test_directive_enforcement.py
 """
@@ -1153,6 +1157,132 @@ def section_12():
     _sh.rmtree(root, ignore_errors=True)
 
 
+# ── §13 v2.16.0: the observer is a DETACHED worker, spawned only when due ────
+# The observer's LLM call ran INSIDE the Stop hook: up to 14 s of the 22 s
+# envelope on every turn of a project with a credential, with Claude Code
+# waiting on it. `_maybe_spawn_observer` now decides — no LLM, no marker
+# read, in a fixed order — and `stop.py --observe <cwd> <sid>` does the work
+# detached. (a) drives the decision with `subprocess.Popen` replaced, so the
+# argv can be read and nothing is really started; (b) drives the worker
+# through `main()` with `call_llm` stubbed, so no network is reached.
+def section_13():
+    print("\n§13 v2.16.0：观察者是分离的工作进程，只在该跑时拉起")
+    import shutil as _sh
+    import subprocess
+    import tempfile as _tf
+    import time as _time
+    from core import auth as auth_mod
+    from llm import ccl_backend as llm_mod
+    import hooks.stop as stop_mod
+    root = Path(_tf.mkdtemp(prefix="ccm-enf-observer-"))
+    mem = root / _MEM
+    db = MemoryDB(mem / "memory.db")
+    pid = db.upsert_project(str(root))
+    spawned = []
+    real_popen, real_key, real_call = (subprocess.Popen, auth_mod.get_api_key,
+                                       llm_mod.call_llm)
+    subprocess.Popen = (lambda cmd, **kw:
+                        spawned.append([str(c) for c in cmd])
+                        or type("_P", (), {"pid": 0})())
+    # why: a placeholder, not a credential — Popen and call_llm are both
+    # stubbed in this section, so nothing built from it reaches the network
+    auth_mod.get_api_key = lambda: ("placeholder-key", "env")
+
+    def _decide():
+        return stop_mod._maybe_spawn_observer(str(root), "enf-obs", mem, db, pid)
+
+    try:
+        # ── (a) the spawn decision ────────────────────────────────────────
+        db.insert_observation(pid, "enf-obs", "Edit", "src/a.py", "")
+        db.insert_observation(pid, "enf-obs", "Edit", "src/b.py", "")
+        check("two observations are below _MIN_OBS_FOR_EVAL: no spawn",
+              _decide() is False and not spawned, f"spawned={spawned}")
+        db.insert_observation(pid, "enf-obs", "Edit", "src/c.py", "")
+        check("three observations above the cursor spawn ONE detached "
+              "worker with --observe <cwd> <session_id>",
+              _decide() is True and len(spawned) == 1
+              and "--observe" in spawned[0]
+              and spawned[0][-2:] == [str(root), "enf-obs"],
+              f"spawned={spawned}")
+        lock = mem / stop_mod.OBSERVER_LOCK
+        lock.write_text("held", encoding="utf-8")
+        check("a fresh .observer.lock (a worker still running) defers the spawn",
+              _decide() is False and len(spawned) == 1, f"spawned={spawned}")
+        old = _time.time() - stop_mod._OBSERVER_STALE_LOCK_S - 5
+        os.utime(lock, (old, old))
+        check("a lock older than the horizon (a dead worker) does not veto it",
+              _decide() is True and len(spawned) == 2, f"spawned={spawned}")
+        lock.unlink()
+        auth_mod.note_llm_failure(mem, "down")
+        check("an active backoff defers the spawn",
+              _decide() is False and len(spawned) == 2, f"spawned={spawned}")
+        auth_mod.clear_llm_backoff(mem)
+        auth_mod.get_api_key = lambda: ("", "")
+        check("no credential: no spawn",
+              _decide() is False and len(spawned) == 2, f"spawned={spawned}")
+        auth_mod.get_api_key = lambda: ("placeholder-key", "env")
+
+        # ── (b) the worker path, through main() ───────────────────────────
+        calls = {"n": 0}
+
+        def _down(*_a, **_k):
+            calls["n"] += 1
+            raise RuntimeError("All LLM backends failed: anthropic: down")
+
+        def _empty(*_a, **_k):
+            calls["n"] += 1
+            return "[]"
+
+        saved_argv = sys.argv
+
+        def _worker():
+            sys.argv = ["stop.py", "--observe", str(root), "enf-obs"]
+            try:
+                stop_mod.main()
+            except SystemExit as exc:
+                return exc.code
+            finally:
+                sys.argv = saved_argv
+            return "no exit"
+
+        top = max(o["id"] for o in db.get_observations_since(pid, 0))
+        llm_mod.call_llm = _down
+        rc = _worker()
+        active, info = auth_mod.llm_backoff(mem)
+        check("worker: a failed call exits 0, records the backoff and leaves "
+              "the cursor where it was",
+              rc == 0 and calls["n"] == 1 and active
+              and float(info.get("until", 0)) > _time.time()
+              and db.observer_cursor(pid) == 0,
+              f"rc={rc} calls={calls['n']} active={active} "
+              f"cursor={db.observer_cursor(pid)}")
+        check("worker: the lock is released when the run ends",
+              not lock.exists(), "a lock left behind would defer the next "
+              "spawn for a whole horizon")
+        rc2 = _worker()
+        check("worker: while backed off it does not call the model",
+              rc2 == 0 and calls["n"] == 1, f"rc={rc2} calls={calls['n']}")
+        auth_mod.clear_llm_backoff(mem)
+        llm_mod.call_llm = _empty
+        rc3 = _worker()
+        check("worker: a call that came back advances the cursor to the "
+              "highest fed row and clears the backoff",
+              rc3 == 0 and calls["n"] == 2 and db.observer_cursor(pid) == top
+              and not (mem / auth_mod.BACKOFF_FILE).exists(),
+              f"rc={rc3} calls={calls['n']} cursor={db.observer_cursor(pid)} "
+              f"top={top}")
+        check("the hook's inline observer call is gone: main() spawns, it "
+              "does not evaluate",
+              "_maybe_spawn_observer(cwd, session_id, memory_dir, db, project_id)"
+              in (REPO / "cc_memory" / "hooks" / "stop.py").read_text(encoding="utf-8")
+              and "_observer_evaluate(cwd, session_id, memory_dir, db=db)"
+              not in (REPO / "cc_memory" / "hooks" / "stop.py").read_text(encoding="utf-8"))
+    finally:
+        subprocess.Popen, auth_mod.get_api_key, llm_mod.call_llm = (
+            real_popen, real_key, real_call)
+    _sh.rmtree(root, ignore_errors=True)
+
+
 def main():
     print("=" * 66)
     print("v2.11.0 enforcement gate — plan + directive ledger")
@@ -1170,6 +1300,7 @@ def main():
         section_10()
         section_11()
         section_12()
+        section_13()
     finally:
         _cleanup_sandbox()
     print("\n" + "=" * 66)
