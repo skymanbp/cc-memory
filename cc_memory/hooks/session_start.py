@@ -12,7 +12,11 @@ Fires on every new session (startup, resume, post-compaction). Three jobs:
      of the handoff contract (see docs/CONTRACTS.md#handoff-contract).
 
   3. Best-effort RETROACTIVE SAVE — if previous JSONL transcripts were
-     never compacted, extract memories from them now via Haiku.
+     never compacted, extract memories from them now via Haiku. Since
+     v2.16.0 the extraction runs in a DETACHED worker (`session_start.py
+     --retro <cwd> <session_id>`, spawned by _maybe_spawn_retro only when a
+     stat()-only scan finds a candidate), so the 15 s hook never waits on
+     the model.
 
 Stdout: injected context (Claude reads it as additional system input).
 Stderr: suppressed (file log only).
@@ -47,7 +51,7 @@ from core.logger import get_logger
 # Shared entry ladder (v2.10.0): stdin parsing + the opt-out→anchor gate,
 # once, in hooks/_entry.py — six hand-rolled copies is how guard drift
 # between hooks kept becoming shipped defects.
-from hooks._entry import parse_payload, resolve_project
+from hooks._entry import parse_payload, resolve_project, spawn_detached
 from core.privacy import (neutralize_document, neutralize_inline,
                           neutralize_markers)
 from core.progress import ACK_TEMPLATE, write_progress_md
@@ -814,7 +818,8 @@ def _get_saved_session_ids(db, project_id):
 from core.extractor import summarize_transcript as _summarize_transcript
 
 
-def _retroactive_extract(messages, total_records=None, deadline=None):
+def _retroactive_extract(messages, total_records=None, deadline=None,
+                         state_dir=None):
     """Returns a (possibly EMPTY) list when extraction RAN, None when it
     did not — no key, nothing to summarise, or a failed call.
 
@@ -865,9 +870,15 @@ def _retroactive_extract(messages, total_records=None, deadline=None):
         # An empty list is a RESULT: the model ran and found nothing worth
         # saving. Only None means "no answer" (see the docstring).
         return valid
-    except Exception:
+    except Exception as e:
         # why: retroactive save is best-effort; any LLM/JSON failure
-        # should be silent — the rest of the hook still works
+        # should be silent — the rest of the hook still works. A
+        # RuntimeError is `call_llm`'s "every leg failed" signal, and since
+        # v2.16.0 it is recorded as a backoff (`state_dir` given) so the
+        # next start does not re-send the same transcript into the outage.
+        if isinstance(e, RuntimeError) and state_dir is not None:
+            from core.auth import note_llm_failure
+            note_llm_failure(state_dir, str(e))
         return None
 
 
@@ -1161,6 +1172,117 @@ def _estimate_load_s(size_bytes):
     return (decode + scan) * _LOAD_SAFETY
 
 
+# The detached retroactive-save worker's lock (v2.16.0, A2), taken through
+# `consolidate_async._acquire_lock` — the lock's ONE policy point — with its
+# own horizon: a worker holds it for at most _RETRO_DEADLINE_S plus the
+# upserts, so a lock older than a minute belongs to a worker that died.
+RETRO_LOCK = ".retro.lock"
+_RETRO_STALE_LOCK_S = 60.0
+
+
+def _retro_candidates(cwd, db, project_id, current_session_id=""):
+    """Prior transcripts worth a retroactive pass, newest first — stat() only.
+
+    The cheap prefix of `retroactive_save`'s loop as one function (v2.16.0):
+    the exact slug directory, the sessions already recorded, the newest
+    three `*.jsonl`, minus the running session, minus the saved ones, minus
+    anything under 1 KiB. No transcript is decoded here — `_maybe_spawn_retro`
+    asks this to decide whether a worker is worth starting, and the hook's
+    15 s budget must not pay for a window load to find out.
+    """
+    transcript_dir = _find_transcript_dir(cwd)
+    if not transcript_dir:
+        return []
+    saved_ids = _get_saved_session_ids(db, project_id)
+    try:
+        jsonls = sorted(transcript_dir.glob("*.jsonl"),
+                        key=lambda f: f.stat().st_mtime, reverse=True)
+    except OSError:
+        return []
+    out = []
+    for jsonl in jsonls[:3]:
+        if jsonl.stem == current_session_id or jsonl.stem in saved_ids:
+            continue
+        try:
+            if jsonl.stat().st_size < 1024:
+                continue
+        except OSError:
+            continue
+        out.append(jsonl)
+    return out
+
+
+def _maybe_spawn_retro(cwd, db, project_id, session_id, memory_dir, source):
+    """Spawn the DETACHED retroactive-save worker when there is work for it.
+
+    v2.16.0 (A2). `retroactive_save` used to run INSIDE this hook: up to
+    _RETRO_DEADLINE_S of the 15 s envelope, at every start, with Claude Code
+    waiting on it. No LLM and no transcript load here, in THIS order, so a
+    test without a credential can never spawn: a start that CONTINUES a
+    session (`source` resume / fork) -> False, its transcripts were handled
+    at the original start; no key -> False; backed off after a failed call
+    -> False; no candidate by stat() alone -> False; a `.retro.lock` younger
+    than _RETRO_STALE_LOCK_S (a worker still running) -> False. Returns
+    True when a worker was started.
+    """
+    from core.auth import get_api_key, llm_backoff
+    if str(source or "") in ("resume", "fork"):
+        return False
+    api_key, _ = get_api_key()
+    if not api_key:
+        return False
+    if llm_backoff(memory_dir)[0]:
+        return False
+    if not _retro_candidates(cwd, db, project_id, session_id):
+        return False
+    try:
+        lock_age = time.time() - (memory_dir / RETRO_LOCK).stat().st_mtime
+    except OSError:
+        # why: no lock (the common case) or an unstatable one; the worker's
+        # own O_CREAT|O_EXCL acquire is the real guard and exits if it loses
+        lock_age = None
+    if lock_age is not None and lock_age < _RETRO_STALE_LOCK_S:
+        return False
+    return spawn_detached([sys.executable, str(_HERE / "session_start.py"),
+                           "--retro", str(cwd), str(session_id)])
+
+
+def _retro_worker(cwd, session_id):
+    """`session_start.py --retro <cwd> <session_id>`: the detached save.
+
+    Everything the inline call did, in a process the harness does not wait
+    for: the hook's own ladder (opt-out -> anchor -> state directory),
+    `.retro.lock` through `consolidate_async._acquire_lock` with the 60 s
+    horizon, then `retroactive_save` under the same absolute deadline it
+    always had — now the worker's own wall-clock, not the hook's. Never
+    raises; the caller exits 0 either way.
+    """
+    try:
+        if not isinstance(cwd, str) or not cwd or not isinstance(session_id, str):
+            return
+        resolved = resolve_project(cwd)
+        if resolved is None:
+            return
+        cwd = resolved
+        memory_dir = resolve_memory_dir(cwd)
+        db_path = memory_dir / DB_FILENAME
+        if not db_path.exists():
+            return
+        from hooks.consolidate_async import _acquire_lock, _release_lock
+        lock = memory_dir / RETRO_LOCK
+        if not _acquire_lock(lock, stale_s=_RETRO_STALE_LOCK_S):
+            return
+        try:
+            db = MemoryDB(db_path)
+            project_id = db.upsert_project(cwd)
+            retroactive_save(cwd, db, project_id, session_id,
+                             deadline=_HOOK_T0 + _RETRO_DEADLINE_S)
+        finally:
+            _release_lock(lock)
+    except Exception:
+        _log.error_tb("retroactive worker")
+
+
 def retroactive_save(cwd, db, project_id, current_session_id="", deadline=None):
     """Best-effort: LLM-extract memories from prior, never-compacted transcripts.
 
@@ -1194,29 +1316,27 @@ def retroactive_save(cwd, db, project_id, current_session_id="", deadline=None):
                   f"transcript was read")
         return
 
-    transcript_dir = _find_transcript_dir(cwd)
-    if not transcript_dir:
-        _log.info(f"retroactive save: no exact transcript dir for {cwd} — skipped")
+    from core.auth import clear_llm_backoff, llm_backoff
+    candidates = _retro_candidates(cwd, db, project_id, current_session_id)
+    if not candidates:
+        _log.info(f"retroactive save: no unsaved transcript for {cwd} — skipped")
         return
-    saved_ids = _get_saved_session_ids(db, project_id)
-    jsonls = sorted(transcript_dir.glob("*.jsonl"),
-                    key=lambda f: f.stat().st_mtime, reverse=True)
 
     memory_dir = resolve_memory_dir(cwd)
     n_retroactive = 0
-    for jsonl in jsonls[:3]:
+    for jsonl in candidates:
         if deadline is not None and time.monotonic() >= deadline:
             _log.info(f"retroactive save: wall-clock budget spent, stopping "
                       f"after {n_retroactive} session(s)")
             break
+        # Backed off after a failed call (v2.16.0): one outage must not cost
+        # three decoded windows and three dead legs per start.
+        if llm_backoff(memory_dir)[0]:
+            _log.info("retroactive save: backed off after a failed LLM call, "
+                      "stopping")
+            break
         session_uuid = jsonl.stem
-        if session_uuid == current_session_id:
-            continue
-        if session_uuid in saved_ids:
-            continue
         size = jsonl.stat().st_size
-        if size < 1024:
-            continue
         # Charge the window load to the budget BEFORE starting it. `continue`
         # rather than `break`: the list is newest-first, so a later file may
         # still be small enough to afford.
@@ -1250,7 +1370,8 @@ def retroactive_save(cwd, db, project_id, current_session_id="", deadline=None):
                 continue
             memories = _retroactive_extract(messages,
                                             total_records=window.total_records,
-                                            deadline=deadline)
+                                            deadline=deadline,
+                                            state_dir=memory_dir)
             # `is None`, because an EMPTY list is a RESULT (register C1 and
             # _retroactive_extract's docstring). `not memories` read "the
             # model found nothing worth keeping" as "extraction never ran",
@@ -1270,6 +1391,8 @@ def retroactive_save(cwd, db, project_id, current_session_id="", deadline=None):
             counts = (upsert_batch(db, project_id, sid, memories,
                                    memory_dir=memory_dir)
                       if memories else {})
+            # A call that came back ends the outage, whatever it held.
+            clear_llm_backoff(memory_dir)
             # Receipt after the memories landed (register X6) — a kill between
             # insert_session and here leaves the row incomplete and the NEXT
             # retroactive pass retries this transcript instead of skipping it.
@@ -1308,6 +1431,13 @@ def _flush_stdout():
 
 
 def main():
+    # Detached worker mode (v2.16.0, A2): `session_start.py --retro <cwd>
+    # <session_id>`, launched by _maybe_spawn_retro with no stdin — the same
+    # shape as consolidate_async.py's `--cwd` and stop.py's `--observe`.
+    if sys.argv[1:2] == ["--retro"]:
+        args = sys.argv[2:4] + ["", ""]
+        _retro_worker(args[0], args[1])
+        sys.exit(0)
     # Logged: SessionStart fires once per session, so a line per failure is
     # affordable and a silently empty injection is otherwise unexplainable.
     data = parse_payload(log=_log)
@@ -1445,12 +1575,14 @@ def main():
         _log.info(f"injected context for {Path(cwd).name}")
 
         try:
-            # Budgeted: retroactive save runs LLM legs and must never be the
-            # reason the 15s hook dies. Everything above is already flushed.
-            retroactive_save(cwd, db, project_id, session_id,
-                             deadline=_HOOK_T0 + _RETRO_DEADLINE_S)
+            # The retroactive save runs LLM legs; since v2.16.0 (A2) they run
+            # in a DETACHED worker this hook only starts, so the 15 s budget
+            # pays for a stat() scan and a Popen. Everything above is
+            # already flushed.
+            _maybe_spawn_retro(cwd, db, project_id, session_id, memory_dir,
+                               source)
         except Exception as e:
-            _log.error(f"retroactive save failed: {e}")
+            _log.error(f"retroactive spawn failed: {e}")
 
     except Exception:
         _log.error_tb("session_start ERROR")

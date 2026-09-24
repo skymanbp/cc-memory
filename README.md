@@ -739,7 +739,7 @@ Six hook commands <!--ce:hooks--> across five Claude Code events, declared in
 | `Stop` | `hooks/stop.py` | 22 s | Detached Haiku observer (v2.16.0), per-turn PROGRESS patch, idle reorg every 5 turns, backpressure probe, plan enforcement |
 | `PreCompact` (sync) | `hooks/pre_compact.py` | 120 s | Extract → reconcile → full-rewrite PROGRESS.md → archive |
 | `PreCompact` (async) | `hooks/consolidate_async.py` | 300 s | Budget-gated consolidation, off the blocking path; also the standalone backpressure worker |
-| `SessionStart` | `hooks/session_start.py` | 15 s | Inject layered context + the forced `<system-reminder>` |
+| `SessionStart` | `hooks/session_start.py` | 15 s | Inject layered context + the forced `<system-reminder>`; start the detached retroactive-save worker (v2.16.0) |
 
 Hook contract, never violated: hooks never write to stderr (Claude Code renders
 stderr as error UI), never raise, and always exit 0.

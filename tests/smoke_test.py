@@ -787,6 +787,111 @@ def main():
     print("[OK] B7 no credential: 0 transcript windows decoded before the "
           "hook gives up")
 
+    # === v2.16.0 A2: the retroactive save is a DETACHED worker ==============
+    # `retroactive_save` ran INSIDE the 15 s SessionStart hook: up to 13 s of
+    # LLM legs at every start, with Claude Code waiting. The hook now decides
+    # by stat() alone (`_retro_candidates`, never a window load) and starts
+    # `session_start.py --retro <cwd> <sid>` detached; the worker records a
+    # failed call as a backoff and the next start skips the spawn. Reuses the
+    # B6 project: its one transcript is already recorded as seen.
+    import subprocess as _a2_sp
+    _a2_spawned = []
+    _a2_saved = (_a2_sp.Popen, _auth8.get_api_candidates, _be8.call_llm,
+                 _ss9.load_transcript_window)
+    _a2_loads = []
+    try:
+        _a2_sp.Popen = (lambda cmd, **kw: _a2_spawned.append([str(c) for c in cmd])
+                        or type("_P", (), {"pid": 0})())
+        _auth8.get_api_candidates = lambda: [
+            ("sk-ant-api03-EXAMPLE-smoke-placeholder", "env", "api_key")]
+        _ss9.load_transcript_window = lambda *a, **kw: (
+            _a2_loads.append(1), _a2_saved[3](*a, **kw))[1]
+
+        def _a2_decide(source="startup", sid="live"):
+            return _ss9._maybe_spawn_retro(str(tmp8), db8, pid8, sid, mem8, source)
+
+        assert _a2_decide() is False and not _a2_spawned, \
+            "the only transcript is already recorded as seen: nothing to spawn for"
+        (_tdir8 / "retro-two.jsonl").write_text("\n".join(_recs8) + "\n",
+                                                encoding="utf-8")
+        assert _a2_decide() is True and len(_a2_spawned) == 1 \
+            and "--retro" in _a2_spawned[0] \
+            and _a2_spawned[0][-2:] == [str(tmp8), "live"], \
+            f"an unsaved transcript must start ONE --retro worker: {_a2_spawned}"
+        assert _a2_loads == [], (
+            f"{len(_a2_loads)} transcript window(s) decoded by the spawn decision "
+            f"— the hook must decide by stat() alone")
+        assert _a2_decide(source="resume") is False and len(_a2_spawned) == 1, \
+            "a resumed start continues a session whose transcripts were handled at its start"
+        (mem8 / _ss9.RETRO_LOCK).write_text("held", encoding="utf-8")
+        assert _a2_decide() is False and len(_a2_spawned) == 1, \
+            "a fresh .retro.lock (a worker still running) must defer the spawn"
+        (mem8 / _ss9.RETRO_LOCK).unlink()
+        _auth8.note_llm_failure(mem8, "down")
+        assert _a2_decide() is False and len(_a2_spawned) == 1, \
+            "an active backoff must defer the spawn"
+        _auth8.clear_llm_backoff(mem8)
+        _auth8.get_api_candidates = lambda: []
+        assert _a2_decide() is False and len(_a2_spawned) == 1, \
+            "no credential: no spawn"
+        _auth8.get_api_candidates = lambda: [
+            ("sk-ant-api03-EXAMPLE-smoke-placeholder", "env", "api_key")]
+        # the worker path, through main(): a failed call records the backoff
+        # and leaves the transcript unsaved; a call that came back saves it
+        _a2_argv = sys.argv
+        _a2_calls = []
+
+        def _a2_worker():
+            sys.argv = ["session_start.py", "--retro", str(tmp8), "live"]
+            try:
+                _ss9.main()
+            except SystemExit as _exc:
+                return _exc.code
+            finally:
+                sys.argv = _a2_argv
+            return "no exit"
+
+        def _a2_down(*a, **kw):
+            _a2_calls.append(1)
+            raise RuntimeError("All LLM backends failed: anthropic: down")
+
+        _be8.call_llm = _a2_down
+        _a2_rc = _a2_worker()
+        _a2_active, _a2_info = _auth8.llm_backoff(mem8)
+        assert _a2_rc == 0 and len(_a2_calls) == 1 and _a2_active \
+            and db8.get_session_count(pid8) == 1, (
+            f"worker after a failed call: rc={_a2_rc} calls={len(_a2_calls)} "
+            f"backoff={_a2_active} sessions={db8.get_session_count(pid8)} — "
+            f"it must exit 0, record the backoff and NOT record the session")
+        assert not (mem8 / _ss9.RETRO_LOCK).exists(), "the worker must release its lock"
+        _a2_rc2 = _a2_worker()
+        assert _a2_rc2 == 0 and len(_a2_calls) == 1, \
+            f"while backed off the worker must not call the model (calls={len(_a2_calls)})"
+        _auth8.clear_llm_backoff(mem8)
+        _be8.call_llm = lambda *a, **kw: (_a2_calls.append(1), "[]")[1]
+        _a2_rc3 = _a2_worker()
+        assert _a2_rc3 == 0 and len(_a2_calls) == 2 \
+            and db8.get_session_count(pid8) == 2 \
+            and not (mem8 / _auth8.BACKOFF_FILE).exists(), (
+            f"worker after a call that came back: rc={_a2_rc3} "
+            f"calls={len(_a2_calls)} sessions={db8.get_session_count(pid8)} — "
+            f"the transcript must be recorded as seen and the backoff cleared")
+        assert _a2_decide() is False and len(_a2_spawned) == 1, \
+            "once every transcript is recorded there is nothing left to spawn for"
+    finally:
+        (_a2_sp.Popen, _auth8.get_api_candidates, _be8.call_llm,
+         _ss9.load_transcript_window) = _a2_saved
+    # `_REPO` is bound further down in main(); this section runs before it.
+    _a2_src = (Path(__file__).resolve().parent.parent / "cc_memory" / "hooks"
+               / "session_start.py").read_text(encoding="utf-8")
+    _a2_main = _a2_src[_a2_src.index("def main():"):]
+    assert ("_maybe_spawn_retro(cwd, db, project_id, session_id, memory_dir,"
+            in _a2_main and "retroactive_save(cwd" not in _a2_main), (
+        "main() must spawn the worker, not run retroactive_save inline")
+    print("[OK] v2.16.0 A2 retroactive save: the hook decides by stat() and spawns "
+          "--retro once; the worker records a failed call as a backoff, honours "
+          "it, and saves after a call that came back")
+
     # === v2.2 features: enable_utf8_io is callable + idempotent ============
     from core.encoding_setup import enable_utf8_io
     enable_utf8_io()

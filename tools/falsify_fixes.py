@@ -3117,6 +3117,18 @@ def _break_r16obslock(root):
            "    if False:  # BREAKAGE: a running worker no longer defers the spawn")
 
 
+@case("r16retrospawn", ["tests/smoke_test.py"],
+      "spawn the retroactive worker without looking for a candidate -> every "
+      "start of a project with a credential launches a worker that finds "
+      "nothing, and a resumed start launches one too")
+def _break_r16retrospawn(root):
+    _patch(root, "cc_memory/hooks/session_start.py",
+           "    if not _retro_candidates(cwd, db, project_id, session_id):\n"
+           "        return False",
+           "    if False:  # BREAKAGE: spawn regardless of candidates\n"
+           "        return False")
+
+
 def verify_anchors():
     """Count every registered case's breakage anchors WITHOUT running a gate.
 

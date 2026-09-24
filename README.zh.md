@@ -1,4 +1,4 @@
-<!-- i18n-source: README.md | sha256: 203c556cc088943b | version: 2.15.2 | translated: 2026-09-24 | translation: cd07d9b8ad5bffaf -->
+<!-- i18n-source: README.md | sha256: 30bb6a166c561e2d | version: 2.15.2 | translated: 2026-09-24 | translation: 431534188c61990a -->
 > [English](README.md) · **简体中文**
 
 <div align="center">
@@ -688,7 +688,7 @@ schema（含每张表的定义位置）见 [§4](docs/ARCHITECTURE.zh.md#4-数�
 | `Stop` | `hooks/stop.py` | 22 秒 | 分离的 Haiku 观察者（v2.16.0）、按轮增量更新 PROGRESS、每 5 轮空闲整理、背压探针、计划强制执行 |
 | `PreCompact`（同步） | `hooks/pre_compact.py` | 120 秒 | 抽取 → 调和 → 全量重写 PROGRESS.md → 归档 |
 | `PreCompact`（异步） | `hooks/consolidate_async.py` | 300 秒 | 预算闸门下的整理，不在阻塞路径上；也是独立运行的背压工作者 |
-| `SessionStart` | `hooks/session_start.py` | 15 秒 | 注入分层上下文 + 强制的 `<system-reminder>` |
+| `SessionStart` | `hooks/session_start.py` | 15 秒 | 注入分层上下文 + 强制的 `<system-reminder>`；拉起分离的追溯保存工作进程（v2.16.0） |
 
 钩子契约，绝不违反：钩子从不写 stderr（Claude Code 会把 stderr 渲染成报错界面）、
 从不抛异常、永远以 0 退出。
