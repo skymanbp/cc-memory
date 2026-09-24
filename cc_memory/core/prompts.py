@@ -73,6 +73,11 @@ HANDSHAKE_WHY = (
     "Spec: `docs/CONTRACTS.md#handoff-contract`.",
 )
 
+# A resumed or forked session (v2.16.0, B4): the startup injection is still
+# in the conversation, so only the ledger is restated, under this line.
+RESUME_NOTE = ("[cc-memory] session resumed — startup context is still in this "
+               "conversation; standing directives restated:")
+
 # ── Query-time recall frame (core/recall.py) ───────────────────────────────
 RECALL_FRAME_OPEN = "<cc-memory-recall>"
 RECALL_FRAME_CLOSE = "</cc-memory-recall>"

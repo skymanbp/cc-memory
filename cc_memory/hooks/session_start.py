@@ -5,7 +5,12 @@ SessionStart hook — forced-handoff injection point.
 Fires on every new session (startup, resume, post-compaction). Three jobs:
 
   1. INJECT layered context (topics, critical memories, recent timeline,
-     handoff summary, footer).
+     handoff summary, footer). The START REASON picks the shape (v2.16.0,
+     B4; `_injection_mode`): a fresh window gets every layer and the ack
+     demand; a post-compaction window gets every layer and the reminder
+     but no ack demand; a resumed or forked session — whose startup
+     injection is still in the conversation — gets the standing directives
+     and nothing else, and rewrites nothing.
 
   2. EMIT A FORCED <system-reminder> directing Claude to Read PROGRESS.md
      BEFORE responding — the ONE file the handshake demands since v2.16.0
@@ -59,7 +64,7 @@ from core.privacy import (neutralize_document, neutralize_inline,
 from core.progress import ACK_TEMPLATE, render_progress_digest, write_progress_md
 from core.prompts import (FALLBACK_SUMMARY_PREFIX, HANDSHAKE_ACK_LEAD,
                           HANDSHAKE_LEAD, HANDSHAKE_READ_STEP, HANDSHAKE_TITLE,
-                          HANDSHAKE_WHY, RESUME_PROTOCOL_HEAD,
+                          HANDSHAKE_WHY, RESUME_NOTE, RESUME_PROTOCOL_HEAD,
                           RESUME_PROTOCOL_STEPS, RESUME_TRIGGER_LINES)
 from llm.memory_writer import upsert_batch
 
@@ -607,8 +612,30 @@ def _write_inject_manifest(memory_dir, manifest):
         _log.error(f".last_inject.json write failed: {e}")
 
 
-def build_context(memory_dir, db, project_id, project_name, current_session_id=""):
+def _injection_mode(source):
+    """Which injection a start reason gets (v2.16.0, B4).
+
+    "full"     startup / clear / unknown: every layer, the forced reminder,
+               the ack demanded — a fresh context window.
+    "compact"  every layer and the reminder (the window was just rebuilt and
+               the earlier injection is gone), but NO ack demand: the ack is
+               a first-reply signal, and a post-compaction start has no first
+               reply for it to appear in.
+    "resume"   resume / fork: the startup injection is STILL in this
+               conversation, so re-sending it put every memory in the
+               context twice. Only the standing directives are restated.
+    """
+    if source in ("resume", "fork"):
+        return "resume"
+    if source == "compact":
+        return "compact"
+    return "full"
+
+
+def build_context(memory_dir, db, project_id, project_name, current_session_id="",
+                  source=""):
     total_budget = _DEFAULT_BUDGET
+    mode = _injection_mode(source)
     mode_name = db.get_project_mode(project_id)
 
     # parts[0] is the plugin's own frame and is deliberately kept OUT of the
@@ -624,6 +651,23 @@ def build_context(memory_dir, db, project_id, project_name, current_session_id="
     # The ledger goes first: intent before facts. See _build_directives_layer.
     budget = int(total_budget * _LAYER_BUDGETS["directives"])
     directives_text, directive_slugs = _build_directives_layer(db, project_id, budget)
+    if mode == "resume":
+        # RESUME / FORK (v2.16.0, B4): the startup injection is still in this
+        # conversation, and re-sending every layer put each memory in the
+        # context twice. The one layer worth restating is the ledger — its
+        # whole enforcement is being in front of the model. No reminder (the
+        # handshake already happened in this conversation), no manifest
+        # rewrite and no reference bump: `.last_inject.json` IS the startup
+        # injection's record, and the recall channel's exclusion set reads
+        # it. The frame and the content sweep are the same as below.
+        parts.append(RESUME_NOTE + "\n")
+        if directives_text:
+            parts.append(directives_text)
+        restated = neutralize_document("\n".join(parts[1:]))
+        result = parts[0] + "\n" + restated + "\n\n" + _BANNER_TAIL + "\n"
+        _log.info(f"resumed: {len(directive_slugs)} directive(s) restated, "
+                  f"{len(result)} chars; manifest untouched")
+        return result
     if directives_text:
         parts.append(directives_text)
 
@@ -692,7 +736,10 @@ def build_context(memory_dir, db, project_id, project_name, current_session_id="
     body = neutralize_document("\n".join(parts[1:])) if len(parts) > 1 else ""
     result = parts[0] + ("\n" + body if body else "")
     result = result + "\n\n" + _BANNER_TAIL + "\n"
-    reminder = _build_forced_reminder(memory_dir)
+    # The compact path keeps the reminder — the window was just rebuilt — and
+    # drops the ack demand: there is no first reply for the ack to appear in.
+    reminder = (_build_forced_reminder(memory_dir) if mode == "full"
+                else _build_forced_reminder(memory_dir, demand_ack=False))
     if reminder:
         result = result + "\n" + reminder
     assert "<system-reminder>" in result or not reminder, \
@@ -725,6 +772,12 @@ def build_context(memory_dir, db, project_id, project_name, current_session_id="
         "n_injected_directives": len(directive_slugs),
         "progress_preview_included": bool(progress_text),
         "progress_layer": progress_layer,   # "digest" | "file" | "" (v2.16.0)
+        # v2.16.0 (B4): `/cc-mem inject-usage` reads `ack_demanded` — a compact
+        # start demanded no ack, so "not stated" would be a finding about a
+        # demand never made. A manifest without the key is an older one and is
+        # still measured.
+        "source": source or "startup",
+        "ack_demanded": mode == "full",
         "total_chars": len(result),
         "est_tokens": len(result) // 4,
     }
@@ -1042,7 +1095,8 @@ def _refresh_progress_row(db, project_id, memory_dir, current_session_id=None,
         this function is effectively a no-op.
 
       Tier 2 (DB):
-        - critical_context  ← db.get_critical_memories(min_importance=4)[:10]
+        - (critical_context is RETIRED, v2.16.0: §5 reads the store at render
+           time and nothing fills the column)
         - status_done       ← latest session_summary.completed
         - status_in_flight  ← latest session_summary.learned
         - plan              ← latest session_summary.next_steps
@@ -1086,16 +1140,10 @@ def _refresh_progress_row(db, project_id, memory_dir, current_session_id=None,
     # row is a decision and not a gap (see progress_was_fully_written).
     settled = progress_was_fully_written(cur)
 
-    # ── Tier 2A: critical_context from DB ──────────────────────────────────
-    if not cur.get("critical_context"):
-        crit = db.get_critical_memories(project_id, min_importance=4)[:10]
-        if crit:
-            patch["critical_context"] = [
-                {"id": m["id"], "category": m["category"],
-                 "topic": m.get("topic", "") or "",
-                 "content": (m["content"] or "")[:200]}
-                for m in crit
-            ]
+    # ── Tier 2A: RETIRED (v2.16.0, B9) — `critical_context` has no reader ──────────────────────────────────
+    # PROGRESS.md §5 reads `get_critical_memories` when it renders (the
+    # v2.15.1 rule §4 already follows), so a snapshot here was one more
+    # writer of a column nothing reads — and one more query per start.
 
     # ── Tier 2B: status + plan from latest session_summary ────────────────
     # NOTE: open_todos is deliberately NOT filled here. Tier 3 (transcript
@@ -1486,6 +1534,45 @@ def retroactive_save(cwd, db, project_id, current_session_id="", deadline=None):
             _log.error(f"retroactive save error: {e}")
 
 
+def _print_injected_line(db, project_id, memory_dir):
+    """The v2.3 observability one-liner: WHAT was injected, read from the
+    manifest `build_context` just wrote (ground truth, not a guess)."""
+    try:
+        man = json.loads((memory_dir / ".last_inject.json").read_text(encoding="utf-8"))
+        if not isinstance(man, dict):
+            # Same escape _build_footer closed for .last_save.json: json.loads
+            # succeeds on null/42/"s"/[1,2], .get() then raises AttributeError
+            # PAST the tuple below — skipping this OK line, the flush after it
+            # and, worse, the retroactive spawn that follows. Same threat model
+            # too: a plain file in the project that anything with the Write
+            # tool can plant.
+            raise ValueError("inject manifest is not a JSON object")
+        topics = man.get("topic_names", [])
+        n_topics = len(topics) if isinstance(topics, list) else 0
+        # neutralize_inline on every value: this line is printed into the
+        # stdout Claude reads, and the manifest is re-read from disk — a
+        # planted string value must not carry a live authority marker.
+        ni = neutralize_inline(str(man.get("n_injected_memories", 0)))
+        nd = neutralize_inline(str(man.get("n_injected_directives", 0)))
+        et = neutralize_inline(str(man.get("est_tokens", 0)))
+        print(
+            f"[cc-memory OK] Injected {ni} memories"
+            f" ({n_topics} topics, {nd} directives, ~{et} tokens"
+            f"{', +PROGRESS.md' if man.get('progress_preview_included') else ''})"
+            f" · see `/cc-mem inject-show`"
+        )
+    except (OSError, json.JSONDecodeError, ValueError, TypeError,
+            AttributeError):
+        # Read only on THIS path (v2.16.0, A7): the manifest line above needs
+        # none of these counts, and `get_stats` is four queries that every
+        # start paid for a fallback it did not take.
+        stats = db.get_stats(project_id)
+        print(
+            f"[cc-memory OK] Context loaded: "
+            f"{stats['n_memories']} memories, {stats.get('n_topics', 0)} topics"
+        )
+
+
 def _flush_stdout():
     """Force the injection out of the stdout buffer, now.
 
@@ -1609,50 +1696,21 @@ def main():
         # way and the layer failure degrades to "no context this session".
         try:
             print(build_context(memory_dir, db, project_id, Path(cwd).name,
-                                current_session_id=session_id))
+                                current_session_id=session_id, source=source))
         except Exception:
             _log.error_tb("build_context failed; emitting the forced reminder alone")
             print(_build_forced_reminder(memory_dir))
         # The injection is complete and irreplaceable — get it out of the
         # buffer before any further work can run us into the 15s timeout.
         _flush_stdout()
-        # v2.3 observability: user-visible one-liner of WHAT was injected, read
-        # from the manifest build_context just wrote (ground truth, not a guess).
-        try:
-            man = json.loads((memory_dir / ".last_inject.json").read_text(encoding="utf-8"))
-            if not isinstance(man, dict):
-                # Same escape _build_footer closed for .last_save.json 900
-                # lines up: json.loads succeeds on null/42/"s"/[1,2], .get()
-                # then raises AttributeError PAST the tuple below — skipping
-                # this OK line, the flush after it and, worse, the
-                # retroactive_save block that follows. Same threat model too:
-                # a plain file in the project that anything with the Write
-                # tool can plant.
-                raise ValueError("inject manifest is not a JSON object")
-            topics = man.get("topic_names", [])
-            n_topics = len(topics) if isinstance(topics, list) else 0
-            # neutralize_inline on every value: this line is printed into the
-            # stdout Claude reads, and the manifest is re-read from disk — a
-            # planted string value must not carry a live authority marker.
-            ni = neutralize_inline(str(man.get("n_injected_memories", 0)))
-            nd = neutralize_inline(str(man.get("n_injected_directives", 0)))
-            et = neutralize_inline(str(man.get("est_tokens", 0)))
-            print(
-                f"[cc-memory OK] Injected {ni} memories"
-                f" ({n_topics} topics, {nd} directives, ~{et} tokens"
-                f"{', +PROGRESS.md' if man.get('progress_preview_included') else ''})"
-                f" · see `/cc-mem inject-show`"
-            )
-        except (OSError, json.JSONDecodeError, ValueError, TypeError,
-                AttributeError):
-            # Read only on THIS path (v2.16.0, A7): the manifest line above
-            # needs none of these counts, and `get_stats` is four queries
-            # that every start paid for a fallback it did not take.
-            stats = db.get_stats(project_id)
-            print(
-                f"[cc-memory OK] Context loaded: "
-                f"{stats['n_memories']} memories, {stats.get('n_topics', 0)} topics"
-            )
+        if _injection_mode(source) == "resume":
+            # The manifest is the STARTUP injection's record and was not
+            # rewritten (B4); its counts would describe an injection this
+            # start did not make.
+            print("[cc-memory OK] Session resumed — the startup injection is "
+                  "still in this conversation; standing directives restated")
+        else:
+            _print_injected_line(db, project_id, memory_dir)
         _flush_stdout()
         _log.info(f"injected context for {Path(cwd).name}")
 

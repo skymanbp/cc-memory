@@ -2181,6 +2181,10 @@ def cmd_inject_show(args):
     data = json.loads(manifest.read_text(encoding="utf-8"))
     print(f"Last injection — session {data.get('session_id','?')[:8] or '(none)'} "
           f"at {data.get('ts','?')}")
+    _ack = data.get("ack_demanded")
+    print(f"  start reason      : {data.get('source') or '(unrecorded, pre-v2.16.0)'}"
+          f" · ack demanded: "
+          f"{'yes' if _ack is True else 'no' if _ack is False else 'unrecorded'}")
     print(f"  memories injected : {data.get('n_injected_memories', 0)} "
           f"(critical={len(data.get('critical_ids', []))}, "
           f"timeline={len(data.get('timeline_ids', []))})")
@@ -2304,6 +2308,18 @@ def _ack_signal(memory_dir, project):
     cannot drift from the demand.
     """
     from core.progress import ack_present
+
+    # v2.16.0 (B4): a compact-start injection demands no ack (there is no
+    # first reply for it to appear in) and the manifest says so. UNMEASURED,
+    # not a negative — the same tri-state rule as every branch below. A
+    # manifest without the key is an older one and is still measured.
+    try:
+        _man = json.loads((memory_dir / ".last_inject.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        _man = None  # why: `_session_window` below reports the unreadable case
+    if isinstance(_man, dict) and _man.get("ack_demanded") is False:
+        return None, (f"the last injection ({_man.get('source') or 'compact'}) "
+                      f"demanded no ack")
 
     sid, window, detail = _session_window(memory_dir, project)
     if window is None:

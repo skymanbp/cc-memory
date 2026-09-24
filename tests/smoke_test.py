@@ -430,9 +430,14 @@ def main():
     _refresh_progress_row(db2, pid2, mem2)
 
     post = db2.get_progress(pid2)
-    assert len(post["critical_context"]) == 1, \
-        f"expected 1 critical context, got {len(post['critical_context'])}"
-    assert "PostgreSQL" in post["critical_context"][0]["content"]
+    # v2.16.0 (B9): `critical_context` is RETIRED -- nothing fills the column;
+    # PROGRESS.md §5 reads the store when it renders (the v2.15.1 rule §4
+    # already follows), so the critical row reaches the file, not the row.
+    assert post["critical_context"] == [], \
+        f"the retired critical_context column was filled: {post['critical_context']!r}"
+    _p5 = (mem2 / "PROGRESS.md").read_text(encoding="utf-8")
+    assert "PostgreSQL" in _p5 and "## 5. Critical Context" in _p5, \
+        "PROGRESS.md §5 must render the store's critical rows"
     assert "Migrated schema" in post["status_done"]
     assert "pgvector index" in post["status_in_flight"]
     assert "hybrid BM25" in post["plan"]
@@ -442,7 +447,7 @@ def main():
     assert len(post["files_touched"]) >= 2
     assert post["trigger_type"] == "session_start_refresh"
     print(f"[OK] _refresh_progress_row fills empty fields: "
-          f"crit={len(post['critical_context'])}, "
+          f"crit=store-read (§5), "
           f"todos={len(post['open_todos'])}, "
           f"files={len(post['files_touched'])}")
 
@@ -635,8 +640,11 @@ def main():
         "files_read": [], "files_modified": [],
     })
     db6.mark_session_complete(sid6)
+    # `plan` is left EMPTY on purpose: it is the never-written field the
+    # refresh must still fill (v2.16.0 retired the `critical_context`
+    # snapshot that used to play that part -- nothing fills it any more).
     db6.upsert_progress(pid6, current_request="r6", status_done="d6",
-                        status_in_flight="i6", open_todos=[], plan="p6",
+                        status_in_flight="i6", open_todos=[], plan="",
                         critical_context=[],
                         files_touched=[{"path": "f6", "action": "edit"}],
                         transcript_ptr="/t6", trigger_type="auto")
@@ -645,8 +653,10 @@ def main():
     assert post6["open_todos"] == [], (
         "empty-on-purpose violated: an open_todos a full rewrite wrote [] was "
         f"re-filled from next_steps -> {post6['open_todos']!r}")
-    assert post6["critical_context"], \
-        "the refresh must still fill a field nothing ever wrote"
+    assert post6["plan"] == "consider caching later; maybe add metrics", \
+        f"the refresh must still fill a field nothing ever wrote: {post6['plan']!r}"
+    assert post6["critical_context"] == [], \
+        "the retired critical_context column was filled (v2.16.0, B9)"
     assert post6["trigger_type"] == "auto", \
         f"provenance overwritten by the refresh: {post6['trigger_type']!r}"
     from hooks.session_start import progress_was_fully_written, tier3_exclusion
@@ -7492,14 +7502,17 @@ def main():
     _b1_txt, _b1_layer = _hooks_ss._build_progress_digest(
         _b1_db, _b1_pid, _b1_root / _MEM, _b1_bud)
     assert _b1_layer == "file" and "B1FILEONLY" in _b1_txt, (_b1_layer, _b1_txt[:120])
-    # a row + a refined plan -> the digest: §1–§4 and nothing of §0/§5–§7
+    # a row + a refined plan -> the digest: §1–§4 and nothing of §0/§5–§7.
+    # §5 reads the STORE (v2.16.0, B9): importance 4 reaches the file's §5
+    # (>= 4) but not the injection's Critical layer (>= 5).
+    _b1_db.insert_memory(_b1_pid, None, "note", "B1CRIT must not appear",
+                         importance=4, topic="b1")
     _b1_db.upsert_progress(
         _b1_pid, current_request="B1REQ: wire the exporter",
         status_done="B1DONE parsed the config",
         open_todos=[{"content": f"B1TODO {_i}", "priority": "high",
                      "status": "pending"} for _i in range(12)],
-        critical_context=[{"id": 1, "category": "note",
-                           "content": "B1CRIT must not appear"}],
+        critical_context=[],
         files_touched=[{"path": "B1FILE.py", "action": "edit"}],
         transcript_ptr="B1PTR.jsonl")
     from core import plan as _b1_plan
@@ -7534,8 +7547,11 @@ def main():
     _b1_man = _json8.loads((_b1_root / _MEM / ".last_inject.json").read_text(encoding="utf-8"))
     assert _b1_man.get("progress_layer") == "digest" \
         and _b1_man.get("progress_preview_included") is True, _b1_man
-    assert "B1REQ" in _b1_ctx and "B1CRIT must not appear" not in _b1_ctx \
-        and "(digest" in _b1_ctx, _b1_ctx[-600:]
+    assert "B1REQ" in _b1_ctx and "(digest" in _b1_ctx, _b1_ctx[-600:]
+    # the store row reaches the file's §5 (and, at importance 4, the Recent
+    # layer above the digest) but never the digest itself
+    assert "B1CRIT must not appear" not in _b1_ctx[_b1_ctx.index("(digest"):], \
+        _b1_ctx[-600:]
     _b1_helpers = _ss_src[:_ss_src.index("def build_context(")]
     assert "neutralize_document(" not in _b1_helpers \
         and _b1_helpers.count("continue   # skip THIS entry") == 3, \
@@ -7611,6 +7627,111 @@ def main():
     shutil.rmtree(_b3_dir, ignore_errors=True)
     print("[OK] v2.16.0 B3: the handshake demands PROGRESS.md alone; no PROGRESS.md "
           "-> no block; demand_ack=False keeps the RESUME PROTOCOL and drops the ack")
+
+    # ── v2.16.0 · B4: the start reason picks the injection; B9: §5 reads the store ─
+    _b4_root = Path(tempfile.mkdtemp(prefix="cc-memory-b4-"))
+    (_b4_root / _MEM).mkdir(parents=True)
+    _b4_db = MemoryDB(_b4_root / _MEM / "memory.db")
+    _b4_pid = _b4_db.upsert_project(str(_b4_root))
+    _b4_fid = _b4_db.insert_memory(_b4_pid, None, "decision",
+                                   "B4FACT the exporter port is 9100", 5, [], "")
+    _b4_db.upsert_directive(_b4_pid, "b4-rule", demand="B4RULE never commit the token",
+                            kind="constraint")
+    _b4_db.upsert_progress(_b4_pid, current_request="B4REQ wire the exporter")
+    from core.progress import write_progress_md as _b4_wpm
+    _b4_wpm(_b4_db, _b4_pid, _b4_root / _MEM)
+    _b4_man_p = _b4_root / _MEM / ".last_inject.json"
+    # (a) startup (the default): every layer, the reminder, the ack demanded
+    _b4_full = _hooks_ss.build_context(_b4_root / _MEM, _b4_db, _b4_pid, "b4", "b4-s1")
+    _b4_m1 = _json8.loads(_b4_man_p.read_text(encoding="utf-8"))
+    assert "B4FACT" in _b4_full and "<system-reminder>" in _b4_full \
+        and ACK_TEMPLATE in _b4_full, _b4_full[-900:]
+    assert _b4_m1["ack_demanded"] is True and _b4_m1["source"] == "startup" \
+        and _b4_m1["session_id"] == "b4-s1", _b4_m1
+    # (b) compact: every layer and the reminder, no ack demand
+    _b4_comp = _hooks_ss.build_context(_b4_root / _MEM, _b4_db, _b4_pid, "b4", "b4-s1",
+                                       source="compact")
+    _b4_m2 = _json8.loads(_b4_man_p.read_text(encoding="utf-8"))
+    assert "B4FACT" in _b4_comp and "<system-reminder>" in _b4_comp \
+        and ACK_TEMPLATE not in _b4_comp, _b4_comp[-900:]
+    assert _b4_m2["ack_demanded"] is False and _b4_m2["source"] == "compact", _b4_m2
+    # (c) resume: the header, one line, the directives; nothing rewritten, no bump
+    import sqlite3 as _b4_sqlite
+    _b4_con = _b4_sqlite.connect(str(_b4_root / _MEM / "memory.db"))
+    _b4_con.execute("UPDATE memories SET last_referenced_at = '2000-01-01 00:00:00' "
+                    "WHERE id = ?", (_b4_fid,))
+    _b4_con.commit()
+    _b4_con.close()
+    _b4_sentinel = _b4_man_p.read_bytes()
+    _b4_res = _hooks_ss.build_context(_b4_root / _MEM, _b4_db, _b4_pid, "b4", "b4-s2",
+                                      source="resume")
+    assert "B4RULE" in _b4_res and "session resumed" in _b4_res \
+        and "### Knowledge Base" not in _b4_res and "B4FACT" not in _b4_res \
+        and "<system-reminder>" not in _b4_res and _hooks_ss._BANNER_TAIL in _b4_res, \
+        _b4_res
+    assert _b4_man_p.read_bytes() == _b4_sentinel, \
+        "a resumed start must not rewrite the startup injection's manifest"
+    assert _b4_db.get_memory(_b4_fid)["last_referenced_at"] == "2000-01-01 00:00:00", \
+        "a resumed start must not bump last_referenced_at (nothing was injected)"
+    assert _hooks_ss._injection_mode("fork") == "resume" \
+        and _hooks_ss._injection_mode("") == "full" \
+        and _hooks_ss._injection_mode("clear") == "full"
+    # (d) the real hook on source=resume: the OK line, the directives, no reminder
+    _b4_env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
+    _b4_run = subprocess.run(
+        [sys.executable, str(_REPO / "cc_memory" / "hooks" / "session_start.py")],
+        input=_json8.dumps({"cwd": str(_b4_root), "session_id": "b4-s3",
+                            "source": "resume", "hook_event_name": "SessionStart"}),
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        env=_b4_env, timeout=120)
+    assert _b4_run.returncode == 0 and not _b4_run.stderr, \
+        (_b4_run.returncode, _b4_run.stderr[-300:])
+    assert "<system-reminder>" not in _b4_run.stdout and "B4RULE" in _b4_run.stdout \
+        and "[cc-memory OK] Session resumed" in _b4_run.stdout, _b4_run.stdout[-600:]
+    assert _b4_man_p.read_bytes() == _b4_sentinel, \
+        "the real hook rewrote the manifest on a resumed start"
+    # (e) the CLI's ack tri-state reads ack_demanded; an older manifest is still measured
+    import cli.mem as _b4_mem
+    _b4_man_p.write_text(_json8.dumps({"session_id": "b4-s1", "ack_demanded": False,
+                                       "source": "compact"}), encoding="utf-8")
+    _b4_state, _b4_detail = _b4_mem._ack_signal(_b4_root / _MEM, str(_b4_root))
+    assert _b4_state is None and "demanded no ack" in _b4_detail, (_b4_state, _b4_detail)
+    _b4_man_p.write_text(_json8.dumps({"session_id": "b4-s1"}), encoding="utf-8")
+    assert "demanded no ack" not in _b4_mem._ack_signal(_b4_root / _MEM, str(_b4_root))[1], \
+        "an older manifest without the key must still be measured"
+    # (f) B9: §5 reads the STORE — the column is written empty and never read
+    _b4_db.upsert_progress(_b4_pid, current_request="B4REQ wire the exporter",
+                           critical_context=[{"id": 999, "category": "note",
+                                              "content": "B9STALE column row"}])
+    _b4_md = _b4_wpm(_b4_db, _b4_pid, _b4_root / _MEM).read_text(encoding="utf-8")
+    assert "B4FACT" in _b4_md and "B9STALE" not in _b4_md, \
+        "§5 must read the store, not the column (v2.15.2 rendered the snapshot)"
+    assert _b4_db.archive_if_unchanged([(_b4_fid, "B4FACT the exporter port is 9100")]) == 1
+    assert "B4FACT" not in _b4_wpm(_b4_db, _b4_pid, _b4_root / _MEM).read_text(encoding="utf-8"), \
+        "an archived row must leave §5 on the next render"
+    from core.progress import collect_progress_state as _b4_cps
+    assert _b4_cps(_b4_db, _b4_pid, _b4_root / _MEM)["critical_context"] == []
+    assert 'patch["critical_context"]' not in _ss_src, \
+        "the SessionStart refresh must not fill the retired column"
+    # (g) B9: §4 leads with a pending raw plan before the stale structured summary
+    from core import plan as _b4_plan
+    _b4_plan.apply_refined_plan(
+        _b4_db, _b4_pid,
+        {"version": 1, "goal": "B4GOAL the old goal", "success_criteria": ["c"],
+         "steps": [{"id": 1, "title": "B4STEP old", "status": "pending", "notes": ""}],
+         "context": "", "refined_by": "test"},
+        memory_dir=_b4_root / _MEM)
+    assert _b4_plan.capture_exit_plan_mode(_b4_db, _b4_pid, "B4RAW a newer raw plan",
+                                           memory_dir=_b4_root / _MEM)
+    _b4_md3 = _b4_wpm(_b4_db, _b4_pid, _b4_root / _MEM).read_text(encoding="utf-8")
+    assert "PENDING REFINEMENT" in _b4_md3 and "STALE" in _b4_md3 and "B4GOAL" in _b4_md3, (
+        "§4 must lead with the raw plan's pendency (core.plan.raw_pending_refinement) "
+        "before the stale structured summary", _b4_md3[:1200])
+    shutil.rmtree(_b4_root, ignore_errors=True)
+    print("[OK] v2.16.0 B4: startup = every layer + ack; compact = every layer, no "
+          "ack demand; resume/fork = the directives only, nothing rewritten; the "
+          "CLI's ack is unmeasured when none was demanded. B9: §5 reads the store, "
+          "§4 leads with a pending raw plan")
 
     # ── v2.16.0 · PreCompact feeds only rows ABOVE the observer cursor ──────
     # Every observation used to reach a model twice: the Stop observer fed it

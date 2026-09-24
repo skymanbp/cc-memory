@@ -3217,6 +3217,37 @@ def _break_r16memoryread(root):
            "        n=2, rel=f\"{MEMORY_DIRNAME}/MEMORY.md\", abs=\"x\"))\n")
 
 
+@case("r16resume", ["tests/smoke_test.py"],
+      "treat a resumed session as a fresh window -> every layer is re-sent "
+      "although the startup injection is still in the conversation, and the "
+      "startup manifest the recall channel excludes against is overwritten")
+def _break_r16resume(root):
+    _patch(root, f"{PKG}/hooks/session_start.py",
+           "    if source in (\"resume\", \"fork\"):\n        return \"resume\"",
+           "    if False:  # BREAKAGE: every start is a fresh window\n        return \"resume\"")
+
+
+@case("r16ackdemand", ["tests/smoke_test.py"],
+      "ignore ack_demanded -> a compact start that demanded no ack is reported "
+      "as 'not acknowledged', a finding about a demand never made")
+def _break_r16ackdemand(root):
+    _patch(root, f"{PKG}/cli/mem.py",
+           "    if isinstance(_man, dict) and _man.get(\"ack_demanded\") is False:",
+           "    if False:  # BREAKAGE: every manifest demanded an ack")
+
+
+@case("r16critstore", ["tests/smoke_test.py"],
+      "render PROGRESS.md §5 from the critical_context column again -> a row "
+      "archived since the snapshot stays in the handoff file")
+def _break_r16critstore(root):
+    _patch(root, f"{PKG}/core/progress.py",
+           "    lines += _render_critical_lines(db, project_id)\n",
+           "    lines += [f\"- #{m.get('id', '?')} `{m.get('category', '')}` \"\n"
+           "              f\"{m.get('content', '')}\"\n"
+           "              for m in _coerce_entries(prog.get(\"critical_context\"), \"content\")[:10]"
+           "] or [\"*(no critical memories)*\"]  # BREAKAGE\n")
+
+
 def verify_anchors():
     """Count every registered case's breakage anchors WITHOUT running a gate.
 

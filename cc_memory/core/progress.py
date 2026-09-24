@@ -17,7 +17,8 @@ Schema (see core.db, table `progress`):
   status_blocked    what's blocked, and on what
   open_todos        JSON list of {content, priority, status}
   plan              sequenced next steps as free text
-  critical_context  JSON list of memory IDs (top-importance, must-read)
+  critical_context  RETIRED (v2.16.0): written as [], no reader — §5 reads
+                    the store at render time
   files_touched     JSON list of {path, action: "read|edit|write"}
   transcript_ptr    absolute path to JSONL of the session being compacted
   trigger_type      what caused the last write (precompact, stop, manual)
@@ -245,13 +246,9 @@ def collect_progress_state(db: MemoryDB, project_id: int,
     # Aggregate from latest session summary
     summary = db.get_latest_summary(project_id) or {}
 
-    # Critical memories (importance >= 4, top 10 newest)
-    crit = db.get_critical_memories(project_id, min_importance=4)[:10]
-    critical_ctx = [
-        {"id": m["id"], "category": m["category"], "topic": m.get("topic", ""),
-         "content": m["content"][:200]}
-        for m in crit
-    ]
+    # `critical_context` is RETIRED (v2.16.0, B9): §5 reads the store at
+    # render time (the v2.15.1 rule §4 already follows), so the column is
+    # written empty and nothing reads it.
 
     # Open todos: filter to non-completed if provided
     open_todos = []
@@ -286,7 +283,7 @@ def collect_progress_state(db: MemoryDB, project_id: int,
         "status_blocked":   "",  # populated only via patch_progress when known
         "open_todos":       open_todos,
         "plan":             next_steps,
-        "critical_context": critical_ctx,
+        "critical_context": [],
         "files_touched":    files_touched,
         "transcript_ptr":   transcript_ptr,
         "trigger_type":     trigger_type,
@@ -395,15 +392,27 @@ def _render_plan_section(db: MemoryDB, project_id: int, prog: Dict) -> List[str]
         _log.debug(f"progress: plan store unreadable: {error}")
         return [legacy or f"*(plan unavailable: {type(error).__name__})*"]
 
+    # The RAW text is the newest plan when it awaits refinement (v2.16.0, B9;
+    # `core.plan.raw_pending_refinement` requires every live-plan renderer to
+    # ask BEFORE rendering the structured form — this one did not). Imported
+    # here: core.plan imports this module.
+    from core.plan import raw_pending_refinement
+    head: List[str] = []
+    if raw_pending_refinement(row):
+        raw_len = len((row.get("raw") or "").strip())
+        head = [f"**PENDING REFINEMENT** — a raw plan of {raw_len} chars awaits "
+                f"`plan-refiner` (`/cc-mem plan-status` shows it); the summary "
+                f"below is the PREVIOUS plan and is STALE.", ""]
+
     structured = row.get("structured") or {}
     steps = [s for s in (structured.get("steps") or []) if isinstance(s, dict)]
     if not steps:
-        return [legacy or "*(no plan recorded)*"]
+        return head + [legacy or "*(no plan recorded)*"]
 
     active_id = row.get("active_step") or 0
     done = sum(1 for s in steps if s.get("status") == "done")
     goal = neutralize_inline(str(structured.get("goal") or "").strip())
-    out = [f"**Goal** — {goal}" if goal else "**Goal** — *(none stated)*", ""]
+    out = head + [f"**Goal** — {goal}" if goal else "**Goal** — *(none stated)*", ""]
     out.append(f"**Progress** — {done}/{len(steps)} steps done"
                + (f" · active step #{active_id}" if active_id else " · no active step"))
     out.append("")
@@ -464,6 +473,34 @@ def _render_todo_lines(prog: Dict, max_todos: int = _MAX_TODOS_RENDERED) -> List
         out.append(f"- … {len(todos) - max_todos} more "
                    f"(render capped at {max_todos}; the "
                    f"`progress` row holds the full list)")
+    return out
+
+
+def _render_critical_lines(db: MemoryDB, project_id: int) -> List[str]:
+    """§5 body, read from the STORE (v2.16.0, B9) — the rule §4 has followed
+    since v2.15.1.
+
+    The `critical_context` column was a snapshot two writers took from this
+    same query (PreCompact's full rewrite and the SessionStart refresh), so
+    the file could list a row that had since been archived or superseded,
+    and a project that never compacted rendered whatever the refresh had
+    frozen. Nothing fills the column now and nothing reads it.
+    """
+    try:
+        crit = db.get_critical_memories(project_id, min_importance=4)[:10]
+    except Exception as error:  # why: PROGRESS.md must still render when the store cannot be read
+        _log.debug(f"progress: critical memories unreadable: {error}")
+        return [f"*(critical memories unavailable: {type(error).__name__})*"]
+    if not crit:
+        return ["*(no critical memories)*"]
+    out = []
+    for m in crit:
+        mid = neutralize_inline(str(m.get("id", "?")))
+        cat = neutralize_inline(str(m.get("category", "")))
+        topic = neutralize_inline(str(m.get("topic", "") or ""))
+        topic_tag = f"[{topic}] " if topic else ""
+        content = neutralize_inline(str(m.get("content", "") or ""))[:200]
+        out.append(f"- #{mid} `{cat}` {topic_tag}{content}")
     return out
 
 
@@ -636,17 +673,7 @@ def write_progress_md(db: MemoryDB, project_id: int, memory_dir: Path) -> Path:
 
     # --- Critical Context ----------------------------------------------------
     lines += ["## 5. Critical Context (must-know memories)", ""]
-    crit = _coerce_entries(prog.get("critical_context"), "content")
-    if not crit:
-        lines.append("*(no critical memories)*")
-    else:
-        for m in crit[:10]:
-            mid = neutralize_inline(str(m.get("id", "?")))
-            cat = neutralize_inline(str(m.get("category", "")))
-            topic = neutralize_inline(str(m.get("topic", "")))
-            topic_tag = f"[{topic}] " if topic else ""
-            content = neutralize_inline(str(m.get("content", "") or ""))[:200]
-            lines.append(f"- #{mid} `{cat}` {topic_tag}{content}")
+    lines += _render_critical_lines(db, project_id)
     lines += [""]
 
     # --- Files Touched -------------------------------------------------------

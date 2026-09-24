@@ -1,4 +1,4 @@
-<!-- i18n-source: ARCHITECTURE.md | sha256: 7d91386da6868e02 | version: 2.15.2 | translated: 2026-09-24 | translation: 79cafd681b2bbf23 -->
+<!-- i18n-source: ARCHITECTURE.md | sha256: 982102c8b69ff72e | version: 2.15.2 | translated: 2026-09-24 | translation: b84dc1ba40762a97 -->
 > [English](ARCHITECTURE.md) · **简体中文**
 
 # cc-memory — 架构
@@ -208,7 +208,7 @@ v2.4.3 把原本 5 份的 `docs/` 目录合并为 2 份。全部 79 处仓库内
 |------|-------|---------|-----|
 | `PreCompact`（同步） | [`cc_memory/hooks/pre_compact.py`](../cc_memory/hooks/pre_compact.py) | 120s | 读取**有界**的 head+tail transcript 窗口（`extractor.load_transcript_window`）；经 Haiku 用 LLM 抽取记忆；经 `memory_writer.upsert_batch` 路由；**整篇重写** `.ccm/PROGRESS.md`；归档会话。写入一个起始标记，使被杀死的运行可被检测。 |
 | `PreCompact`（异步） | [`cc_memory/hooks/consolidate_async.py`](../cc_memory/hooks/consolidate_async.py) | 300s，`async: true` | LLM 整理，在 v2.3.2 中被移出阻塞式压缩路径（间隔标记 + 锁，受预算门约束）。每 N 次会话到期，**或**写入积压判定到期（v2.12.0）；也可由 Stop 钩子的背压探针以独立进程方式拉起（`--cwd <root>`）。 |
-| `SessionStart` | [`cc_memory/hooks/session_start.py`](../cc_memory/hooks/session_start.py) | 15s | 注入分层上下文（长期指令 / 主题 / 关键项 / 时间线 / PROGRESS 摘要 / 页脚——指令账本自 v2.12.2 起是第一层；在此之前没有任何东西注入它。自 v2.16.0 起 PROGRESS 层是从 `progress` 行渲染的 §1–§4 摘要，只有"有文件没有行"的项目才退回文件预览；内嵌整个文件曾让同一段文字在上下文里出现两次，强制 Read 之后是三次）；发出强制的 `<system-reminder>`，要求 Read `PROGRESS.md`（自 v2.16.0 起只要求这一个文件；MEMORY.md 的事实已经在上面各层里）；拉起分离的 `--retro` 工作进程去追溯保存未保存的既往 JSONL（v2.16.0——只凭 stat() 扫描决定，续接或分叉的启动不拉起；调用失败后通过 `.llm_backoff.json` 退避，运行中的工作进程持有 `.retro.lock`）。 |
+| `SessionStart` | [`cc_memory/hooks/session_start.py`](../cc_memory/hooks/session_start.py) | 15s | 注入分层上下文（长期指令 / 主题 / 关键项 / 时间线 / PROGRESS 摘要 / 页脚——指令账本自 v2.12.2 起是第一层；在此之前没有任何东西注入它。自 v2.16.0 起 PROGRESS 层是从 `progress` 行渲染的 §1–§4 摘要，只有"有文件没有行"的项目才退回文件预览；内嵌整个文件曾让同一段文字在上下文里出现两次，强制 Read 之后是三次）；发出强制的 `<system-reminder>`，要求 Read `PROGRESS.md`（自 v2.16.0 起只要求这一个文件；MEMORY.md 的事实已经在上面各层里）。启动原因决定形态（v2.16.0）：`resume`/`fork` 只重述长期指令、什么都不重写——启动注入仍在这段对话里；`compact` 保留每一层和提醒块，但不要求确认；拉起分离的 `--retro` 工作进程去追溯保存未保存的既往 JSONL（v2.16.0——只凭 stat() 扫描决定，续接或分叉的启动不拉起；调用失败后通过 `.llm_backoff.json` 退避，运行中的工作进程持有 `.retro.lock`）。 |
 | `Stop` | [`cc_memory/hooks/stop.py`](../cc_memory/hooks/stop.py) | 22s | 观察者：拉起分离的 `stop.py --observe` 工作进程，由它经 Haiku 从本回合的 observations 抽取（v2.16.0——钩子本身从不等模型；调用失败后工作进程通过 `.llm_backoff.json` 退避，运行中的工作进程持有 `.observer.lock`）；每回合 `patch_progress(files_touched, ...)`；每 5 个回合运行 `idle.maybe_run_idle`（清理 + 重新生成 MEMORY.md）；探测整理积压，到期时拉起独立的异步工作者（v2.12.0）；当计划**在活**时，累加其回合计数器并**强制执行**——对未精炼的计划、未做漂移检查的计划或闲置的指令**拒绝收官**（`{"decision": "block"}`），逃生预算见 CONTRACTS.md（v2.11.0；本行从前描述的建议行已不存在）。续发的 Stop（`stop_hook_active`，v2.16.0）除强制执行外跳过所有工作。 |
 | `PostToolUse` | [`cc_memory/hooks/post_tool_use.py`](../cc_memory/hooks/post_tool_use.py) | 8s | **先**做实时计划集成，且所有模式一视同仁：`ExitPlanMode` → `plan_active.raw`，`TodoWrite` → 机械式步骤同步，`Edit`/`Write`/`MultiEdit`/`NotebookEdit` → 漂移计数器 +1，敏感 Bash 调用 → +20。**然后**才为被观测的工具调用向 `observations` 插入一行（模式白名单 / 跳过列表——`core.modes.should_observe`）。不调用 LLM。端到端实测约 180-290 ms，其中约 75-120 ms 是解释器启动。 |
 | `UserPromptSubmit` | [`cc_memory/hooks/user_prompt.py`](../cc_memory/hooks/user_prompt.py) | 8s | 首次接触时自动初始化 `.ccm/`；跟踪回合数；为 Stop 观察者保存提示；在首条非脚手架提示时（每会话一次——与 `pre_compact._first_user_request` 共用的 `strip_scaffolding` 谓词，加上 `cc_mem_seeded_` 标记；v2.14.0）给会话打标签并为 `progress.current_request` 播种（依据双语恢复信号白名单，把触发类型判定为 `resume_request` 还是 `user_prompt`）。**然后是查询时召回**（v2.15.0）：把清洗后的提示转成 FTS5 表达式，越过相关度地板的最佳匹配会被打进 stdout 的 `<cc-memory-recall>` 帧里，否则一个字节都不输出（`core/recall.py`）；若上一个 Stop 为本会话寄存了计划建议行，则先打印它（v2.16.0，`_emit_block_advisory`）。 |
@@ -572,10 +572,10 @@ slug 约定是：把 `[A-Za-z0-9]` 之外的**每一个**字符替换成 `-`。c
    —— 后者此前逐字复制了旧解析器，连模糊分支一起。
 2. 模糊兜底被**删除**。未命中返回 `None`。调用方必须把它当作「没有 transcript」，
    绝不能当成可以猜的许可。
-3. 归属改为正向校验。`_transcript_belongs_to`（`session_start.py:822-839`）读取
+3. 归属改为正向校验。`_transcript_belongs_to`（`session_start.py:880-897`）读取
    transcript 自身记录携带的 `cwd`，并且是**失败闭合**的 —— 没有 `cwd` 就不摄取 ——
    它在有界窗口加载之后为 `retroactive_save` 把关。第 3 级挖掘则使用故意更弱的
-   `_transcript_is_foreign`（`session_start.py:822-849`）：缺失 `cwd` 放行，`cwd`
+   `_transcript_is_foreign`（`session_start.py:900-927`）：缺失 `cwd` 放行，`cwd`
    **不同**才拒绝。两者的差异是刻意的 —— 追溯保存会把 LLM 抽取的记忆永久落库，
    理应要求证明；而第 3 级还必须对 `tests/smoke_test.py:266-278` 构造的那种没有
    `cwd` 的 transcript 形态继续可用。
@@ -665,8 +665,8 @@ BudgetGate 来说仍是已知量。候选顺序与传输格式（`core/auth.py:2
 `get_api_key()` 是同一份候选列表的单凭据向后兼容视图（它不重试，
 `core/auth.py:60-93`）；它同时承载 `oauth_expired` 信号，支撑 SessionStart 的
 “[WARNING: OAuth expired — LLM extraction disabled]” 页脚
-（`session_start.py:753`）。钩子调用方用它来*提供*传给 `call_llm` 的凭据：
-`pre_compact.py:96 → :166`、`stop.py:99`、`session_start.py:753`、
+（`session_start.py:806`）。钩子调用方用它来*提供*传给 `call_llm` 的凭据：
+`pre_compact.py:96 → :166`、`stop.py:99`、`session_start.py:806`、
 `core/consolidate.py:425, 549, 724`。
 
 逐级回退是 v2.3.4 为一个具体故障加入的：一个失效的环境变量密钥（例如额度为零 →
@@ -976,7 +976,7 @@ home 边界是双份的：环境所声称的（`HOME`/`USERPROFILE`/`Path.home()
 
 旧的 v2.0 `SESSION_HANDOFF.md` 文件会在 v2.1 下的首次 PreCompact 时被重命名为
 `SESSION_HANDOFF.md.v2.bak`（一次性迁移 `core.progress.migrate_legacy_handoff`，
-`progress.py:774-792`）。
+`progress.py:801-819`）。
 
 ---
 
