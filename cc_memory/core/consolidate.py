@@ -238,7 +238,7 @@ def cleanup_garbage(db, project_id):
 # core/plan.py. The private English-only trigram copy this replaced made every
 # CJK near-duplicate invisible to this stage (see textsim's module docstring
 # for the measured collapse); the aliases keep the call sites readable.
-from core.textsim import jaccard as _jaccard, shingle_set as _trigram_set
+from core.textsim import HIGH_SIM, jaccard as _jaccard, shingle_set as _trigram_set
 
 
 # Row cap for the pairwise stages. `BudgetGate` bounds the three LLM stages in
@@ -290,9 +290,12 @@ def merge_near_duplicates(db, project_id, threshold=0.65):
                 continue
             mi, ti = trigrams[i]
             mj, tj = trigrams[j]
-            if mi["category"] != mj["category"]:
-                continue
             sim = _jaccard(ti, tj)
+            # Cross-category at HIGH_SIM only (v2.16.0, C2): the same sentence
+            # filed under two categories is one fact; a MID-band pair of
+            # different categories stays two, as before.
+            if mi["category"] != mj["category"] and sim < HIGH_SIM:
+                continue
             if sim >= threshold:
                 if mi["importance"] > mj["importance"]:
                     to_archive.add(mj["id"])
@@ -336,7 +339,8 @@ def merge_near_duplicates(db, project_id, threshold=0.65):
 # candidate PAIRS by WORD-overlap (coarser, catches rewording), groups them
 # conservatively (NO transitive union-find — that produced a 21-node mega-blob
 # on the live DB), and asks Haiku to confirm before archiving. Same-category
-# only; decodable only; survivor keeps history via supersedes_id.
+# at the word floor, cross-category at HIGH_SIM (v2.16.0, C2); decodable only;
+# survivor keeps history via supersedes_id.
 
 # CJK-aware word sets (core/textsim.py). The old `[a-z0-9_]{3,}` grammar here
 # produced an EMPTY set for a pure-CJK memory, so word-Jaccard returned 0.0
@@ -346,47 +350,48 @@ from core.textsim import word_set as _word_set
 _word_jaccard = _jaccard
 
 
-def _nominate_groups(memories, floor=0.30, max_group=4, max_groups=12):
-    """Form small same-category candidate groups from high word-Jaccard pairs.
+def _nominate_groups(memories, floor=0.30, max_group=4, max_groups=12,
+                     cross_floor=HIGH_SIM):
+    """Form small candidate groups from high word-Jaccard pairs.
 
     Greedy, bounded: start each group from the highest-scoring unused pair,
-    extend ONLY with members that exceed `floor` against EVERY current member
+    extend ONLY with members that clear the bar against EVERY current member
     (no transitive chaining through hub tokens). Caps group size and count.
+    A same-category pair clears `floor`; a pair of DIFFERENT categories must
+    clear `cross_floor` (v2.16.0, C2 — the same sentence filed under two
+    categories is one fact, and this stage could not see it at all).
     Returns list of groups (each a list of memory dicts, len 2..max_group).
     """
-    by_cat = defaultdict(list)
-    for m in memories:
-        if is_decodable(m["content"]):
-            by_cat[m["category"]].append(m)
+    rows = [m for m in memories if is_decodable(m["content"])]
+    wsets = {m["id"]: _word_set(m["content"]) for m in rows}
+
+    def _bar(a, b):
+        return floor if a["category"] == b["category"] else cross_floor
 
     pairs = []
-    wsets = {}
-    for cat, mems in by_cat.items():
-        for m in mems:
-            wsets[m["id"]] = _word_set(m["content"])
-        for i in range(len(mems)):
-            for j in range(i + 1, len(mems)):
-                s = _word_jaccard(wsets[mems[i]["id"]], wsets[mems[j]["id"]])
-                if s >= floor:
-                    pairs.append((s, mems[i], mems[j], cat))
+    for i in range(len(rows)):
+        for j in range(i + 1, len(rows)):
+            s = _word_jaccard(wsets[rows[i]["id"]], wsets[rows[j]["id"]])
+            if s >= _bar(rows[i], rows[j]):
+                pairs.append((s, rows[i], rows[j]))
     pairs.sort(key=lambda p: -p[0])
 
     used = set()
     groups = []
-    for s, a, b, cat in pairs:
+    for s, a, b in pairs:
         if len(groups) >= max_groups:
             break
         if a["id"] in used or b["id"] in used:
             continue
         group = [a, b]
         gids = {a["id"], b["id"]}
-        # try to extend within same category, all-pairwise >= floor
-        for m in by_cat[cat]:
+        # extend: the candidate must clear its bar against EVERY member
+        for m in rows:
             if len(group) >= max_group:
                 break
             if m["id"] in used or m["id"] in gids:
                 continue
-            if all(_word_jaccard(wsets[m["id"]], wsets[g["id"]]) >= floor
+            if all(_word_jaccard(wsets[m["id"]], wsets[g["id"]]) >= _bar(m, g)
                    for g in group):
                 group.append(m)
                 gids.add(m["id"])
@@ -398,8 +403,9 @@ def _nominate_groups(memories, floor=0.30, max_group=4, max_groups=12):
 
 _DEDUP_JUDGE_PROMPT = """\
 You are de-duplicating a project's memory database. You are given a small group \
-of memories that are all the SAME category and lexically similar. Decide whether \
-they state the SAME underlying fact (just reworded / re-discovered across sessions).
+of lexically similar memories, each tagged with its category (two categories may \
+hold one fact). Decide whether they state the SAME underlying fact (just reworded \
+/ re-discovered across sessions).
 
 Output ONLY a JSON object, no markdown:
 {"duplicates": true|false, "canonical_content": "<the single best merged statement, \
@@ -420,15 +426,16 @@ def _judge_group_llm(group, api_key, deadline=None):
     wall-clock inside the leg (register C3)."""
     import json as _json
     mem_text = "\n".join(
-        f"[{i}] (id={m['id']}, imp={m['importance']}) {m['content']}"
+        f"[{i}] (id={m['id']}, {m['category']}, imp={m['importance']}) {m['content']}"
         for i, m in enumerate(group)
     )
+    cats = ", ".join(sorted({m["category"] for m in group}))
     try:
         from llm.ccl_backend import call_llm
         from llm.parse import extract_json
         raw = call_llm(
             _DEDUP_JUDGE_PROMPT,
-            f"Memories (same category '{group[0]['category']}'):\n\n{mem_text}",
+            f"Memories (categories: {cats}):\n\n{mem_text}",
             api_key, max_tokens=400,
             timeout=_JUDGE_HAIKU_S, fallback_timeout=_JUDGE_FALLBACK_S,
             deadline=deadline,
@@ -463,13 +470,21 @@ def semantic_dedup(db, project_id, budget=None, use_llm=True,
     """
     from core.auth import get_api_key
     budget = budget or BudgetGate.unbounded_gate()
-    result = {"groups_judged": 0, "memories_archived": 0, "proposals": []}
+    result = {"groups_judged": 0, "memories_archived": 0, "proposals": [],
+              "status": "skipped:use_llm=False"}
 
     if not use_llm:
         return result
     api_key, _ = get_api_key()
     if not api_key:
+        # Visible, never silent (v2.16.0, C1): a project with no credential
+        # ran every consolidation with this stage absent and the marker still
+        # said "consolidated". `status` reaches the marker's `llm_stages`,
+        # `/cc-mem status` and the SessionStart footer's warning.
+        _log.info("semantic_dedup skipped: no credential")
+        result["status"] = "skipped:no-credential"
         return result
+    result["status"] = "ran:0"
 
     memories = db.get_all_active_memories(project_id)
     if len(memories) > _MAX_PAIRWISE_ROWS:
@@ -569,6 +584,7 @@ def semantic_dedup(db, project_id, budget=None, use_llm=True,
             _log.warn(f"dedup: canonical for #{survivor['id']} collides with "
                       f"another active row; survivor keeps its own wording")
 
+    result["status"] = f"ran:{result['groups_judged']}"
     return result
 
 
@@ -817,7 +833,7 @@ def _summarize_topic_fallback(topic_name, memories):
 
 
 def consolidate_topics(db, project_id, use_llm=True, min_memories_per_topic=3,
-                       budget=None):
+                       budget=None, report=None):
     """Summarize each topic (>=min_memories) into the topics table.
 
     Budget-gated (v2.3.2): the LLM summary is only attempted while the gate can
@@ -826,9 +842,26 @@ def consolidate_topics(db, project_id, use_llm=True, min_memories_per_topic=3,
     the worker never STARTS a call it can't finish before its deadline. This
     closes the pre-v2.3.2 hole where this stage was the one ungated LLM loop
     and overran the PreCompact hook timeout on large DBs → "Hook cancelled".
+
+    `report` (v2.16.0, C1): a dict the caller passes to learn HOW the stage
+    ran — `status` is `skipped:use_llm=False`, `skipped:no-credential` or
+    `ran:<n>` (topics summarised by the model), beside `llm` and `fallback`
+    counts. The credential is checked ONCE here rather than silently per
+    topic, so a project with no key sees the stage named as skipped.
     """
     budget = budget or BudgetGate.unbounded_gate()
     PER_CALL_COST = _worst_call_cost(_SUMMARY_HAIKU_S, _SUMMARY_FALLBACK_S)
+    report = report if report is not None else {}
+    if use_llm:
+        from core.auth import get_api_key
+        if not get_api_key()[0]:
+            _log.info("consolidate_topics: no credential — every topic gets "
+                      "the no-LLM summary")
+            report["status"] = "skipped:no-credential"
+            use_llm = False
+    else:
+        report["status"] = "skipped:use_llm=False"
+    n_llm = 0
     all_memories = db.get_all_active_memories(project_id)
     by_topic: Dict[str, List[Dict]] = defaultdict(list)
     for m in all_memories:
@@ -846,6 +879,8 @@ def consolidate_topics(db, project_id, use_llm=True, min_memories_per_topic=3,
         if use_llm and budget.can_spend(PER_CALL_COST):
             summary = _summarize_topic_llm(topic, memories,
                                            deadline=budget.deadline())
+            if summary:
+                n_llm += 1
         if not summary:
             if use_llm and not budget.can_spend(PER_CALL_COST):
                 n_deferred_llm += 1
@@ -871,6 +906,10 @@ def consolidate_topics(db, project_id, use_llm=True, min_memories_per_topic=3,
     if n_deferred_llm:
         _log.info(f"consolidate_topics: budget exhausted, {n_deferred_llm} "
                   f"topic(s) used the no-LLM fallback summary")
+    report["llm"] = n_llm
+    report["fallback"] = n_consolidated - n_llm
+    if use_llm:
+        report["status"] = f"ran:{n_llm}"
     return n_consolidated
 
 
@@ -967,12 +1006,17 @@ def detect_obsolete_llm(db, project_id, budget=None, use_llm=True,
     import json as _json
     from core.auth import get_api_key
     budget = budget or BudgetGate.unbounded_gate()
-    result = {"pairs_found": 0, "archived": 0, "proposals": []}
+    result = {"pairs_found": 0, "archived": 0, "proposals": [],
+              "status": "skipped:use_llm=False"}
     if not use_llm:
         return result
     api_key, _ = get_api_key()
     if not api_key:
+        # Visible, never silent — see semantic_dedup (v2.16.0, C1).
+        _log.info("detect_obsolete_llm skipped: no credential")
+        result["status"] = "skipped:no-credential"
         return result
+    n_judged = 0
 
     mems = [m for m in db.get_all_active_memories(project_id)
             if is_decodable(m["content"])]
@@ -1009,6 +1053,7 @@ def detect_obsolete_llm(db, project_id, budget=None, use_llm=True,
                 timeout=_JUDGE_HAIKU_S, fallback_timeout=_JUDGE_FALLBACK_S,
                 deadline=budget.deadline(),
             )
+            n_judged += 1
             pairs = extract_json(raw, kind="array")
             if pairs is None:
                 continue
@@ -1036,6 +1081,7 @@ def detect_obsolete_llm(db, project_id, budget=None, use_llm=True,
             _log.info(f"obsolete: #{sid} superseded by #{cid}: {p.get('reason','')}")
 
     result["pairs_found"] = len(to_archive)
+    result["status"] = f"ran:{n_judged}"
     if to_archive and not dry_run:
         # group by canonical for forward-linking; content-guarded because the
         # verdict snapshot predates the judge round-trips (see `contents`)
@@ -1101,6 +1147,23 @@ def archive_consolidated(db, project_id, keep_per_topic=5, dup_threshold=0.65):
 
 # Unconsolidated writes that make the backlog "due" on their own.
 BACKLOG_ROWS = 50
+# The consolidation worker's lock (v2.16.0, C3): ONE name and ONE staleness
+# horizon. `hooks/consolidate_async.py` takes it (its `_acquire_lock` is the
+# lock's policy point and re-exports the horizon as `_STALE_LOCK_S`), the Stop
+# probe reads the horizon through the worker, and the idle reorg defers while
+# a live worker holds the lock. A worker holds it for at most ~240 s, so a
+# lock older than this belongs to a hard-killed process and is reclaimed.
+CONSOLIDATION_LOCK = ".consolidation.lock"
+STALE_LOCK_S = 360.0
+
+
+def consolidation_lock_age(memory_dir: Path) -> Optional[float]:
+    """Seconds since the consolidation lock was taken, or None when there is
+    no lock or it cannot be stat'ed (`_acquire_lock` is the real guard)."""
+    try:
+        return time.time() - (memory_dir / CONSOLIDATION_LOCK).stat().st_mtime
+    except OSError:
+        return None
 # Staleness trigger: due after this many days IF anything new was written at
 # all (the floor below) — an idle project must not burn LLM calls on a timer.
 BACKLOG_DAYS = 7.0
@@ -1178,6 +1241,8 @@ def write_consolidation_marker(db, project_id, memory_dir: Path, cwd: str,
         "final_topics": results.get("final_topics"),
         "semantic_dedup_archived": results.get("semantic_dedup_archived"),
         "archived_obsolete": results.get("archived_obsolete"),
+        # Which LLM stages ran, and why the others did not (v2.16.0, C1).
+        "llm_stages": results.get("llm_stages"),
     }
     try:
         (memory_dir / ".last_consolidation.json").write_text(
@@ -1261,7 +1326,8 @@ def run_consolidation(cwd, use_llm=True, verbose=True, budget=None):
     # irreversible purge for rows that are still recoverable and still on the
     # supersede chain. The key IS the report on every consumer.
     results["garbage_archived"] = cleanup_garbage(db, project_id)
-    # 2. lexical near-dup (verbatim restatement) — content, category-gated
+    # 2. lexical near-dup (verbatim restatement) — content; same category at
+    #    the threshold, any category at HIGH_SIM (v2.16.0, C2)
     results["duplicates_archived"] = merge_near_duplicates(db, project_id)
     # 3. SEMANTIC dedup (reworded same-fact) — LLM-judged, budget-gated.
     #    Runs BEFORE topic work so there are fewer rows to relabel/summarize.
@@ -1272,8 +1338,9 @@ def run_consolidation(cwd, use_llm=True, verbose=True, budget=None):
     results["topics_canonicalized"] = canonicalize_topics(db, project_id)
     # 5. summarize topics into the topics table (budget-gated: LLM while the
     #    gate allows, deterministic fallback once exhausted)
+    topic_report = {}
     results["topics_consolidated"] = consolidate_topics(
-        db, project_id, use_llm=use_llm, budget=budget)
+        db, project_id, use_llm=use_llm, budget=budget, report=topic_report)
     # 6. staleness: reference-aware decay + zero-false-archive SQL net
     da = decay_and_archive(db, project_id)
     results["importance_decayed"] = da["importance_decayed"]
@@ -1281,6 +1348,15 @@ def run_consolidation(cwd, use_llm=True, verbose=True, budget=None):
     # 7. LLM obsolescence (old-vs-new contradiction) — budget-gated
     ob = detect_obsolete_llm(db, project_id, budget=budget, use_llm=use_llm)
     results["archived_obsolete"] = ob["archived"]
+    # How the LLM stages ran (v2.16.0, C1): written into the marker, printed
+    # by `/cc-mem status` and `/cc-mem consolidate`. A project with no
+    # credential used to read as "consolidated" while three stages had never
+    # run once.
+    results["llm_stages"] = {
+        "semantic_dedup": sd.get("status", "unknown"),
+        "topic_summaries": topic_report.get("status", "unknown"),
+        "obsolete": ob.get("status", "unknown"),
+    }
     # 8. archive_consolidated LAST, content-near-dup guarded (label-safe)
     results["archived_after_consolidation"] = archive_consolidated(db, project_id)
 

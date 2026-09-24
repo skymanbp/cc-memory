@@ -10,7 +10,10 @@ Decision tree for a new memory M about topic T:
   1. Hash exact match → no new row and no content rewrite: M is a perfect
      duplicate of the stored content. M's importance and tags are still
      folded into the matched row (REINFORCE); when they add nothing, SKIP.
-  2. Same topic + trigram-Jaccard ≥ HIGH_SIM (>= 0.80) on existing memory E:
+  2. Same topic + trigram-Jaccard ≥ HIGH_SIM (>= 0.80) on existing memory E
+     — or, since v2.16.0 (C2), a row of ANOTHER category at ≥ HIGH_SIM: the
+     same sentence filed under two categories is one fact. The MID band
+     below never crosses a category.
         → MERGE: archives E, inserts M with supersedes_id=E.id, E's fields
         folded in by `_merge_fields` and E's `created_at` carried forward.
         Treats M as a refined wording of the SAME fact.
@@ -56,7 +59,7 @@ from core.prompts import MEMORY_MD_FOOTER, MEMORY_MD_NOTICE
 # where the equivalent English edit scores 0.7317), so every CJK correction
 # fell below MID_SIM and was INSERTED beside the fact it corrects. The old
 # names are kept as aliases so the decision tree below reads unchanged.
-from core.textsim import jaccard as _jaccard, shingle_set as _trigram_set
+from core.textsim import HIGH_SIM, MID_SIM, jaccard as _jaccard, shingle_set as _trigram_set
 
 _log = get_logger("memory_writer")
 
@@ -69,9 +72,10 @@ _log = get_logger("memory_writer")
 _atomic_write_text = write_atomic
 
 
-# Similarity thresholds (tuned: 0.8 demands "essentially same sentence")
-HIGH_SIM = 0.80
-MID_SIM = 0.50
+# Similarity thresholds: HIGH_SIM (0.80, "essentially the same sentence") and
+# MID_SIM (0.50) are imported from core/textsim.py above and re-exported here
+# under the writer's names (v2.16.0, C2) — the consolidation stages read the
+# same HIGH_SIM as their cross-category floor, and a copied threshold drifts.
 MIN_CONTENT_LEN = 10
 # 500, up from 50. The scan is a set-intersection per candidate (~µs each);
 # what 50 actually bounded was CORRECTNESS, not cost: get_memories_by_topic

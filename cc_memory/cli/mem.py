@@ -879,6 +879,30 @@ def cmd_status(args):
     else:
         print(f"  [INFO] No save recorded yet")
 
+    # Consolidation (v2.16.0, C1): when it last ran, what is waiting, and
+    # which LLM stages actually ran. A project with no credential used to
+    # read as "consolidated" while three stages had silently never run.
+    from core.consolidate import consolidation_backlog, read_consolidation_marker
+    marker = read_consolidation_marker(memory_dir, project, pid)
+    if marker:
+        print(f"  [OK]   Last consolidation: {marker.get('ts', '?')}")
+    else:
+        print("  [INFO] Last consolidation: never (no marker for this project row)")
+    due = consolidation_backlog(db, pid, marker)
+    n_new = db.count_memories_since(
+        pid, row_id=int(marker.get("last_memory_id") or 0),
+        since_ts=str(marker.get("ts") or ""))
+    print(f"  [{'WARN' if due else 'OK  '}] Consolidation backlog: {n_new} "
+          f"unconsolidated memor{'y' if n_new == 1 else 'ies'}"
+          + (f" — due ({due})" if due else " — not due"))
+    stages = marker.get("llm_stages") if marker else None
+    if isinstance(stages, dict) and stages:
+        skipped = [k for k, v in stages.items() if str(v).startswith("skipped")]
+        print(f"  [{'WARN' if skipped else 'OK  '}] LLM stages, last run: "
+              + ", ".join(f"{k}={v}" for k, v in sorted(stages.items())))
+    elif marker:
+        print("  [INFO] LLM stages, last run: not recorded (marker predates v2.16.0)")
+
     prog = db.get_progress(pid)
     if prog:
         cr = (prog.get("current_request") or "")[:60]

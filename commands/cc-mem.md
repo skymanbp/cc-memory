@@ -18,7 +18,7 @@ someone who knows the command exists.
 | Subcommand | Effect |
 |------------|--------|
 | `stats` | Database statistics + supersede-chain count |
-| `status` | Full health check (hooks, DB, API key, PROGRESS state) |
+| `status` | Full health check (hooks, DB, API key, PROGRESS state, consolidation: last run, backlog and which LLM stages ran — v2.16.0) |
 | `search <q>` | Search active memories. FTS5 ranked by bm25, with a `LIKE` substring fallback whenever the index answers empty. **CJK and Latin do not behave identically, and the difference is the tokenizer's, not a bug**: the index is built with `tokenize='trigram'`, which segments Chinese / Japanese / Korean but has a **3-character floor**, so a 1- or 2-character CJK query (`超时`) is answered by the substring fallback rather than by the index — same rows, no ranking. Latin text tokenises into words, so a multi-word query matches non-contiguously (`deploy rotated` finds "the deploy key is **rotated** monthly"), which the substring fallback cannot do. A query that strips to empty returns nothing — `list` is the surface that means "show me everything" |
 | `list [category]` | List memories (filter by `decision`/`result`/`bug`/...) |
 | `add <category> "<text>"` | Add one memory through the anti-patch writer |

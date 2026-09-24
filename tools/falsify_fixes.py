@@ -3275,6 +3275,51 @@ def _break_r16matcherfrozen(root):
            "                    \"|Read|TodoWrite|WebFetch|WebSearch)$\"),  # BREAKAGE\n")
 
 
+@case("r16llmvisible", ["tests/smoke_test.py"],
+      "drop the LLM-stage record from the marker again -> a project with no "
+      "credential reads as consolidated while three stages never ran")
+def _break_r16llmvisible(root):
+    _patch(root, f"{PKG}/core/consolidate.py",
+           '        "llm_stages": results.get("llm_stages"),\n',
+           '        "llm_stages": None,  # BREAKAGE: silent again\n')
+
+
+@case("r16crosscat", ["tests/smoke_test.py"],
+      "restore the category gate on the lexical merge -> the same sentence "
+      "filed under two categories stays two active rows")
+def _break_r16crosscat(root):
+    _patch(root, f"{PKG}/core/consolidate.py",
+           '            if mi["category"] != mj["category"] and sim < HIGH_SIM:\n',
+           '            if mi["category"] != mj["category"]:  # BREAKAGE\n')
+
+
+@case("r16writercross", ["tests/smoke_test.py"],
+      "drop the writer's cross-category scan -> a decision restated as a note "
+      "is INSERTED beside it")
+def _break_r16writercross(root):
+    _patch(root, f"{PKG}/core/db.py",
+           "                if similar is None or sim < high_sim:\n",
+           "                if False:  # BREAKAGE: category-scoped only\n")
+
+
+@case("r16idlelock", ["tests/smoke_test.py"],
+      "let the idle reorg run under a live consolidation lock -> it archives "
+      "and relabels the rows the judge is re-reading")
+def _break_r16idlelock(root):
+    _patch(root, f"{PKG}/core/idle.py",
+           "    if lock_age is not None and lock_age < STALE_LOCK_S:\n",
+           "    if False:  # BREAKAGE: no deferral\n")
+
+
+@case("r16nominatecross", ["tests/smoke_test.py"],
+      "keep nomination inside one category -> a HIGH-band pair across "
+      "categories is never handed to the judge")
+def _break_r16nominatecross(root):
+    _patch(root, f"{PKG}/core/consolidate.py",
+           '        return floor if a["category"] == b["category"] else cross_floor\n',
+           '        return floor if a["category"] == b["category"] else 2.0  # BREAKAGE\n')
+
+
 def verify_anchors():
     """Count every registered case's breakage anchors WITHOUT running a gate.
 

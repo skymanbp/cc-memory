@@ -1847,6 +1847,23 @@ class MemoryDB:
                            ORDER BY updated_at DESC LIMIT ?""",
                         (project_id, category, max_candidates)).fetchall()]
                 similar, sim = pick(candidates) if candidates else (None, 0.0)
+                if similar is None or sim < high_sim:
+                    # Cross-category, HIGH band only (v2.16.0, C2): the same
+                    # sentence filed under two categories is one fact, and
+                    # the category-scoped scan above could not see it — a
+                    # `decision` restated as a `note` was INSERTED beside
+                    # it. A MID-band restatement of another category's row
+                    # stays a separate fact, exactly as before.
+                    others = [dict(r) for r in conn.execute(
+                        """SELECT * FROM memories
+                           WHERE project_id = ? AND is_active = 1
+                             AND category != ?
+                           ORDER BY updated_at DESC LIMIT ?""",
+                        (project_id, category, max_candidates)).fetchall()]
+                    if others:
+                        x_similar, x_sim = pick(others)
+                        if x_similar is not None and x_sim >= high_sim:
+                            similar, sim = x_similar, x_sim
                 if similar is not None and sim >= high_sim:
                     f = merge_fields(similar)
                     # ARCHIVE-then-INSERT, exactly as the SUPERSEDE branch

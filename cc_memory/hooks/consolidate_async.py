@@ -72,7 +72,10 @@ _BUDGET_SAFETY_S = 8.0
 
 # A worker holds the lock for at most ~_BUDGET_TOTAL_S; reclaim anything older
 # (a lock left by a hard-killed process) so consolidation can't wedge forever.
-_STALE_LOCK_S = 360.0
+# The number and the lock's name are spelled ONCE, in core/consolidate.py
+# (v2.16.0, C3): the Stop probe imports the horizon from here and the idle
+# reorg reads it from there, so no reader carries a copy of its own.
+from core.consolidate import CONSOLIDATION_LOCK, STALE_LOCK_S as _STALE_LOCK_S
 
 _DEFAULT_INTERVAL = 5
 
@@ -220,7 +223,7 @@ def main():
         # No memory yet for this project — nothing to consolidate.
         sys.exit(0)
 
-    lock_path = memory_dir / ".consolidation.lock"
+    lock_path = memory_dir / CONSOLIDATION_LOCK
     acquired = False
     try:
         db = MemoryDB(db_path)

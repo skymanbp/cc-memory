@@ -497,10 +497,16 @@ def _build_footer(db, project_id, memory_dir, budget=None):
     try:
         from core.auth import get_api_key
         _key, source = get_api_key()
+        # Every stage the credential gates is NAMED (v2.16.0, C1): the
+        # consolidation worker's semantic de-dup, obsolescence check and
+        # topic summaries skip silently without a key, and "extraction
+        # disabled" alone read as if memory were merely not being written.
+        _off = ("LLM extraction, semantic de-dup, obsolescence check and "
+                "topic summaries disabled")
         if source == "oauth_expired":
-            lines.append("[WARNING: OAuth expired — LLM extraction disabled]")
+            lines.append(f"[WARNING: OAuth expired — {_off}]")
         elif not _key:
-            lines.append("[WARNING: No API key — LLM extraction disabled]")
+            lines.append(f"[WARNING: No API key — {_off}]")
     except Exception:
         # why: auth check is purely informational here; never block startup
         pass

@@ -397,12 +397,12 @@ The `supersedes_id` column on `memories` (migration `v3_supersedes`,
 `db.py:173`) makes the anti-patch chain explicit: when `upsert_smart` decides a
 new memory supersedes an old one, the new row links back to the old row's ID
 (and the old row is archived). Walking the chain via
-`db.get_supersede_chain(memory_id)` (`db.py:1999-2014`) shows the full update
+`db.get_supersede_chain(memory_id)` (`db.py:2016-2031`) shows the full update
 history. `content_hash` (migration `v2_content_hash` in
 `_MIGRATIONS`, `db.py:126`) is `sha256[:16]` of the normalized content, used
 for the cheap exact-duplicate check
-(`db.compute_content_hash` at `db.py:2592-2594`,
-`db.find_by_hash` at `db.py:2605-2613`).
+(`db.compute_content_hash` at `db.py:2609-2611`,
+`db.find_by_hash` at `db.py:2622-2630`).
 
 Migrations are applied in order from the `_MIGRATIONS` list (`db.py:121-284`) and
 recorded in `_migrations`. Levels shipped so far: **v1** (`topic` column +
@@ -489,7 +489,7 @@ caller's responsibility, and there are exactly two shapes:
   once itself, after the rest of its state changes (`pre_compact.py:729`,
   `pre_compact.py:856`).
 - Single-shot callers call `regenerate_memory_index` explicitly:
-  `cli/mem.py:1220` and `:584`, `mcp/server.py:647`, `ui/dashboard.py:1716`,
+  `cli/mem.py:1244` and `:584`, `mcp/server.py:647`, `ui/dashboard.py:1716`,
   `ui/web_viewer.py:1034`, plus the `skills/ccm-load` inline script
   (`skills/ccm-load/SKILL.md:290, 307`). `core/idle.py:96` and
   `hooks/consolidate_async.py:276` also refresh it after maintenance.
@@ -501,7 +501,7 @@ by grepping `upsert_smart|upsert_batch` across `cc_memory/`.)
 
 Thresholds live in ONE place — `memory_writer.HIGH_SIM = 0.80`,
 `MID_SIM = 0.50`, `MIN_CONTENT_LEN = 10`, `MAX_CANDIDATES_TO_SCAN = 50`
-(`memory_writer.py:82`). They are no longer mirrored in `config.json`: that
+(`memory_writer.py:86`). They are no longer mirrored in `config.json`: that
 `writer` block was read by nothing and was deleted in v2.5, because an inert
 tunable is worse than no tunable. See
 [docs/CONTRACTS.md](CONTRACTS.md#anti-patch-contract) for the full contract.
@@ -592,8 +592,8 @@ SessionStart:
 
 Call signatures above are the real ones: `write_progress_md(db, project_id,
 memory_dir)` (`core/progress.py:498-677`; call sites `pre_compact.py:814`,
-`stop.py:540`, `user_prompt.py:52`, `session_start.py:1087`, `mcp/server.py:243`,
-`cli/mem.py:1311`). See
+`stop.py:540`, `user_prompt.py:52`, `session_start.py:1093`, `mcp/server.py:243`,
+`cli/mem.py:1335`). See
 [docs/CONTRACTS.md](CONTRACTS.md#handoff-contract) for the PROGRESS.md
 schema.
 
@@ -740,10 +740,10 @@ while the same token via Bearer + beta gets HTTP 200 (`core/auth.py:14-15`).
 
 `get_api_key()` is the single-credential back-compat view of that same list (it
 does not retry, `core/auth.py:60-93`); it also carries the `oauth_expired`
-signal behind SessionStart's "[WARNING: OAuth expired — LLM extraction
-disabled]" footer (`session_start.py:806`). Hook callers use it to *supply*
+signal behind SessionStart's "[WARNING: OAuth expired — LLM extraction,
+semantic de-dup, obsolescence check and topic summaries disabled]" footer (`session_start.py:812`). Hook callers use it to *supply*
 the credential passed into `call_llm`: `pre_compact.py:96 → :166`,
-`stop.py:99`, `session_start.py:806`, `core/consolidate.py:427, 549, 724`.
+`stop.py:99`, `session_start.py:812`, `core/consolidate.py:434, 549, 724`.
 
 Fall-through was added in v2.3.4 for a concrete failure: a dead env key (e.g.
 zero credit → HTTP 400) used to blackhole the healthy subscription token behind

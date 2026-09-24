@@ -337,6 +337,11 @@ new rows), because the cadence-only trigger starved projects that never
 compact: this repository measured 349 memories accumulated in one month
 against a 17-day-old consolidation marker. `/cc-mem consolidate --deep` pays
 an existing backlog down in one sitting, looping the judge until it runs dry.
+Without a credential the LLM stages are skipped and SAY so (v2.16.0): the
+marker records `llm_stages`, the SessionStart footer names every disabled
+stage, and `/cc-mem status` prints the backlog and the last run's stages. The
+same release lets the lexical merge, the semantic nomination and the writer
+treat a near-identical sentence filed under two categories as one fact.
 
 **Capability 7 — query-time recall (v2.15.0).** Everything above injects at
 *session start*, where there is no question yet — the selector can only rank by

@@ -1,4 +1,4 @@
-<!-- i18n-source: ARCHITECTURE.md | sha256: 43f30ba1fbc7c487 | version: 2.15.2 | translated: 2026-09-24 | translation: e95e21f05624cfd9 -->
+<!-- i18n-source: ARCHITECTURE.md | sha256: 3fef273c9b4593b7 | version: 2.15.2 | translated: 2026-09-24 | translation: 7e812018f4653d10 -->
 > [English](ARCHITECTURE.md) · **简体中文**
 
 # cc-memory — 架构
@@ -355,11 +355,11 @@ SQLite 表（定义在 [`cc_memory/core/db.py`](../cc_memory/core/db.py)），�
 
 `memories` 上的 `supersedes_id` 列（迁移 `v3_supersedes`，`db.py:173`）把反补丁的
 取代链显式化：当 `upsert_smart` 判定一条新记忆取代了一条旧记忆时，新行会回链到旧行
-的 ID（旧行被归档）。通过 `db.get_supersede_chain(memory_id)`（`db.py:1999-2014`）走一遍
+的 ID（旧行被归档）。通过 `db.get_supersede_chain(memory_id)`（`db.py:2016-2031`）走一遍
 链条，就能看到完整的更新历史。`content_hash`（迁移 `v2_content_hash`，位于
 `_MIGRATIONS`，`db.py:126`）是归一化内容的 `sha256[:16]`，用于廉价的精确重复检查
-（`db.compute_content_hash` 在 `db.py:2592-2594`，
-`db.find_by_hash` 在 `db.py:2605-2613`）。
+（`db.compute_content_hash` 在 `db.py:2609-2611`，
+`db.find_by_hash` 在 `db.py:2622-2630`）。
 
 迁移按 `_MIGRATIONS` 列表（`db.py:121-284`）的顺序应用，并记录在 `_migrations` 中。目前
 已交付的层级：**v1**（`topic` 列 + 索引）、**v2**（content_hash、observations、
@@ -436,11 +436,11 @@ regenerate_memory_index(db, project_id, memory_dir)   ← MEMORY.md 刷新
 
 - `upsert_batch`（`memory_writer.py:318-360`）逐条循环调用 `upsert_smart`，并在最后
   重新生成**一次**，但仅当传入了 `memory_dir` **且**这一批真的写了行——插入、合并、
-  取代或强化——时才会；一批纯 skip 什么都不渲染（`memory_writer.py:372`，v2.16.0）。
+  取代或强化——时才会；一批纯 skip 什么都不渲染（`memory_writer.py:376`，v2.16.0）。
   Stop 观察者与 SessionStart 的追溯保存会传（`stop.py:539`、
   `session_start.py:1394`）；同步 PreCompact 支路不传（`pre_compact.py:729`），
   而是在其余状态变更之后自己渲染一次（`pre_compact.py:856`）。
-- 单发调用方显式调用 `regenerate_memory_index`：`cli/mem.py:1220` 与 `:584`、
+- 单发调用方显式调用 `regenerate_memory_index`：`cli/mem.py:1244` 与 `:584`、
   `mcp/server.py:647`、`ui/dashboard.py:1716`、`ui/web_viewer.py:1035`，外加
   `skills/ccm-load` 的内联脚本（`skills/ccm-load/SKILL.md:290, 307`）。
   `core/idle.py:96` 与 `hooks/consolidate_async.py:276` 也会在维护之后刷新它。
@@ -536,7 +536,7 @@ SessionStart：
 上面的调用签名都是真实的：`write_progress_md(db, project_id, memory_dir)`
 （`core/progress.py:498-677`；调用点 `pre_compact.py:814`、`stop.py:683`、
 `user_prompt.py:133`、`session_start.py:1107`、`mcp/server.py:243`、
-`cli/mem.py:1311`）。PROGRESS.md 的结构规格见
+`cli/mem.py:1335`）。PROGRESS.md 的结构规格见
 [docs/CONTRACTS.md](CONTRACTS.md#handoff-contract)。
 
 ### 被杀运行检测（v2.4.2）
@@ -664,9 +664,10 @@ BudgetGate 来说仍是已知量。候选顺序与传输格式（`core/auth.py:2
 
 `get_api_key()` 是同一份候选列表的单凭据向后兼容视图（它不重试，
 `core/auth.py:60-93`）；它同时承载 `oauth_expired` 信号，支撑 SessionStart 的
-“[WARNING: OAuth expired — LLM extraction disabled]” 页脚
-（`session_start.py:806`）。钩子调用方用它来*提供*传给 `call_llm` 的凭据：
-`pre_compact.py:96 → :166`、`stop.py:99`、`session_start.py:806`、
+“[WARNING: OAuth expired — LLM extraction, semantic de-dup, obsolescence check
+and topic summaries disabled]” 页脚
+（`session_start.py:812`）。钩子调用方用它来*提供*传给 `call_llm` 的凭据：
+`pre_compact.py:96 → :166`、`stop.py:99`、`session_start.py:812`、
 `core/consolidate.py:425, 549, 724`。
 
 逐级回退是 v2.3.4 为一个具体故障加入的：一个失效的环境变量密钥（例如额度为零 →

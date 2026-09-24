@@ -26,7 +26,8 @@ if str(_PKG_ROOT) not in sys.path:
     sys.path.insert(0, str(_PKG_ROOT))
 
 from core.db import MemoryDB
-from core.consolidate import cleanup_garbage, assign_topics_auto
+from core.consolidate import (STALE_LOCK_S, assign_topics_auto, cleanup_garbage,
+                              consolidation_lock_age)
 from core.layout import DB_FILENAME, memory_dir as resolve_memory_dir
 from core.logger import get_logger
 # safe_id replaces this module's private `[:16]` truncating copy (three
@@ -84,6 +85,19 @@ def maybe_run_idle(cwd: str, session_id: str, turn_count: int,
     memory_dir = resolve_memory_dir(cwd)
     db_path = memory_dir / DB_FILENAME
     if not db_path.exists():
+        return {}
+
+    # A LIVE consolidation worker owns the tables for the next few minutes
+    # (v2.16.0, C3): this reorg archives garbage and relabels topics while
+    # `semantic_dedup` is re-reading survivors across a network round-trip,
+    # and the worker's lock is scoped to other WORKERS, not to the data. The
+    # horizon is the worker's own: a lock older than STALE_LOCK_S belongs to
+    # a dead process and is no reason to wait. Nothing is recorded, so the
+    # reorg is due again at the next Stop.
+    lock_age = consolidation_lock_age(memory_dir)
+    if lock_age is not None and lock_age < STALE_LOCK_S:
+        _log.info(f"idle reorg deferred: consolidation lock is "
+                  f"{lock_age:.0f}s old")
         return {}
 
     db = db if db is not None else MemoryDB(db_path)

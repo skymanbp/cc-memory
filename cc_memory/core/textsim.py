@@ -50,6 +50,16 @@ Pure stdlib. Import as ``from core.textsim import shingle_set, jaccard``.
 """
 import re
 
+# The two calibrated thresholds every reconciling reader shares (v2.16.0, C2).
+# `llm/memory_writer.py` (MERGE / SUPERSEDE) re-exports them under the same
+# names; `core/consolidate.py` reads HIGH_SIM as the CROSS-CATEGORY floor of
+# the lexical merge and the semantic nomination — the same sentence filed
+# under two categories is one fact, and a MID-band restatement of another
+# category's row stays a separate fact. Both numbers were tuned on ASCII
+# trigrams; the CJK bigram path was calibrated to land in the same bands.
+HIGH_SIM = 0.80   # "essentially the same sentence"
+MID_SIM = 0.50    # "the same fact, restated"
+
 # Han (unified + ext-A + compatibility), kana, and Hangul syllables: the
 # scripts where "one glyph ≈ one morpheme" makes trigrams too coarse. Latin,
 # Cyrillic, Greek etc. keep trigrams — their edits move letter-by-letter

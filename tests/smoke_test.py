@@ -7785,6 +7785,208 @@ def main():
           "CLI's ack is unmeasured when none was demanded. B9: §5 reads the store, "
           "§4 leads with a pending raw plan")
 
+    # ── v2.16.0 · C1-C4: consolidation without a credential says what it skipped,
+    # de-duplicates across categories at HIGH_SIM, and the idle reorg defers to
+    # a live worker. End to end, on a seeded project, the sandbox experiment of
+    # 2026-09-24 turned into a gate.
+    import re as _c16_re
+    import core.auth as _c16_auth
+    import core.consolidate as _c16
+    import llm.ccl_backend as _c16_be
+    from core import textsim as _c16_ts
+    from core.idle import maybe_run_idle as _c16_idle
+    from llm.memory_writer import upsert_smart as _c16_upsert
+    _c16_stop = _il.import_module("hooks.stop")
+    _c16_cli = _il.import_module("cli.mem")
+    _c16_root = Path(tempfile.mkdtemp(prefix="cc-memory-c16-", dir=str(_SANDBOX)))
+    _c16_mem = _c16_root / _MEM
+    _c16_mem.mkdir(parents=True)
+    _c16_db = MemoryDB(_c16_mem / "memory.db")
+    _c16_pid = _c16_db.upsert_project(str(_c16_root))
+    # 60 mutually dissimilar fillers: the backlog, and nothing the judge could
+    # be handed (a filler pair above the word floor would eat the group cap)
+    for _i in range(60):
+        _c16_db.insert_memory(_c16_pid, None, "note",
+                              " ".join(f"c16tok{_i}x{_k}" for _k in range(6)),
+                              importance=3, topic=f"t{_i % 3}")
+    # (a) backpressure: 60 rows and no marker -> the Stop probe spawns the worker
+    _c16_spawned = []
+    _c16_real_spawn = _c16_stop.spawn_detached
+    _c16_stop.spawn_detached = lambda argv: (_c16_spawned.append(list(argv)) or True)
+    try:
+        _c16_kicked = _c16_stop._maybe_kick_consolidation(
+            str(_c16_root), _c16_mem, _c16_db, _c16_pid)
+    finally:
+        _c16_stop.spawn_detached = _c16_real_spawn
+    assert _c16_kicked is True and len(_c16_spawned) == 1, (_c16_kicked, _c16_spawned)
+    assert "--cwd" in _c16_spawned[0] and _c16_spawned[0][-1] == str(_c16_root) \
+        and _c16_spawned[0][-2] == "--cwd" \
+        and _c16_spawned[0][1].endswith("consolidate_async.py"), _c16_spawned[0]
+    # (b) seed the shapes consolidation exists for
+    for _g in ("Now I have all the information I need to finish C16",
+               "Let me compile my findings about C16 into a summary",
+               "I'll now run the C16 gate end to end",
+               "Based on my analysis of C16 the exporter is fine",
+               "C16 tiny"):
+        _c16_db.insert_memory(_c16_pid, None, "note", _g, importance=2)
+    _c16_parquet = [
+        "The C16 exporter writes parquet files to the out directory every night",
+        "The C16 exporter writes parquet files to the out directory nightly",
+        "The C16 exporter writes parquet files into the out directory every night",
+        "The C16 exporter writes parquet files to the out directory every night."]
+    for _p in _c16_parquet:
+        _c16_db.insert_memory(_c16_pid, None, "arch", _p, importance=3, topic="exp")
+    _c16_zh = ("C16 项目要求把导出超时设为三十秒并在超时后重试一次",
+               "C16 项目要求把导出超时设为六十秒并在超时后重试一次")
+    for _z in _c16_zh:
+        _c16_db.insert_memory(_c16_pid, None, "config", _z, importance=3, topic="zh")
+    _c16_cross = ("C16 keeps SQLite as the only store for memories",
+                  "C16 keeps SQLite as the only store for memories.")
+    _c16_db.insert_memory(_c16_pid, None, "decision", _c16_cross[0], importance=4)
+    _c16_db.insert_memory(_c16_pid, None, "note", _c16_cross[1], importance=3)
+    _c16_rw = ("The nightly export job retries a failed upload once and then alerts the owner",
+               "Failed uploads are retried once by the nightly export job before the owner is alerted")
+    _c16_rwzh = ("导出任务失败后由夜间作业重试一次再通知负责人",
+                 "夜间作业会在导出任务失败后重试一次然后通知负责人")
+    _c16_rw_ids = {}
+    for _pair in (_c16_rw, _c16_rwzh):
+        _c16_rw_ids[_pair] = [
+            _c16_db.insert_memory(_c16_pid, None, "task", _t, importance=3, topic="rw")
+            for _t in _pair]
+    # fixture preconditions, asserted rather than assumed: the reworded pairs
+    # sit UNDER the lexical merge threshold and OVER the nomination floor
+    for _pair in (_c16_rw, _c16_rwzh):
+        _tri = _c16_ts.jaccard(_c16_ts.shingle_set(_pair[0]), _c16_ts.shingle_set(_pair[1]))
+        _wrd = _c16_ts.jaccard(_c16_ts.word_set(_pair[0]), _c16_ts.word_set(_pair[1]))
+        assert _tri < 0.65 and 0.30 <= _wrd < _c16_ts.HIGH_SIM, (_pair[0][:30], _tri, _wrd)
+    _x_tri = _c16_ts.jaccard(_c16_ts.shingle_set(_c16_cross[0]), _c16_ts.shingle_set(_c16_cross[1]))
+    assert _x_tri >= _c16_ts.HIGH_SIM, _x_tri
+
+    def _c16_active(needle):
+        return [m for m in _c16_db.get_all_active_memories(_c16_pid) if needle in m["content"]]
+
+    # (c) the writer merges a HIGH-band restatement ACROSS categories, with a chain
+    _c16_old = _c16_db.insert_memory(_c16_pid, None, "arch",
+                                     "C16 stores every memory row in one SQLite file per project",
+                                     importance=3)
+    _c16_w = _c16_upsert(_c16_db, _c16_pid, None, "note",
+                         "C16 stores every memory row in one SQLite file per project.",
+                         importance=3)
+    assert _c16_w["action"] == "merged" and _c16_w["old_id"] == _c16_old, _c16_w
+    assert _c16_old in [r["id"] for r in _c16_db.get_supersede_chain(_c16_w["id"])], \
+        "the cross-category MERGE must leave the chain walkable"
+    assert len(_c16_active("one SQLite file per project")) == 1
+    _c16_m = _c16_upsert(_c16_db, _c16_pid, None, "bug",
+                         "C16 stores every memory row in a SQLite file, one per project, sometimes two",
+                         importance=3)
+    assert _c16_m["action"] == "inserted", (
+        "a MID-band restatement of ANOTHER category's row must stay a separate fact", _c16_m)
+    # (d) no credential: the run archives what it can, and SAYS what it skipped
+    _c16_saved = (_c16_auth.get_api_key, _c16_be.call_llm)
+    _c16_calls = []
+    try:
+        _c16_auth.get_api_key = lambda: (None, "none")
+        _c16_r1 = _c16.run_consolidation(str(_c16_root), use_llm=True, verbose=False)
+        assert _c16_r1["garbage_archived"] == 5, _c16_r1
+        assert len(_c16_active("parquet")) == 1, "four near-verbatim rows must leave one"
+        assert len(_c16_active("导出超时设为")) == 1, "the CJK near-verbatim pair must leave one"
+        assert len(_c16_active("only store for memories")) == 1, (
+            "a HIGH-band pair across categories must leave one (v2.16.0, C2)")
+        # "通知负责人" is the reworded pair's own needle: "重试一次" also sits in
+        # the config pair above, which the lexical stage has just merged 2 -> 1.
+        assert len(_c16_active("nightly export job")) == 2 and len(_c16_active("通知负责人")) == 2, (
+            "reworded pairs are the judge's job; without a credential both stay")
+        assert _c16_r1["llm_stages"] == {"semantic_dedup": "skipped:no-credential",
+                                         "topic_summaries": "skipped:no-credential",
+                                         "obsolete": "skipped:no-credential"}, _c16_r1["llm_stages"]
+        _c16.write_consolidation_marker(_c16_db, _c16_pid, _c16_mem, str(_c16_root), _c16_r1)
+        _c16_read = _c16.read_consolidation_marker(_c16_mem, str(_c16_root), _c16_pid)
+        assert _c16_read.get("llm_stages") == _c16_r1["llm_stages"], _c16_read
+        assert _c16.consolidation_backlog(_c16_db, _c16_pid, _c16_read) is None
+        # the footer names every disabled stage; `status` prints the marker
+        _c16_foot = _hooks_ss._build_footer(_c16_db, _c16_pid, _c16_mem)
+        assert "No API key" in _c16_foot and "semantic de-dup" in _c16_foot \
+            and "topic summaries disabled" in _c16_foot, _c16_foot
+        _c16_out = io.StringIO()
+
+        class _C16Args:
+            project = str(_c16_root)
+        with contextlib.redirect_stdout(_c16_out):
+            _c16_cli.cmd_status(_C16Args())
+        _c16_txt = _c16_out.getvalue()
+        assert "Last consolidation: " + _c16_read["ts"] in _c16_txt, _c16_txt
+        assert "Consolidation backlog: 0 unconsolidated memories — not due" in _c16_txt, _c16_txt
+        assert "[WARN] LLM stages, last run: obsolete=skipped:no-credential, " \
+               "semantic_dedup=skipped:no-credential, topic_summaries=skipped:no-credential" \
+               in _c16_txt, _c16_txt
+        # (e) the idle reorg defers to a LIVE worker and ignores a dead one's lock
+        _c16_lock = _c16_mem / _c16.CONSOLIDATION_LOCK
+        _c16_lock.write_text("x", encoding="utf-8")
+        assert _c16_idle(str(_c16_root), "c16-sess", 5, force=True, db=_c16_db) == {}, \
+            "the idle reorg ran under a live consolidation lock (v2.16.0, C3)"
+        _c16_stale = time.time() - _c16.STALE_LOCK_S - 30
+        os.utime(_c16_lock, (_c16_stale, _c16_stale))
+        assert _c16_idle(str(_c16_root), "c16-sess", 5, force=True, db=_c16_db) != {}, \
+            "a lock older than STALE_LOCK_S belongs to a dead worker and must not defer"
+        _c16_lock.unlink()
+        # (f) with a credential the judge merges what the lexical stage could not
+        _c16_auth.get_api_key = lambda: ("sk-ant-api03-EXAMPLE-smoke-placeholder", "env")
+
+        def _c16_llm(system, user, api_key, **kw):
+            _c16_calls.append(system[:24])
+            if "de-duplicating" in system:
+                _first = _c16_re.search(r"^\[0\] \(id=\d+, \w+, imp=\d+\) (.+)$", user, _c16_re.M)
+                assert _first, user
+                return _json8.dumps({"duplicates": True, "canonical_content": _first.group(1),
+                                     "reason": "same fact"}, ensure_ascii=False)
+            if "OBSOLETE" in system:
+                return "[]"
+            return "C16 topic summary from the stub"
+        _c16_be.call_llm = _c16_llm
+        _c16_r2 = _c16.run_consolidation(str(_c16_root), use_llm=True, verbose=False)
+        assert len(_c16_active("nightly export job")) == 1 and len(_c16_active("通知负责人")) == 1, (
+            "the judge's verdict must archive the reworded twin, in either language")
+        assert _c16_r2["semantic_dedup_archived"] >= 2, _c16_r2
+        assert _c16_r2["llm_stages"]["semantic_dedup"].startswith("ran:") \
+            and _c16_r2["llm_stages"]["topic_summaries"].startswith("ran:") \
+            and _c16_r2["llm_stages"]["obsolete"].startswith("ran:"), _c16_r2["llm_stages"]
+        assert int(_c16_r2["llm_stages"]["topic_summaries"].split(":")[1]) >= 3, _c16_r2["llm_stages"]
+        assert _c16_calls, "the stub was never reached — the with-key half proved nothing"
+        # the loser of a judged pair is archived WITH a link to its survivor
+        for _pair, _ids in _c16_rw_ids.items():
+            _rows = [_c16_db.get_memory(_i) for _i in _ids]
+            _live = [r for r in _rows if r["is_active"]]
+            _gone = [r for r in _rows if not r["is_active"]]
+            assert len(_live) == 1 and len(_gone) == 1, (_pair[0][:20], _rows)
+            assert _gone[0]["supersedes_id"] == _live[0]["id"], (_gone[0], _live[0]["id"])
+            assert "llm-dedup" in str(_live[0].get("tags") or ""), _live[0]
+    finally:
+        _c16_auth.get_api_key, _c16_be.call_llm = _c16_saved
+    # (g) the nomination crosses a category only at HIGH_SIM, as a pure function
+    _c16_a = {"id": 901, "category": "decision", "importance": 3, "tags": "[]", "topic": "",
+              "created_at": "2026-01-01", "content": "C16 exporter retries once then alerts owner"}
+    _c16_b = dict(_c16_a, id=902, category="note",
+                  content="owner alerts then once retries exporter C16")
+    _c16_c = dict(_c16_a, id=903, category="note",
+                  content="C16 exporter retries once then pages the on-call owner by phone")
+    _c16_ab = _c16_ts.jaccard(_c16_ts.word_set(_c16_a["content"]), _c16_ts.word_set(_c16_b["content"]))
+    _c16_ac = _c16_ts.jaccard(_c16_ts.word_set(_c16_a["content"]), _c16_ts.word_set(_c16_c["content"]))
+    assert _c16_ab >= _c16_ts.HIGH_SIM > _c16_ac >= 0.30, (_c16_ab, _c16_ac)
+    _c16_groups = _c16._nominate_groups([_c16_a, _c16_b, _c16_c])
+    assert any({901, 902} == {m["id"] for m in g} for g in _c16_groups), _c16_groups
+    assert not any(903 in {m["id"] for m in g} for g in _c16_groups), (
+        "a MID-band pair across categories must not be nominated", _c16_groups)
+    _c16_same = _c16._nominate_groups([_c16_a, dict(_c16_b, category="decision"),
+                                       dict(_c16_c, category="decision")])
+    assert any({901, 902, 903} <= {m["id"] for m in g} for g in _c16_same), (
+        "same-category rows still group at the word floor", _c16_same)
+    shutil.rmtree(_c16_root, ignore_errors=True)
+    print("[OK] v2.16.0 C1-C4: 60 rows kick a detached worker; without a credential "
+          "garbage 5/5, near-verbatim 4->1 and 2->1, a HIGH-band cross-category pair "
+          "-> 1 (chain intact) and every LLM stage recorded as skipped in the marker, "
+          "the footer and `status`; the idle reorg defers to a live lock only; with a "
+          "credential the judge merges the reworded pairs in both languages")
+
     # ── v2.16.0 · PreCompact feeds only rows ABOVE the observer cursor ──────
     # Every observation used to reach a model twice: the Stop observer fed it
     # and advanced `projects.obs_watermark`, then PreCompact fed EVERYTHING
