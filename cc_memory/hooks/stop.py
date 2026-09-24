@@ -276,7 +276,7 @@ def _emit_block(reason_text):
     sys.exit(0)
 
 
-def _observer_evaluate(cwd, session_id, memory_dir):
+def _observer_evaluate(cwd, session_id, memory_dir, db=None):
     from core.auth import get_api_key
     from core.privacy import clean_for_storage
 
@@ -288,7 +288,9 @@ def _observer_evaluate(cwd, session_id, memory_dir):
     if not api_key:
         return 0
 
-    db = MemoryDB(db_path)
+    # The caller's handle when it has one (v2.16.0, one handle per hook);
+    # a direct caller without one still gets its own.
+    db = db if db is not None else MemoryDB(db_path)
     project_id = db.upsert_project(cwd)
 
     safe = _safe_id(session_id)
@@ -560,23 +562,35 @@ def main():
     if not (memory_dir / DB_FILENAME).exists():
         sys.exit(0)
 
+    # ONE handle for every job below (v2.16.0). Job 2 and Job 3 each used to
+    # construct their own, and every construction pays the bootstrap probes:
+    # measured at v2.15.2, the second handle was 2 of this hook's 17 sqlite
+    # opens per turn, for a file the first handle already had open. An
+    # unopenable database is the one failure every job shares, so it is
+    # handled once, in the shape Job 3's handler used to give it.
+    try:
+        db = MemoryDB(memory_dir / DB_FILENAME)
+        project_id = db.upsert_project(cwd)
+    except Exception:
+        _log.error_tb("stop hook: database unavailable")
+        print("\n[cc-memory] stop hook ran (degraded)")
+        sys.exit(0)
+
     # Job 1: observer evaluation
     try:
-        _observer_evaluate(cwd, session_id, memory_dir)
+        _observer_evaluate(cwd, session_id, memory_dir, db=db)
     except Exception:
         _log.error_tb("observer error")
 
     # Job 2: idle reorg (every 5 turns)
     turn_count = _read_turn_count(session_id)
     try:
-        maybe_run_idle(cwd, session_id, turn_count)
+        maybe_run_idle(cwd, session_id, turn_count, db=db)
     except Exception as e:
         _log.error(f"idle reorg failed: {e}")
 
     # Job 3: per-turn PROGRESS.md files_touched patch
     try:
-        db = MemoryDB(memory_dir / DB_FILENAME)
-        project_id = db.upsert_project(cwd)
         # v5: tag the session BEFORE patching files_touched so PROGRESS.md §0
         # attributes "Files Touched This Session" to the right session.
         # Idempotent — only writes if this session_id differs from the stored

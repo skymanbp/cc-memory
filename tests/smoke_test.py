@@ -7122,6 +7122,66 @@ def main():
           "on the settled open, re-entered on reset, and the self-healing "
           "probes still run outside it")
 
+    # ── v2.16.0 · the Stop hook holds ONE database handle ───────────────────
+    # Job 2 (idle reorg) and Job 3 (PROGRESS patch) each constructed their own
+    # MemoryDB, and every construction pays the bootstrap probes. Driven
+    # in-process with the idle reorg DUE (turn marker at 5, no idle marker)
+    # and no credential, so the observer leg returns before it could open
+    # anything: exactly one construction is the whole hook's budget.
+    import json as _sh1_json
+    from core import markers as _sh1_markers
+    _sh1_root = Path(tempfile.mkdtemp(prefix="cc-memory-stophandle-"))
+    (_sh1_root / _MEM).mkdir(parents=True)
+    MemoryDB(_sh1_root / _MEM / "memory.db").upsert_project(str(_sh1_root))
+    _sh1_spec = _ilu.spec_from_file_location(
+        "_stop_sm", _REPO / "cc_memory" / "hooks" / "stop.py")
+    _sh1_stop = _ilu.module_from_spec(_sh1_spec)
+    _sh1_spec.loader.exec_module(_sh1_stop)
+    _sh1_sid = "sh1-single-handle-session"
+    assert _sh1_markers.write_marker(
+        _sh1_markers.marker_path(_sh1_stop._TURN_FILE_PREFIX,
+                                 _sh1_markers.safe_id(_sh1_sid)), "5"), \
+        "fixture: the turn marker must be writable for the idle reorg to be due"
+    _sh1_n = {"init": 0}
+    _sh1_real_init = MemoryDB.__init__
+
+    def _sh1_counting_init(self, *a, **k):
+        _sh1_n["init"] += 1
+        return _sh1_real_init(self, *a, **k)
+
+    _sh1_saved_stdin = sys.stdin
+    _sh1_saved_key = os.environ.pop("ANTHROPIC_API_KEY", None)
+    _sh1_out = io.StringIO()
+    MemoryDB.__init__ = _sh1_counting_init
+    try:
+        sys.stdin = _V5FakeStdin(_sh1_json.dumps(
+            {"cwd": str(_sh1_root), "session_id": _sh1_sid}).encode("utf-8"))
+        with contextlib.redirect_stdout(_sh1_out):
+            try:
+                _sh1_stop.main()
+            except SystemExit:
+                pass  # why: the hook contract ends every run with sys.exit(0); an in-process drive absorbs it
+    finally:
+        MemoryDB.__init__ = _sh1_real_init
+        sys.stdin = _sh1_saved_stdin
+        if _sh1_saved_key is not None:
+            os.environ["ANTHROPIC_API_KEY"] = _sh1_saved_key
+    _sh1_idle = _sh1_markers.read_marker(
+        _sh1_markers.marker_path("cc_mem_idle_", _sh1_markers.safe_id(_sh1_sid)),
+        "0").strip()
+    assert _sh1_idle == "5", (
+        f"fixture: the idle reorg must have RUN on this Stop (idle marker "
+        f"{_sh1_idle!r}, expected '5'), or the count below proves nothing")
+    assert _sh1_n["init"] == 1, (
+        f"the Stop hook constructed MemoryDB {_sh1_n['init']} times on one "
+        f"turn (v2.15.2: 2 — idle reorg and the PROGRESS patch each opened "
+        f"their own); one handle per hook")
+    assert "[cc-memory]" in _sh1_out.getvalue(), \
+        f"the status line must still be emitted: {_sh1_out.getvalue()!r}"
+    shutil.rmtree(_sh1_root)
+    print("[OK] v2.16.0 one handle: Stop constructs MemoryDB exactly once "
+          "with the idle reorg due (v2.15.2: twice)")
+
     print("\nProduced files:")
     for f in sorted(mem_dir.rglob("*")):
         if f.is_file():

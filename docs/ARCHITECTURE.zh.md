@@ -1,4 +1,4 @@
-<!-- i18n-source: ARCHITECTURE.md | sha256: 069843609b6f84f8 | version: 2.15.2 | translated: 2026-09-24 | translation: 9ace9e0519cc8cd1 -->
+<!-- i18n-source: ARCHITECTURE.md | sha256: 97ec87ff3f4b96c1 | version: 2.15.2 | translated: 2026-09-24 | translation: 18489bfbf591e791 -->
 > [English](ARCHITECTURE.md) · **简体中文**
 
 # cc-memory — 架构
@@ -527,7 +527,7 @@ SessionStart：
 ```
 
 上面的调用签名都是真实的：`write_progress_md(db, project_id, memory_dir)`
-（`core/progress.py:498-677`；调用点 `pre_compact.py:775`、`stop.py:523`、
+（`core/progress.py:498-677`；调用点 `pre_compact.py:775`、`stop.py:525`、
 `user_prompt.py:133`、`session_start.py:1107`、`mcp/server.py:243`、
 `cli/mem.py:1304`）。PROGRESS.md 的结构规格见
 [docs/CONTRACTS.md](CONTRACTS.md#handoff-contract)。

@@ -581,7 +581,7 @@ SessionStart:
 
 Call signatures above are the real ones: `write_progress_md(db, project_id,
 memory_dir)` (`core/progress.py:498-677`; call sites `pre_compact.py:775`,
-`stop.py:473`, `user_prompt.py:52`, `session_start.py:944`, `mcp/server.py:243`,
+`stop.py:475`, `user_prompt.py:52`, `session_start.py:944`, `mcp/server.py:243`,
 `cli/mem.py:1304`). See
 [docs/CONTRACTS.md](CONTRACTS.md#handoff-contract) for the PROGRESS.md
 schema.

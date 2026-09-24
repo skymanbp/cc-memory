@@ -64,11 +64,17 @@ def _record_idle_turn(session_id, turn):
 
 
 def maybe_run_idle(cwd: str, session_id: str, turn_count: int,
-                   force: bool = False) -> dict:
+                   force: bool = False, db=None) -> dict:
     """Run idle reorg if enough turns have passed.
 
     Returns a dict of {garbage, topics_assigned, memory_md_regen} on actual
     run, or {} if skipped.
+
+    `db` (v2.16.0): the caller's open `MemoryDB`, when it holds one. The
+    Stop hook already has a handle for its other jobs, and constructing a
+    second one here re-ran the bootstrap probes for nothing — measured at
+    v2.15.2, two `MemoryDB.__init__` per Stop on the no-key path. A caller
+    without a handle (the CLI, a test) passes nothing and one is opened.
     """
     if not force:
         last = _last_idle_turn(session_id)
@@ -80,7 +86,7 @@ def maybe_run_idle(cwd: str, session_id: str, turn_count: int,
     if not db_path.exists():
         return {}
 
-    db = MemoryDB(db_path)
+    db = db if db is not None else MemoryDB(db_path)
     project_id = db.upsert_project(cwd)
 
     results = {

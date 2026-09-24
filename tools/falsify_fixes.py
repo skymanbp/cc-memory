@@ -3071,6 +3071,15 @@ def _break_r16stamp(root):
            "        if True:  # BREAKAGE: the stamp is written and never read")
 
 
+@case("r16onehandle", ["tests/smoke_test.py"],
+      "let the idle reorg open its own MemoryDB again -> the Stop hook pays "
+      "the bootstrap probes twice per turn for one file")
+def _break_r16onehandle(root):
+    _patch(root, "cc_memory/hooks/stop.py",
+           "        maybe_run_idle(cwd, session_id, turn_count, db=db)",
+           "        maybe_run_idle(cwd, session_id, turn_count)  # BREAKAGE")
+
+
 def verify_anchors():
     """Count every registered case's breakage anchors WITHOUT running a gate.
 
