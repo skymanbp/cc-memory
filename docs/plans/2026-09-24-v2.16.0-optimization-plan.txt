@@ -1,0 +1,273 @@
+# cc-memory v2.16.0：注入/提示词管理优化 · 运行效率 · 设计冲突与瘦身 · 记忆调用与清理的强制生效 · 文档条理化
+
+## Context（为什么做）
+
+用户要求：(1) 优化插件向 Claude 注入提示词/上下文的方式及其管理，提高运行效率；(2) 排查设计冲突，整体优化、瘦身；(3) 整体内容条理化、降低混乱；(4) **必须验证**每个项目的记忆库能被自动调用，且去重与垃圾记忆清理是强制且生效的。
+
+仓库是 Claude Code 记忆插件（纯 stdlib Python，v2.15.2，5.4 万行代码 + 1.6 万行文档，12 道发布门禁 `python tests/run_gates.py`，CI 另跑 `tools/falsify_fixes.py --anchors`）。三路只读探索 + 沙箱实测 + 规划代理对既有测试/锚点的逐条核对，得到下面的事实；方案全部建立在实测之上。
+
+### 已确认的决策（用户 2026-09-24）
+
+| # | 决策 | 结论 |
+|---|---|---|
+| D1 | SessionStart 强制 Read 协议 | **保留 PROGRESS.md 强制 Read；内嵌预览改为 §1–§4 摘要；取消 MEMORY.md 强制 Read** |
+| D2 | 阻塞式 LLM 调用 | **Stop 观察者、SessionStart 追溯提取改为分离后台进程**（沿用 v2.12.0 整理器的 spawn+锁模式，hook 数量不变） |
+| D3 | 遗留面 | **移除 `plans` 队列面（`cli/plan.py`、仪表盘 Plans 页、9 个 db 方法），`plans` 表保留不删数据；`core/idle.py` 保留为薄编排层，只补锁检查**。用户附加约束：**行为不能变化，计划功能本身必须照常工作**——解读为：只删被 `plan_active` 取代的旧队列的读写面；PLAN.md / `/cc-mem plan-*` / refiner / guardian / carryover / Stop 强制一律不动；5 回合空闲清理的节奏与三道工序原样保留。 |
+| D4 | 文档 | **CLAUDE.md 压成操作手册（≤ 600 行）；32 节版本记录原文迁入 CHANGELOG 对应版本；约 150 条"不可破坏的规则"提炼为新的根目录 `INVARIANTS.md`；README/ARCHITECTURE/CONTRACTS 只改因本次改动失真和已知过时的段落（同步中文）** |
+
+### 实测基线（Linux 沙箱，600 条记忆的库；脚本在 scratchpad `sb/drive2.py`、`sb/seed2.py`）
+
+**门禁**：12 道中 11 道绿；`surfaces` 红仅因容器缺 `python3-tk`（`ui/dashboard.py:60`），全套 84 s。
+
+| hook | 进程耗时 | 进程内 | SQLite 打开次数 | 打开+关闭合计 | stdout |
+|---|---|---|---|---|---|
+| user_prompt | ~75 ms | 51 ms | 8 | 2.6 ms | 0–463 B（召回块） |
+| post_tool_use | ~75 ms | 43 ms | 10 | 3.3 ms | 0 |
+| stop | ~90 ms | 85 ms | 21–31 | 7.1 ms | 63 B 或 527 B（block JSON） |
+| session_start | ~95 ms | 61 ms | 19–25 | 5.5 ms | 6.5 KB（~1.6k token） |
+| pre_compact | ~115 ms | 80 ms | 30 | 7.7 ms | 131 B |
+
+- 裸 `python3 -c pass` 16 ms；仅 import 常用 stdlib 79 ms；每个 hook 加载 110–119 个模块 → **import 占 hook 墙钟约 60%，SQLite 连接数不是瓶颈**。懒加载不做（`ui/installer.py:_REQUIRED_PLUGIN_FILES` 由 hook 的模块级 import 图推导；收益 10–20 ms）。
+- **真正的大头是阻塞的 LLM 调用**：有 key 时 Stop 观察者每回合最长 14 s（`stop.py:_LLM_DEADLINE_S`）；SessionStart `retroactive_save` 最长 13 s。失败路径：`call_llm` 的 `RuntimeError`（`llm/ccl_backend.py:360-362`）不在观察者 except 元组（`stop.py:410-411`），水位不前进，**同一提示每回合重发、无退避**。`stop_hook_active` 从未被读取。每条观察被送 Haiku **两次**（观察者按水位读；PreCompact 从第 0 行读再删，`pre_compact.py:658, 790-791`）。
+- PostToolUse 的 matcher 是 `""`：对 Agent/MCP/Skill/Task 等它不处理的工具也整进程启动一次（10 次 SQLite 打开含一次写事务）。
+- **已核实（Claude Code hooks 文档）**：只有 SessionStart 与 UserPromptSubmit 的 exit-0 stdout 进入模型上下文；Stop/PreCompact/PostToolUse 的 stdout 只进调试日志 → Stop 的状态行**和逃生预算用尽后的 "degrading to advisory" 行都到不了模型**（v2.11.0 设计的"响亮的建议"实际静默）；`stop_hook_active` 为 true 应提前退出（Claude Code 在连续 8 次 block 后强制放行）；PostToolUse `matcher` 支持正则、区分大小写，MCP 工具名 `mcp__server__tool`；`"async": true` 支持 PostToolUse/Stop/PreCompact，**不支持 SessionStart**；SessionStart `source` 有 `startup/resume/clear/compact/fork`；CLAUDE.md 无文档化大小上限。
+
+**注入内容的重复**：PROGRESS.md 全文内嵌（< 4000 字符时逐字节相同）后又强制 Read 它和 MEMORY.md → 同一文件进上下文 2–3 次 + 一次工具调用；critical 层记忆同时在注入层 / §5 / MEMORY.md；Recent 层不排除主题层已覆盖的行；指令账本两个渲染器（`session_start.py:283-329` / `core/plan.py:583-609`）；`resume/compact` 原样重放全量注入含 ack 要求；握手文案在一次注入里出现三次；MEMORY.md 43% 是维护者注释；无 LLM 时主题"摘要"是 8 条原文 bullet（`_summarize_topic_fallback`），Knowledge Base 层再复制一遍记忆原文。
+
+**记忆库自动调用（要求 4）— 能用，四处缺口**：✅ SessionStart 注入 6 指令 + 12 主题 + 8 critical + 13 recent（25/518 行）、`.last_inject.json` 记 id；✅ 召回对中英文都触发并对已注入行去重。❌ 召回去重集跨会话、取 `sorted(ids)[-200:]`、不核对 `session_id`（`user_prompt.py:143-178`）；❌ Recent 层不按时间排序，观察者写入行 `session_id=None`；❌ 主题层与 Recent 层可重复，§5 是冻结快照；❌ 握手的 Read 本身进入 §6 并被送给观察者 LLM。
+
+**清理/去重强制生效（要求 4）— 确定性工序生效，LLM 工序无凭据时静默跳过**：✅ 种 600 条后第一次 Stop 记录 `backpressure: spawned … 600 unconsolidated (threshold 50)`，后台 18 ms 完成并写水位；`.consolidation.kick` 600 s 冷却；`idle reorg @ turn 5` 如期。✅ 无 key 跑 `consolidate_async.py --cwd`：556→515 活跃、12 主题、0.8 s。✅ 直接插入 12 条原始行再整理：5 条垃圾全部归档；4 条英文近重复留 1；中文标点变体合并。⚠ 中文一字之差（bigram Jaccard 0.643 < 0.65）留 2 条——只能靠 LLM 语义去重，而 `semantic_dedup`/`detect_obsolete_llm`/`consolidate_topics` 无 key 时 `return`（`consolidate.py:470,775,958`）**不打日志、不进标记、不进状态面**。⚠ 近重复合并与写路径 `reconcile_upsert`、LLM 判官都按类别隔离 → 同一事实记为 `decision` 与 `fact` 时任何工序都不去重。⚠ `core/idle.py` 不取整理锁。
+
+**CLAUDE.md**：2413 行 / 150 KB（≈3.7 万 token）每会话加载；第 19–1694 行（70%）是 32 节 "What changed"；`## Tests` 359 行。这些记录含约 150 条编号规则、36 个 `Gate:`、约 60 个 `--case` 指针——仓库唯一的"规则→门禁→反证用例"索引；代码注释按 "v2.14.0 rule 12" 引用（`core/db.py:3189`、`core/plan.py:1364`、`core/extractor.py:599`、`cli/mem.py:2482,2504`、`llm/usage_judge.py:46,167`、`core/recall.py:26,80,373`）。
+
+### 硬约束（逐行核对过；违反任何一条门禁就红）
+
+**文档门禁**
+- CLAUDE.md 只有三处整文件子串断言：`**TWELVE release gates`（smoke:1880-1884）、9 个门禁脚本路径都要出现（smoke:1891-1893；`tools/doc_coverage.py` 目前只在 :2177）、`Database schema (12 tables)`（smoke:1894-1899）；无标题被解析。
+- `<!--ce:NAME-->` 绑定挂在**前 160 字符内最近的计数**上（`tools/doc_claims.py:199,237-277`）：`## Hooks (6) <!--ce:hooks-->` 与 :1787、:2102、:2132、:2207、:2231-2232、:2292 处的绑定必须与其数字同句迁移；`## What changed…/What's new…` 标题下整段豁免；**CHANGELOG.md 整文件豁免**；触发名词 `hooks/renderers/render paths` 与数词同现即为计数（新写的注释/文档也受检）。
+- `tools/citation_check.py:TRACKED` 必须含每个 `git ls-files` 的 `.md`（smoke:1697-1707）→ 新建 `INVARIANTS.md` 要登记；`file.py:LINE` 引用漂移用 `--fix` 修（只修行号，不修跨文件搬迁）。
+- i18n 只覆盖 README.md 与 `docs/*.md`（`tools/i18n_check.py:172-192`）→ CLAUDE.md、CHANGELOG.md、根目录新文件不需要中文；README/ARCHITECTURE/CONTRACTS 任何英文改动都要真正翻译中文后 `--emit-marker`（未改译文的重签会被 `r13i18nrestamp` 拒绝）。
+- **不往 `tools/` 加脚本**（smoke:1750-1758 会把它变成第 13 道必需门禁）；基准脚本放 `scripts/`。
+- `falsify --anchors` 要求 5 个文档锚各恰好一次（ARCHITECTURE.md 2、README.md 2、CONTRIBUTING.md 1）；`cli/plan.py` 上 4 个 `_patch` 锚（`falsify_fixes.py:429,437,2441,2473`）随文件删除。
+- hooks.json 6 条命令是被绑定的计数（`<!--ce:hooks-->`、`test_surfaces.py:1565-1583`、`tools/contracts.py:123-138`）→ **不加第 7 条 hook**。
+- 新运行时模块登记 `ui/installer.py:SUBPACKAGE_FILES` + `scripts/build_exe.py` + ARCHITECTURE §8 FLAT 图（smoke:1814-1843，两种语言）；新临时标记前缀登记 `ui/installer.py:_TEMP_MARKER_PREFIXES`；`.ccm/` 新文件同时进三份 gitignore 列表（`core/progress.py:68-84` == `ui/installer.py:1409-1415` == `skills/ccm-load/SKILL.md:291-295`，**同序**，smoke:2895-2907）与 ARCHITECTURE §7 目录树（:813-828，两种语言）。
+
+**代码锚（必须逐字节保留、且只出现一次）**
+| 文件 | 锚 | 守护者 |
+|---|---|---|
+| `hooks/stop.py` | `    if not write_marker(f, f"{digest}:{n}"):`(:189)；`        idle = turns_total - int(row.get("turns_at_touch") or 0)`(:261)；`    turns_total = int(plan_row.get("turns_total") or 0)`(:257)；:657-660 的 4 行 advisory 块（16 空格缩进）；`    if _lock_age is not None and _lock_age < _STALE_LOCK_S:`(:471)；`        if not reasons:\n            # The turn may close, so the streak is over`(:664-665)；`from hooks.consolidate_async import _STALE_LOCK_S` 且无 `^_STALE_LOCK_S\s*=`；`_HOOK_T0 = time.monotonic()` 在 `sys.path.insert` 之前；`deadline=_HOOK_T0 + _LLM_DEADLINE_S`；`^_API_TIMEOUT = 7$`/`^_FALLBACK_TIMEOUT = 3$`/`^_LLM_DEADLINE_S = 14.0$`；无 `_LAST_EVAL_PREFIX`；有 `_OBS_FED_PER_STOP` | falsify r11budget/r11idle/r11resetforgives/r14advisoryslug/r14stalelock/r13budgetreset；directive:865-871；smoke:2344-2384, 6236, 6255-6257 |
+| `hooks/session_start.py` | `deadline=_HOOK_T0 + _RETRO_DEADLINE_S`；`^_RETRO_DEADLINE_S = 13.0$`；`body = neutralize_document("\n".join(parts[1:]))`(:616) 之后存在字面 `_build_forced_reminder(memory_dir)`；`build_context` 之上的任何 helper 里不得出现 `neutralize_document(`；恰好 3 处 `            continue   # skip THIS entry; see _LAYER_SKIP_NOTE`；:617-618 两行 result 拼接；:558-559 directives append；:449 `if budget is not None and len(text) > budget:`；:241-242 preview 的 read_text/except；:1183-1184 与 :865-867 | smoke:2347-2383, 4796-4807, 383-392, 6738-6745；falsify joinedtag/layerbreak/r8banner/r12directiveinject/footerbudget/previewdecode/r14retrokey/r14retroempty |
+| `hooks/pre_compact.py` | `_OBS_PER_EXTRACTION = 300`(:145)；`def main():` 一次；`        candidate = strip_scaffolding(candidate)` | r7obsbudget/r9hookbind/r7harness |
+| `core/idle.py` | `    memory_dir = resolve_memory_dir(cwd)`(:78) | r13statejoin |
+| `core/db.py` | `_detect_fts5` 的 try/with/`_setup_fts5` 块(:1065-1067)；`_ensure_active_hash_unique` 的 `CREATE UNIQUE INDEX` 块(:1201-1206)；`        if not drop_triggers:\n            return`(:930-931)；:2602 seed 行；:2625 `MAX(COALESCE(obs_watermark` UPDATE | ftsrepair/r5x1idx/r8ftsdrop/r8obsseed/r8obsmono |
+| `core/progress.py` | `    text = neutralize_document("\n".join(lines))`(:662)；`    if _markers_is_link(memory_dir):` 一次；`ACK_PREFIX = "Read PROGRESS.md — prior progress:"` 且其他模块不得再拼这个串 | r7ndprog/r5y1emd/r9junction/r15ackspell；smoke:6748-6756 |
+| `hooks/user_prompt.py` | `        _emit_recall(cwd, prompt, session_id)`；:209 `prompt, exclude_ids=_already_shown(state_dir))`（C2 会改，需同步修 `falsify_fixes.py:2948` 的 r15recalldedup 锚） | r15recallchannel/r15recallprivate/r15recalldedup |
+| `core/modes.py` | `because ALL SIX hooks` | r8claimpy |
+| 每个 hook | `parse_payload` → 字段检查 → 字面 `resolve_project(cwd` → exit 0、stderr 为空 | test_surfaces:2485, 1609-1624 |
+
+## 方案
+
+### 共享基础件（都放在既有模块，除 `core/prompts.py` 外不加模块）
+- `hooks/_entry.py:spawn_detached(argv) -> bool`：`stop.py:491-504` 的 Popen 形状（DEVNULL×3、`close_fds=True`、Windows `DETACHED_PROCESS|CREATE_NEW_PROCESS_GROUP`、POSIX `start_new_session=True`），`except OSError: return False`；模块级 `import subprocess` 并通过模块属性调用（smoke:6627-6649 会 monkeypatch `subprocess.Popen` 并断言 `--cwd` argv）；追加在文件末尾（:1675-1819 四个锚在 `parse_payload`/`resolve_project` 内）。`_maybe_kick_consolidation` 改用它，签名与 argv 不变。
+- `hooks/consolidate_async.py:_acquire_lock(lock_path, stale_s=_STALE_LOCK_S)`：加关键字参数，默认不变（smoke:1347-1348 两参调用不变）；`.observer.lock`、`.retro.lock` 复用它（60 s 过期）→ 锁策略仍只有一个点（directive:863-871）。
+- `core/auth.py`（只 import `json/os/time/pathlib`，每回合路径已经懒 import 它）：`llm_backoff(state_dir) -> (active, info)`、`note_llm_failure(state_dir, reason)`、`clear_llm_backoff(state_dir)`；文件 `.ccm/.llm_backoff.json = {"until", "failures", "reason"[:200], "ts"}`，延迟 `min(60·2^(failures-1), 1800)` s，缺失/损坏视为不激活，成功即 unlink，用 `core.atomic.write_atomic` 写。
+- `.ccm/` 新增 `.observer.lock`、`.retro.lock`、`.llm_backoff.json`：三份 gitignore 列表同序追加在 `.consolidation.kick` 之后 + ARCHITECTURE §7 树（两种语言）。
+- **`core/prompts.py`（新模块，"提示词管理"的落点）**：只放 Claude 可见文本的常量与占位符模板——握手 reminder 模板、`RESUME_TRIGGERS`（合并 `session_start.py:501-502` / `user_prompt.py:402-405` / `core/recall.py:171-175` 三份）、`<cc-memory-recall>` 帧标签与前言、PROGRESS.md/MEMORY.md/PLAN.md 头尾文案、主题回退摘要前缀 `FALLBACK_SUMMARY_PREFIX`；**不做渲染、不调用 neutralize**（`tools/contracts.py` 的 `render_paths` 集合不变）；`ACK_*` 仍留在 `core/progress.py`（r15ackspell 要求只在那里拼）。登记：`SUBPACKAGE_FILES["core"]`、`build_exe.py`、ARCHITECTURE §8 FLAT 图（两种语言，重签）。`/cc-mem inject-show --templates` 列出每个模板名与字节数。
+
+### WP-A 运行效率：LLM 后台化与每回合开销（D2）
+
+**A1 Stop 观察者 → 分离 worker（`stop.py --observe <cwd> <session_id>`）**
+- `main()` 开头（`parse_payload()` :530 之前，与 `consolidate_async.py:179-185` 同形）：`if sys.argv[1:2] == ["--observe"]: _observe_worker(...); sys.exit(0)`。
+- `continuation = bool(data.get("stop_hook_active"))`；`.exists()` 检查（:560）后**只构造一次** `MemoryDB`（删 :578-579 的第二次）。
+- `if not continuation:` → `_maybe_spawn_observer(cwd, session_id, memory_dir, db, project_id)`（替换 :565 的内联调用）→ `maybe_run_idle(..., db=db)` → tag/patch(:584-585) → kick(:590)。Job-4 块(:603-669) 缩进不动，只把 `db.bump_plan_turn_counter(project_id, n=1)`(:630) 包进 `if not continuation:`。
+- `_maybe_spawn_observer`（无 LLM、不读标记，按此顺序，保证无凭据的测试永不 spawn）：`get_api_key()` 空 → False；`observer_watermark` + `get_observations_since(..., limit=_MIN_OBS_FOR_EVAL)` 不足 3 条 → False；`llm_backoff` 激活 → False；`.observer.lock` 年轻于 `_OBSERVER_STALE_LOCK_S = 60.0`（名字不能是 `_STALE_LOCK_S`）→ False；否则 `spawn_detached([sys.executable, __file__, "--observe", cwd, session_id])`。不需要 kick 式冷却：失败 worker 写退避，崩溃 worker 的锁 60 s 过期。
+- `_observe_worker`：`resolve_project` → `memory_dir` → `_acquire_lock(memory_dir/".observer.lock", stale_s=60)` → 锁内再查退避 → `_observer_evaluate(cwd, session_id, memory_dir, db=MemoryDB(db_path))` → `finally` 释放 → 一律 `sys.exit(0)`，整体 `try/except Exception: _log.error_tb`。
+- `_observer_evaluate(..., db=None)`：保留主体与 `deadline=_HOOK_T0 + _LLM_DEADLINE_S` 字面；except 元组加 `RuntimeError` 并在其中 `note_llm_failure(memory_dir, str(e))`（`call_llm` 把每条腿的失败聚合成一个 `RuntimeError`——这才是"中断"信号；`extract_json` 为 None 只是坏答案，不写退避）；成功 `advance_observer_watermark` 后 `clear_llm_backoff`。水位仍只在成功 upsert 后前进。
+- 提示标记竞态是已接受的残余（worker 在 Stop 后 ~100 ms 读 `cc_mem_prompt_`，子进程继承环境所以 `marker_dir()` 一致）；无新标记前缀。
+- 牵连：smoke:2344-2384（字面与常量不变即过，加注释说明 deadline 现在约束的是 worker）；smoke:6624-6649（kick 的签名与 `--cwd` argv 形状要活）；directive §8(:684-735)、§9c(:822-872，真 spawn)；surfaces §4/§7/junk-cwd（无 key 不 spawn）；docs：CONTRACTS.md:225/zh:201 引 `stop.py:384`（`--fix`）、ARCHITECTURE.md:234/zh:212 Stop 行、README.md:739、`stop.py:5-7` docstring。
+- 新门禁（directive 套件）：(a) 进程内：桩 `core.auth.get_api_key`、monkeypatch `subprocess.Popen`，种 3 条 Edit 观察 → `_maybe_spawn_observer` 返回 True 且 argv 含 `--observe`；新鲜 `.observer.lock` → False；写了退避 → False；只有 2 条观察 → False。(b) worker 路径：`sys.argv=["stop.py","--observe",cwd,sid]`、`call_llm` 桩抛 `RuntimeError` → 退出 0、`.llm_backoff.json` 存在且 `until > now`、水位不变；第二次 worker 桩计数为 0（退避生效）；清退避 + 桩返回 `"[]"` → 水位 == 投喂的最大 id。旧代码无 `--observe` 且 `RuntimeError` 逃逸 → (b) 红。falsify `r16obsbackoff`：把 except 元组改回旧的。
+
+**A2 SessionStart 追溯提取 → 分离 worker（`session_start.py --retro <cwd> <session_id>`）**
+- `main()`(:1310) 在 `parse_payload` 之前处理 `--retro`；:1447-1453 的内联块换成 `_maybe_spawn_retro(cwd, db, project_id, session_id, memory_dir, source)`：`source in ("resume","fork")` 跳过；无 key 跳过；退避激活跳过；`_retro_candidates(...)` 为空跳过；`.retro.lock` 年轻跳过；否则 spawn。
+- `_retro_candidates` = `retroactive_save` :1197-1219 的循环前缀（精确 slug 目录、`_get_saved_session_ids`、最新优先 `*.jsonl` 取 `[:3]` 再过滤当前/已存/`<1024` 字节），只 `stat()`，绝不调用 `load_transcript_window`（smoke B7 :773-788 要求无 key 时 0 次加载；`retroactive_save` 顶部的 `get_api_key()` 检查逐字节保留给 r14retrokey）。
+- `retroactive_save` 签名不变（smoke B6/B7 直接调用），循环顶加 `if llm_backoff(memory_dir)[0]: break`；`_retroactive_extract(..., state_dir=None)` 在 `except Exception`(:868-871) 里对 `RuntimeError` 写退避（:866-867 的 r14retroempty 锚保留）。
+- `_retro_worker`：`resolve_project` → `MemoryDB` → `_acquire_lock(memory_dir/".retro.lock", stale_s=60)` → `retroactive_save(cwd, db, project_id, sid, deadline=_HOOK_T0 + _RETRO_DEADLINE_S)`（字面保留给 smoke:2358）→ 释放 → exit 0。
+- 牵连：smoke:716-788、:2347 过；surfaces:1612-1618 无 key 不 spawn；docs：CONTRACTS.md:226/zh:202 引 `session_start.py:1125`（`--fix`）、ARCHITECTURE.md:233/zh:211、`session_start.py:14-15`。
+- 新门禁：把 `spawn_detached` import 进 session_start 命名空间以便桩；B6 形状的合格 transcript → `_maybe_spawn_retro` True 且 argv 含 `--retro`；已保存会话行 → False；退避 → False；`source="resume"` → False。
+
+**A3 读取 `stop_hook_active`**：续发时跳过观察者 spawn、idle、PROGRESS 补丁、kick、plan 回合加一；仍算状态、`blocking_reasons`、`_block_attempt`（续发就是下一次尝试，逃生预算照常递减）、`_block_reset`。新门禁（directive，真 hook）：活计划 + 1 条 Edit 观察，`"stop_hook_active": true` 驱动两次 → `plan_active.turns_total` 不变（旧：每次 +1）、`progress.trigger_type != "stop"`（旧：`_patch_progress_from_recent_obs` 会盖）、decision 仍 block 且尝试计数递进。falsify `r16continuation`：`continuation = False`。
+
+**A4 观察不再双投（PreCompact 只投喂观察者游标之上的行）**
+- `core/db.py` 新增 `observer_cursor(project_id) -> int`：纯读 `projects.obs_watermark`（未设为 0），放在 `observer_watermark`(:2577-2607) 旁；**不要**复用 `observer_watermark(window=0)`（它会把游标"播种"到最新 id，把从未跑过观察者的项目的所有行藏起来）。
+- `pre_compact.py:658` 保留 `get_observations_since(project_id, 0)`（:707 `files_from_observations` 需要全部行）；`obs_mark = db.observer_cursor(pid)`；:667-674 循环只投喂 `unfed = [o for o in observations if o["id"] > obs_mark]`；:676-679 日志与 :792-795 警告按 `unfed` 计数；清理 :790-791 保持 `if llm_ok and consumed_through` 对投喂切片，另加无条件 `if obs_mark: db.cleanup_observations(pid, obs_mark)`（游标只在成功 upsert 后前进，其下的行已被观察者送过 Haiku，删了不丢东西；`trim_observations` 的 "NEVER fed" 警告重新准确）。切片选择抽成纯函数 `_observations_to_feed(observations, obs_mark) -> (obs_fed, chars)`。
+- 牵连：smoke:5828-5844、:4640-4675 直调 DB 过；r7obsbudget/r9hookbind/r7harness/r7j2sum/r14linkrecover/trigger 锚在改动区之外（用 `--anchors` 验）；CONTRACTS.md:224/zh:200 引 `pre_compact.py:690`（`--fix`）。
+- 新门禁（smoke）：30 条观察、`advance_observer_watermark(pid, 10)` → `_observations_to_feed(rows, 10)` 投喂 11..30（旧投 1..30）；真 hook 无 key 驱动（surfaces:3506-3540 已有 PreCompact transcript 夹具）→ 1..10 被删、11..30 保留。falsify `r16prefeed`：`unfed = list(observations)`。
+
+**A5 PostToolUse matcher 单源**
+- `core/modes.py`（`MODES` :374-421 之后）：`PLAN_CONTROL_TOOLS = ("ExitPlanMode","TodoWrite")`、`EDIT_TOOLS = ("Edit","Write","MultiEdit","NotebookEdit")`、`SENSITIVE_TOOLS = ("Bash",)`；`handled_tools()` = 所有模式 `observe_tools` ∪ 三元组；`hook_tool_matcher()` = `"^(" + "|".join(re.escape(t)) + ")$"`，若任一模式 `observe_tools` 为空则 `""`；`HOOK_TOOL_MATCHER = hook_tool_matcher()`（今日值 `^(Bash|Edit|ExitPlanMode|Glob|Grep|MultiEdit|NotebookEdit|Read|TodoWrite|WebFetch|WebSearch|Write)$`）。
+- `hooks/hooks.json:47` 写同一正则（第 9 行不动，ARCHITECTURE.md:1176/zh:1011 的 bounds 引用仍成立）；6 条命令字符串不变。
+- `ui/installer.py`：`_declared_hook_timeouts()`(:702-733) 扩为同时收集每事件的 `matcher`（唯一调用者 `_make_hooks_config:737`）；加回退字面 `HOOK_MATCHERS = {"PostToolUse": "<同一正则>"}` 放在 `HOOK_SCRIPTS`(:112-118) 旁；:753 → `"matcher": matchers.get(ev, HOOK_MATCHERS.get(ev, ""))`。升级路径：旧 `""` 组只含我们的命令时被 `_strip_ccm_entries`(:863-891) 整组删除再写新组（surfaces:4361-4430 的逐条规则基于 Stop，不受影响）。
+- 牵连：smoke:2619-2639 超时锁步（扩展）；surfaces §4/§7 直接调用 `post_tool_use.py`（matcher 不作用）；`.claude-plugin/plugin.json` 无 hooks 键。docs：`post_tool_use.py:3,19,160`、ARCHITECTURE.md:235/zh:213、README.md:738、CLAUDE.md hooks 表、installer:106-111 注释。
+- 新门禁（smoke，:2619 旁）：hooks.json 的 matcher == `modes.HOOK_TOOL_MATCHER`（旧 `""` 红）；`_inst.HOOK_MATCHERS["PostToolUse"]` 与 `_make_hooks_config` 输出相等；行为：对所有 observe/skip 工具 + `ExitPlanMode`、`Agent`、`mcp__x__y`，`bool(re.search(M, t)) == (t in handled_tools())`，且任一模式 `should_observe(mode,t)` 为真的 t 都匹配；`re.search ≡ re.fullmatch`。falsify `r16matcher`：结构化 JSON 补丁把 matcher 改回 `""`（形同 r9hookbind :1710-1720）。
+
+**A6 `MemoryDB` 引导快路径 + 每 hook 一个句柄**
+- `core/db.py` `_MIGRATIONS`(:125) 之后：`_BOOTSTRAP_STAMP = (zlib.crc32((SCHEMA_SQL + "\n".join(n for n,_ in _MIGRATIONS)).encode()) & 0x7FFFFFFF) or 1`——由 schema 文本 + 账本名派生，任何改动自动失效（"派生、不手写"）。`_bootstrap`(:764-775)：一个连接读 `PRAGMA user_version`；不等则 `executescript(SCHEMA_SQL)` + `_run_migrations()` + topic 列检查(:772-775)；`_detect_fts5()` 与 `_ensure_active_hash_unique()` **无条件保留**（它们是自愈探针，`_retokenize_if_stale` 才是察觉 sqlite 构建变化的地方；ftsrepair/r5x1idx 锚与 smoke:4704-4731、5478-5530、5934-6052 的重开自愈断言依赖它们）；全路径跑完后单独连接 `PRAGMA user_version = <int>`，`sqlite3.DatabaseError`（只读卷）吞掉。稳态 3 个连接而非 5。已记录盲点：手工 DROP 的基表不再由 `IF NOT EXISTS` 重建（印章记录的是意图，和账本一样）。
+- `core/idle.py:maybe_run_idle(cwd, session_id, turn_count, force=False, db=None)`（:78 锚不动，:83 改为 `db if db is not None else MemoryDB(db_path)`）；`stop.py` 单次构造（A1）；`user_prompt.py` 的两次构造（首触 :129 与召回 :200）记为后续。
+- 牵连：smoke:3701-3757 数的是活 `Connection` 对象不是打开次数；:147-148,861,1014,1128 新库全路径；docs：ARCHITECTURE.md:379,381/zh:343-344 引 `core/db.py:906-957`、CONTRACTS.md:335 引 `:1144-1159`（`--fix`）；ARCHITECTURE §4 与 CLAUDE.md 数据模型段提一句印章。
+- 新门禁（smoke）：新开 → `PRAGMA user_version == MemoryDB._BOOTSTRAP_STAMP`；monkeypatch `_run_migrations` 抛错 → 第二次打开不抛（旧抛）；手工 `user_version=0` → 重入全路径；`_MIGRATIONS + [("v99_probe","")]` 算出的印章不同；进程内驱动 `stop.main()`（`_V5FakeStdin` 形状 smoke:2711-2727）在 idle 到期、无 key 时 `MemoryDB.__init__` 恰好 1 次（旧 2 次）。falsify `r16stamp`：`if stamped != _BOOTSTRAP_STAMP:` → `if True:`。
+
+**A7 重复渲染与无用计算**：`upsert_batch` 计数全 0 不重生成 MEMORY.md；PreCompact 只重生成一次（去 :806 第二次）；`session_start.py:1410` 未用的 `get_stats` 删除；`read_config`/`marker_dir()` 进程内 `lru_cache`；Stop 的 `get_plan_active` 四次读合一；Stop 每回合状态行与 PreCompact 状态行**改为只写日志**（已核实到不了模型；省 `get_stats` 6 条查询）。
+
+### WP-B 注入去重与提示词管理（D1）
+
+**B1 PROGRESS 摘要替代整文件**：`core/progress.py` 从 `write_progress_md`(:552-587) 抽出 `_render_request_lines/_render_status_lines/_render_todo_lines`（PROGRESS.md 输出逐字节不变；surfaces:2739-2744 按 `## 1. Current Request`/`## 2.` 切分）；新增 `render_progress_digest(db, project_id, prog, max_todos=10)` = §1/§2/§3（封顶并注明）/§4（复用已 neutralize 的 `_render_plan_section` :372-424），无 §0/§5/§6/§7 与头尾。`session_start.py` 新增 `_build_progress_digest(db, pid, memory_dir, budget)`：`db.get_progress` 为空时回退到保持原样的 `_build_progress_preview`（previewdecode 锚；smoke:4889-4901 直调 GBK 字节）；标题 `### Last Session PROGRESS (digest — read .ccm/PROGRESS.md for §0/§5-§7)`；预算截断 + 围栏平衡抽成 `_balance_fences(text)` 共用；新 helper 里**不得**写 `neutralize_document(`（smoke:4806 源序规则）、不得加第 4 个 `continue   # skip THIS entry`。manifest 保留 `progress_preview_included`（cli/mem.py:2171 读）并加 `progress_layer: "digest"|"file"|""`。`_LAYER_BUDGETS`(:62-75)：progress 0.25→0.15、critical 0.15→0.20、timeline 0.15→0.20（和仍为 1.0；smoke:4830,4848,4857 只查键）；同步 ARCHITECTURE.md:568-570/zh 与 README.md:327。新门禁：种 progress 行 + 精炼计划 → 输出含 `## 1. Current Request`、待办、步骤标题，不含 `## 5. Critical Context`/`## 7.`/`SINGLE SOURCE OF TRUTH`（旧内嵌全文红）；`progress_layer=="digest"`；无 progress 行且磁盘有文件 → `"file"`。
+
+**B2 一个 `seen` 集 + 整份 manifest 去重 + 会话作用域召回**：`build_context`(:561-575) 主题层之后计算 `covered`（`_build_critical_layer:153-156` 因主题已渲染而丢掉的 ≥5 行，保留其 2 元组返回，smoke:4831-4838 解包），`seen = shown_ids | covered` 传给 `_build_timeline_layer`（签名不变）。manifest(:634-647) 加 `shown_ids`（渲染过的 ∪ timeline）、`topic_covered_ids`、`source`、`ack_demanded`，旧键 `critical_ids/timeline_ids/n_injected_memories` 保留（cli/mem.py:2163-2177,2423-2429、smoke:6965-6970 读）；`bump_last_referenced` 仍只对渲染过的 id。**决定：`topic_covered_ids` 只记录、不喂给 `_already_shown`**（主题摘要一行不等于展示了该事实）。`user_prompt.py:_already_shown(state_dir, session_id="")`(:143-178)：优先 `shown_ids`；任一 manifest 的 `session_id` 存在且不同则跳过；写入(:226-250)：`prev` 仅在同会话时沿用，`ids = (prev + 新)[-200:]` 保留发射顺序（替换 `sorted(set(prev)|set(ids))`）；调用点 :209 改为 `_already_shown(state_dir, session_id)` → **同步修 `falsify_fixes.py:2948` r15recalldedup 的 old/new 串**并注明 "anchor repaired 2026-09-24"。牵连：test_recall:381-398,465-468（同 sid 两次 → 去重仍成立）、:438-453（成对清 manifest、不同 sid）过；smoke:6960-6970 过；`cli/mem.py:_delivered_ids` 支持可选 `shown_ids`。新门禁（test_recall §3）：`.last_recall.json` 带 `session_id:"other"` 与匹配 id → 当前会话仍发射（旧被排除红）；同 sid → 静默；205 次不同召回后 manifest 保留最后 200 条发射顺序（旧 `sorted(...)[-200:]` 红）。falsify `r16recallscope`：去掉会话判定。
+
+**B3 reminder 只要求 PROGRESS.md**：`_build_forced_reminder(memory_dir, demand_ack=True)`(:458-517)：删 `memory_md/has_memory`(:466-469,484-487)；`not has_progress → ""`；单条编号行；`demand_ack=False` 时省略 :490-497（"After reading, explicitly state" + `ACK_TEMPLATE`）。`build_context` 在 join 行之后保留一次字面 `_build_forced_reminder(memory_dir)`（smoke:4796-4800），compact 路径用 `_build_forced_reminder(memory_dir, demand_ack=False)`。RESUME PROTOCOL 块保留（smoke:383-392）；smoke:6732-6745 期望默认路径含 `ACK_TEMPLATE` 且 `ack_present(reminder) is False` → 过；无测试断言 MEMORY.md 行。README 的 verbatim 区域对照的是固定捕获文件（`tools/citation_check.py:212-249` 只对捕获校验）→ 不受影响。文档（两种语言 + 真翻译后重签）：CONTRACTS.md:543-575 引用块删第 2 行并重编号、:575 句子、:234-288 引用 `--fix`；ARCHITECTURE.md:233,574/zh:211；README.md:612 与 commands/cc-mem.md:54 仍真（inject-usage 仍统计两文件的 Read）。新门禁：两文件都在时 `".ccm/MEMORY.md" not in reminder`（旧含红）且含 `` 1. Use the Read tool on `.ccm/PROGRESS.md` ``；`demand_ack=False` → 无 `ACK_TEMPLATE` 但仍有 RESUME PROTOCOL。相对路径改用 `core.layout` 的实际状态目录名。
+
+**B4 `source` 分流**：`build_context(..., source="")`，`main()`(:1326-1332,1402) 传入。full（startup/clear/未知）= 今日 + `ack_demanded: True`；compact = 各层 + `demand_ack=False` 的 reminder，manifest 重写（压缩后早先注入已丢）且 `ack_demanded: False`；resume/fork = 头 + 一行 `[cc-memory] session resumed — startup context is still in this conversation; standing directives restated:` + 指令层，无 reminder，**manifest 不重写、`bump_last_referenced` 跳过**（启动注入仍在上下文，召回排除集必须仍指向它），不 spawn 追溯。:616-618 拼接行逐字节不变。`cli/mem.py:_ack_signal`(:2263-2291)：manifest `ack_demanded is False` → `(None, "the last injection (compact) demanded no ack")`；缺键仍视为要求（smoke:6812-6826 夹具不变）。牵连：directive:629 与 surfaces `_hook_payload` 无 source → full；smoke:673-677,705-706 的 `source="compact"` 刷新逻辑不动。文档：CONTRACTS 握手节、ARCHITECTURE.md:233、CLAUDE.md、`session_start.py:5`。新门禁：`source="resume"` → 无 `### Knowledge Base`、无 `<system-reminder>`、有指令、预先写的哨兵 `.last_inject.json` 逐字节存活；`compact` → 各层 + reminder、无 `ACK_TEMPLATE`、`ack_demanded is False`；`startup` → 有 `ACK_TEMPLATE`；真 hook `"source":"resume"` 驱动 stdout 无 `<system-reminder>`。falsify `r16resume`：`mode = "full"`。
+
+**B5 指令层单一渲染器**：`core/plan.py` 增 `render_directive_lines(rows, style)`，PLAN.md(:583-609) 与注入层(:283-329) 共用；:558-559 锚不动。
+
+**B6 主题回退摘要不再复制原文**：`_summarize_topic_fallback` 改写为一行 `FALLBACK_SUMMARY_PREFIX + "<n> memories; top: a · b · c"`（≤120 字符）；`_build_critical_layer` 只把摘要**非回退**的主题当作"已覆盖"（`startswith(FALLBACK_SUMMARY_PREFIX)` 判定），否则无 LLM 项目的 critical 行会从注入里整体消失；MEMORY.md 主题节同规则。
+
+**B7 MEMORY.md 瘦身**：维护者注释 16 行 → 3 行（保留 smoke:839-841 断言的 "AUTO-GENERATED by cc-memory" 与 "DO NOT EDIT THIS FILE BY HAND" 两句）；去掉用户项目里跑不了的 `python -m cc_memory.cli.mem …` 尾注。
+
+**B8 Recent 真按时间**：`get_recent_memories` 按 `created_at DESC`（仍返回 `session_id` NULL 行，smoke:2302-2314）；观察者写入行带会话（`db.insert_session`/已有会话行）。
+
+**B9 §5 读 STORE 不读列**（沿用 v2.15.1 规则 1）：PROGRESS.md §5 渲染时取 `get_critical_memories`，`critical_context` 列停用并在文档记为无读者；§4 先判 `raw_pending_refinement`（`core/plan.py:402-431` 已要求）。
+
+**B10 握手不自污染**：观察者投喂与 §6 过滤对 PROGRESS.md/MEMORY.md 的 Read 观察。
+
+### WP-C 记忆调用与强制清理/去重（要求 4）
+- **C1 无凭据可见化**：三处 `if not api_key: return` 各记一行 INFO；`write_consolidation_marker` 记 `llm_stages: {"semantic_dedup": "skipped:no-credential"|"ran:N", …}`；SessionStart 页脚警告扩为 "…extraction, semantic de-dup and topic summaries disabled"；`/cc-mem status` 加三行：最近整理时间 / 积压条数（`consolidation_backlog`）/ LLM 工序是否运行。
+- **C2 跨类别去重**：`merge_near_duplicates` 与 `reconcile_upsert` 在相似度 ≥ `HIGH_SIM`(0.80) 时忽略类别（MID 档仍按类别）；`_nominate_groups` 同样放开高相似档。
+- **C3 空闲整理加锁检查**：`maybe_run_idle` 在 `.consolidation.lock` 年轻时跳过本轮；节奏（`IDLE_INTERVAL_TURNS`）、三道工序、MEMORY.md 重生成原样（D3 约束）。
+- **C4 端到端强制性门禁（smoke § v2.16.0 consolidation，固化本次沙箱实验）**：种 60 条 → 直调 `_maybe_kick_consolidation` 返回 True 且 argv 含 `--cwd`；直接 `insert_memory` 5 条垃圾 + 4 条近重复 + 2 条中文变体 + `decision`/`fact` 同文一对 → `run_consolidation(use_llm=True)`（无 key）→ 垃圾 5/5 归档、近重复留 1、跨类别对留 1 且 `supersedes_id` 链完整、marker 的 `llm_stages` 全为 skipped；再用 `call_llm` 桩模拟有 key → 语义去重把一字之差合并。falsify `r16llmvisible`（删 skipped 记录）、`r16crosscat`（恢复类别门）。
+- **C5 召回可靠性**：B2 的 test_recall §3 新断言即为此项门禁。
+
+### WP-D 设计冲突与瘦身（D3 + 探索发现）
+- **D1 删除遗留 plans 队列面**：删 `cc_memory/cli/plan.py`、`pyproject.toml:69` 的 `cc-memory-plan`、仪表盘 Plans 页（`ui/dashboard.py:344-400, 1012-1034, 1848-2156`）、`core/db.py:3599-3728` 九个方法、`get_stats` 的 `n_active_plans`；表保留（`Database schema (12 tables)` 与 doc_coverage 命名不变）。牵连：smoke:3925-3951（v2.5.3 作用域断言→改用 `plan_active` 或删除）、smoke:4918-4919 夹具改表、surfaces:2512/2551/2885（三个 CLI 面→两个）、falsify:429/437/2441/2473 四用例删除、installer/build_exe 清单、ARCHITECTURE.md:677-708 小节 + README:726-728 改一句"旧队列已移除，表保留"（中文 + 重签）、`core/modes.py:266,296`、`core/progress.py:137`、`core/db.py:3643,3733`、`ui/installer.py:58`、`cli/mem.py:3009` 注释、`tools/citation_check.py:359,490` 的两 plan.py 歧义处理可留。**行为保证**：`/cc-mem plan-*` 六子命令、PLAN.md、carryover、guardian/refiner、Stop 强制不动，由 `test_plan_carryover.py`、`test_directive_enforcement.py`、smoke live-plan 段把守。
+- **D2 四份提取提示词与解析循环合一**：`llm/parse.py` 增 `build_extraction_prompt(kind, transcript, *, mode_suffix)` 与 `normalize_memories(items)`；观察者(:113-129,369-382)、PreCompact(:149-167,218-234)、追溯(:687-698,848-864)、仪表盘(:2164-2173,2202-2215，补上漏掉的 `topic`) 改为调用；接通从未被读的 `MODES[*]["extraction_prompt_suffix"]`；`MIN_CONTENT_LEN` 八处副本只留 `memory_writer.py:74` + MCP 那份。
+- **D3 常量单源化**：guardian 8/12（`plan.py:1350-1351` 与 :1411-1412）→ 模块常量；指令空闲 25（`stop.py:79,223`、`plan.py:467`）→ 一处；`_WINDOW_TAIL_BYTES` import `extractor._DEFAULT_TAIL_BYTES`；`.last_recall.json` 名一处；`cc_mem_turns_/cc_mem_prompt_` 从 `core/markers` 导出；critical 阈值（层 ≥5 / §5 ≥4）统一；三份 `sessions` 列表查询统一到 `db.get_recent_sessions`（按 `db.py:1486-1499` 的排序规则）。
+- **D4 死代码**：删 `archive_memory`、`bulk_archive`、`delete_memories`；`insert_memory`/`supersede_memory` 保留但注释改为"测试与 SUPERSEDE 内部"（falsify `supersede` 用例切片缩到 `supersede_memory` 本体）；删 `should_nudge_guardian`、`privacy.strip_context_tags` 与 `<cc-memory-context>` 反递归设计；清 `recall.py:197`、`layout.py:214-218`、`roots.py:428-431` 不可达分支与三处包裹永不抛错 `write_marker` 的 `except OSError`；`_TEMP_MARKER_PREFIXES` 三个无写者前缀保留（卸载清扫）加注释；`cc_memory/__init__.py:1-85` 止于 v2.5.0 的 changelog 串删掉。
+- **D5 代码与注释的矛盾**（改注释不改行为）：`progress.py:373-386`（`plan` 列其实由 :284 每次 PreCompact 写 `next_steps`）；`stop.py:5-11`；`consolidate.py:4-10`（6 阶段实为 8）；"Hash-guarded" 实为全文比较；`plan.py:789-790` 引用不存在函数；`plan.py:1426`、`post_tool_use.py:129-132` 仍说"只标记"；`plan-check` 顺序（`cli/mem.py:1929-1932,1972-1976` 先重置后 guardian）与阻断文案（`plan.py:500-512` 先 guardian 后重置）**相反** → 以阻断文案为准改 CLI；`user_prompt.py:25-26`；`atomic.py:1-12` "ONE implementation" 但 `session_start.py:520-538`、`pre_compact.py:388-393` 手写 mkstemp+replace → 改调 `write_atomic`；`db.py:1916-1918`。
+- **D6 PROGRESS 行写者整理**：`status_blocked` 无写者 → 空则不渲染；`pre_compact.py:762` 的 `latest_todos or ext["todos"]` 回灌历史待办（与 `extractor.py:510-520` 禁令冲突）→ 去掉回退；`session_start.py:1108-1114` 把 `next_steps` 拆成"待办"→ 渲染进 §4 不冒充 §3（RESUME PROTOCOL 会自动执行 `todos[0]`）。
+- **D7 MCP `memory_add` 会话挂靠**（`mcp/server.py:565-589`）→ 与其他手动路径一致 `session_id=NULL`。
+- **D8 到不了模型的 advisory 改走可达通道**：Stop 只在 `cc_mem_block_` 标记记"已降级 + 原因键"；下一次 UserPromptSubmit 读到即在 stdout 输出一行 neutralize 过的 advisory（与召回块同级）并清标记。牵连：directive §5/§8/§9(a) 对 advisory 行的断言改为断言标记 + 下一次 user_prompt 输出；:657-660 锚块保留（其输出改为日志）。CLAUDE.md/ARCHITECTURE 的 "Stop stdout → status line (read by Claude)" 改正。
+
+### WP-E 文档条理化（D4）
+- **E1 CLAUDE.md → 操作手册（≤ 600 行 / ≤ 45 KB）**：项目一句话 + 当前版本 → 精简布局树 → 六个 hook 与契约表（含 matcher、后台 worker、stdout 可达性）→ 数据模型（`Database schema (12 tables)` 原句 + 印章一句）→ 三个契约各一段 + 指向 `docs/CONTRACTS.md` → **注入通道与预算表**（每通道的渲染函数、预算、去重规则、`source` 分流、`core/prompts.py`）→ **整理与清理触发表**（背压/间隔/空闲/CLI、锁与冷却、退避、无凭据行为）→ 开发规则 → 测试（保留 `**TWELVE release gates`、9 个脚本路径、`<!--ce:...-->` 绑定同句迁移，删叙事）→ 构建/发布/同步 → 指向 `INVARIANTS.md` 与 `CHANGELOG.md`。不再写 "What changed in vX"，改一行 "本版变更见 CHANGELOG § [2.16.0]"。
+- **E2 版本记录迁移**：32 节原文逐节**追加到 CHANGELOG.md 对应 `## [X.Y.Z]` 节末尾**，子标题 `### Rules recorded in CLAUDE.md at release`（末尾，免得 `scripts/release_notes.py` 把它当发布标题）；迁移的 4 条 `file:line` 引用保持符号同句。
+- **E3 根目录 `INVARIANTS.md`**：按组件分节（存储/写路径、hook 入口与安全、注入与渲染、隐私、计划与指令、整理、安装器、文档门禁），每条 `INV-nnn`：一句规则 + 一句原因 + `Gate:` + `falsify --case`，附来源 `(v2.14.0 §12)`；顶部"版本 → INV 编号"对照表；**只引符号不引行号**；数词避开触发名词或加绑定。登记 `TRACKED`；更新 8 处按版本号引用规则的代码注释。
+- **E4 README / ARCHITECTURE / CONTRACTS 最小修正（同步中文并重签）**：版本徽章 2.15.1→2.16.0（README.md:12/zh:13）；SECURITY.md 2.16.x；ARCHITECTURE §3 hook 表（matcher、worker、stdout 可达性）、§4 印章、§5 删旧队列小节、§7 树新增文件、§8 FLAT 图加 `prompts.py`、:151-153 "four suites"→五、:170-173 "nudged" 与错引、:244 advisory 行、:568-570 预算；CONTRACTS 握手契约（摘要内嵌 + 只强制 Read PROGRESS.md + `source` 分流）、:16 "(20 checks)"、:29-31 SKIP 语义、:691-751 旧 advisory 生命周期图、:1021 "Nudge thresholds"、观察段落加 A4 一句；README "How it works" 握手描述、:327 预算、:738-739 hook 行。
+- **E5 门禁**：smoke 新增 CLAUDE.md ≤ 45 KB；`tools/doc_claims.py` 历史豁免正则补上 README.zh.md:842 `## v2.15.0 有什么新东西` 的形状。
+
+### 版本与发布
+五个版本位点 → 2.16.0（`core/version.py`、`pyproject.toml`、`plugin.json`、`marketplace.json`、`config.json`）+ CLAUDE.md 版本句；CHANGELOG `## [2.16.0] — 2026-09-2x`（第一个 `###` 是发布标题），含 `scripts/bench_hooks.py` 的前后测量表；不打 tag。
+
+## 提交顺序（每步：`python tests/run_gates.py` 绿 + `python tools/falsify_fixes.py --anchors` 绿；被引文件增行就 `python tools/citation_check.py --fix`；每段英文文档改动真翻译后 `python tools/i18n_check.py --emit-marker <doc>`；每个新 `r16*` 用例 `--case` 单独驱红后才保留）
+1. WP0：`apt-get install -y python3-tk`（不可装则记录为环境限制）；`scripts/bench_hooks.py` + 基线数字。
+2. A6 印章 + 门禁 + `r16stamp`（`db.py` 引用 `--fix`）。
+3. A6 `maybe_run_idle(db=)` + Stop 单句柄 + 门禁。
+4. A4 `observer_cursor` + PreCompact 投喂/清理 + 门禁 + `r16prefeed`。
+5. A3 续发标志 + 门禁 + `r16continuation`。
+6. `core/auth.py` 退避 + 观察者 `RuntimeError`/退避（仍内联）+ `.llm_backoff.json` 三份列表与 §7 树（两种语言）+ 门禁(b) + `r16obsbackoff`。
+7. A1 `spawn_detached`、`_acquire_lock(stale_s=)`、`--observe` worker、`_maybe_spawn_observer`、`.observer.lock` + 门禁(a) + 文档行。
+8. A2 `--retro` worker、`_retro_candidates`、`_maybe_spawn_retro`、`.retro.lock` + 门禁。
+9. A7 重复渲染/无用计算 + 状态行改日志；D8 advisory 通道（directive 断言随改）。
+10. `core/prompts.py`（登记四处）+ B5 指令渲染器 + B6 回退摘要 + B7 MEMORY.md + B8 Recent + B10 过滤。
+11. B1 摘要 + 预算 + ARCHITECTURE:568-570/README:327（两种语言）+ 门禁。
+12. B2 seen 集 + manifest + 会话作用域召回 + r15recalldedup 锚修复 + 门禁 + `r16recallscope`。
+13. B3 reminder + `demand_ack` + CONTRACTS/ARCHITECTURE 重写（两种语言）+ 门禁。
+14. B4 `source` 分流 + `ack_demanded` + `_ack_signal` 三态 + 门禁 + `r16resume`；B9 §4/§5。
+15. A5 matcher + installer + hooks.json + 文档 + 门禁 + `r16matcher`。
+16. C1–C4（可见化、跨类别、idle 锁检查、端到端强制性门禁）+ `r16llmvisible`/`r16crosscat`。
+17. D1 删旧队列面（代码、测试、falsify、清单、文档两种语言）。
+18. D2–D7 合一/单源/死代码/注释矛盾/PROGRESS 写者/MCP 会话。
+19. E1–E5 文档重构 + 版本 2.16.0 + CHANGELOG + 全量门禁 + `--anchors` + 逐个 `--case r16*`。
+
+## 验证（端到端）
+1. `python tests/run_gates.py` 全绿；`python tools/falsify_fixes.py --anchors` 绿；每个 `r16*` 单独红。
+2. `python scripts/bench_hooks.py` 前后对照（目标：非处理工具 0 次 PostToolUse 启动；有 key 时 Stop 同步耗时 < 0.3 s；SessionStart 注入字节比基线降 ≥ 30% 且同一记忆 id 出现次数 = 1；resume ≤ 600 B；Stop 稳态 SQLite 打开次数 ≤ 12）。
+3. 沙箱重放：600 条 → Stop 触发后台整理（日志）→ 垃圾/近重复/跨类别归档计数与 marker 的 `llm_stages`；无 key 与桩 key 两种情况。
+4. 真实会话验收（用户侧）：新会话首条回复出现 ack；`/cc-mem inject-show` 显示摘要而非全文；`/cc-mem status` 显示整理三行；`/cc-mem plan-set --raw …` → Stop 阻断 → refiner → `plan-set --from-refiner` → `plan-check` 流程不变；`claude --resume` 后只见一行 resumed + 指令。
+5. 文档：`wc -c CLAUDE.md` ≤ 45 KB；`python tools/i18n_check.py` 3 in-sync；`python tools/citation_check.py` 0 stale/0 unchecked；`python tools/doc_claims.py` 0 problem；`python tools/doc_coverage.py` OK。
+
+## 不做与风险
+- 不做懒加载；不改 `_connect` 关闭语义；不加第 7 条 hook；不删任何表或数据；不动 `demo/captures`；`user_prompt.py` 的两次 `MemoryDB` 构造记为后续。
+- 仪表盘无 tkinter 在本容器无法运行：Plans 页删除只能靠 import + `--help` 与 §8 无头驱动验证，发布 CI 在 Windows 上实际运行 exe。
+- 观察者 worker 读提示标记有 ~100 ms 竞态（已接受，记入文档）；B2 若召回质量下降，把 `topic_covered_ids` 喂给 `_already_shown` 只需一行（已决定不喂）。
+- 印章盲点：手工 DROP 的基表不再自动重建（与迁移账本同一语义，记入 INVARIANTS）。
+
+
+## 附录 A：沙箱测量脚本（WP0 的 `scripts/bench_hooks.py` 由此整理；HOME/USERPROFILE/TMPDIR/TEMP/TMP 全部指向 scratchpad 沙箱，`unset ANTHROPIC_API_KEY`）
+
+### seed2.py — 种入 600 条内容各异的记忆 + 6 条指令 + 一份原始计划
+
+```python
+import sys, random, time
+sys.path.insert(0, 'cc_memory')
+from pathlib import Path
+from core.db import MemoryDB
+from core.layout import memory_dir
+from llm.memory_writer import upsert_batch
+proj = Path(sys.argv[1]); md = memory_dir(proj); db = MemoryDB(md/'memory.db'); pid = db.upsert_project(str(proj))
+random.seed(7)
+nouns = "vault client timeout retry backoff scheduler queue worker cache token session cookie header router handler middleware parser lexer tokenizer index shard replica leader follower quorum ledger journal snapshot checkpoint migration schema column table view trigger cursor batch stream buffer socket listener proxy gateway certificate key secret rotation audit metric tracer logger sampler exporter dashboard alert pager runbook playbook pipeline stage artifact bundle package module plugin adapter driver kernel thread process container image registry cluster node pod service ingress egress firewall policy quota budget invoice receipt customer account profile avatar locale timezone calendar reminder digest newsletter template layout theme palette icon sprite font glyph".split()
+verbs = "must never always should prefers rejected adopted deprecated renamed moved pinned capped throttled retried disabled enabled documented measured verified refused defaulted".split()
+zh = ["用户要求把超时设为三十秒","缓存策略改为写穿","登录接口必须限流","数据库迁移需要备份","部署脚本禁止直接推主干","日志级别默认改为警告","配置文件采用只读挂载","接口返回值必须带版本号","测试必须在临时目录运行","发布前必须跑全部门禁"]
+mems=[]
+for i in range(600):
+    if i % 6 == 0:
+        c = zh[i % len(zh)] + "，编号" + str(i)
+    else:
+        c = f"{random.choice(nouns)} {random.choice(verbs)} {random.choice(nouns)} {random.choice(nouns)} #{i}: " + " ".join(random.sample(nouns, 6))
+    mems.append({'category': random.choice(['decision','fact','note','preference']), 'content': c,
+                 'importance': random.randint(1,5), 'topic': random.choice(nouns[:12]), 'tags':['seed']})
+t0=time.perf_counter(); r = upsert_batch(db, pid, None, mems, memory_dir=md)
+print("seed2:", {k:v for k,v in r.items() if k!='results'}, f"{time.perf_counter()-t0:.1f}s")
+print("active rows:", db.count_memories(pid) if hasattr(db,'count_memories') else '?')
+from core.plan import capture_exit_plan_mode
+try:
+    res = capture_exit_plan_mode(db, pid, "1. Add the vault client timeout flag\n2. Write the migration\n3. Run the gates\n4. Update README", md)
+    print("plan captured:", res)
+except Exception as e:
+    print("plan capture failed:", repr(e))
+```
+
+### drive2.py — 进程内驱动一个 hook：统计 sqlite3.connect 次数、打开+关闭耗时、进程内耗时、stdout 字节
+
+```python
+import sys, io, runpy, sqlite3, time
+hook, payload = sys.argv[1], open(sys.argv[2], encoding='utf-8').read()
+stats = {'n':0, 't_open':0.0, 't_close':0.0}
+class TimedConn(sqlite3.Connection):
+    def close(self):
+        t=time.perf_counter(); r=super().close(); stats['t_close']+=time.perf_counter()-t; return r
+orig = sqlite3.connect
+def counting(*a, **k):
+    k.setdefault('factory', TimedConn); t=time.perf_counter(); c = orig(*a, **k); stats['t_open']+=time.perf_counter()-t; stats['n']+=1; return c
+sqlite3.connect = counting
+sys.stdin = io.TextIOWrapper(io.BytesIO(payload.encode('utf-8')), encoding='utf-8')
+real_out = sys.stdout; buf = io.BytesIO(); sys.stdout = io.TextIOWrapper(buf, encoding='utf-8', write_through=True)
+t = time.perf_counter()
+try: runpy.run_path(hook, run_name='__main__')
+except SystemExit: pass
+dt = time.perf_counter() - t
+try: sys.stdout.flush()
+except Exception: pass
+out = buf.getvalue().decode('utf-8','replace'); sys.stdout = real_out
+print(f"{hook.split('/')[-1]:<18} connects={stats['n']:>3} open+close={1000*(stats['t_open']+stats['t_close']):6.1f}ms  in-process={1000*dt:6.1f}ms  stdout={len(out):>6} chars")
+if '--show' in sys.argv: print(out)
+```
+
+### 用法
+
+```bash
+# 载荷示例（session_start）：
+# {"session_id":"s1","transcript_path":"<sb>/home/.claude/projects/x/s1.jsonl","cwd":"<sb>/proj","hook_event_name":"SessionStart","source":"startup"}
+python3 seed2.py <sb>/proj
+for h in user_prompt:up session_start:ss post_tool_use:pt stop:st pre_compact:pc; do n=${h%%:*}; p=${h##*:}; python3 drive2.py cc_memory/hooks/$n.py <sb>/$p.json; done
+```
