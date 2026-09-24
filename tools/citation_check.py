@@ -356,7 +356,7 @@ def _resolve_path(root: Path, cited: str):
     """Resolve a cited path. Returns ``(path, note)``.
 
     A citation may be repo-relative or bare (`db.py`). A bare name matching
-    more than one file — this repo has both core/plan.py and cli/plan.py —
+    more than one file (this repo had both core/plan.py and cli/plan.py) —
     resolves to nothing: guessing which one a sentence meant is exactly the
     kind of invention this tool exists to replace. That is reported as SKIP,
     not FAIL: the citation may be perfectly correct.
@@ -487,7 +487,7 @@ def classify(root: Path):
                 target, note = _resolve_path(root, cited)
                 if target is None and note and "ambiguous" in note:
                     # Disambiguate by SYMBOL rather than giving up. This repo
-                    # has both cli/plan.py and core/plan.py, and 13 citations
+                    # had both cli/plan.py and core/plan.py, and 13 citations
                     # said only `plan.py`; the sentence around each names a
                     # symbol that exists in exactly one of them.
                     cands = [p for p in _tree_files(root, cited.split("/")[-1])

@@ -728,9 +728,7 @@ some Claude Code setups use for their own per-project notes. The full
 per-project file tree, with the writer of each file, is in
 [docs/ARCHITECTURE.md §7](docs/ARCHITECTURE.md#7-per-project-state-ccm); the
 12-table schema, with the definition site of each table, in
-[§4](docs/ARCHITECTURE.md#4-database-schema); and the `cc-memory-plan` task
-queue — a queue in the same database, distinct from the live plan anchor —
-in [§5](docs/ARCHITECTURE.md#the-plan-queue-cc-memory-plan).
+[§4](docs/ARCHITECTURE.md#4-database-schema).
 
 ### Hook table
 

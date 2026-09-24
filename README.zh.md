@@ -1,4 +1,4 @@
-<!-- i18n-source: README.md | sha256: e554d7863a9dbd5d | version: 2.15.2 | translated: 2026-09-24 | translation: 07599519ee282430 -->
+<!-- i18n-source: README.md | sha256: f47e929f2e0a7301 | version: 2.15.2 | translated: 2026-09-24 | translation: 89e54d7358b049b5 -->
 > [English](README.md) · **简体中文**
 
 <div align="center">
@@ -677,9 +677,7 @@ LF 换行——**不需要任何 `PYTHONUTF8` / `PYTHONIOENCODING` 环境变量*
 **你的项目目录**里——与 `~/.claude/projects/<slug>/memory/` 无关，后者是某些
 Claude Code 配置自己的按项目笔记。完整的每项目文件树（含每个文件由谁写入）见
 [docs/ARCHITECTURE.zh.md §7](docs/ARCHITECTURE.zh.md#7-按项目的状态ccm)；12 张表的
-schema（含每张表的定义位置）见 [§4](docs/ARCHITECTURE.zh.md#4-数据库-schema)；
-`cc-memory-plan` 任务队列——同一个数据库里的队列，与实时计划锚点是两回事——见
-[§5](docs/ARCHITECTURE.zh.md#计划队列cc-memory-plan)。
+schema（含每张表的定义位置）见 [§4](docs/ARCHITECTURE.zh.md#4-数据库-schema)。
 
 ### 钩子一览
 

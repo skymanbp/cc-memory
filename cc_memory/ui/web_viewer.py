@@ -1068,8 +1068,8 @@ def main():
     # The last unanchored --project. It defaults to "." and only READS, so the
     # symptom was the inverse of everywhere else: instead of planting a stray
     # it REFUSED a fully initialised project whenever it was started from a
-    # subdirectory, printing "no memory database" for a database mem.py,
-    # plan.py and the dashboard all serve from the same directory. Opt-out
+    # subdirectory, printing "no memory database" for a database mem.py
+    # and the dashboard both serve from the same directory. Opt-out
     # checked on the raw pick, before anchoring, so a per-subdirectory
     # exclusion is not widened to its parent.
     try:

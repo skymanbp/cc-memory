@@ -55,7 +55,7 @@ SUBPACKAGE_FILES = {
               "stop.py", "user_prompt.py"],
     "llm":   ["__init__.py", "ccl_backend.py", "memory_writer.py", "parse.py",
               "usage_judge.py"],
-    "cli":   ["__init__.py", "mem.py", "plan.py"],
+    "cli":   ["__init__.py", "mem.py"],
     "mcp":   ["__init__.py", "server.py"],
     "ui":    ["__init__.py", "dashboard.py", "installer.py", "web_viewer.py"],
 }

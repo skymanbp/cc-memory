@@ -423,22 +423,6 @@ def _break_snapguard(root):
            "                    (now, mid, MemoryDB.compute_content_hash(content))")
 
 
-@case("queueback", ["tests/smoke_test.py"],
-      "drop the approve/set-eval status predicate -> a DONE plan re-enters the queue")
-def _break_queueback(root):
-    _patch(root, f"{PKG}/cli/plan.py",
-           "    _require_plans(db, pid, [args.id], statuses=_APPROVABLE_STATUSES)",
-           "    _require_plans(db, pid, [args.id])  # BREAKAGE")
-
-
-@case("execflag", ["tests/smoke_test.py"],
-      "let a flag silently override the positional id -> the wrong plan runs")
-def _break_execflag(root):
-    _patch(root, f"{PKG}/cli/plan.py",
-           "    if args.id is not None and (args.next or args.all):",
-           "    if False:  # BREAKAGE")
-
-
 @case("sensitive", ["tests/smoke_test.py"],
       "substring-match sensitive commands -> a read-only grep demands a check")
 def _break_sensitive(root):
@@ -2428,7 +2412,7 @@ def _break_r14goalrepr(root):
 
 
 @case("r14cliboundary", ["tests/test_surfaces.py"],
-      "narrow both dispatch boundaries back to FileNotFoundError -> a non-SQLite or directory memory.db, a .ccm that is a file and a UTF-16 --raw-file each traceback again")
+      "narrow the dispatch boundary back to FileNotFoundError -> a non-SQLite or directory memory.db, a .ccm that is a file and a UTF-16 --raw-file each traceback again")
 def _break_r14cliboundary(root):
     _patch(root, f"{PKG}/cli/mem.py",
            "    except _BOUNDARY_ERRORS as exc:",
@@ -2438,9 +2422,6 @@ def _break_r14cliboundary(root):
            "            # why: OSError was the only class caught",
            "        except () as e:  # BREAKAGE: only OSError again\n"
            "            # why: OSError was the only class caught")
-    _patch(root, f"{PKG}/cli/plan.py",
-           "    except _BOUNDARY_ERRORS as exc:",
-           "    except () as exc:  # BREAKAGE: this CLI has no boundary again")
 
 
 @case("r14sqlremedy", ["tests/test_surfaces.py"],
@@ -2470,9 +2451,6 @@ def _break_r14rowid(root):
     _patch(root, f"{PKG}/cli/mem.py",
            "    par.add_argument(\"memory_ids\", type=_row_id, nargs=\"+\",",
            "    par.add_argument(\"memory_ids\", type=int, nargs=\"+\",")
-    _patch(root, f"{PKG}/cli/plan.py",
-           "    pa.add_argument(\"--start-order\", type=_plan_int, default=0,",
-           "    pa.add_argument(\"--start-order\", type=int, default=0,")
 
 
 @case("r14stdinbom", ["tests/test_surfaces.py"],
@@ -3318,6 +3296,16 @@ def _break_r16nominatecross(root):
     _patch(root, f"{PKG}/core/consolidate.py",
            '        return floor if a["category"] == b["category"] else cross_floor\n',
            '        return floor if a["category"] == b["category"] else 2.0  # BREAKAGE\n')
+
+
+@case("r16queuegone", ["tests/smoke_test.py"],
+      "ship a console script for the deleted plans CLI again -> `pip install` "
+      "writes a `cc-memory-plan` that cannot import its module (the v2.4.3 shape)")
+def _break_r16queuegone(root):
+    _patch(root, "pyproject.toml",
+           'cc-memory = "cc_memory.cli.mem:main"\n',
+           'cc-memory = "cc_memory.cli.mem:main"\n'
+           'cc-memory-plan = "cc_memory.cli.plan:main"  # BREAKAGE\n')
 
 
 def verify_anchors():

@@ -2805,6 +2805,43 @@ def main():
           "handles — hooks.json, the installer fallback and _make_hooks_config all "
           "spell core.modes.HOOK_TOOL_MATCHER, and it accepts exactly handled_tools()")
 
+    # === v2.16.0 (D1): the legacy plans QUEUE surface is gone, and stays gone
+    # `cli/plan.py` + the `cc-memory-plan` console script, the dashboard's
+    # Plans tab and nine MemoryDB methods over the `plans` table predated the
+    # v2.2 live plan anchor, shared nothing with it but a word, and no hook
+    # ever read them. The TABLE stays — an existing database keeps its rows
+    # and the 12-table schema count is unchanged; every reader and writer went.
+    assert not (_REPO / "cc_memory" / "cli" / "plan.py").exists(), \
+        "cc_memory/cli/plan.py is back (deleted in v2.16.0, D1)"
+    _d1_toml = (_REPO / "pyproject.toml").read_text(encoding="utf-8")
+    assert "cc-memory-plan" not in _d1_toml \
+        and 'cc-memory = "cc_memory.cli.mem:main"' in _d1_toml, \
+        "pyproject.toml ships a console script for the deleted plans CLI"
+    for _d1_name in ("add_plan", "get_plans", "get_active_plans",
+                     "update_plan_status", "get_next_plan", "clear_done_plans",
+                     "delete_plan", "update_plan_content", "reorder_plans"):
+        assert not hasattr(MemoryDB, _d1_name), \
+            f"MemoryDB.{_d1_name} is back (the plans queue was deleted in v2.16.0)"
+    _d1_dash = (_REPO / "cc_memory" / "ui" / "dashboard.py").read_text(encoding="utf-8")
+    for _d1_needle in ("_build_plans_tab", "_load_plans", "n_active_plans"):
+        assert _d1_needle not in _d1_dash, f"dashboard.py still carries {_d1_needle}"
+    assert "plan.py" not in _inst.SUBPACKAGE_FILES["cli"] \
+        and "plan.py" in _inst.SUBPACKAGE_FILES["core"], _inst.SUBPACKAGE_FILES
+    _d1_root = Path(tempfile.mkdtemp(prefix="cc-memory-d1-"))
+    (_d1_root / _MEM).mkdir(parents=True)
+    _d1_db = MemoryDB(_d1_root / _MEM / "memory.db")
+    _d1_pid = _d1_db.upsert_project(str(_d1_root))
+    assert "n_active_plans" not in _d1_db.get_stats(_d1_pid)
+    with _d1_db._connect() as _d1_conn:
+        assert _d1_conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='plans'"
+        ).fetchone(), "the plans TABLE must stay: an existing database keeps its rows"
+    del _d1_db
+    shutil.rmtree(_d1_root, ignore_errors=True)
+    print("[OK] v2.16.0 D1: the legacy plans queue is gone — no cli/plan.py, no "
+          "console script, no MemoryDB queue methods, no dashboard tab, no "
+          "n_active_plans — and the plans table stays")
+
     # === v2.5.0 (7): an unrefined raw plan wins over the stale structured one =
     # plan_active is a single slot holding BOTH forms. capture_exit_plan_mode
     # (the primary auto-capture path) and `/cc-mem plan-set --raw` stored a
@@ -4078,46 +4115,6 @@ def main():
           "refused replace raises with the previous COMPLETE file intact "
           "(v2.5.2 silently truncated it)")
 
-    # ── v2.5.3 · the plan mutators cannot be called unscoped ────────────────
-    # `plans.id` is global to the DB FILE, so an unscoped UPDATE/DELETE hits
-    # whatever row owns that id — including another project's. Through v2.5.2
-    # `project_id` merely DEFAULTED to None; README and CLAUDE.md both carried
-    # it as a known unfixed limit for two releases. All 11 call sites already
-    # passed it by keyword, so requiring it cost nothing.
-    _pm_root = Path(tempfile.mkdtemp(prefix="cc-memory-planscope-"))
-    (_pm_root / _MEM).mkdir(parents=True)
-    _pm_db = MemoryDB(_pm_root / _MEM / "memory.db")
-    _pm_a = _pm_db.upsert_project(str(_pm_root / "proj-a"))
-    _pm_b = _pm_db.upsert_project(str(_pm_root / "proj-b"))
-    _pm_id = _pm_db.add_plan(_pm_b, "b's plan content", exec_order=1)
-    for _pm_name, _pm_call in (
-            ("update_plan_status",
-             lambda: _pm_db.update_plan_status(_pm_id, "done")),
-            ("delete_plan", lambda: _pm_db.delete_plan(_pm_id)),
-            ("update_plan_content",
-             lambda: _pm_db.update_plan_content(_pm_id, "x"))):
-        try:
-            _pm_call()
-            raise AssertionError(
-                f"MemoryDB.{_pm_name} still accepts an UNSCOPED call; "
-                f"project_id must be required and keyword-only")
-        except TypeError:
-            # why: the TypeError IS the assertion — the signature now refuses
-            # a call that cannot name its project.
-            pass
-    # scoped to the WRONG project must match nothing, not cross over
-    assert _pm_db.update_plan_status(_pm_id, "done", project_id=_pm_a) == 0
-    assert _pm_db.update_plan_content(_pm_id, "hacked", project_id=_pm_a) == 0
-    assert _pm_db.delete_plan(_pm_id, project_id=_pm_a) == 0
-    _pm_rows = _pm_db.get_plans(_pm_b)
-    assert len(_pm_rows) == 1 and _pm_rows[0]["content"] == "b's plan content", \
-        f"a foreign-scoped call reached another project's plan: {_pm_rows}"
-    assert _pm_db.delete_plan(_pm_id, project_id=_pm_b) == 1
-    shutil.rmtree(_pm_root, ignore_errors=True)
-    print("[OK] v2.5.3 plan scoping: update_plan_status / delete_plan / "
-          "update_plan_content REFUSE an unscoped call (TypeError) and match "
-          "0 rows when scoped to the wrong project")
-
     # ── v2.8.0 · ONE similarity substrate, and it does not collapse on CJK ───
     # The whole anti-patch contract is a threshold test over these numbers, and
     # three modules each carried a private English-only `_trigram_set`. On CJK
@@ -5077,37 +5074,6 @@ def main():
         "_reserve_archive_ts already claimed the path with O_CREAT|O_EXCL "
         "and nothing rewrites it.")
     assert "write_atomic(archive_path" in _ar_src
-    # ── v2.8.0 r4 · the plan QUEUE state machine only moves forward ────────
-    _q_root = Path(tempfile.mkdtemp(prefix="cc-memory-queue-"))
-    (_q_root / _MEM).mkdir(parents=True)
-    _q_db = MemoryDB(_q_root / _MEM / "memory.db")
-    _q_pid = _q_db.upsert_project(str(_q_root))
-    _q_id = _q_db.add_plan(_q_pid, "a finished task", exec_order=1)
-    _q_db.update_plan_status(_q_id, "done", project_id=_q_pid)
-    _q_cli = _REPO / "cc_memory" / "cli" / "plan.py"
-    _q_env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
-    for _q_args in (["approve", str(_q_id)],
-                    ["set-eval", str(_q_id), "ready", "second thoughts"]):
-        _q_p = subprocess.run(
-            [sys.executable, str(_q_cli), "--project", str(_q_root), *_q_args],
-            capture_output=True, text=True, encoding="utf-8", timeout=60,
-            env=_q_env)
-        assert _q_db.get_plans(_q_pid)[0]["status"] == "done", (
-            f"`plan.py {' '.join(_q_args)}` walked a DONE plan back into the "
-            f"ready queue, where `exec --next` hands it to Claude to run "
-            f"again. `cmd_evaluate` has filtered on its own status predicate "
-            f"since the twin defect was fixed there; the explicit-id branches "
-            f"of approve/set-eval had NO predicate at all.")
-    _q_contra = subprocess.run(
-        [sys.executable, str(_q_cli), "--project", str(_q_root),
-         "exec", "--next", str(_q_id)],
-        capture_output=True, text=True, encoding="utf-8", timeout=60,
-        env=_q_env)
-    assert _q_contra.returncode != 0, (
-        "`exec --next <ID>` exited 0 and executed a DIFFERENT plan than the "
-        "one named — the id was never validated or even mentioned")
-    shutil.rmtree(_q_root, ignore_errors=True)
-
     # ── v2.8.0 r4 · the guardian nudge fires on ACTIONS, not on mentions ────
     for _s_cmd, _s_want in ((r'grep -rn "git push" docs/', False),
                             (r'echo "never run rm -rf /"', False),

@@ -267,7 +267,7 @@ def refusal_notice(project) -> str:
     asked: `is_excluded` appeared zero times in cli/mem.py, cli/plan.py and
     ui/dashboard.py, so every hand-run command read and wrote an opted-out
     project freely. "Any
-    tool" now means any tool, and it says so in one place so the three CLI
+    tool" now means any tool, and it says so in one place so the CLI
     surfaces cannot drift apart from the MCP text.
 
     Callers PRINT this and exit 0 — a standing user setting is not an error.
@@ -294,8 +294,9 @@ def refusal_notice(project) -> str:
 def cli_opt_out_notice(project):
     """Refusal text for a hand-run surface, or None when the project is in.
 
-    The ONE gate cli/mem.py, cli/plan.py and ui/dashboard.py share, because
-    three inline copies is how they drift. It differs from calling
+    The ONE gate cli/mem.py and ui/dashboard.py share (cli/plan.py did too,
+    until v2.16.0 deleted it), because inline copies is how they drift. It
+    differs from calling
     `is_excluded` directly in exactly one way, and that difference is the
     point: a BLANK `--project` is normalised to the current directory first.
 

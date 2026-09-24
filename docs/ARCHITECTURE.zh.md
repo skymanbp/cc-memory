@@ -1,4 +1,4 @@
-<!-- i18n-source: ARCHITECTURE.md | sha256: 3fef273c9b4593b7 | version: 2.15.2 | translated: 2026-09-24 | translation: 7e812018f4653d10 -->
+<!-- i18n-source: ARCHITECTURE.md | sha256: 394c3b710178ed03 | version: 2.15.2 | translated: 2026-09-24 | translation: da6f578123d39290 -->
 > [English](ARCHITECTURE.md) · **简体中文**
 
 # cc-memory — 架构
@@ -127,7 +127,7 @@ cc-memory/
 │   │                              stdin 解析 + 退出开关→锚定闸门，v2.10.0）
 │   ├── llm/                     ← ccl_backend（Haiku/Ollama）+ memory_writer
 │   │                              + parse（容错的 LLM-JSON 读取器）
-│   ├── cli/                     ← mem.py, plan.py
+│   ├── cli/                     ← mem.py
 │   ├── mcp/                     ← server.py（MCP stdio）
 │   └── ui/                      ← installer, dashboard, web_viewer
 ├── .github/workflows/           ← gates.yml（每次 push/PR 跑全部闸门）+
@@ -334,7 +334,7 @@ SQLite 表（定义在 [`cc_memory/core/db.py`](../cc_memory/core/db.py)），�
 | `memories` | 抽取出的事实（category、importance、topic、content_hash、**supersedes_id**、last_referenced_at）（`db.py:57`）。自 `v10_memories_recall_count` 起带有 `recall_count`——当 `core/recall.py` 因为一次真实的用户提问检索到该行时递增。它与 `last_referenced_at` 记录的是**两件事**：后者说的是「SessionStart 的重要度/新近度排序在还没有任何查询时选中了它」，前者说的是「确实有人问起过它」。这一对正是 `/cc-mem inject-usage` 分两条通道报告的东西——但它们都只是**送达**事实。Claude 是否真的**用**了送达的那一行，是对文本的判断，因此属于第 2 层（`--judge`，需显式开启，`llm/usage_judge.py`）：对该会话自己的回复做一次 LLM 调用，逐行给出 `used` / `unused` / `unknown`；判不了的一律记 `unknown`，绝不写成 `unused` |
 | `topics` | 按主题名的整理摘要（带版本）（`db.py:71`） |
 | `keywords` | 自动检测的项目词汇（`db.py:81`） |
-| `plans` | 计划队列（draft → ready → done）（`db.py:90`） |
+| `plans` | 旧版 v2.0 任务队列的表（`db.py:90`）——保留是为了让已有数据库留住它的行；所有读写它的代码都在 v2.16.0 删掉了（见 §5） |
 | `observations` | 原始 PostToolUse 事件，抽取后清理（`db.py:131`） |
 | `session_summaries` | 每会话 6 字段结构化摘要（request / investigated / learned / completed / next_steps / notes）+ files_read/files_modified（`db.py:144`） |
 | **`progress`** | v2.1 新增——每项目一行。`.ccm/PROGRESS.md` 的唯一真相来源（`db.py:188`）。 |
@@ -441,7 +441,7 @@ regenerate_memory_index(db, project_id, memory_dir)   ← MEMORY.md 刷新
   `session_start.py:1394`）；同步 PreCompact 支路不传（`pre_compact.py:729`），
   而是在其余状态变更之后自己渲染一次（`pre_compact.py:856`）。
 - 单发调用方显式调用 `regenerate_memory_index`：`cli/mem.py:1244` 与 `:584`、
-  `mcp/server.py:647`、`ui/dashboard.py:1716`、`ui/web_viewer.py:1035`，外加
+  `mcp/server.py:647`、`ui/dashboard.py:1738`、`ui/web_viewer.py:1035`，外加
   `skills/ccm-load` 的内联脚本（`skills/ccm-load/SKILL.md:290, 307`）。
   `core/idle.py:96` 与 `hooks/consolidate_async.py:276` 也会在维护之后刷新它。
 
@@ -613,33 +613,12 @@ PENDING REFINEMENT 横幅加逐字原文开头，并把更旧的结构化计划�
 那段逐字块的围栏宽度会超过原始文本里最长的一串反引号，因为计划模式的输出里经常
 带有代码围栏。
 
-### 计划队列（`cc-memory-plan`）
+### 计划队列（v2.16.0 已删除）
 
-同一个数据库里的任务队列（`plans` 表），与上面的实时计划**锚点**是两回事：锚点是
-会话正在执行的那一个计划，队列是一串草稿的积压，沿
-`draft → evaluating → ready → executing → done | failed | skipped` 流转。
-
-```bash
-P="cc-memory-plan --project ."       # 或 python .../cli/plan.py --project .
-
-$P add "任务 A" "任务 B" "任务 C"     # 追加草稿
-$P list                              # 查看队列
-$P reorder <id> <position>           # 调整顺序
-$P evaluate                          # draft → evaluating
-$P set-eval <id> "<结论>"            # 记录可行性结论
-$P approve --all                     # evaluating → ready
-$P exec --next                       # ready → executing，并打印计划正文
-$P done <id> "<结果>"                # → done
-$P fail <id> "<原因>"                # → failed
-$P skip <id> "<原因>"                # → skipped
-$P status                            # 队列摘要
-$P clear                             # 清掉 done/failed/skipped
-```
-
-`exec` **不会**启动任何东西——它只是翻转状态，打印计划正文以及事后该跑的 `done`
-命令。每个带 id 的子命令都先在 `--project` 内解析该 id，遇到未知或属于别的项目
-的 id 就以 1 退出——`plans.id` 对整个数据库文件是全局的，这也是 `core/db.py`
-里的计划变更器只接受仅限关键字的 `project_id` 的原因（`CLAUDE.md` § v2.5.3）。
+旧版 v2.0 的任务队列——`cc-memory-plan` 控制台脚本（`cli/plan.py`）、仪表盘的
+*Plans* 页、以及 `MemoryDB` 上操作 `plans` 表的九个方法——在 v2.16.0 删掉了（D1）。
+它比上面的实时计划**锚点**更早出现，与锚点只是共用一个词，没有任何钩子读过它。
+`plans` 表本身保留，好让已有数据库留住它的行；此后没有任何代码再读写它。
 
 ---
 
@@ -929,7 +908,6 @@ home 边界是双份的：环境所声称的（`HOME`/`USERPROFILE`/`Path.home()
 |---|---|---|
 | 六个 hook<!--ce:hooks--> | 会（`user_prompt`、`pre_compact`） | `core.logger`，仅限低频 hook |
 | `cli/mem.py` | 不会——报 "no memory database at X" | `print` |
-| `cli/plan.py` | 仅写入类子命令（v2.8.0 起） | `print` |
 | `mcp/server.py` | 会，唯一面向模型的写入面 | `_log`——**绝不** `print` |
 | `ui/dashboard.py` | 会，经 `_load_project` | UI 对话框 |
 | `ui/installer.py` | 会，*Initialize Project* | 安装日志 |
@@ -949,11 +927,6 @@ home 边界是双份的：环境所声称的（`HOME`/`USERPROFILE`/`Path.home()
 自己那个未解析的写法（这正是符号链接项目目录仍能工作的原因），所以单边比较对相对路径永远
 不可能相等：`--project .`——恰恰是 `/cc-mem` 包装器传的那个——在**每一次调用**都打印
 `. is inside a project rooted at .`。
-
-`cli/plan.py` 另外还停止了让只读命令凭空造库。`MemoryDB.__init__` 会 mkdir 并创建，所以
-`list` 和 `status` 此前仅仅因为你问了一句队列里有什么，就造出一个 140 KB 的空库——而且
-**不写** `.ccm/.gitignore`，正是这一处遗漏让野生库混进了版本库。`cli/mem.py` 一直是报错
-退出的；同一对 CLI 的两半不该在这件事上互相矛盾。
 
 因此，已存在的野生库会被原地留下——并且被**报告**出来，不至于隐形：`nested_databases`
 （`core/roots.py:797-862`）支撑着 `cc-mem status` 里的
@@ -1052,7 +1025,7 @@ MCP 服务器遵循同样的分岔。在市场类布局下，`.claude-plugin/plu
 ├── hooks/   _entry.py consolidate_async.py post_tool_use.py pre_compact.py
 │            session_start.py stop.py user_prompt.py
 ├── llm/     ccl_backend.py memory_writer.py parse.py usage_judge.py
-├── cli/     mem.py plan.py
+├── cli/     mem.py
 ├── mcp/     server.py
 ├── ui/      dashboard.py installer.py web_viewer.py
 └── logs/    ← core.logger 的输出目标

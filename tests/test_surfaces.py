@@ -2471,7 +2471,7 @@ def _roots_every_hook_resolves():
     plant), so the ladder now lives in hooks/_entry.py and this rule asserts
     (1) the ORDER once, inside the gate itself, and (2) that no hook bypasses
     the gate with a direct import — the same shape `_cli_opt_out_gate`
-    asserts for the three CLI surfaces via `cli_opt_out_notice`.
+    asserts for the CLI surfaces via `cli_opt_out_notice`.
     """
     entry = (REPO / "cc_memory" / "hooks" / "_entry.py").read_text(
         encoding="utf-8")
@@ -2514,8 +2514,6 @@ def _every_creator_refuses_in_practice(pkg, victim):
     cmds = {
         "cli/mem.py": [str(pkg / "cli" / "mem.py"), "--project", str(victim),
                        "add", "note", "must never land"],
-        "cli/plan.py": [str(pkg / "cli" / "plan.py"), "--project", str(victim),
-                        "add", "must never land"],
         "ui/installer.py": ["-c", f"import runpy,sys; sys.argv=['installer.py'];"
                             f"m=runpy.run_path(r'{pkg / 'ui' / 'installer.py'}',"
                             f"run_name='_probe');"
@@ -2553,7 +2551,6 @@ def _every_creator_asks_the_opt_out():
     creators = {
         "cc_memory/ui/dashboard.py": ("_ensure_memory_dir", "MemoryDB("),
         "cc_memory/ui/installer.py": ("memory_dir.mkdir",),
-        "cc_memory/cli/plan.py": ("MemoryDB(",),
         "cc_memory/cli/mem.py": ("MemoryDB(",),
         "skills/ccm-load/SKILL.md": ("mem_dir.mkdir",),
         "skills/save-memories/SKILL.md": ("MemoryDB(",),
@@ -2858,10 +2855,10 @@ def _cli_opt_out_gate():
     HOOK's match to the interpreter's cwd), while `anchor_project("")` turns
     the same "" into the real project root. So `--project ""` was a fully
     working spelling that skipped the privacy check: measured, `plan.py
-    --project "" add` wrote a row into an opted-out project's database while
-    `--project .` was refused one command earlier. Drives the real CLIs as
-    subprocesses against a COPY of the package, so the repo's own config.json
-    is never touched.
+    --project "" add` (the plans CLI, deleted in v2.16.0) wrote a row into an
+    opted-out project's database while `--project .` was refused one command
+    earlier. Drives the real CLI as a subprocess against a COPY of the
+    package, so the repo's own config.json is never touched.
     """
     pkg = Path(tempfile.mkdtemp(prefix="ccm-optout-pkg-")) / "cc_memory"
     shutil.copytree(REPO / "cc_memory", pkg,
@@ -2870,24 +2867,24 @@ def _cli_opt_out_gate():
     victim = Path(tempfile.mkdtemp(prefix="ccm-optout-victim-"))
     _write_pkg_config(pkg, {"excluded_projects": [str(victim)]})
 
-    def plan(*argv):
-        return subprocess.run([sys.executable, str(pkg / "cli" / "plan.py"),
+    def mem(*argv):
+        return subprocess.run([sys.executable, str(pkg / "cli" / "mem.py"),
                                *argv], cwd=str(victim), capture_output=True,
                               text=True, encoding="utf-8", timeout=60).stdout
 
     spellings = (".", "", "   ", "./", str(victim))
     for spelling in spellings:
-        out = plan("--project", spelling, "add", "must never land")
+        out = mem("--project", spelling, "add", "note", "must never land")
         assert "opted out" in out, \
-            (f"plan.py --project {spelling!r} was NOT refused for an opted-out "
+            (f"mem.py --project {spelling!r} was NOT refused for an opted-out "
              f"project — the privacy opt-out promises 'neither readable nor "
              f"writable through any cc-memory tool'. Output: {out[:200]!r}")
     assert not (victim / _MEM / "memory.db").exists(), \
         (f"a refused command still created {victim / 'memory' / 'memory.db'}")
 
-    # ...and the three surfaces must all route through the ONE shared gate;
-    # three inline `is_excluded(args.project)` copies is how this drifted.
-    for rel in ("cli/mem.py", "cli/plan.py", "ui/dashboard.py"):
+    # ...and both surfaces must route through the ONE shared gate; inline
+    # `is_excluded(args.project)` copies is how this drifted.
+    for rel in ("cli/mem.py", "ui/dashboard.py"):
         src = (REPO / "cc_memory" / rel).read_text(encoding="utf-8")
         assert "cli_opt_out_notice" in src, \
             f"{rel} does not use the shared opt-out gate"
@@ -3242,7 +3239,7 @@ def test_project_root_anchoring():
     n_spell = _cli_opt_out_gate()
     print(f"[OK] CLI opt-out gate: {n_spell} --project spellings (including "
           f"the blank ones) refused for a listed project on the real CLI, no "
-          f"database created, and all 3 surfaces route through one gate")
+          f"database created, and both surfaces route through one gate")
     n_announce = _roots_anchor_announce()
     print(f"[OK] anchor_project announce: {n_announce} cases (a redirection "
           f"is announced exactly when one occurred, never for '.', an "
@@ -4860,15 +4857,16 @@ def _cli_boundaries_catch_the_class(pkg):
     (`sqlite3.OperationalError` / `DatabaseError`), a `.ccm` that is a regular
     file (`FileExistsError`), a UTF-16 `--raw-file` (`UnicodeDecodeError` —
     Notepad's default on the primary platform), and any id past 2**63
-    (`OverflowError`). `cli/plan.py` had no boundary at all, while its own
-    `_get_db` docstring cited mem.py for printing one clean line instead.
+    (`OverflowError`). `cli/plan.py` (the plans CLI, deleted in v2.16.0) had
+    no boundary at all, while its own `_get_db` docstring cited mem.py for
+    printing one clean line instead.
 
     Asserted per shape: no traceback, a non-zero exit, and an actionable
     line — a boundary that prints `Error: <repr>` and exits 1 passes a
     "no traceback" test while telling the user nothing they can act on.
     """
     box = Path(tempfile.mkdtemp(prefix="ccm-d5-"))
-    mem_py, plan_py = pkg / "cli" / "mem.py", pkg / "cli" / "plan.py"
+    mem_py = pkg / "cli" / "mem.py"
     checks = 0
 
     live = box / "live"
@@ -4901,10 +4899,6 @@ def _cli_boundaries_catch_the_class(pkg):
          "regular file"),
         (mem_py, live, ["plan-set", "--raw-file", str(utf16)], "UTF-8"),
         (mem_py, live, ["plan-set", "--raw-file", str(gbk)], "UTF-8"),
-        (plan_py, not_sqlite, ["list"], "SQLite"),
-        (plan_py, not_sqlite, ["add", "a plan"], "SQLite"),
-        (plan_py, db_is_dir, ["add", "a plan"], "writable"),
-        (plan_py, db_is_dir, ["status"], "writable"),
     ]
     for cli, proj, argv, remedy in shapes:
         r = subprocess.run(
@@ -4928,8 +4922,7 @@ def _cli_boundaries_catch_the_class(pkg):
                       (mem_py, ["archive", HUGE]),
                       (mem_py, ["archive", "1", "--supersedes", HUGE]),
                       (mem_py, ["list", "--sessions", HUGE]),
-                      (mem_py, ["directive-add", "d", "--times", HUGE]),
-                      (plan_py, ["add", "x", "--start-order", HUGE])):
+                      (mem_py, ["directive-add", "d", "--times", HUGE])):
         r = subprocess.run(
             [sys.executable, str(cli), "--project", str(live)] + argv,
             capture_output=True, encoding="utf-8",

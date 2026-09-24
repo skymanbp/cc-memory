@@ -55,7 +55,7 @@ def _get_surface_root():
 BUNDLE_DIR = _get_bundle_root()
 
 # Prime sys.path HERE, at module scope, the way every other surface does
-# (`cli/mem.py:25`, `cli/plan.py:32`, `ui/dashboard.py:40`, `ui/web_viewer.py:59`,
+# (`cli/mem.py:25`, `ui/dashboard.py:40`, `ui/web_viewer.py:59`,
 # `mcp/server.py:92`). This file was the only one that primed it inside a
 # function — `_init_project` did it 34 lines AFTER its own opt-out and
 # anchoring guards, so on the first Initialize Project click of a process both
@@ -86,7 +86,7 @@ SUBPACKAGE_FILES = {
               "stop.py", "user_prompt.py"],
     "llm":   ["__init__.py", "ccl_backend.py", "memory_writer.py", "parse.py",
               "usage_judge.py"],
-    "cli":   ["__init__.py", "mem.py", "plan.py"],
+    "cli":   ["__init__.py", "mem.py"],
     "mcp":   ["__init__.py", "server.py"],
     "ui":    ["__init__.py", "dashboard.py", "installer.py", "web_viewer.py"],
 }

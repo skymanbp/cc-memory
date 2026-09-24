@@ -142,7 +142,7 @@ cc-memory/
 │   │                              opt-out→anchor gate, v2.10.0)
 │   ├── llm/                     ← ccl_backend (Haiku/Ollama) + memory_writer
 │   │                              + parse (tolerant LLM-JSON reader)
-│   ├── cli/                     ← mem.py, plan.py
+│   ├── cli/                     ← mem.py
 │   ├── mcp/                     ← server.py (MCP stdio)
 │   └── ui/                      ← installer, dashboard, web_viewer
 ├── .github/workflows/           ← gates.yml (every gate, on push/PR) +
@@ -374,7 +374,7 @@ project-local at `<project>/.ccm/memory.db`, WAL mode:
 | `memories` | Extracted facts (category, importance, topic, content_hash, **supersedes_id**, last_referenced_at) (`db.py:57`). Carries `recall_count` since `v10_memories_recall_count` — incremented when `core/recall.py` retrieves the row for a real user question, which is a different fact from `last_referenced_at`: that one records that SessionStart's importance/recency ranking chose the row with no query in existence, this one records that somebody asked. The pair is what `/cc-mem inject-usage` reports as two channels — both of them DELIVERY facts. Whether Claude USED a delivered row is a judgement about text, so it is layer 2 (`--judge`, opt-in, `llm/usage_judge.py`): one LLM call over that session's own replies, answering `used` / `unused` / `unknown` per row, where `unknown` covers every case in which the judge could not run and is never printed as `unused` |
 | `topics` | Consolidated summaries per topic name (versioned) (`db.py:71`) |
 | `keywords` | Auto-detected project vocabulary (`db.py:81`) |
-| `plans` | Plan queue (draft → ready → done) (`db.py:90`) |
+| `plans` | The legacy v2.0 task queue's table (`db.py:90`) — kept so an existing database keeps its rows; every reader and writer was deleted in v2.16.0 (§5) |
 | `observations` | Raw PostToolUse events, cleaned up after extraction (`db.py:131`) |
 | `session_summaries` | 6-field structured summary per session (request / investigated / learned / completed / next_steps / notes) + files_read/files_modified (`db.py:144`) |
 | **`progress`** | NEW in v2.1 — single row per project. SOT for `.ccm/PROGRESS.md` (`db.py:188`). |
@@ -489,7 +489,7 @@ caller's responsibility, and there are exactly two shapes:
   once itself, after the rest of its state changes (`pre_compact.py:729`,
   `pre_compact.py:856`).
 - Single-shot callers call `regenerate_memory_index` explicitly:
-  `cli/mem.py:1244` and `:584`, `mcp/server.py:647`, `ui/dashboard.py:1716`,
+  `cli/mem.py:1244` and `:584`, `mcp/server.py:647`, `ui/dashboard.py:1738`,
   `ui/web_viewer.py:1034`, plus the `skills/ccm-load` inline script
   (`skills/ccm-load/SKILL.md:290, 307`). `core/idle.py:96` and
   `hooks/consolidate_async.py:276` also refresh it after maintenance.
@@ -685,35 +685,14 @@ banner plus the verbatim raw text, labelling any older structured plan as
 superseded. The verbatim block's fence widens past the longest backtick run in
 the raw text, because plan-mode output routinely contains code fences.
 
-### The plan queue (`cc-memory-plan`)
+### The plan queue (deleted in v2.16.0)
 
-A task queue in the same database (the `plans` table), distinct from the
-live plan **anchor** above: the anchor is the one plan the session is
-executing, the queue is a backlog of drafts moving through
-`draft → evaluating → ready → executing → done | failed | skipped`.
-
-```bash
-P="cc-memory-plan --project ."       # or python .../cli/plan.py --project .
-
-$P add "Task A" "Task B" "Task C"    # append drafts
-$P list                              # show the queue
-$P reorder <id> <position>           # move a task
-$P evaluate                          # draft → evaluating
-$P set-eval <id> "<verdict>"         # record a feasibility verdict
-$P approve --all                     # evaluating → ready
-$P exec --next                       # ready → executing, print the plan text
-$P done <id> "<result>"              # → done
-$P fail <id> "<why>"                 # → failed
-$P skip <id> "<why>"                 # → skipped
-$P status                            # queue summary
-$P clear                             # drop done/failed/skipped
-```
-
-`exec` spawns nothing — it flips status and prints the plan text plus the
-`done` command to run afterwards. Every subcommand that names an id resolves
-it within `--project` first and exits 1 on an unknown or foreign id —
-`plans.id` is global to the database file, which is why the plan mutators in
-`core/db.py` take a keyword-only `project_id` (`CLAUDE.md` § v2.5.3).
+The legacy v2.0 task queue — the `cc-memory-plan` console script
+(`cli/plan.py`), the dashboard's *Plans* tab and nine `MemoryDB` methods over
+the `plans` table — was deleted in v2.16.0 (D1). It predated the live plan
+**anchor** above, shared nothing with it but a word, and no hook ever read it.
+The `plans` table itself stays, so an existing database keeps its rows;
+nothing reads or writes it any more.
 
 ---
 
@@ -1076,7 +1055,6 @@ anchoring. They now share one implementation, `anchor_project`
 |---|---|---|
 | six hooks <!--ce:hooks--> | yes (`user_prompt`, `pre_compact`) | `core.logger`, rare hooks only |
 | `cli/mem.py` | no — reports "no memory database at X" | `print` |
-| `cli/plan.py` | writing subcommands only (v2.8.0) | `print` |
 | `mcp/server.py` | yes, the one model-facing write path | `_log` — **never** `print` |
 | `ui/dashboard.py` | yes, via `_load_project` | UI dialog |
 | `ui/installer.py` | yes, *Initialize Project* | install log |
@@ -1102,13 +1080,6 @@ caller's own unresolved spelling whenever the answer is the input itself
 comparison could never match a relative path: `--project .` — exactly what the
 `/cc-mem` wrapper passes — announced `. is inside a project rooted at .` on
 every single call.
-
-`cli/plan.py` additionally stopped conjuring databases from read-only
-commands. `MemoryDB.__init__` mkdirs and creates, so `list` and `status` used
-to fabricate a 140 KB empty database — *without* `.ccm/.gitignore`, the one
-omission that let a stray ride into version control — merely for asking what
-was in the queue. `cli/mem.py` had always refused instead; two halves of one
-CLI pair must not disagree about that.
 
 A pre-existing stray is therefore left exactly where it is — and *reported*,
 so it is not invisible: `nested_databases` (`core/roots.py:797-862`) backs a
@@ -1222,7 +1193,7 @@ segment**, and `_make_hooks_config` (`installer.py:759-782`) builds commands as
 ├── hooks/   _entry.py consolidate_async.py post_tool_use.py pre_compact.py
 │            session_start.py stop.py user_prompt.py
 ├── llm/     ccl_backend.py memory_writer.py parse.py usage_judge.py
-├── cli/     mem.py plan.py
+├── cli/     mem.py
 ├── mcp/     server.py
 ├── ui/      dashboard.py installer.py web_viewer.py
 └── logs/    ← core.logger output target

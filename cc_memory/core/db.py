@@ -3742,157 +3742,6 @@ class MemoryDB:
             ).fetchall()
             return [r["keyword"] for r in rows]
 
-    # ── plans ────────────────────────────────────────────────────────────────
-
-    def add_plan(self, project_id, content, exec_order=0):
-        now = self._now()
-        with self._connect() as conn:
-            if exec_order <= 0:
-                row = conn.execute(
-                    "SELECT COALESCE(MAX(exec_order), 0) + 1 AS next_order "
-                    "FROM plans WHERE project_id = ? "
-                    "AND status NOT IN ('done', 'failed', 'skipped')",
-                    (project_id,)
-                ).fetchone()
-                exec_order = row["next_order"]
-            cur = conn.execute(
-                """INSERT INTO plans
-                   (project_id, content, exec_order, status, created_at, updated_at)
-                   VALUES (?, ?, ?, 'draft', ?, ?)""",
-                (project_id, content, exec_order, now, now)
-            )
-            return cur.lastrowid
-
-    def get_plans(self, project_id, statuses=None):
-        with self._connect() as conn:
-            if statuses:
-                ph = ",".join("?" * len(statuses))
-                rows = conn.execute(
-                    f"SELECT * FROM plans WHERE project_id = ? "
-                    f"AND status IN ({ph}) ORDER BY exec_order",
-                    [project_id] + statuses
-                ).fetchall()
-            else:
-                rows = conn.execute(
-                    "SELECT * FROM plans WHERE project_id = ? ORDER BY exec_order",
-                    (project_id,)
-                ).fetchall()
-            return [dict(r) for r in rows]
-
-    def get_active_plans(self, project_id):
-        return self.get_plans(project_id,
-                              statuses=["draft", "evaluating", "ready", "executing"])
-
-    def update_plan_status(self, plan_id, status, notes=None,
-                           field="feasibility", *, project_id):
-        """Set a plan's status (and optionally one notes column).
-
-        Returns cur.rowcount: 0 means the UPDATE matched nothing. Callers MUST
-        surface that — `cli/plan.py done 9999 ghost` used to print
-        "Plan #9999 -> done: ghost" and exit 0 because this method discarded
-        the rowcount.
-
-        `project_id` is REQUIRED and KEYWORD-ONLY as of v2.5.3. `plans.id` is
-        global to the DB FILE, not to a project, and one memory.db can hold
-        several project rows (a directory rename creates a second one, and
-        the dashboard opens arbitrary databases via its projects.json
-        registry), so an unscoped call rewrites whatever row owns that
-        id — including another project's status and result columns. Through
-        v2.5.2 it merely *defaulted* to None "so the pre-v2.5 signature stays
-        callable", which meant the cross-project write stayed one forgotten
-        argument away and no test could catch it; README and CLAUDE.md both
-        recorded that as a known unfixed limit for two releases. Every one of
-        the 11 call sites in the tree already passed it as a keyword, so making
-        it mandatory cost nothing and closed the hole: a caller that does not
-        know its project now fails loudly at the call, not silently in another
-        project's data.
-
-        `field` names a column and so cannot be a bound parameter; it is
-        whitelisted rather than interpolated blind. `project_id` is a bound
-        parameter.
-        """
-        if field not in ("feasibility", "result"):
-            field = "feasibility"
-        now = self._now()
-        with self._connect() as conn:
-            if notes is not None:
-                cur = conn.execute(
-                    f"UPDATE plans SET status = ?, {field} = ?, updated_at = ? "
-                    f"WHERE id = ? AND project_id = ?",
-                    [status, notes, now, plan_id, project_id]
-                )
-            else:
-                cur = conn.execute(
-                    "UPDATE plans SET status = ?, updated_at = ? "
-                    "WHERE id = ? AND project_id = ?",
-                    [status, now, plan_id, project_id]
-                )
-            return cur.rowcount
-
-    def get_next_plan(self, project_id):
-        with self._connect() as conn:
-            row = conn.execute(
-                "SELECT * FROM plans WHERE project_id = ? AND status = 'ready' "
-                "ORDER BY exec_order LIMIT 1",
-                (project_id,)
-            ).fetchone()
-            return dict(row) if row else None
-
-    def clear_done_plans(self, project_id):
-        with self._connect() as conn:
-            cur = conn.execute(
-                "DELETE FROM plans WHERE project_id = ? "
-                "AND status IN ('done', 'failed', 'skipped')",
-                (project_id,)
-            )
-            return cur.rowcount
-
-    def delete_plan(self, plan_id, *, project_id):
-        """Delete one plan row. Returns cur.rowcount (0 = matched nothing).
-
-        `project_id` is REQUIRED and KEYWORD-ONLY (v2.5.3), for the same reason
-        as `update_plan_status`: `plans.id` is global to the DB FILE, not to a
-        project, and one memory.db can hold several project rows (renames;
-        the dashboard's projects.json registry). Unscoped, a stale or
-        typo'd id deletes whatever row owns it — including another project's.
-        This is a DELETE, so that loss is unrecoverable.
-        """
-        with self._connect() as conn:
-            return conn.execute(
-                "DELETE FROM plans WHERE id = ? AND project_id = ?",
-                [plan_id, project_id]).rowcount
-
-    def update_plan_content(self, plan_id, content, *, project_id):
-        """Rewrite one plan's content. Returns cur.rowcount (0 = no match).
-
-        `project_id` is REQUIRED and KEYWORD-ONLY (v2.5.3) — see `delete_plan`.
-        """
-        with self._connect() as conn:
-            return conn.execute(
-                "UPDATE plans SET content = ?, updated_at = ? "
-                "WHERE id = ? AND project_id = ?",
-                [content, self._now(), plan_id, project_id]).rowcount
-
-    def reorder_plans(self, project_id, plan_ids):
-        """Renumber exec_order to match the given id sequence.
-
-        Returns the number of rows actually updated. Callers compare it against
-        len(plan_ids) to detect ids that do not belong to this project —
-        `cli/plan.py reorder 9999 8888` used to print "Reordered Plans" and
-        exit 0 while changing nothing, because this method discarded rowcount.
-        """
-        now = self._now()
-        updated = 0
-        with self._connect() as conn:
-            for order, pid in enumerate(plan_ids, 1):
-                cur = conn.execute(
-                    "UPDATE plans SET exec_order = ?, updated_at = ? "
-                    "WHERE id = ? AND project_id = ?",
-                    (order, now, pid, project_id)
-                )
-                updated += cur.rowcount
-        return updated
-
     # ── analytics / stats ────────────────────────────────────────────────────
 
     def get_stats(self, project_id):
@@ -3916,11 +3765,6 @@ class MemoryDB:
                 "ORDER BY id DESC LIMIT 1",
                 (project_id,)
             ).fetchone()
-            n_plans = conn.execute(
-                "SELECT COUNT(*) FROM plans WHERE project_id = ? "
-                "AND status NOT IN ('done', 'failed', 'skipped')",
-                (project_id,)
-            ).fetchone()[0]
             n_topics = conn.execute(
                 "SELECT COUNT(*) FROM topics WHERE project_id = ?",
                 (project_id,)
@@ -3928,7 +3772,6 @@ class MemoryDB:
             return {
                 "n_sessions":     n_sessions,
                 "n_memories":     n_memories,
-                "n_active_plans": n_plans,
                 "n_topics":       n_topics,
                 "by_category":    [dict(r) for r in by_cat],
                 "last_session":   last_session[0] if last_session else None,

@@ -1478,12 +1478,14 @@ project registry is backed up before being overwritten, launching with no
 `--project` opens nothing, and a new read-only **Progress / Plan** tab renders
 the `progress` + `plan_active` rows (7 tabs now). `.claude-plugin/plugin.json`
 ships an inline `mcpServers` entry. `cc-memory-plan` (the console script) could
-not be imported at all — `cli/plan.py` now has a `main()`.
+not be imported at all — `cli/plan.py` now has a `main()`. (The whole plans-queue
+surface — that file, the dashboard's Plans tab and the nine `MemoryDB` queue
+methods — was deleted in v2.16.0, D1; the `plans` table stays.)
 
 **Residual limits, recorded rather than papered over:**
 
-- `core/db.py`'s three plan mutators — `update_plan_status` (`db.py:3769-3813`),
-  `delete_plan` (`:1410`) and `update_plan_content` (`:1427`) — all accept
+- `core/db.py`'s three plan mutators — `update_plan_status`, `delete_plan` and
+  `update_plan_content` (all deleted with the queue in v2.16.0, D1) — all accept
   `project_id`, and `cli/plan.py` + `ui/dashboard.py` pass it at every call
   site, but none of them *requires* it (it defaults to `None`). An unscoped raw
   call from new code would therefore still cross projects, because `plans.id` is
@@ -1751,7 +1753,7 @@ cc-memory/
 │   ├── llm/                     ccl_backend, memory_writer, parse,
 │   │                            usage_judge (layer 2 of the injection-usage
 │   │                            measurement, v2.15.0 — opt-in, LLM-judged)
-│   ├── cli/                     mem, plan
+│   ├── cli/                     mem
 │   ├── mcp/                     server
 │   └── ui/                      installer, dashboard, web_viewer
 ├── tests/

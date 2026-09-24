@@ -7,7 +7,6 @@ Tkinter-based GUI for browsing, searching, and managing cc-memory databases.
 Features:
   - Project selector (auto-discovers projects with memory.db)
   - Memory browser: filter by category, importance, search
-  - Plan manager: add/approve/execute/clear plans
   - Session history viewer
   - Keyword vocabulary
   - Stats overview
@@ -217,7 +216,6 @@ class DashboardApp:
 
         self._build_memories_tab()
         self._build_progress_tab()
-        self._build_plans_tab()
         self._build_sessions_tab()
         self._build_keywords_tab()
         self._build_sql_tab()
@@ -341,63 +339,6 @@ class DashboardApp:
         self.mem_tree.pack(fill=tk.BOTH, expand=True, side=tk.LEFT)
         scroll.pack(fill=tk.Y, side=tk.RIGHT)
 
-    def _build_plans_tab(self):
-        frame = ttk.Frame(self.notebook)
-        self.notebook.add(frame, text="Plans")
-
-        # Toolbar row 1: lifecycle actions
-        tb1 = ttk.Frame(frame, padding=(5, 5, 5, 0))
-        tb1.pack(fill=tk.X)
-        ttk.Button(tb1, text="Add Plan", command=self._add_plan_dialog).pack(side=tk.LEFT)
-        ttk.Separator(tb1, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=6)
-        ttk.Button(tb1, text="Approve", command=self._approve_plans).pack(side=tk.LEFT)
-        ttk.Button(tb1, text="Approve All", command=self._approve_all_plans).pack(side=tk.LEFT, padx=3)
-        ttk.Separator(tb1, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=6)
-        ttk.Button(tb1, text="Execute", command=self._execute_plans).pack(side=tk.LEFT)
-        ttk.Button(tb1, text="Mark Done", command=self._mark_plan_done).pack(side=tk.LEFT, padx=3)
-        ttk.Button(tb1, text="Mark Failed", command=self._mark_plan_failed).pack(side=tk.LEFT)
-        ttk.Separator(tb1, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=6)
-        ttk.Button(tb1, text="Edit", command=self._edit_plan_dialog).pack(side=tk.LEFT)
-        ttk.Button(tb1, text="Delete", command=self._delete_plans).pack(side=tk.LEFT, padx=3)
-        ttk.Button(tb1, text="Clear Done", command=self._clear_done_plans).pack(side=tk.LEFT, padx=3)
-        ttk.Button(tb1, text="Refresh", command=self._load_plans).pack(side=tk.RIGHT)
-
-        # Treeview
-        cols = ("id", "order", "status", "content", "result")
-        self.plan_tree = ttk.Treeview(frame, columns=cols, show="headings", height=15,
-                                       selectmode="extended")
-        self.plan_tree.heading("id", text="ID")
-        self.plan_tree.heading("order", text="Order")
-        self.plan_tree.heading("status", text="Status")
-        self.plan_tree.heading("content", text="Content")
-        self.plan_tree.heading("result", text="Eval / Result")
-        self.plan_tree.column("id", width=40)
-        self.plan_tree.column("order", width=50)
-        self.plan_tree.column("status", width=80)
-        self.plan_tree.column("content", width=420)
-        self.plan_tree.column("result", width=280)
-
-        scroll = ttk.Scrollbar(frame, orient=tk.VERTICAL, command=self.plan_tree.yview)
-        self.plan_tree.configure(yscrollcommand=scroll.set)
-        self.plan_tree.pack(fill=tk.BOTH, expand=True, side=tk.LEFT, padx=(5, 0), pady=5)
-        scroll.pack(fill=tk.Y, side=tk.RIGHT, padx=(0, 5), pady=5)
-
-        # Double-click to edit
-        self.plan_tree.bind("<Double-1>", lambda e: self._edit_plan_dialog())
-
-        # Right-click context menu
-        self.plan_menu = tk.Menu(self.plan_tree, tearoff=0)
-        self.plan_menu.add_command(label="Edit...", command=self._edit_plan_dialog)
-        self.plan_menu.add_separator()
-        self.plan_menu.add_command(label="Approve", command=self._approve_plans)
-        self.plan_menu.add_command(label="Execute", command=self._execute_plans)
-        self.plan_menu.add_command(label="Mark Done", command=self._mark_plan_done)
-        self.plan_menu.add_command(label="Mark Failed", command=self._mark_plan_failed)
-        self.plan_menu.add_command(label="Skip", command=self._skip_plans)
-        self.plan_menu.add_separator()
-        self.plan_menu.add_command(label="Delete", command=self._delete_plans)
-        self.plan_tree.bind("<Button-3>", self._plan_context_menu)
-
     def _build_sessions_tab(self):
         frame = ttk.Frame(self.notebook)
         self.notebook.add(frame, text="Sessions")
@@ -458,7 +399,8 @@ class DashboardApp:
         `progress` (one row per project) is the source of truth behind
         .ccm/PROGRESS.md; `plan_active` (also one row) backs .ccm/PLAN.md.
         Both shipped as headline features and neither was visible anywhere in
-        this GUI — the "Plans" tab is the unrelated legacy v2.0 `plans` queue.
+        this GUI (the "Plans" tab was the unrelated legacy v2.0 queue, deleted
+        in v2.16.0).
         Read-only by design: PROGRESS.md is owned by the hooks and PLAN.md by
         `/cc-mem plan-*`, so editing it here would fight the writers.
         """
@@ -934,7 +876,6 @@ class DashboardApp:
         for label, loader in (
             ("memories", self._load_memories),
             ("progress/plan", self._load_progress_plan),
-            ("plans", self._load_plans),
             ("sessions", self._load_sessions),
             ("keywords", self._load_keywords),
             ("stats", self._load_stats),
@@ -1009,29 +950,6 @@ class DashboardApp:
 
         self.status_var.set(f"Memories: {len(rows)} shown")
 
-    def _load_plans(self):
-        if not self.db:
-            return
-        for item in self.plan_tree.get_children():
-            self.plan_tree.delete(item)
-
-        plans = self.db.get_plans(self.project_id)
-        for p in plans:
-            content = p["content"]
-            if len(content) > 80:
-                content = content[:77] + "..."
-            # Show result if done/failed, otherwise show feasibility
-            info = ""
-            if p.get("result"):
-                info = p["result"]
-            elif p.get("feasibility"):
-                info = p["feasibility"]
-            if len(info) > 50:
-                info = info[:47] + "..."
-            self.plan_tree.insert("", tk.END, values=(
-                p["id"], p["exec_order"], p["status"], content, info
-            ))
-
     def _load_sessions(self):
         if not self.db:
             return
@@ -1081,7 +999,6 @@ Path: {self.project_path}
 
 Sessions:      {stats['n_sessions']}
 Memories:      {stats['n_memories']}
-Active Plans:  {stats['n_active_plans']}
 Last Session:  {stats['last_session'] or 'Never'}
 
 Category Breakdown:
@@ -1844,322 +1761,6 @@ Memories:
         bf.grid(row=3, column=1, pady=10, sticky=tk.W)
         ttk.Button(bf, text="Save", command=save).pack(side=tk.LEFT, padx=5)
         ttk.Button(bf, text="Cancel", command=dlg.destroy).pack(side=tk.LEFT)
-
-    def _add_plan_dialog(self):
-        if not self.db:
-            messagebox.showwarning("No Project", "Load a project first.")
-            return
-
-        dlg = tk.Toplevel(self.root)
-        dlg.title("Add Plans")
-        dlg.geometry("600x400")
-        dlg.transient(self.root)
-        dlg.grab_set()
-
-        ttk.Label(dlg, text="Enter plans (one per line):").pack(padx=10, pady=5, anchor=tk.W)
-        plan_text = tk.Text(dlg, height=15, width=70)
-        plan_text.pack(padx=10, pady=5, fill=tk.BOTH, expand=True)
-
-        def save():
-            lines = plan_text.get("1.0", tk.END).strip().split("\n")
-            lines = [l.strip() for l in lines if l.strip()]
-            if not lines:
-                messagebox.showwarning("Empty", "Enter at least one plan line.")
-                return
-            for content in lines:
-                self.db.add_plan(self.project_id, content)
-            dlg.destroy()
-            self._load_plans()
-            self.status_var.set(f"Added {len(lines)} plan(s)")
-
-        bf = ttk.Frame(dlg)
-        bf.pack(pady=10)
-        ttk.Button(bf, text="Add All", command=save).pack(side=tk.LEFT, padx=5)
-        ttk.Button(bf, text="Cancel", command=dlg.destroy).pack(side=tk.LEFT)
-
-    def _approve_plans(self):
-        if not self.db:
-            return
-        selected = self.plan_tree.selection()
-        # project_id scopes every UPDATE below. `plans.id` is unique per DB
-        # FILE, not per project, and one memory.db can hold several projects
-        # (core/db.py:1306-1314), so an unscoped id rewrote whatever row owned
-        # it — including another project's status and result columns. Scoped, a
-        # stale or foreign id matches nothing and the rowcount says so.
-        done = 0
-        for item in selected:
-            values = self.plan_tree.item(item, "values")
-            plan_id = int(values[0])
-            done += self.db.update_plan_status(
-                plan_id, "ready", project_id=self.project_id) or 0
-        self._load_plans()
-        if selected:
-            self.status_var.set(f"Approved {done} of {len(selected)} plan(s)")
-
-    def _approve_all_plans(self):
-        if not self.db:
-            return
-        plans = self.db.get_plans(self.project_id, statuses=["draft", "evaluating"])
-        done = 0
-        for p in plans:
-            done += self.db.update_plan_status(
-                p["id"], "ready", project_id=self.project_id) or 0
-        self._load_plans()
-        self.status_var.set(f"Approved {done} of {len(plans)} plan(s)")
-
-    def _clear_done_plans(self):
-        if not self.db:
-            return
-        n = self.db.clear_done_plans(self.project_id)
-        self._load_plans()
-        self.status_var.set(f"Cleared {n} completed plan(s)")
-
-    def _get_selected_plan_ids(self):
-        """Get list of selected plan IDs from treeview."""
-        return [int(self.plan_tree.item(item, "values")[0])
-                for item in self.plan_tree.selection()]
-
-    def _execute_plans(self):
-        """Launch Claude Code CLI with selected plan content."""
-        if not self.db:
-            return
-        ids = self._get_selected_plan_ids()
-        if not ids:
-            messagebox.showinfo("No Selection", "Select plan(s) to execute.")
-            return
-
-        # Gather plan contents
-        plans_text = []
-        for pid in ids:
-            with self.db._connect() as conn:
-                row = conn.execute(
-                    "SELECT content FROM plans WHERE id = ?", (pid,)
-                ).fetchone()
-                if row:
-                    plans_text.append(row["content"])
-
-        if not plans_text:
-            return
-
-        # Build the prompt for Claude Code
-        if len(plans_text) == 1:
-            prompt = plans_text[0]
-        else:
-            prompt = "Execute these tasks in order:\n" + "\n".join(
-                f"{i+1}. {t}" for i, t in enumerate(plans_text))
-
-        # Add project context
-        proj_dir = str(self.project_path) if self.project_path else ""
-
-        if not messagebox.askyesno(
-            "Execute in Claude Code",
-            f"Launch Claude Code with this plan?\n\n"
-            f"{prompt[:300]}{'...' if len(prompt) > 300 else ''}\n\n"
-            f"Project: {proj_dir}"):
-            return
-
-        # Launch Claude Code in a new console window FIRST. The old order
-        # marked every selected plan `executing` before Popen and the except
-        # branch never rolled it back, so a missing `claude` binary left the
-        # plans wedged in `executing` with nothing running.
-        try:
-            kwargs = {"cwd": proj_dir}
-            if sys.platform == "win32":
-                kwargs["creationflags"] = subprocess.CREATE_NEW_CONSOLE
-            else:
-                kwargs["start_new_session"] = True
-            subprocess.Popen(["claude", prompt], **kwargs)
-        except Exception as e:
-            self._load_plans()
-            self.status_var.set("Launch failed — plan statuses unchanged")
-            messagebox.showerror("Error", f"Failed to launch Claude Code:\n\n{e}\n\n"
-                                 "Make sure 'claude' is on your PATH.")
-            return
-
-        marked = 0
-        for pid in ids:
-            marked += self.db.update_plan_status(
-                pid, "executing", project_id=self.project_id) or 0
-        self._load_plans()
-        self.status_var.set(
-            f"Launched Claude Code for {len(ids)} plan(s) "
-            f"({marked} marked executing)")
-
-    def _mark_plan_done(self):
-        """Mark selected plans as done, optionally with a result note."""
-        if not self.db:
-            return
-        ids = self._get_selected_plan_ids()
-        if not ids:
-            messagebox.showinfo("No Selection", "Select plan(s) to mark done.")
-            return
-
-        # Ask for optional result note
-        dlg = tk.Toplevel(self.root)
-        dlg.title("Mark Done")
-        dlg.geometry("450x150")
-        dlg.transient(self.root)
-        dlg.grab_set()
-
-        ttk.Label(dlg, text=f"Result note for {len(ids)} plan(s) (optional):").pack(
-            padx=10, pady=(10, 5), anchor=tk.W)
-        result_var = tk.StringVar()
-        ttk.Entry(dlg, textvariable=result_var, width=55).pack(padx=10, fill=tk.X)
-
-        def do_done():
-            note = result_var.get().strip()
-            n = 0
-            for pid in ids:
-                n += self.db.update_plan_status(
-                    pid, "done", note or None, field="result",
-                    project_id=self.project_id) or 0
-            dlg.destroy()
-            self._load_plans()
-            self.status_var.set(f"Marked {n} of {len(ids)} plan(s) done")
-
-        bf = ttk.Frame(dlg)
-        bf.pack(pady=10)
-        ttk.Button(bf, text="Done", command=do_done).pack(side=tk.LEFT, padx=5)
-        ttk.Button(bf, text="Cancel", command=dlg.destroy).pack(side=tk.LEFT)
-
-    def _mark_plan_failed(self):
-        """Mark selected plans as failed."""
-        if not self.db:
-            return
-        ids = self._get_selected_plan_ids()
-        if not ids:
-            return
-
-        dlg = tk.Toplevel(self.root)
-        dlg.title("Mark Failed")
-        dlg.geometry("450x150")
-        dlg.transient(self.root)
-        dlg.grab_set()
-
-        ttk.Label(dlg, text=f"Failure reason for {len(ids)} plan(s) (optional):").pack(
-            padx=10, pady=(10, 5), anchor=tk.W)
-        reason_var = tk.StringVar()
-        ttk.Entry(dlg, textvariable=reason_var, width=55).pack(padx=10, fill=tk.X)
-
-        def do_fail():
-            reason = reason_var.get().strip()
-            n = 0
-            for pid in ids:
-                n += self.db.update_plan_status(
-                    pid, "failed", reason or None, field="result",
-                    project_id=self.project_id) or 0
-            dlg.destroy()
-            self._load_plans()
-            self.status_var.set(f"Marked {n} of {len(ids)} plan(s) failed")
-
-        bf = ttk.Frame(dlg)
-        bf.pack(pady=10)
-        ttk.Button(bf, text="Mark Failed", command=do_fail).pack(side=tk.LEFT, padx=5)
-        ttk.Button(bf, text="Cancel", command=dlg.destroy).pack(side=tk.LEFT)
-
-    def _skip_plans(self):
-        """Skip selected plans."""
-        if not self.db:
-            return
-        ids = self._get_selected_plan_ids()
-        n = 0
-        for pid in ids:
-            n += self.db.update_plan_status(
-                pid, "skipped", project_id=self.project_id) or 0
-        self._load_plans()
-        self.status_var.set(f"Skipped {n} of {len(ids)} plan(s)")
-
-    def _edit_plan_dialog(self):
-        """Edit the content of a selected plan."""
-        if not self.db:
-            return
-        ids = self._get_selected_plan_ids()
-        if len(ids) != 1:
-            messagebox.showinfo("Select One", "Select exactly one plan to edit.")
-            return
-        plan_id = ids[0]
-
-        # Get current plan data
-        plans = self.db.get_plans(self.project_id)
-        plan = next((p for p in plans if p["id"] == plan_id), None)
-        if not plan:
-            return
-
-        dlg = tk.Toplevel(self.root)
-        dlg.title(f"Edit Plan #{plan_id}")
-        dlg.geometry("600x350")
-        dlg.transient(self.root)
-        dlg.grab_set()
-
-        ttk.Label(dlg, text=f"Status: {plan['status']}  |  Order: {plan['exec_order']}",
-                  font=("", 9)).pack(padx=10, pady=(10, 5), anchor=tk.W)
-
-        ttk.Label(dlg, text="Content:").pack(padx=10, anchor=tk.W)
-        content_text = tk.Text(dlg, height=6, width=70, font=("Consolas", 10))
-        content_text.pack(padx=10, pady=5, fill=tk.X)
-        content_text.insert("1.0", plan["content"])
-
-        ttk.Label(dlg, text="Evaluation notes:").pack(padx=10, anchor=tk.W)
-        feas_var = tk.StringVar(value=plan.get("feasibility") or "")
-        ttk.Entry(dlg, textvariable=feas_var, width=70).pack(padx=10, fill=tk.X)
-
-        ttk.Label(dlg, text="Result:").pack(padx=10, pady=(5, 0), anchor=tk.W)
-        result_var = tk.StringVar(value=plan.get("result") or "")
-        ttk.Entry(dlg, textvariable=result_var, width=70).pack(padx=10, fill=tk.X)
-
-        def save():
-            new_content = content_text.get("1.0", tk.END).strip()
-            if new_content and new_content != plan["content"]:
-                self.db.update_plan_content(plan_id, new_content,
-                                            project_id=self.project_id)
-            new_feas = feas_var.get().strip()
-            if new_feas != (plan.get("feasibility") or ""):
-                self.db.update_plan_status(plan_id, plan["status"], new_feas,
-                                           field="feasibility",
-                                           project_id=self.project_id)
-            new_result = result_var.get().strip()
-            if new_result != (plan.get("result") or ""):
-                self.db.update_plan_status(plan_id, plan["status"], new_result,
-                                           field="result",
-                                           project_id=self.project_id)
-            dlg.destroy()
-            self._load_plans()
-
-        bf = ttk.Frame(dlg)
-        bf.pack(pady=10)
-        ttk.Button(bf, text="Save", command=save).pack(side=tk.LEFT, padx=5)
-        ttk.Button(bf, text="Cancel", command=dlg.destroy).pack(side=tk.LEFT)
-
-    def _delete_plans(self):
-        """Delete selected plans."""
-        if not self.db:
-            return
-        ids = self._get_selected_plan_ids()
-        if not ids:
-            return
-        if not messagebox.askyesno("Delete Plans",
-                                    f"Delete {len(ids)} plan(s)? This cannot be undone."):
-            return
-        # project_id scopes the DELETE: plans.id is global to the DB file, and
-        # one memory.db can hold several projects (this dashboard switches
-        # between them), so an unscoped id can reach another project's row.
-        deleted = sum(self.db.delete_plan(pid, project_id=self.project_id)
-                      for pid in ids)
-        self._load_plans()
-        if deleted != len(ids):
-            self.status_var.set(
-                f"Deleted {deleted} of {len(ids)} plan(s) — "
-                f"{len(ids) - deleted} did not belong to this project")
-        else:
-            self.status_var.set(f"Deleted {deleted} plan(s)")
-
-    def _plan_context_menu(self, event):
-        """Show right-click context menu on plan tree."""
-        item = self.plan_tree.identify_row(event.y)
-        if item:
-            if item not in self.plan_tree.selection():
-                self.plan_tree.selection_set(item)
-            self.plan_menu.post(event.x_root, event.y_root)
 
     _EXTRACTION_PROMPT = """\
 You are a memory extraction system. Given a Claude Code conversation transcript, extract the most important information worth remembering across sessions.
