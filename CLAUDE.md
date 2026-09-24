@@ -1793,7 +1793,7 @@ blocking sync leg + a background `async` leg.
 | `PreCompact` (async) | `cc_memory/hooks/consolidate_async.py` | 300s, `async:true` | Background consolidation every N sessions OR on write backlog (interval marker + lock, budget-gated) — off the blocking path; also spawnable standalone (`--cwd`) by the Stop probe |
 | `SessionStart` | `cc_memory/hooks/session_start.py` | 15s | Inject layered context (the directive ledger FIRST, v2.12.2) + FORCED `<system-reminder>` to Read PROGRESS.md; `resume`/`fork` restate the directives only and rewrite nothing, `compact` demands no ack (v2.16.0) |
 | `Stop` | `cc_memory/hooks/stop.py` | 22s | Observer (Haiku) + per-turn PROGRESS.md patch + idle reorg every 5 turns + consolidation backpressure probe (v2.12.0) + plan enforcement |
-| `PostToolUse` | `cc_memory/hooks/post_tool_use.py` | 8s | Live plan anchor in EVERY mode (ExitPlanMode capture / TodoWrite step sync / drift counters), THEN an observation row for observed tools only (no LLM) |
+| `PostToolUse` | `cc_memory/hooks/post_tool_use.py` | 8s | Live plan anchor in EVERY mode (ExitPlanMode capture / TodoWrite step sync / drift counters), THEN an observation row for observed tools only (no LLM). Bound by matcher to the tools it handles — `core.modes.HOOK_TOOL_MATCHER`, spelled in `hooks/hooks.json` and the installer's fallback table (v2.16.0) |
 | `UserPromptSubmit` | `cc_memory/hooks/user_prompt.py` | 8s | Auto-init `.ccm/` (migrating a pre-v2.13.0 `memory/`) + turn count + seed `progress.current_request` on the first NON-scaffolding prompt, once per session (v2.14.0) + **query-time recall** on stdout (v2.15.0) + the plan advisory a Stop parked for this session (v2.16.0) |
 
 Hook contract (NEVER violate):
@@ -1911,7 +1911,7 @@ The `plan_active` table (one row per project) backs PLAN.md. Lifecycle:
   `ui/installer.py` so an uninstall still sweeps what older installs wrote.)
 
 **All of the `PostToolUse` legs above run in EVERY mode, above the
-`should_observe` gate** (`hooks/post_tool_use.py:183`). They shipped below it
+`should_observe` gate** (`hooks/post_tool_use.py:191`). They shipped below it
 from v2.2 through v2.4.3, which made the entire anchor dead through its own
 hook — `TodoWrite` is in every mode's `skip_tools` and `ExitPlanMode` is in no
 mode's `observe_tools`. Plan control is not observation: mode selects what is

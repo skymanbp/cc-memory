@@ -702,7 +702,7 @@ Both share the same SQLite database (`plan_active` and `progress` tables
 respectively) so they cannot drift out of sync with their source of truth.
 `write_plan_md` (`core/plan.py:783-832`) is a full rewrite from the row, and
 the generated file carries a DO-NOT-EDIT banner naming the SQL table and the
-three legitimate edit entries (`core/plan.py:1007`).
+three legitimate edit entries (`core/plan.py:1008`).
 
 ### Lifecycle
 
@@ -843,7 +843,7 @@ When `TodoWrite` is observed, `core.plan.sync_todos_to_steps`
    shingles (trigrams for non-CJK, bigrams for CJK runs) to every step's
    title.
 2. Pick the best-matching step IF similarity ≥ `MATCH_THRESHOLD` (0.35,
-   `core/plan.py:99`).
+   `core/plan.py:100`).
 3. Update the step's status from the todo's status, using
    (`_TODO_TO_STEP_STATUS`, `core/plan.py:270-277`):
    - `completed` → `done`

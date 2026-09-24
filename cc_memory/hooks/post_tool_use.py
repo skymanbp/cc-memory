@@ -1,6 +1,12 @@
 #!/usr/bin/env python3
 """
-PostToolUse hook — fires after every tool call.
+PostToolUse hook — fires for the tool calls it handles.
+
+Bound by matcher (v2.16.0, A5): `hooks/hooks.json` declares
+`core.modes.HOOK_TOOL_MATCHER`, an anchored alternation of exactly the tools
+this hook does work for — every mode's `observe_tools` plus the plan legs
+below. It used to bind EVERY tool call and return early for most of them,
+paying an interpreter start each time.
 
 Two jobs:
   1. LIVE PLAN (v2.2) — capture ExitPlanMode output, sync TodoWrite snapshots
@@ -16,9 +22,10 @@ Latency: NOT <50 ms. Measured on Windows 11 / CPython 3.13, median of 25
 subprocess invocations against a warm 40 KiB DB with an 8-step active plan:
 **~180-290 ms end-to-end** depending on machine load, of which ~75-120 ms is
 bare CPython start-up — so this hook's own body (imports + sqlite) is
-~100-180 ms. It fires after EVERY tool call, so keep it free of network I/O
-and of any unbounded scan. The previous "<50 ms" claim was never measured and
-understated reality by ~4x.
+~100-180 ms. It fires for every HANDLED tool call — the ones a coding
+session makes most — so keep it free of network I/O and of any unbounded
+scan. The previous "<50 ms" claim was never measured and understated reality
+by ~4x.
 """
 import json
 import sys
@@ -99,6 +106,7 @@ def _apply_plan_integration(db, project_id, cwd, tool_name, tool_input):
     Deliberately independent of `core.modes.should_observe` — see main().
     """
     from core import plan as plan_mod
+    from core.modes import EDIT_TOOLS
     memory_dir = resolve_memory_dir(cwd)
 
     if tool_name == "ExitPlanMode":
@@ -122,7 +130,7 @@ def _apply_plan_integration(db, project_id, cwd, tool_name, tool_input):
                 db, project_id, todos, memory_dir=memory_dir
             )
 
-    elif tool_name in ("Edit", "Write", "MultiEdit", "NotebookEdit"):
+    elif tool_name in EDIT_TOOLS:
         if plan_mod.is_live_plan(db.get_plan_active(project_id)):
             db.bump_plan_edit_counter(project_id, n=1)
 
@@ -157,8 +165,8 @@ def main():
     # ahead of the DB probe. Gating on the state database existing is not an
     # opt-out: a project initialised BEFORE the user listed it would otherwise
     # keep storing every tool input and output. No log passed — this hook
-    # fires after every tool call, so a redirection line would be a line per
-    # call; the rare hooks pass a logger and carry the reporting duty.
+    # fires for every handled tool call, so a redirection line would be a
+    # line per call; the rare hooks pass a logger and carry the reporting duty.
     cwd = resolve_project(cwd)
     if cwd is None:
         sys.exit(0)

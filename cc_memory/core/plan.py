@@ -45,6 +45,7 @@ from typing import Dict, List, Optional, Tuple
 
 from core.atomic import write_atomic, _DERIVED_BUDGET_S
 from core.logger import get_logger
+from core.modes import SENSITIVE_TOOLS
 # Render-path marker defence. PLAN.md is read by Claude as the live plan
 # anchor, and every field it renders originates outside the plugin.
 from core.privacy import (clean_for_storage, neutralize_block,
@@ -1469,7 +1470,7 @@ def is_sensitive_tool_call(tool_name: str, tool_input: Dict) -> bool:
     For now: bash commands that include `git push`, `rm -rf`, `DROP TABLE`,
     or that look like deploys (`npm publish`, `cargo publish`).
     """
-    if tool_name not in ("Bash",):
+    if tool_name not in SENSITIVE_TOOLS:
         return False
     cmd = (tool_input or {}).get("command", "") if isinstance(tool_input, dict) else ""
     # ANCHORED at a command position, not `pattern in cmd_lower`. A bare

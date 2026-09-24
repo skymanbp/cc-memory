@@ -44,7 +44,7 @@
     ],
     "PostToolUse": [
       {
-        "matcher": "",
+        "matcher": "^(Bash|Edit|ExitPlanMode|Glob|Grep|MultiEdit|NotebookEdit|Read|TodoWrite|WebFetch|WebSearch|Write)$",
         "hooks": [
           {
             "type": "command",

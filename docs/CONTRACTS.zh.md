@@ -1,4 +1,4 @@
-<!-- i18n-source: CONTRACTS.md | sha256: b9853bd3334f460a | version: 2.15.2 | translated: 2026-09-24 | translation: aa484bd8ab3c40cc -->
+<!-- i18n-source: CONTRACTS.md | sha256: 855988abd60d61a3 | version: 2.15.2 | translated: 2026-09-24 | translation: e66c9cae2e9656f3 -->
 > [English](CONTRACTS.md) · **简体中文**
 
 # cc-memory — 契约（Contracts）
@@ -750,7 +750,7 @@ Python repr（`"['list goal']"`）存下来并通过上面的检查。替换之�
 
 1. 对每一条 todo，基于 `core.textsim.shingle_set` 的 shingle（非 CJK 用
    三元组，CJK 连续段用二元组）计算它与每一个步骤 title 的 Jaccard 相似度。
-2. 在相似度 ≥ `MATCH_THRESHOLD`（0.35，`core/plan.py:99`）时挑出最佳匹配的步骤。
+2. 在相似度 ≥ `MATCH_THRESHOLD`（0.35，`core/plan.py:100`）时挑出最佳匹配的步骤。
 3. 用 todo 的状态更新步骤状态，映射关系为
    （`_TODO_TO_STEP_STATUS`，`core/plan.py:270-277`）：
    - `completed` → `done`

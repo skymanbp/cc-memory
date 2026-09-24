@@ -14,6 +14,7 @@ exactly how the BOM hole below stayed open for a release.
 """
 import json
 import os
+import re
 from pathlib import Path
 
 from core.db import CATEGORIES
@@ -421,6 +422,48 @@ MODES = {
 }
 
 VALID_MODES = set(MODES.keys())
+
+# ── The PostToolUse binding (v2.16.0, A5) ────────────────────────────────
+# `hooks/post_tool_use.py` does work for exactly these tools: the three
+# mode-independent plan legs below, plus whatever any mode observes. v2.15.2
+# registered the hook with an EMPTY matcher, so it fired after every tool call
+# and returned early for most of them — an interpreter start (~75-120 ms) per
+# call for nothing. The matcher hooks/hooks.json declares is DERIVED here, so a
+# tool added to a mode's allow-list or to a plan leg reaches the hook without
+# anyone remembering to edit the JSON; the smoke gate asserts every spelling
+# (the JSON, `ui/installer.py:HOOK_MATCHERS`, this module) agrees.
+PLAN_CONTROL_TOOLS = ("ExitPlanMode", "TodoWrite")           # capture / step sync
+EDIT_TOOLS = ("Edit", "Write", "MultiEdit", "NotebookEdit")  # +1 drift each
+SENSITIVE_TOOLS = ("Bash",)   # `core.plan.is_sensitive_tool_call` reads these
+
+
+def handled_tools() -> frozenset:
+    """Every tool name `hooks/post_tool_use.py` does any work for.
+
+    The union of every mode's `observe_tools` (the observation row) and the
+    three plan legs. A mode with an EMPTY allow-list observes every tool
+    outside its skip list (`should_observe`), and that set is unbounded —
+    `hook_tool_matcher` answers "" (bind everything) for it rather than guess.
+    """
+    out = set(PLAN_CONTROL_TOOLS) | set(EDIT_TOOLS) | set(SENSITIVE_TOOLS)
+    for mode in MODES.values():
+        out.update(mode["observe_tools"])
+    return frozenset(out)
+
+
+def hook_tool_matcher() -> str:
+    """The PostToolUse `matcher` regex hooks/hooks.json must declare.
+
+    Anchored, alternation-only, escaped: `re.search`, `re.fullmatch` and the
+    host's own regex engine all accept exactly `handled_tools()`. "" (bind
+    everything) when any mode's `observe_tools` is empty — see handled_tools.
+    """
+    if any(not mode["observe_tools"] for mode in MODES.values()):
+        return ""
+    return "^(" + "|".join(re.escape(t) for t in sorted(handled_tools())) + ")$"
+
+
+HOOK_TOOL_MATCHER = hook_tool_matcher()
 
 
 def get_mode(mode_name: str) -> Dict:

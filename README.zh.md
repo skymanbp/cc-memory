@@ -1,4 +1,4 @@
-<!-- i18n-source: README.md | sha256: 9dac5c12e65bef58 | version: 2.15.2 | translated: 2026-09-24 | translation: e73b1bf6a63a08ad -->
+<!-- i18n-source: README.md | sha256: f7f5c2f9b67e8c11 | version: 2.15.2 | translated: 2026-09-24 | translation: 37310cbeca62b54d -->
 > [English](README.md) · **简体中文**
 
 <div align="center">
@@ -685,7 +685,7 @@ schema（含每张表的定义位置）见 [§4](docs/ARCHITECTURE.zh.md#4-数�
 | 事件 | 脚本 | 超时 | 职责 |
 |---|---|---|---|
 | `UserPromptSubmit` | `hooks/user_prompt.py` | 8 秒 | 自动初始化 `.ccm/`、计轮次、在首条真实提示时播种请求（每会话一次），然后是**查询时召回**写到 stdout（v2.15.0），前面带上上一个 Stop 寄存的计划建议行（若有，v2.16.0） |
-| `PostToolUse` | `hooks/post_tool_use.py` | 8 秒 | **在每种模式下**维护实时计划锚点，然后为被观察的工具各写一行 observation |
+| `PostToolUse` | `hooks/post_tool_use.py` | 8 秒 | **在每种模式下**维护实时计划锚点，然后为被观察的工具各写一行 observation——由 matcher 只绑定它真正处理的工具，而不是每一次调用（v2.16.0） |
 | `Stop` | `hooks/stop.py` | 22 秒 | 分离的 Haiku 观察者（v2.16.0）、按轮增量更新 PROGRESS、每 5 轮空闲整理、背压探针、计划强制执行 |
 | `PreCompact`（同步） | `hooks/pre_compact.py` | 120 秒 | 抽取 → 调和 → 全量重写 PROGRESS.md → 归档 |
 | `PreCompact`（异步） | `hooks/consolidate_async.py` | 300 秒 | 预算闸门下的整理，不在阻塞路径上；也是独立运行的背压工作者 |

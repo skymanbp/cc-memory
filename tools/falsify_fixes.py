@@ -3248,6 +3248,33 @@ def _break_r16critstore(root):
            "] or [\"*(no critical memories)*\"]  # BREAKAGE\n")
 
 
+@case("r16matcher", ["tests/smoke_test.py"],
+      "bind PostToolUse to every tool again -> the hook pays an interpreter "
+      "start for calls it returns early on, and nothing says the JSON drifted")
+def _break_r16matcher(root):
+    spec = root / "hooks" / "hooks.json"
+    data = json.loads(spec.read_text(encoding="utf-8"))
+    # Structural, not textual, like r9hookbind: found by walking the parsed
+    # spec, so a reformat of hooks.json cannot rot this anchor.
+    groups = data.get("hooks", {}).get("PostToolUse", [])
+    if len(groups) != 1 or not groups[0].get("matcher"):
+        raise SystemExit(
+            f"BREAKAGE ANCHOR ROTTED: hooks/hooks.json holds {len(groups)} "
+            f"PostToolUse groups, expected 1 with a non-empty matcher. Fix "
+            f"this script, not the tree.")
+    groups[0]["matcher"] = ""   # BREAKAGE: v2.15.2's bind-everything
+    spec.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+
+@case("r16matcherfrozen", ["tests/smoke_test.py"],
+      "let the installer's frozen-install fallback drift from core.modes -> a "
+      "standalone install never delivers Write to the hook")
+def _break_r16matcherfrozen(root):
+    _patch(root, f"{PKG}/ui/installer.py",
+           "                    \"|Read|TodoWrite|WebFetch|WebSearch|Write)$\"),\n",
+           "                    \"|Read|TodoWrite|WebFetch|WebSearch)$\"),  # BREAKAGE\n")
+
+
 def verify_anchors():
     """Count every registered case's breakage anchors WITHOUT running a gate.
 

@@ -120,6 +120,17 @@ HOOK_SCRIPTS = {
 # runs off the blocking compaction path so a slow consolidation can never
 # surface as "Hook cancelled". 300s is a background deadline, not a UI budget.
 ASYNC_HOOK = ("PreCompact", "hooks/consolidate_async.py", 300)
+# The PostToolUse binding (v2.16.0, A5). hooks/hooks.json declares the matcher
+# `core.modes.HOOK_TOOL_MATCHER` derives from the mode tables and the plan
+# legs — an anchored alternation of exactly the tools the hook does work for,
+# where v2.15.2 bound every tool call and returned early for most of them.
+# Spelled here for the same reason the timeouts are: a frozen/flat install has
+# no hooks.json to read, and this bootstrap imports nothing from the package.
+# The smoke gate asserts the JSON, this table and `core.modes` agree.
+HOOK_MATCHERS = {
+    "PostToolUse": ("^(Bash|Edit|ExitPlanMode|Glob|Grep|MultiEdit|NotebookEdit"
+                    "|Read|TodoWrite|WebFetch|WebSearch|Write)$"),
+}
 
 _SETTINGS_FIX_HINT = ("Fix that file (or move it aside) and re-run the "
                       "installer. Nothing has been installed.")
@@ -699,29 +710,35 @@ def _hooks_json_candidates():
     return paths
 
 
-def _declared_hook_timeouts():
-    """Timeouts declared by hooks/hooks.json: {event: {is_async: timeout}}.
+def _declared_hooks():
+    """What hooks/hooks.json declares: (timeouts, matchers, path).
 
-    hooks/hooks.json is the single source of truth for hook timeouts; HOOK_SCRIPTS
-    / ASYNC_HOOK are the fallback for installs where that file is not present,
-    and carry the same numbers.
+    `timeouts` is {event: {is_async: timeout}}, `matchers` is {event: matcher}
+    (the first group's, v2.16.0). hooks/hooks.json is the single source of
+    truth for both; HOOK_SCRIPTS / ASYNC_HOOK / HOOK_MATCHERS are the fallback
+    for installs where that file is not present, and carry the same values.
     """
     for p in _hooks_json_candidates():
         try:
             data = json.loads(p.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             # why: hooks.json is absent in a flat/frozen layout, or unparseable;
-            # the literal table below carries the same values
+            # the literal tables above carry the same values
             continue
         hooks = data.get("hooks") if isinstance(data, dict) else None
         if not isinstance(hooks, dict):
             continue
-        out = {}
+        out, matchers = {}, {}
         for event, groups in hooks.items():
             if not isinstance(groups, list):
                 continue
             for group in groups:
-                entries = group.get("hooks") if isinstance(group, dict) else None
+                if not isinstance(group, dict):
+                    continue
+                m = group.get("matcher")
+                if isinstance(m, str) and event not in matchers:
+                    matchers[event] = m
+                entries = group.get("hooks")
                 for entry in entries if isinstance(entries, list) else []:
                     if not isinstance(entry, dict):
                         continue
@@ -729,12 +746,18 @@ def _declared_hook_timeouts():
                     if isinstance(t, int) and not isinstance(t, bool):
                         out.setdefault(event, {})[bool(entry.get("async"))] = t
         if out:
-            return out, p
-    return {}, None
+            return out, matchers, p
+    return {}, {}, None
+
+
+def _declared_hook_timeouts():
+    """Timeouts declared by hooks/hooks.json: ({event: {is_async: timeout}}, path)."""
+    out, _matchers, p = _declared_hooks()
+    return out, p
 
 
 def _make_hooks_config(target_dir):
-    declared, _src = _declared_hook_timeouts()
+    declared, matchers, _src = _declared_hooks()
     python_cmd = _detect_python_cmd()
 
     def _timeout(event, is_async, fallback):
@@ -750,7 +773,8 @@ def _make_hooks_config(target_dir):
             c["async"] = True
         return c
 
-    config = {ev: [{"matcher": "", "hooks": [_cmd(script, _timeout(ev, False, t))]}]
+    config = {ev: [{"matcher": matchers.get(ev, HOOK_MATCHERS.get(ev, "")),
+                    "hooks": [_cmd(script, _timeout(ev, False, t))]}]
               for ev, (script, t) in HOOK_SCRIPTS.items()}
     ev, script, t = ASYNC_HOOK
     config[ev][0]["hooks"].append(

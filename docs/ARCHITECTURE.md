@@ -232,7 +232,7 @@ would falsify the record.
 | `PreCompact` (async) | [`cc_memory/hooks/consolidate_async.py`](../cc_memory/hooks/consolidate_async.py) | 300s, `async: true` | LLM consolidation, moved OFF the blocking compaction path in v2.3.2 (interval marker + lock, budget-gated). Due every Nth session OR when the write backlog says so (v2.12.0); also spawnable standalone (`--cwd <root>`) by the Stop hook's backpressure probe. |
 | `SessionStart` | [`cc_memory/hooks/session_start.py`](../cc_memory/hooks/session_start.py) | 15s | Inject layered context (standing directives / topics / critical / timeline / PROGRESS digest / footer — the directive ledger is the first layer since v2.12.2; before that nothing injected it. The PROGRESS layer is §1–§4 rendered from the `progress` row since v2.16.0, with the file preview only for a project that has a file but no row; embedding the whole file put the same text in the context twice, once more on the forced Read); emit the FORCED `<system-reminder>` to Read `PROGRESS.md` (the one file demanded since v2.16.0; MEMORY.md's facts already ride the layers). The start reason picks the shape (v2.16.0): `resume`/`fork` restate the standing directives and rewrite nothing — the startup injection is still in the conversation — and `compact` keeps every layer and the reminder but demands no ack; start the DETACHED `--retro` worker that saves unsaved prior JSONLs (v2.16.0 — decided by a stat()-only scan, never on a resumed or forked start; a failed call backs it off through `.llm_backoff.json`, a running one holds `.retro.lock`). |
 | `Stop` | [`cc_memory/hooks/stop.py`](../cc_memory/hooks/stop.py) | 22s | Observer: spawn the DETACHED `stop.py --observe` worker that extracts from this turn's observations via Haiku (v2.16.0 — the hook never waits on the model; a failed call backs the worker off through `.llm_backoff.json`, a running one holds `.observer.lock`); per-turn `patch_progress(files_touched, ...)`; every 5 turns run `idle.maybe_run_idle` (cleanup + MEMORY.md regen); probe the consolidation backlog and spawn the detached async worker when it is due (v2.12.0); when a plan is LIVE, bump its turn counter and **enforce** — refuse the turn (`{"decision": "block"}`) over an unrefined plan, an undrift-checked plan, or an idle directive, with the escape budget CONTRACTS.md specifies (v2.11.0; the advisory nudge this row used to describe is gone). A continuation Stop (`stop_hook_active`, v2.16.0) skips every job but enforcement. |
-| `PostToolUse` | [`cc_memory/hooks/post_tool_use.py`](../cc_memory/hooks/post_tool_use.py) | 8s | Live-plan integration FIRST, in every mode: `ExitPlanMode` → `plan_active.raw`, `TodoWrite` → mechanical step sync, `Edit`/`Write`/`MultiEdit`/`NotebookEdit` → +1 drift counter, sensitive Bash call → +20. THEN one row into `observations`, for OBSERVED tool calls only (mode allowlist / skip list — `core.modes.should_observe`). No LLM. Measured ~180-290 ms end to end, of which ~75-120 ms is interpreter start-up. |
+| `PostToolUse` | [`cc_memory/hooks/post_tool_use.py`](../cc_memory/hooks/post_tool_use.py) | 8s | Live-plan integration FIRST, in every mode: `ExitPlanMode` → `plan_active.raw`, `TodoWrite` → mechanical step sync, `Edit`/`Write`/`MultiEdit`/`NotebookEdit` → +1 drift counter, sensitive Bash call → +20. THEN one row into `observations`, for OBSERVED tool calls only (mode allowlist / skip list — `core.modes.should_observe`). No LLM. Measured ~180-290 ms end to end, of which ~75-120 ms is interpreter start-up. Bound by matcher since v2.16.0: `hooks/hooks.json` declares `core.modes.HOOK_TOOL_MATCHER`, an anchored alternation of exactly the tools the hook does work for (every mode's `observe_tools` ∪ the plan legs), where it used to bind every tool call and return early for most of them. |
 | `UserPromptSubmit` | [`cc_memory/hooks/user_prompt.py`](../cc_memory/hooks/user_prompt.py) | 8s | Auto-init `.ccm/` on first contact; track turn count; save prompt for the Stop observer; on the first non-scaffolding prompt (once per session — `strip_scaffolding`, shared with `pre_compact._first_user_request`, and the `cc_mem_seeded_` marker; v2.14.0), tag the session and seed `progress.current_request` (typing the trigger `resume_request` vs `user_prompt` from the bilingual resume-signal whitelist). **Then QUERY-TIME RECALL** (v2.15.0): the cleaned prompt is turned into an FTS5 expression, the best matches that clear the relevance floor are printed to stdout inside a `<cc-memory-recall>` frame, and nothing at all is printed otherwise (`core/recall.py`) — preceded by the plan advisory the previous Stop parked for this session, when there is one (v2.16.0, `_emit_block_advisory`). |
 
 ### Hook stdout contract
@@ -310,7 +310,7 @@ truth. `cc_memory/ui/installer.py` `HOOK_SCRIPTS` / `ASYNC_HOOK`
 (`installer.py:108-114`) is the standalone-install declaration. Since v2.5 those
 entries carry the **final wire values** — PreCompact 120 (sync) / 300 (async),
 SessionStart 15, Stop 22, PostToolUse 8, UserPromptSubmit 8 — and
-`_declared_hook_timeouts()` (`installer.py:701-732`) *reads* `hooks/hooks.json`
+`_declared_hook_timeouts()` (`installer.py:753-756`) *reads* `hooks/hooks.json`
 whenever it is available (dev checkout, or `cc_memory_meta/hooks.json` inside a
 frozen build), falling back to the literal table only for a flat/frozen install
 where that file is absent.
@@ -1207,7 +1207,7 @@ shapes do not share a `cc_memory/` path segment.
 **Standalone installer (FLAT)** — `_copy_subpackages(TARGET_DIR)`
 (`installer.py:77-89`) writes each `SUBPACKAGE_FILES` key (`installer.py:77-89`)
 directly under `TARGET_DIR` (`installer.py:72`), with **no `cc_memory/`
-segment**, and `_make_hooks_config` (`installer.py:735-757`) builds commands as
+segment**, and `_make_hooks_config` (`installer.py:759-782`) builds commands as
 `python "<TARGET_DIR>/hooks/<name>.py"`:
 
 ```
@@ -1254,7 +1254,7 @@ user actually interacts with was missing.
 recording what it wrote in `installed_surfaces.json` (`installer.py:58`).
 
 Uninstall is **by name**, never `rmtree`: `~/.claude/{commands,agents,skills}`
-hold the user's own files. `_remove_surfaces` (`installer.py:504-538`) deletes only
+hold the user's own files. `_remove_surfaces` (`installer.py:547-581`) deletes only
 the recorded paths, removes an emptied `skills/<name>/` but never `commands/` or
 `agents/` themselves, and distinguishes "no manifest" (fall back to this build's
 `SURFACE_FILES`) from "a manifest recording nothing" (delete nothing, and say
@@ -1263,7 +1263,7 @@ seeded leaves exactly those two files behind.
 
 ### settings.json is validated before anything is copied (v2.5)
 
-`_read_settings` (`installer.py:729-761`) returns `(dict, None)` or `(None, error)`
+`_read_settings` (`installer.py:785-817`) returns `(dict, None)` or `(None, error)`
 and never raises; `cli_install` calls it at step **[0/3]** and returns 1 with
 `Nothing has been installed.` on a parse failure. Through v2.4.3 the parse
 happened *after* the copy, so a `settings.json` the installer could not read

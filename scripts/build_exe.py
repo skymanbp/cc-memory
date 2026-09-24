@@ -18,8 +18,8 @@ Packaging: bundles three payloads.
                               standalone install ships no /cc-mem, no /ccm-load
                               and no plan-refiner subagent (PLAN.md then can
                               never be populated).
-  cc_memory_meta/hooks.json   the hook-timeout source of truth, read by
-                              installer._declared_hook_timeouts().
+  cc_memory_meta/hooks.json   the hook-timeout and PostToolUse-matcher source
+                              of truth, read by installer._declared_hooks().
 
 The installer is built WITHOUT --windowed: its --cli branch is the documented
 headless path, and a GUI-subsystem binary prints nothing, returns no exit code

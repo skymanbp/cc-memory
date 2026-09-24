@@ -2753,6 +2753,58 @@ def main():
     print("[OK] v2.5.0 installer hook timeouts == hooks.json (live read AND "
           "frozen-install fallback table)")
 
+    # === v2.16.0 (A5): the PostToolUse matcher is DERIVED, and every spelling agrees
+    # v2.15.2 registered the hook with an empty matcher: it fired after EVERY
+    # tool call and returned early for most of them, paying an interpreter
+    # start (~75-120 ms) each time. `core.modes.hook_tool_matcher` derives the
+    # binding from the mode tables and the plan legs; hooks/hooks.json and the
+    # installer's frozen-install fallback must SPELL the same regex, and the
+    # regex must accept exactly the tools the hook does work for.
+    import re as _a5_re
+    from core import modes as _a5_modes
+    from core import plan as _a5_plan
+    _a5_m = _a5_modes.HOOK_TOOL_MATCHER
+    assert _a5_m and _a5_m == _a5_modes.hook_tool_matcher(), _a5_m
+    _a5_json = hj["hooks"]["PostToolUse"][0].get("matcher")
+    assert _a5_json == _a5_m, \
+        f"hooks.json binds PostToolUse to {_a5_json!r}; core.modes derives {_a5_m!r}"
+    assert _inst.HOOK_MATCHERS["PostToolUse"] == _a5_m, \
+        f"installer fallback {_inst.HOOK_MATCHERS['PostToolUse']!r} != {_a5_m!r}"
+    assert _v5_cfg["PostToolUse"][0]["matcher"] == _a5_m, _v5_cfg["PostToolUse"]
+    for _a5_ev in _v5_cfg:
+        if _a5_ev != "PostToolUse":
+            assert _v5_cfg[_a5_ev][0]["matcher"] == hj["hooks"][_a5_ev][0]["matcher"] == "", \
+                _a5_ev
+    _a5_handled = _a5_modes.handled_tools()
+    _a5_probe = set(_a5_handled) | {"Agent", "mcp__x__y", "Bashx", "xBash", "bash",
+                                    "Edit|Write", "ExitPlanMode", ""}
+    for _a5_mode in _a5_modes.MODES.values():
+        _a5_probe.update(_a5_mode["observe_tools"])
+        _a5_probe.update(_a5_mode["skip_tools"])
+    for _a5_t in sorted(_a5_probe):
+        _a5_s = bool(_a5_re.search(_a5_m, _a5_t))
+        assert _a5_s == bool(_a5_re.fullmatch(_a5_m, _a5_t)) == (_a5_t in _a5_handled), \
+            f"{_a5_t!r}: search={_a5_s}, handled={_a5_t in _a5_handled}"
+        for _a5_mode_name in _a5_modes.MODES:
+            if _a5_modes.should_observe(_a5_mode_name, _a5_t):
+                assert _a5_s, \
+                    f"mode {_a5_mode_name} observes {_a5_t!r} but the matcher never delivers it"
+    for _a5_t in (_a5_modes.PLAN_CONTROL_TOOLS + _a5_modes.EDIT_TOOLS
+                  + _a5_modes.SENSITIVE_TOOLS):
+        assert _a5_re.fullmatch(_a5_m, _a5_t), f"plan-leg tool {_a5_t!r} is not delivered"
+    # The plan legs read the SAME tuples the matcher is derived from.
+    for _a5_t in _a5_modes.SENSITIVE_TOOLS:
+        assert _a5_plan.is_sensitive_tool_call(_a5_t, {"command": "git push origin main"}), _a5_t
+    assert not _a5_plan.is_sensitive_tool_call("Agent", {"command": "git push origin main"})
+    _a5_ptu = (_REPO / "cc_memory" / "hooks" / "post_tool_use.py").read_text(encoding="utf-8")
+    assert "elif tool_name in EDIT_TOOLS:" in _a5_ptu, \
+        "the drift-counter leg spells its own tool list instead of core.modes.EDIT_TOOLS"
+    assert "after every tool call" not in _a5_ptu and "after EVERY tool call" not in _a5_ptu, \
+        "post_tool_use.py still describes the bind-everything registration"
+    print(f"[OK] v2.16.0 A5: PostToolUse is bound to the {len(_a5_handled)} tools it "
+          "handles — hooks.json, the installer fallback and _make_hooks_config all "
+          "spell core.modes.HOOK_TOOL_MATCHER, and it accepts exactly handled_tools()")
+
     # === v2.5.0 (7): an unrefined raw plan wins over the stale structured one =
     # plan_active is a single slot holding BOTH forms. capture_exit_plan_mode
     # (the primary auto-capture path) and `/cc-mem plan-set --raw` stored a
