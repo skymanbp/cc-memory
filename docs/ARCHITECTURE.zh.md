@@ -1,4 +1,4 @@
-<!-- i18n-source: ARCHITECTURE.md | sha256: 97ec87ff3f4b96c1 | version: 2.15.2 | translated: 2026-09-24 | translation: 18489bfbf591e791 -->
+<!-- i18n-source: ARCHITECTURE.md | sha256: be21a4f6d750b079 | version: 2.15.2 | translated: 2026-09-24 | translation: f6730b5fe5661033 -->
 > [English](ARCHITECTURE.md) · **简体中文**
 
 # cc-memory — 架构
@@ -431,9 +431,9 @@ regenerate_memory_index(db, project_id, memory_dir)   ← MEMORY.md 刷新
 
 - `upsert_batch`（`memory_writer.py:318-360`）逐条循环调用 `upsert_smart`，并在最后
   重新生成**一次**，但仅当传入了 `memory_dir` 时才会（`memory_writer.py:318-360`）。
-  所有钩子调用方都会传（`pre_compact.py:445`、`stop.py:279`、
+  所有钩子调用方都会传（`pre_compact.py:442`、`stop.py:279`、
   `session_start.py:1144`）；同步 PreCompact 支路还会在其余状态变更之后再刷一次
-  （`pre_compact.py:806`）。
+  （`pre_compact.py:841`）。
 - 单发调用方显式调用 `regenerate_memory_index`：`cli/mem.py:1213` 与 `:584`、
   `mcp/server.py:647`、`ui/dashboard.py:1716`、`ui/web_viewer.py:1035`，外加
   `skills/ccm-load` 的内联脚本（`skills/ccm-load/SKILL.md:290, 307`）。
@@ -527,7 +527,7 @@ SessionStart：
 ```
 
 上面的调用签名都是真实的：`write_progress_md(db, project_id, memory_dir)`
-（`core/progress.py:498-677`；调用点 `pre_compact.py:775`、`stop.py:525`、
+（`core/progress.py:498-677`；调用点 `pre_compact.py:801`、`stop.py:525`、
 `user_prompt.py:133`、`session_start.py:1107`、`mcp/server.py:243`、
 `cli/mem.py:1304`）。PROGRESS.md 的结构规格见
 [docs/CONTRACTS.md](CONTRACTS.md#handoff-contract)。
@@ -537,9 +537,9 @@ SessionStart：
 被宿主超时杀死的 `PreCompact` 死于 `TerminateProcess`：不走 `except`，也不走
 `finally`，所以 `.last_save.json` 仍然描述着*上一次*成功的运行，失败因此不可见。
 为此，同步支路会在加载 transcript **之前**写入
-`.ccm/.pre_compact_attempt.json`（`pre_compact.py:359-368`），并且只在运行完整
-结束时才移除它（`pre_compact.py:795`）——包括在它自己的错误路径上
-（`pre_compact.py:731`），这样一次*报错*的运行绝不会被报告成一次*被杀*的运行。
+`.ccm/.pre_compact_attempt.json`（`pre_compact.py:596-609`），并且只在运行完整
+结束时才移除它（`pre_compact.py:883`）——包括在它自己的错误路径上
+（`pre_compact.py:941`），这样一次*报错*的运行绝不会被报告成一次*被杀*的运行。
 `SessionStart` 会报告残留的标记，但只在它至少已存在 10 分钟之后才报，因此一次仍在
 进行中的运行绝不会被误标（`session_start.py:187-206`）。
 
@@ -953,7 +953,7 @@ home 边界是双份的：环境所声称的（`HOME`/`USERPROFILE`/`Path.home()
 `ensure_memory_gitignore`（`progress.py:85-122`）**只追加缺失的行**，保留用户自己
 添加的任何内容。此前每一版生成器都被 `if not gi.exists()` 守卫着，因此每当插件开始
 写一种新产物，已有安装就会永远保留过期的忽略列表，并开始无声地泄漏它。这些产物中
-有几种会逐字嵌入对话或计划原文，所以那是隐私问题，而不只是噪声。`pre_compact.py:353`
+有几种会逐字嵌入对话或计划原文，所以那是隐私问题，而不只是噪声。`pre_compact.py:585`
 在**每一次**压缩时都运行它（而不只是在项目创建时），正是为了让老安装完成迁移。这份
 列表另有两份独立副本，因为它们无法导入本模块，必须手工保持同步：
 `cc_memory/ui/installer.py`（仅 stdlib 的引导程序）与 `skills/ccm-load/SKILL.md`

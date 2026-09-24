@@ -3080,6 +3080,15 @@ def _break_r16onehandle(root):
            "        maybe_run_idle(cwd, session_id, turn_count)  # BREAKAGE")
 
 
+@case("r16prefeed", ["tests/smoke_test.py"],
+      "feed every observation regardless of the observer cursor -> each row "
+      "the Stop observer already sent to Haiku is sent again by PreCompact")
+def _break_r16prefeed(root):
+    _patch(root, "cc_memory/hooks/pre_compact.py",
+           '    unfed = [o for o in observations if o["id"] > obs_mark]',
+           '    unfed = list(observations)  # BREAKAGE: the cursor is read, then ignored')
+
+
 def verify_anchors():
     """Count every registered case's breakage anchors WITHOUT running a gate.
 

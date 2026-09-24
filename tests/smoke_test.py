@@ -7182,6 +7182,81 @@ def main():
     print("[OK] v2.16.0 one handle: Stop constructs MemoryDB exactly once "
           "with the idle reorg due (v2.15.2: twice)")
 
+    # ── v2.16.0 · PreCompact feeds only rows ABOVE the observer cursor ──────
+    # Every observation used to reach a model twice: the Stop observer fed it
+    # and advanced `projects.obs_watermark`, then PreCompact fed EVERYTHING
+    # still in the table and deleted only what it fed — so a project with a
+    # credential paid for each row twice and, whenever extraction did not
+    # run, kept the observer-fed rows forever. The slice is a pure function
+    # now (`_observations_to_feed`), read through `observer_cursor` — a pure
+    # read, never the seeding `observer_watermark` — and the rows below the
+    # cursor are deleted whether extraction ran or not.
+    import json as _a4_json
+    import hooks.pre_compact as _a4_pc
+    from core.auth import get_api_key as _a4_key
+    _a4_box = Path(tempfile.mkdtemp(prefix="cc-memory-prefeed-"))
+    _a4_root = _a4_box / "proj"
+    (_a4_root / _MEM).mkdir(parents=True)
+    _a4_db = MemoryDB(_a4_root / _MEM / "memory.db")
+    _a4_pid = _a4_db.upsert_project(str(_a4_root))
+    for _i in range(30):
+        _a4_db.insert_observation(_a4_pid, "s-a4", "Edit", '{"i": %d}' % _i, "ok")
+    _a4_rows = _a4_db.get_observations_since(_a4_pid, 0)
+    _a4_ids = [o["id"] for o in _a4_rows]
+    assert len(_a4_ids) == 30, "fixture: 30 observations"
+    assert _a4_db.observer_cursor(_a4_pid) == 0 and _a4_db.observer_cursor(_a4_pid) == 0, (
+        "observer_cursor must be a PURE read: a never-run observer reads as 0 on "
+        "every call. Seeding on read is observer_watermark's job, and here it "
+        "would hide every row of a never-observed project from extraction")
+    _a4_all, _a4_all_chars, _a4_all_unfed = _a4_pc._observations_to_feed(_a4_rows, 0)
+    assert [o["id"] for o in _a4_all] == _a4_ids and len(_a4_all_unfed) == 30, \
+        "with no cursor every row is fed (a project whose observer never ran)"
+    _a4_db.advance_observer_watermark(_a4_pid, _a4_ids[9])
+    assert _a4_db.observer_cursor(_a4_pid) == _a4_ids[9], "fixture: cursor at row 10"
+    _a4_fed, _a4_chars, _a4_unfed = _a4_pc._observations_to_feed(_a4_rows, _a4_ids[9])
+    assert [o["id"] for o in _a4_fed] == _a4_ids[10:], (
+        f"PreCompact fed {[o['id'] for o in _a4_fed]} against an observer cursor "
+        f"at {_a4_ids[9]}: rows at or below the cursor were already fed by the "
+        f"Stop observer (v2.15.2 fed all 30)")
+    assert [o["id"] for o in _a4_unfed] == _a4_ids[10:] and _a4_chars > 0, \
+        "`unfed` is every row above the cursor and the fed slice is its prefix"
+    # The real hook with no credential: extraction cannot run, the rows the
+    # observer fed are deleted anyway, and every row above the cursor is kept
+    # for the next compaction.
+    _a4_saved_key = os.environ.pop("ANTHROPIC_API_KEY", None)
+    try:
+        assert not _a4_key()[0], \
+            "precondition: a credential resolves in the sandbox, so the no-key drive below proves nothing"
+        _a4_tr = _a4_box / "t.jsonl"
+        _a4_tr.write_text(
+            _a4_json.dumps({"message": {"role": "user", "content": "please fix the flaky test"}}) + "\n"
+            + _a4_json.dumps({"message": {"role": "assistant", "content": "decided to bound the settle"}}) + "\n",
+            encoding="utf-8")
+        _a4_proc = subprocess.run(
+            [sys.executable, str(_REPO / "cc_memory" / "hooks" / "pre_compact.py")],
+            input=_a4_json.dumps({"cwd": str(_a4_root), "transcript_path": str(_a4_tr),
+                                  "trigger": "manual", "session_id": "s-a4"}),
+            capture_output=True, text=True, encoding="utf-8", timeout=120,
+            env={**os.environ, "PYTHONIOENCODING": "utf-8"})
+    finally:
+        if _a4_saved_key is not None:
+            os.environ["ANTHROPIC_API_KEY"] = _a4_saved_key
+    assert _a4_proc.returncode == 0 and _a4_proc.stderr == "", \
+        f"pre_compact rc={_a4_proc.returncode} stderr={_a4_proc.stderr[-300:]!r}"
+    _a4_status = _a4_json.loads(
+        (_a4_root / _MEM / ".last_save.json").read_text(encoding="utf-8"))
+    assert _a4_status.get("success") is True and _a4_status.get("method") == "none", \
+        f"precondition: the compaction must complete WITHOUT extraction: {_a4_status}"
+    _a4_left = [o["id"] for o in _a4_db.get_observations_since(_a4_pid, 0)]
+    assert _a4_left == _a4_ids[10:], (
+        f"after a no-credential compaction the table holds {_a4_left}: rows at "
+        f"or below the observer cursor ({_a4_ids[9]}) must be deleted — the "
+        f"observer fed them — and every row above it kept (v2.15.2 kept all 30)")
+    shutil.rmtree(_a4_box, ignore_errors=True)
+    print("[OK] v2.16.0 observer cursor: PreCompact feeds rows 11..30 of 30 "
+          "against a cursor at 10, and deletes 1..10 without a credential "
+          "(v2.15.2: fed 30, kept 30)")
+
     print("\nProduced files:")
     for f in sorted(mem_dir.rglob("*")):
         if f.is_file():

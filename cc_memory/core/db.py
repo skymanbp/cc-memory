@@ -2665,6 +2665,25 @@ class MemoryDB:
                     (seed, project_id))
             return seed
 
+    def observer_cursor(self, project_id):
+        """The Stop observer's cursor as STORED — 0 when it has never advanced.
+
+        A pure read, unlike `observer_watermark`, which SEEDS an unset cursor
+        to the live end of the queue and persists the seed. PreCompact asks
+        this one (v2.16.0, A4): every row at or below the cursor has already
+        been fed to a model by the Stop observer — that hook advances the
+        cursor only after its `upsert_batch` returns — so the extraction
+        feeds the rows above it and deletes the rows below it unread by
+        itself, not unread. Seeding here instead would hide every row of a
+        project whose observer has never run (no credential) from the one
+        reader that still wants them.
+        """
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT obs_watermark FROM projects WHERE id = ?",
+                (project_id,)).fetchone()
+            return int((row["obs_watermark"] if row else 0) or 0)
+
     def advance_observer_watermark(self, project_id, row_id):
         """Move the observer cursor forward. NEVER backward.
 

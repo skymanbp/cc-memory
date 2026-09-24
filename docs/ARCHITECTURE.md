@@ -475,9 +475,9 @@ caller's responsibility, and there are exactly two shapes:
 - `upsert_batch` (`memory_writer.py:318-360`) loops `upsert_smart` per item and
   regenerates ONCE at the end, but only when a `memory_dir` is passed
   (`memory_writer.py:334`). All hook callers pass it
-  (`pre_compact.py:435`, `stop.py:166`, `session_start.py:1144`); the sync
+  (`pre_compact.py:716`, `stop.py:166`, `session_start.py:1144`); the sync
   PreCompact leg additionally touches it again after the rest of its state
-  changes (`pre_compact.py:806`).
+  changes (`pre_compact.py:841`).
 - Single-shot callers call `regenerate_memory_index` explicitly:
   `cli/mem.py:1213` and `:584`, `mcp/server.py:647`, `ui/dashboard.py:1716`,
   `ui/web_viewer.py:1034`, plus the `skills/ccm-load` inline script
@@ -580,7 +580,7 @@ SessionStart:
 ```
 
 Call signatures above are the real ones: `write_progress_md(db, project_id,
-memory_dir)` (`core/progress.py:498-677`; call sites `pre_compact.py:775`,
+memory_dir)` (`core/progress.py:498-677`; call sites `pre_compact.py:801`,
 `stop.py:475`, `user_prompt.py:52`, `session_start.py:944`, `mcp/server.py:243`,
 `cli/mem.py:1304`). See
 [docs/CONTRACTS.md](CONTRACTS.md#handoff-contract) for the PROGRESS.md
@@ -592,8 +592,8 @@ A `PreCompact` killed by the host timeout dies on `TerminateProcess`: no
 `except`, no `finally`, so `.last_save.json` still describes the *previous*
 successful run and the failure is invisible. The sync leg therefore writes
 `.ccm/.pre_compact_attempt.json` **before** the transcript load
-(`pre_compact.py:359-368`) and removes it only on a completed run
-(`pre_compact.py:795`) — including on its own error path (`pre_compact.py:731`),
+(`pre_compact.py:596-609`) and removes it only on a completed run
+(`pre_compact.py:883`) — including on its own error path (`pre_compact.py:941`),
 so an *errored* run is never reported as a *killed* one. `SessionStart` reports
 a surviving marker, but only once it is at least 10 minutes old, so a run still
 in flight is never mislabelled (`session_start.py:187-206`).
@@ -1110,7 +1110,7 @@ generator was guarded by `if not gi.exists()`, so each time the plugin started
 writing a new artifact, existing installs kept the stale ignore list forever and
 silently began leaking it. Several of these artifacts embed verbatim
 conversation or plan prose, which makes that a privacy problem rather than
-noise. `pre_compact.py:353` runs it on EVERY compaction (not only at project
+noise. `pre_compact.py:585` runs it on EVERY compaction (not only at project
 creation) precisely so old installs migrate. Two standalone copies of the list
 exist because they cannot import this module and must be kept in sync:
 `cc_memory/ui/installer.py` (stdlib-only bootstrap) and

@@ -146,6 +146,34 @@ _OBS_PER_EXTRACTION = 300
 _OBS_CHARS_BUDGET = 24000
 _OBS_LINE_CHARS = 200
 
+
+def _observations_to_feed(observations, obs_mark):
+    """The slice of `observations` one extraction feeds, oldest first.
+
+    Rows at or below `obs_mark` — the Stop observer's cursor,
+    `MemoryDB.observer_cursor` — are not fed: the observer already sent them
+    to a model, and feeding them again here was the double feed measured at
+    v2.15.2 (every observation reached Haiku twice, once per hook; A4).
+    Above the cursor the two bounds apply: at most `_OBS_PER_EXTRACTION`
+    rows and at most `_OBS_CHARS_BUDGET` characters at `_OBS_LINE_CHARS`
+    per row — the first row is always taken, so one oversized row cannot
+    stall the queue. Returns `(obs_fed, chars, unfed)`: the slice, its
+    character cost, and every row above the cursor, of which the slice is
+    a prefix. A pure function, so the gate drives it with neither a
+    transcript nor a credential.
+    """
+    unfed = [o for o in observations if o["id"] > obs_mark]
+    obs_fed, chars = [], 0
+    for o in unfed[:_OBS_PER_EXTRACTION]:
+        cost = len((o["tool_input"] or "")[:_OBS_LINE_CHARS]) + len(
+            o["tool_name"] or "") + 4
+        if obs_fed and chars + cost > _OBS_CHARS_BUDGET:
+            break
+        obs_fed.append(o)
+        chars += cost
+    return obs_fed, chars, unfed
+
+
 _EXTRACTION_PROMPT = """\
 You are a memory extraction system. Given a Claude Code conversation transcript, \
 extract the most important information worth remembering across sessions.
@@ -643,11 +671,15 @@ def main():
             brief_summary=archive_text[:1000],
         )
 
-        # Observations to feed this extraction. EVERYTHING still present for
-        # this project: `cleanup_observations` below deletes exactly what is
-        # consumed here, so whatever survives is by definition unconsumed.
+        # Observations still present for this project — ALL of them, because
+        # `files_from_observations` below builds §0's file lists from every
+        # row. What is FED is a slice: `_observations_to_feed` skips the rows
+        # at or below the Stop observer's cursor (v2.16.0, A4) — that hook
+        # already sent them to a model — and the cleanup at the bottom of
+        # this function deletes those unconditionally, so whatever survives
+        # a compaction is by definition unread by BOTH hooks.
         #
-        # This used to bound on the PREVIOUS session's `compacted_at` — a
+        # The read used to bound on the PREVIOUS session's `compacted_at` — a
         # naive-local-time string. A clock that stepped back (DST fall-back,
         # NTP correction) put every subsequent observation BELOW that bound,
         # so extraction saw none of them and the cleanup at the bottom of
@@ -656,6 +688,7 @@ def main():
         # watermark from the read side entirely; the write side keeps one,
         # and it is now a monotonic row id.
         observations = db.get_observations_since(project_id, 0)
+        obs_mark = db.observer_cursor(project_id)
         # Feed the OLDEST prefix and watermark EXACTLY what was fed (register
         # B3): the prompt used to take the newest 50 while the cleanup bound
         # was the highest id READ, so on a >50-observation backlog the oldest
@@ -664,19 +697,12 @@ def main():
         # next compaction; the deferral is logged (no silent caps). The
         # watermark also predates the slow LLM leg, so anything a concurrent
         # PostToolUse writes meanwhile survives too.
-        obs_fed, _obs_chars = [], 0
-        for _o in observations[:_OBS_PER_EXTRACTION]:
-            _cost = len((_o["tool_input"] or "")[:_OBS_LINE_CHARS]) + len(
-                _o["tool_name"] or "") + 4
-            if obs_fed and _obs_chars + _cost > _OBS_CHARS_BUDGET:
-                break
-            obs_fed.append(_o)
-            _obs_chars += _cost
+        obs_fed, _obs_chars, unfed = _observations_to_feed(observations, obs_mark)
         consumed_through = obs_fed[-1]["id"] if obs_fed else 0
-        if len(observations) > len(obs_fed):
+        if len(unfed) > len(obs_fed):
             _log.info(f"observations: feeding oldest {len(obs_fed)} of "
-                      f"{len(observations)} ({_obs_chars} chars); the rest "
-                      f"wait for the next run")
+                      f"{len(unfed)} above the observer cursor {obs_mark} "
+                      f"({_obs_chars} chars); the rest wait for the next run")
 
         # LLM extraction → upsert through memory_writer (anti-patch path).
         # None = did not run / failed; a list (even empty) = ran. Register C1:
@@ -787,12 +813,21 @@ def main():
         # used to delete every observation unread — a credential outage
         # measured 4 -> 0 rows with 0 memories extracted. Kept rows are
         # bounded by trim_observations below, and hitting that cap is logged.
+        #
+        # Rows at or below the observer cursor go regardless (v2.16.0, A4):
+        # the Stop observer fed them and advances its cursor only after its
+        # upsert returns, so nothing is lost — and `trim_observations`'
+        # "NEVER fed" warning below is accurate again. Before this, a project
+        # with a credential kept every observer-fed row until a compaction
+        # fed it a second time.
+        if obs_mark:
+            db.cleanup_observations(project_id, obs_mark)
         if llm_ok and consumed_through:
             db.cleanup_observations(project_id, consumed_through)
-        elif not llm_ok and observations:
-            _log.warn(f"extraction did not run; keeping "
-                      f"{len(observations)} observation(s) for the next "
-                      f"compaction")
+        elif not llm_ok and unfed:
+            _log.warn(f"extraction did not run; keeping {len(unfed)} "
+                      f"observation(s) above the observer cursor for the "
+                      f"next compaction")
         trimmed = db.trim_observations(project_id)
         if trimmed:
             _log.warn(f"observations over the {MemoryDB._MAX_OBSERVATIONS} "

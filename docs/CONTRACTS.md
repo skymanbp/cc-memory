@@ -221,7 +221,7 @@ r8antipatch` proves the assertion goes red when a bypass caller appears.
 
 | Save path | Entry function |
 |-----------|---------------|
-| `PreCompact` hook | `upsert_batch(db, pid, sid, extracted_list, memory_dir)` (`hooks/pre_compact.py:690`) |
+| `PreCompact` hook | `upsert_batch(db, pid, sid, extracted_list, memory_dir)` (`hooks/pre_compact.py:716`) |
 | `Stop` observer | `upsert_batch(db, pid, None, observer_list, memory_dir)` (`hooks/stop.py:386`) |
 | `SessionStart` retroactive save | `upsert_batch(db, pid, sid, memories, memory_dir=memory_dir)` — un-saved prior sessions (`hooks/session_start.py:1125`) |
 | `/save-memories` skill | `upsert_batch(db, pid, None, memories, memory_dir=mem_dir)` — `mem_dir` is `core.layout.memory_dir(project)`, never a hand-spelled join (`skills/save-memories/SKILL.md:180`) |
@@ -388,7 +388,7 @@ v2.1 fixed this with **PROGRESS.md** (always-full-rewrite from a SQL row) +
 a **forced `<system-reminder>` injection at SessionStart**. The legacy
 `SESSION_HANDOFF.md` is renamed to `SESSION_HANDOFF.md.v2.bak` on the first
 PreCompact under v2.1+ (one-shot migration `migrate_legacy_handoff`,
-`core/progress.py:735-753`, called from `hooks/pre_compact.py:560`).
+`core/progress.py:735-753`, called from `hooks/pre_compact.py:588`).
 
 ### PROGRESS.md is the SOT
 
@@ -401,7 +401,7 @@ at `db.py:176-190`, plus the two v5 session-annotation columns at `db.py:219-222
 | Column | Type | Primary source · Fallbacks |
 |--------|------|---------------------------|
 | `project_id` | INTEGER PK | `upsert_project` |
-| `current_request` | TEXT | UserPromptSubmit, first non-scaffolding prompt, once per session (`user_prompt.py:330`) → PreCompact `_first_user_request(window.head)` (`pre_compact.py:269-311`) — scans up to 200 records past the leading `queue-operation` / `attachment` meta rows and skips empty-content user rows (`pre_compact.py:269-311`, v2.4.2) → `session_summaries.request` (`progress.py:241`) |
+| `current_request` | TEXT | UserPromptSubmit, first non-scaffolding prompt, once per session (`user_prompt.py:330`) → PreCompact `_first_user_request(window.head)` (`pre_compact.py:335-392`) — scans up to 200 records past the leading `queue-operation` / `attachment` meta rows and skips empty-content user rows (`pre_compact.py:335-392`, v2.4.2) → `session_summaries.request` (`progress.py:241`) |
 | `status_done` | TEXT | `session_summaries.completed` (`progress.py:236`), which PreCompact fills from the extraction's `result` / `decision` memories (`pre_compact.py:307-364`), falling back to the observed Edit/Write paths only when the extractor returned no outcome. Before v2.8.0 it was ALWAYS that path list, so §2 "Done" rendered a file dump instead of what was accomplished. SessionStart fills it if empty (`session_start.py:589-590`) |
 | `status_in_flight` | TEXT | `session_summaries.learned`, filled from the extraction's `arch` / `config` / `bug` memories (`pre_compact.py:666-700`). Before v2.8.0 PreCompact hard-coded it to `""`, so §2 "In-flight" rendered `*(none active)*` unconditionally — structurally, not because nothing was in flight |
 | `status_blocked` | TEXT | Explicit `patch_progress(status_blocked=...)` — no in-tree caller does this today; it is an API for external tooling. A repo-wide grep finds only the schema default (`core/db.py:2865-2904,853`), the empty seed (`core/progress.py:282`) and the read (`core/progress.py:282`) |
@@ -409,10 +409,10 @@ at `db.py:176-190`, plus the two v5 session-annotation columns at `db.py:219-222
 | `plan` | TEXT | `session_summaries.next_steps` — sourced from the latest TodoWrite pending items if any, else from LLM-extracted `task` memories (`pre_compact.py:462-468`); propagated at `progress.py:255`, filled-if-empty at `session_start.py:965` |
 | `critical_context` | JSON | Top 10 memories with importance ≥ 4, content truncated to 200 chars (`progress.py:107-113`; `session_start.py:966`) |
 | `files_touched` | JSON | `observations` table (`pre_compact.py:446-453` → `progress.py:128-134`; Stop per-turn patch `stop.py:193-211`; SessionStart tier-2C `session_start.py:966`) → tier-3 prior-transcript `extract_file_changes` (`session_start.py:966`) |
-| `transcript_ptr` | TEXT | PreCompact `transcript_path` resolved absolute (`pre_compact.py:768`) → tier-3 `find_latest_transcript(cwd, exclude_session_id=...)` (`session_start.py:929`) |
+| `transcript_ptr` | TEXT | PreCompact `transcript_path` resolved absolute (`pre_compact.py:794`) → tier-3 `find_latest_transcript(cwd, exclude_session_id=...)` (`session_start.py:929`) |
 | `updated_at` | TEXT | ISO timestamp, stamped by `upsert_progress` / `patch_progress` (`db.py:2769-2845`, `:937-943`) |
-| `trigger_type` | TEXT | "auto" \| "manual" (PreCompact passes the host's own trigger string through — `pre_compact.py:773,492`; `"precompact"` is only `collect_progress_state`'s default kwarg at `progress.py:200-260` and is always overridden) \| "stop" (`stop.py:598`) \| "user_prompt" \| "resume_request" (`user_prompt.py:392`) \| "session_start_refresh" (`session_start.py:991`) |
-| `current_session_id` | TEXT | `db.tag_progress_session` only (`db.py:2958-2982`) — tagged by PreCompact (`pre_compact.py:773`), Stop (`stop.py:598`), SessionStart (`session_start.py:991`), UserPromptSubmit (`user_prompt.py:392`) |
+| `trigger_type` | TEXT | "auto" \| "manual" (PreCompact passes the host's own trigger string through — `pre_compact.py:799,492`; `"precompact"` is only `collect_progress_state`'s default kwarg at `progress.py:200-260` and is always overridden) \| "stop" (`stop.py:598`) \| "user_prompt" \| "resume_request" (`user_prompt.py:392`) \| "session_start_refresh" (`session_start.py:991`) |
+| `current_session_id` | TEXT | `db.tag_progress_session` only (`db.py:2958-2982`) — tagged by PreCompact (`pre_compact.py:799`), Stop (`stop.py:598`), SessionStart (`session_start.py:991`), UserPromptSubmit (`user_prompt.py:392`) |
 | `session_started_at` | TEXT | `db.tag_progress_session` — reset only when the stored sid changes; `upsert_progress` preserves both across a full rewrite (`db.py:2769-2845`) |
 
 The rendered Markdown (sections 0-7 in
@@ -421,7 +421,7 @@ from this row. Hand-editing PROGRESS.md is pointless: any of the four automatic
 update paths (PreCompact / Stop / UserPromptSubmit / SessionStart refresh) —
 plus the two manual regenerators, `/cc-mem progress` (`cli/mem.py:1238`) and the
 MCP `progress_regenerate` tool (`mcp/server.py:745`) — will overwrite it.
-All six `write_progress_md` call sites: `pre_compact.py:775`, `stop.py:525`,
+All six `write_progress_md` call sites: `pre_compact.py:801`, `stop.py:525`,
 `user_prompt.py:384`, `session_start.py:1125`, `cli/mem.py:1458`,
 `mcp/server.py:243`.
 
@@ -462,8 +462,8 @@ whitespace-flattened and truncated at 100 chars (`:210-234`).
      `extracted_memories + observations + session_summaries`
      (`progress.py:463`).
    - `db.tag_progress_session(...)` runs FIRST so the tag survives
-     (`pre_compact.py:773`; see the preservation logic at `db.py:2958-2982`).
-   - `db.upsert_progress(**all_fields)` overwrites the row (`pre_compact.py:768`).
+     (`pre_compact.py:799`; see the preservation logic at `db.py:2958-2982`).
+   - `db.upsert_progress(**all_fields)` overwrites the row (`pre_compact.py:794`).
    - `write_progress_md(db, pid, memory_dir)` rewrites the file (`:501`).
 
 2. **Stop** (partial update, every turn):
@@ -505,7 +505,7 @@ whitespace-flattened and truncated at 100 chars (`:210-234`).
    - The emptiness test is made INSIDE the write. `db.fill_empty_progress`
      applies every field as
      `SET col = CASE WHEN COALESCE(col, '') IN ('', '[]') THEN ? ELSE col END`
-     under `BEGIN IMMEDIATE` (`db.py:2847-2863`); the read above it only decides
+     under `BEGIN IMMEDIATE` (`db.py:2866-2882`); the read above it only decides
      what to OFFER. The verdict used to be a `get_progress()` read on one
      connection and an unconditional `patch_progress()` on another, with the
      tier-3 transcript load between them, so a PreCompact rewrite committing in
