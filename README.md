@@ -9,7 +9,7 @@ Your project's decisions, results, bugs and plans survive compaction, session
 boundaries, and closed terminals — the next session is *forced* to read them
 before it does anything, and what is stored is *reconciled*, never stacked.
 
-[![version](https://img.shields.io/badge/version-2.15.1-blue.svg)](CHANGELOG.md)
+[![version](https://img.shields.io/badge/version-2.16.0-blue.svg)](CHANGELOG.md)
 [![license](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![python](https://img.shields.io/badge/python-3.8%2B-blue.svg)](pyproject.toml)
 [![dependencies](https://img.shields.io/badge/runtime%20deps-0-brightgreen.svg)](#requirements)
@@ -42,7 +42,7 @@ before it does anything, and what is stored is *reconciled*, never stacked.
 - [Development](#development)
 - [Troubleshooting](#troubleshooting)
 - [Roadmap and known limits](#roadmap-and-known-limits)
-- [What's new in v2.15.0](#whats-new-in-v2150)
+- [What's new in v2.16.0](#whats-new-in-v2160)
 - [Documentation map](#documentation-map)
 - [License](#license)
 
@@ -918,75 +918,51 @@ has to rediscover:
 
 ---
 
-## What's new in v2.15.0
+## What's new in v2.16.0
 
-**The channel that had a query, and the search that could not read Chinese.**
-Six defects arrived from a project using this plugin, each with a `file:line`
-and a reading; each was reproduced here before it was touched, and two of them
-turned out to be halves of a missing feature.
+**The hooks got out of the way, the injection got smaller and shaped, and the
+manual became a manual.** Every change was measured on the same 600-memory
+sandbox before and after (`scripts/bench_hooks.py`; the table is in
+`CHANGELOG.md` § [2.16.0]).
 
-- **Search can see Chinese.** `memories_fts` shipped with no `tokenize=`, so
-  fts5 used `unicode61`, which never segments Han, kana or Hangul — a whole
-  Chinese clause indexed as ONE token. Measured against a row reading
-  `用户要求把超时设为三十秒`: `MATCH '超时'` returned 0, the whole clause
-  returned 1. The index is `tokenize='trigram'` now, chosen by a runtime probe
-  (older SQLite has no trigram tokenizer), and an index built by an earlier
-  version re-tokenises itself on open.
-- **An empty search result is never an answer.** The `LIKE` fallback used to
-  run only when the FTS triggers were missing, so in the healthy case "the
-  index found nothing" came back as fact — and the MCP layer reports an empty
-  result set as a SUCCESS, so the model was told the project has no such
-  memory. That branch is unconditional now. Two more, found by the new gate on
-  its first run: `search ""` and `search "\x00"` each returned every active
-  row, and both spellings are reachable from the web viewer and from the
-  model-invokable `memory_search`.
-- **Query-time recall — and why this project does not need a vector database.**
-  The report asked which write path produces the least-used memories, with the
-  reading that 82.6 % of stored rows had never been injected. The instrument
-  for that (`memories.recall_count`) exposed the real finding: this plugin had
-  **two** moments at which it could put memories in front of Claude and used
-  one. The only automatic moment that HAS a user query wrote to the database
-  and printed nothing. See [Capability 7](#what-it-does--seven-capabilities).
-- **`/cc-mem inject-usage` computes the signals it promised.** Its docstring
-  advertised an ack measurement no line of code performed. The ack is measured
-  now, from the transcript of the session that received the last injection,
-  through the same constant the hook EMITS — one demand, one detector — and it
-  is **tri-state**: `unmeasured` is never printed as `no`. The observation
-  window is `--window` and the output states it. **`--judge`** adds an opt-in
-  second layer: one LLM call that reads that session's own replies and judges,
-  per delivered memory, whether it was `used` / `unused` / `unknown`. Layer 1
-  is free and always runs; layer 2 costs an API call and is therefore asked
-  for, never assumed — and `unknown` is never rendered as `unused`, because an
-  outage of ours is not evidence about Claude.
-- **A MERGE stopped destroying the text it replaced** — both rewriting
-  branches archive the old row and link the new one to it, so the superseded
-  wording stays recoverable.
-- **The drift remedy converges.** Running `/cc-mem plan-check` — the remedy the
-  refusal itself names — and then touching one more file used to re-arm the
-  same block at the same Stop; one sensitive Bash call did it alone. A guardian
-  check now grants immunity for exactly the turn it happened in, and the remedy
-  text runs the guardian FIRST, records it LAST, so nothing accrues after the
-  reset. Separately, `plan-status` and the Stop gate read **one** verdict
-  function, so the screen can no longer disagree with the refusal.
-
-Two of the release's own falsification cases ran GREEN on their first drive,
-and the **checks** were fixed rather than the cases: a zero-byte assertion is
-evidence only when paired with a control that emits, and a gate made of three
-tests is only measured by a probe that isolates each one.
-
-v2.14.x closed a 38-finding debug pass at its roots — a project's identity
-became its database rather than the path string inside it — and tightened four
-gate checkers that had been certifying what they never checked. v2.13.0 moved
-per-project state from `memory/` to `.ccm/`, migrated one way on first write
-and identified by content, never by name. v2.12.x brought
-backpressure-triggered consolidation, the step-reference audit, CI-built
-releases and the [Before and after](#before-and-after) captures.
-
-Every earlier release is in **[CHANGELOG.md](CHANGELOG.md)**, which is the
-single history of this project — this README documents what the software *is*,
-not what it used to be.
-
----
+- **No hook waits on the model any more.** The Stop observer and the
+  retroactive save each ran a Haiku call inside the hook's own budget (up to
+  14 s of Stop's 22 s, up to 13 s of SessionStart's 15 s). Both are detached
+  workers now — the hook decides in milliseconds and spawns; a failed call is
+  remembered in `.ccm/.llm_backoff.json` (one minute, doubling to thirty) so an
+  outage costs one attempt, not one per turn.
+- **PostToolUse fires only for the tools it handles.** The hook was registered
+  with an empty matcher and paid an interpreter start for every tool call,
+  returning early for most of them. The matcher is derived from the modes and
+  the plan legs, and spelled once.
+- **A refused turn is one turn.** A continuation Stop (the harness re-firing
+  after a refusal) re-ran every job and counted twice; a database opened five
+  times per hook opens three; Stop opens one handle per turn; PreCompact feeds
+  the extraction only what the observer has not already sent.
+- **SessionStart injects a digest, not the file.** PROGRESS.md was embedded
+  whole and then demanded as a Read — the same text twice. The layer is now a
+  §1-§4 digest drawn by the file's own renderers, the handshake demands one Read
+  (PROGRESS.md; MEMORY.md's facts were already in the layers), a resumed
+  session gets the directive ledger and nothing else, a compacted one gets the
+  layers and no ack demand, and one seen set keeps a fact from appearing in two
+  layers or in recall. `/cc-mem inject-show` says which layer, which template
+  and which ids reached the model.
+- **Consolidation you can see.** A run without a credential says which LLM
+  stages it skipped; `/cc-mem status` prints the last run, the backlog and
+  whether one is due; a decision restated as a note merges across categories
+  instead of landing beside the fact it restates; the idle reorg waits while a
+  judge holds the lock.
+- **Less of everything that was duplicated.** One extraction prompt and one
+  normaliser for the four extractors (the modes' prompt suffix reaches the
+  model for the first time); thresholds, marker prefixes and file names spelled
+  once; the v2.0 plans queue (`cli/plan.py`, the dashboard tab, nine `MemoryDB`
+  methods) deleted with the table kept; dead code and comment/code
+  contradictions swept; a manual MCP add stores no session, like every other
+  manual path.
+- **`CLAUDE.md` is an operating manual again** — under 45 KB, gated. Thirty-two
+  version narratives moved into `CHANGELOG.md` under their own releases, and the
+  rules they carried are numbered in `INVARIANTS.md`, each with its gate and
+  falsification case.
 
 ## Requirements
 
@@ -1013,7 +989,8 @@ say it has.
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) · [.zh](docs/ARCHITECTURE.zh.md) | Module map, data flow, install layouts, the i18n convention |
 | [docs/CONTRACTS.md](docs/CONTRACTS.md) · [.zh](docs/CONTRACTS.zh.md) | The three hard contracts, in specification form |
 | [commands/cc-mem.md](commands/cc-mem.md) | Every `/cc-mem` subcommand, with semantics |
-| [CLAUDE.md](CLAUDE.md) | Instructions for Claude Code working *on* this repository |
+| [CLAUDE.md](CLAUDE.md) | The operating manual for Claude Code working *on* this repository |
+| [INVARIANTS.md](INVARIANTS.md) | The numbered rules a change must not break, each with its gate and falsification case |
 | [CHANGELOG.md](CHANGELOG.md) | The complete version history |
 | [CONTRIBUTING.md](CONTRIBUTING.md) · [SECURITY.md](SECURITY.md) | How to contribute; how to report a vulnerability |
 

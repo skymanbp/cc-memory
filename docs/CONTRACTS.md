@@ -13,7 +13,7 @@ Where the assertions live: `tests/smoke_test.py` covers the anti-patch decisions
 the PROGRESS.md full-rewrite + fill-only-empty refresh, and the plan lifecycle
 (v4 migration → capture → refine → TodoWrite sync → PLAN.md). The **R610
 carryover gate** is covered by its own suite, `tests/test_plan_carryover.py`
-(20 checks) — `grep -n "carryover\|dispositions" tests/smoke_test.py` still
+(28 checks at v2.16.0) — `grep -n "carryover\|dispositions" tests/smoke_test.py` still
 returns nothing, so run both. `tests/test_surfaces.py` (v2.5) covers the
 shipped surfaces these contracts are reached through.
 
@@ -27,8 +27,9 @@ each citation it resolves the symbols named in the surrounding prose with `ast`
 and asserts the cited range covers that symbol's definition, or at least
 mentions it. Its first run found **163 of 594 citations stale** and repaired
 them mechanically. A citation whose sentence names no uniquely resolvable
-function, class or ALL_CAPS constant is reported SKIP and is **not** checked, so
-treat a line number here as a hint and the **symbol name** as the fact:
+function, class or ALL_CAPS constant is bounds-checked only — inside the file and
+non-blank, reported as "NOT verified against a symbol" (v2.14.0) — so treat a
+line number here as a hint and the **symbol name** as the fact:
 `grep -n "def <symbol>" <file>` is authoritative, and
 `python tools/citation_check.py --fix` is how you repair a number.
 
@@ -467,6 +468,9 @@ whitespace-flattened and truncated at 100 chars (`:210-234`).
    - `collect_progress_state(...)` builds the full state from
      `extracted_memories + observations + session_summaries`
      (`progress.py:576`).
+   - Only the observations above `MemoryDB.observer_cursor` reach the LLM
+     extraction (v2.16.0, A4): the rows at or below it were fed by the Stop
+     observer already, and PreCompact deletes them whether extraction ran or not.
    - `db.tag_progress_session(...)` runs FIRST so the tag survives
      (`pre_compact.py:788`; see the preservation logic at `db.py:3057-3081`).
    - `db.upsert_progress(**all_fields)` overwrites the row (`pre_compact.py:789`).
@@ -769,10 +773,12 @@ three legitimate edit entries (`core/plan.py:1017`).
               [continue, or `/cc-mem plan-replan` if drift severe]
 ```
 
-Hooks never spawn subagents themselves — they only nudge. The Stop hook's turn
-counter is bumped on every turn an active plan row exists (`stop.py:274-277`),
-and the two nudge kinds are mutually exclusive: `needs_refine` wins over the
-guardian nudge (`stop.py:279-296`).
+Hooks never spawn subagents themselves — the Stop hook REFUSES the turn and
+names the remedy (v2.11.0), and a spent escape budget parks the advisory for
+the next UserPromptSubmit to print (v2.16.0). The turn counter is bumped on
+every turn an active plan row exists, except a continuation Stop
+(`stop_hook_active`, v2.16.0), and `core.plan.blocking_reasons` returns every
+condition that must stop the turn, an unrefined plan first.
 
 ### Data model: `plan_active`
 

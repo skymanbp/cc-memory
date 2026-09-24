@@ -116,7 +116,7 @@ TRIGGER_OF_RE = None  # assigned below, once TRIGGER_NOUNS is complete
 HISTORY_DOCS = ("CHANGELOG.md",)
 HISTORY_HEADING_RE = re.compile(
     r"^##\s+(?:Previously\b|What(?:'s|\s+is)\s+new\b|What\s+changed\b"
-    r"|此前|.*有什么新变化)", re.MULTILINE)
+    r"|此前|.*有什么新变化|.*有什么新东西)", re.MULTILINE)
 HEADING_RE = re.compile(r"^##\s", re.MULTILINE)
 
 # `(?![-/])` because "the three hook/package line numbers" counts LINE

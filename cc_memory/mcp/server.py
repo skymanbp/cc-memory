@@ -804,7 +804,7 @@ def _is_failed_result(result):
 def _defang(obj):
     """Neutralise authority markers in every string a tool result carries.
 
-    THIS SERVER IS A RENDER PATH. `CLAUDE.md` states the marker defence "runs
+    THIS SERVER IS A RENDER PATH. `INVARIANTS.md` INV-051 states the marker defence "runs
     on the write path via `clean_for_storage` and again on every render
     path". When this function was added it named four renderers
     <!--ce:render_paths:asof--> — `core/progress.py`,

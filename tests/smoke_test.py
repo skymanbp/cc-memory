@@ -2025,6 +2025,17 @@ def main():
     assert f"Database schema ({_dc_tables} tables)" in _dc_claude, \
         (f"CLAUDE.md's table count is stale — core/db.py creates "
          f"{_dc_tables} tables")
+    # v2.16.0 · CLAUDE.md is a MANUAL, and bounded. Thirty-two version
+    # narratives had grown it to 153 KB; they live in CHANGELOG.md now, the
+    # rules in INVARIANTS.md, and this keeps the next release from writing
+    # one back into the file every session loads.
+    _dc_size = (_REPO / "CLAUDE.md").stat().st_size
+    assert _dc_size <= 45 * 1024, (
+        f"CLAUDE.md is {_dc_size} bytes — over the 45 KB manual bound; put "
+        f"the narrative in CHANGELOG.md and the rule in INVARIANTS.md")
+    assert (_REPO / "INVARIANTS.md").is_file() and \
+        "INVARIANTS.md" in _dc_claude, \
+        "the manual must point at INVARIANTS.md, and the file must exist"
     # len(_dc_gates), never a literal: this line said "all 5 gate scripts" and
     # would have become false the moment doc_claims.py joined the list — the
     # same hand-counted-number defect the claim gate below exists to end.

@@ -3344,7 +3344,7 @@ class MemoryDB:
         read-then-write here would stamp a turn number that had already moved
         and grant the one-turn immunity to the wrong turn — the same
         read-here-write-there shape `fill_empty_progress` was rewritten to
-        remove (CLAUDE.md v2.14.0 rule 12).
+        remove (INV-009; v2.14.0 rule 12).
         """
         now = self._now()
         with self._connect() as conn:

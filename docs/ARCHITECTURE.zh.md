@@ -1,4 +1,4 @@
-<!-- i18n-source: ARCHITECTURE.md | sha256: f45ee5c2705de757 | version: 2.15.2 | translated: 2026-09-24 | translation: 829f3eb0f9fcd748 -->
+<!-- i18n-source: ARCHITECTURE.md | sha256: 6ba326a37da17cdc | version: 2.16.0 | translated: 2026-09-24 | translation: da3fd0b441463e98 -->
 > [English](ARCHITECTURE.md) · **简体中文**
 
 # cc-memory — 架构
@@ -122,20 +122,23 @@ cc-memory/
 │   ├── core/                    ← 领域层：db, extractor, consolidate, idle,
 │   │                              progress, plan, privacy, modes, roots, auth,
 │   │                              logger, encoding_setup, version,
-│   │                              atomic, markers, textsim, layout
+│   │                              atomic, markers, textsim, layout, recall,
+│   │                              prompts
 │   ├── hooks/                   ← 6 个钩子入口 + _entry.py（共享入口阶梯：
 │   │                              stdin 解析 + 退出开关→锚定闸门，v2.10.0）
 │   ├── llm/                     ← ccl_backend（Haiku/Ollama）+ memory_writer
-│   │                              + parse（容错的 LLM-JSON 读取器）
+│   │                              + parse（容错的 LLM-JSON 读取器；唯一的
+│   │                              提取提示词 + 归一化器）+ usage_judge
 │   ├── cli/                     ← mem.py
 │   ├── mcp/                     ← server.py（MCP stdio）
 │   └── ui/                      ← installer, dashboard, web_viewer
 ├── .github/workflows/           ← gates.yml（每次 push/PR 跑全部闸门）+
 │                                  release.yml（tag → 闸门 → 构建 exe →
 │                                  实际运行 → GitHub Release，v2.12.0）
-├── tests/                       ← run_gates.py（唯一的闸门运行器）+ 四个
+├── tests/                       ← run_gates.py（唯一的闸门运行器）+ 五个
 │                                  套件：smoke_test、test_plan_carryover、
-│                                  test_surfaces、test_directive_enforcement
+│                                  test_surfaces、test_directive_enforcement、
+│                                  test_recall
 ├── tools/                       ← dev/CI 检查器，从不打包：i18n_check、
 │                                  citation_check、doc_claims、doc_coverage、
 │                                  contracts、falsify_fixes
@@ -144,7 +147,8 @@ cc-memory/
 ├── pyproject.toml
 ├── README.md
 ├── README.zh.md                 ← 受漂移跟踪的翻译（见 §9）
-├── CLAUDE.md                    ← 给 Claude Code 的项目指令
+├── CLAUDE.md                    ← 给 Claude Code 的操作手册
+├── INVARIANTS.md                ← 编号的不变量：规则、闸门、证伪用例
 ├── CHANGELOG.md
 ├── CONTRIBUTING.md              ← 每道闸门查什么、红了怎么读
 ├── SECURITY.md                  ← 威胁模型 + 漏洞的私密上报方式
@@ -152,10 +156,10 @@ cc-memory/
 ```
 
 `agents/`、`tests/` 和 `tools/` 是承重结构，不是附带品：
-`agents/plan-refiner.md` 与 `agents/plan-guardian.md` 都由
-`cc_memory/hooks/stop.py` 提示触发；`tools/i18n_check.py` 正是
+`agents/plan-refiner.md` 与 `agents/plan-guardian.md` 是
+`cc_memory/hooks/stop.py` 的拒绝信息点名的补救手段；`tools/i18n_check.py` 正是
 [§9](#9-文档语言约定i18n) 所规定的对象，也是
-`tests/smoke_test.py:878-895` 作为漂移门禁导入的模块。
+`tests/smoke_test.py` 作为漂移门禁导入的模块。
 
 ### 只有一个版本字符串（v2.5）
 
@@ -746,8 +750,8 @@ v2.4.2 才成立：`_extract_via_llm` 的 `except` 元组此前不包含 `Runtim
 （`memory_writer.py:384-421`）；`PROGRESS.md` ← `core.progress.write_progress_md`
 （`progress.py:498-677, 366`）；`PLAN.md` ← `core.plan.write_plan_md`
 （`plan.py:783-832`）；`.plan_history/` ← `plan.py:783-832`；`.last_save.json` ←
-`pre_compact.py:737, 771`；`.last_inject.json` ← `session_start.py:291-309`
-（临时文件 + `os.replace`，是真正原子的，不同于 `.last_save.json` 用的普通写）；
+`pre_compact.py:398, 771`；`.last_inject.json` ← `session_start._write_inject_manifest`
+（自 v2.16.0 起经 `core.atomic.write_atomic`；`.last_save.json` 仍是普通写）；
 `.last_consolidation.json` ← `core.consolidate.write_consolidation_marker`
 （唯一写入方，异步钩子 + CLI 共用）；`.consolidation.lock` ← `_acquire_lock`
 （`consolidate_async.py:121-155`）；`.consolidation.kick` ←
@@ -756,8 +760,8 @@ v2.4.2 才成立：`_extract_via_llm` 的 `except` 元组此前不包含 `Runtim
 60 秒过期；`.llm_backoff.json` ←
 `core.auth.note_llm_failure`（唯一写入方；每个调用 LLM 的钩子都通过
 `core.auth.llm_backoff` 读它，第一次成功的调用即删除它）；`.pre_compact_attempt.json` ←
-`pre_compact.py:284-311`。`sessions/` 与 `topics/` 由最先接触该项目的那条路径创建
-——自动初始化时是 `user_prompt.py:57-63`，否则是 `pre_compact.py:342-343`。
+`pre_compact._write_attempt`（自 v2.16.0 起经 `core.atomic.write_atomic`）。`sessions/` 与 `topics/` 由最先接触该项目的那条路径创建
+——自动初始化时是 `user_prompt.py:57-63`，否则是 `pre_compact.py:376-403`。
 
 `.ccm/PROGRESS.md`、`.ccm/MEMORY.md` 和 `.ccm/PLAN.md` 都是**生成产物**。请改
 SQL 真相来源（PROGRESS.md 对应 `progress`，PLAN.md 对应 `plan_active`，MEMORY.md

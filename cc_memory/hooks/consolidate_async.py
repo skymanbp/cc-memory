@@ -132,7 +132,7 @@ def _acquire_lock(lock_path, stale_s=_STALE_LOCK_S):
     and the retroactive-save worker (`.retro.lock`) take theirs through this
     function with their own horizon, so a second copy of the reclaim rule
     never gets a chance to drift — the Stop probe already carried one copy
-    minus the staleness rule once (v2.14.0, rule 15).
+    minus the staleness rule once (INV-042; v2.14.0 rule 15).
     """
     try:
         if lock_path.exists():
@@ -253,7 +253,7 @@ def main():
         last = int(marker.get("last_session_count", 0) or 0)
 
         # Cadence gate (race-immune; see module docstring). Two ways to be
-        # due since v2.12.0: the sessions interval (the v2.3.2 rule — only
+        # due since v2.12.0: the sessions interval (INV-091, the v2.3.2 rule — only
         # meaningful when compactions happen), OR a write backlog
         # (core.consolidate.consolidation_backlog — the trigger that ends
         # the starvation of projects that never compact). A standalone

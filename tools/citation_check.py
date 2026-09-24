@@ -87,6 +87,7 @@ from pathlib import Path
 # UNTRACKED, not-ignored markdown (`--others --exclude-standard`): the local
 # run sees what CI will see, minus EVIDENCE_PREFIXES below.
 TRACKED = ["README.md", "README.zh.md", "CLAUDE.md", "CHANGELOG.md",
+           "INVARIANTS.md",
            "CONTRIBUTING.md", "SECURITY.md",
            ".github/PULL_REQUEST_TEMPLATE.md",
            "docs/ARCHITECTURE.md", "docs/ARCHITECTURE.zh.md",

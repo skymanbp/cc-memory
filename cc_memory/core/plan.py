@@ -1396,7 +1396,7 @@ def guardian_verdict(plan_row: Optional[Dict], *,
     `edits_since_last_guardian` raw and never mentioned a threshold, while
     the Stop path applied its own defaults — two
     readers of one row, each interpreting it privately, which is the shape
-    v2.14.0 rule 15 records for the consolidation lock (`stop.py` held a copy
+    INV-042 (v2.14.0 rule 15) records for the consolidation lock (`stop.py` held a copy
     of the policy minus its staleness rule and vetoed the only process that
     could clear it). A display that cannot disagree with the gate is worth
     more than a display that is merely correct today.

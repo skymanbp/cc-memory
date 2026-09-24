@@ -247,7 +247,7 @@ def collect_progress_state(db: MemoryDB, project_id: int,
     summary = db.get_latest_summary(project_id) or {}
 
     # `critical_context` is RETIRED (v2.16.0, B9): §5 reads the store at
-    # render time (the v2.15.1 rule §4 already follows), so the column is
+    # render time (INV-066, the v2.15.1 rule §4 already follows), so the column is
     # written empty and nothing reads it.
 
     # Open todos: filter to non-completed if provided

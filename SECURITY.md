@@ -4,8 +4,8 @@
 
 | Version | Supported |
 |---|---|
-| 2.15.x | ✅ |
-| < 2.15 | ❌ — upgrade; several fixes below are security-relevant |
+| 2.16.x | ✅ |
+| < 2.16 | ❌ — upgrade; several fixes below are security-relevant |
 
 ## Reporting a vulnerability
 

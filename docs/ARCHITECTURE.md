@@ -136,21 +136,24 @@ cc-memory/
 │   ├── core/                    ← Domain: db, extractor, consolidate, idle,
 │   │                              progress, plan, privacy, modes, roots,
 │   │                              auth, logger, encoding_setup, version,
-│   │                              atomic, markers, textsim, layout
+│   │                              atomic, markers, textsim, layout, recall,
+│   │                              prompts
 │   ├── hooks/                   ← 6 hook entry points + _entry.py (the
 │   │                              shared entry ladder: stdin parse + the
 │   │                              opt-out→anchor gate, v2.10.0)
 │   ├── llm/                     ← ccl_backend (Haiku/Ollama) + memory_writer
-│   │                              + parse (tolerant LLM-JSON reader)
+│   │                              + parse (tolerant LLM-JSON reader; the ONE
+│   │                              extraction prompt + normaliser) + usage_judge
 │   ├── cli/                     ← mem.py
 │   ├── mcp/                     ← server.py (MCP stdio)
 │   └── ui/                      ← installer, dashboard, web_viewer
 ├── .github/workflows/           ← gates.yml (every gate, on push/PR) +
 │                                  release.yml (tag → gates → exes → RUN
 │                                  them → GitHub Release, v2.12.0)
-├── tests/                       ← run_gates.py (THE gate runner) + the four
+├── tests/                       ← run_gates.py (THE gate runner) + the five
 │                                  suites: smoke_test, test_plan_carryover,
-│                                  test_surfaces, test_directive_enforcement
+│                                  test_surfaces, test_directive_enforcement,
+│                                  test_recall
 ├── tools/                       ← dev/CI checkers, never packaged: i18n_check,
 │                                  citation_check, doc_claims, doc_coverage,
 │                                  contracts, falsify_fixes
@@ -159,7 +162,8 @@ cc-memory/
 ├── pyproject.toml
 ├── README.md
 ├── README.zh.md                 ← drift-tracked translation (see §9)
-├── CLAUDE.md                    ← Project instructions for Claude Code
+├── CLAUDE.md                    ← the operating manual for Claude Code
+├── INVARIANTS.md                ← the numbered rules, each with its gate
 ├── CHANGELOG.md
 ├── CONTRIBUTING.md              ← what each gate checks, and how to read a red
 ├── SECURITY.md                  ← threat model + private vulnerability reports
@@ -167,10 +171,10 @@ cc-memory/
 ```
 
 `agents/`, `tests/`, and `tools/` are load-bearing, not incidental:
-`agents/plan-refiner.md` is nudged from `cc_memory/hooks/stop.py` and
-`agents/plan-guardian.md` from the same hook; `tools/i18n_check.py` is what
+`agents/plan-refiner.md` and `agents/plan-guardian.md` are the remedies a
+Stop refusal from `cc_memory/hooks/stop.py` names; `tools/i18n_check.py` is what
 [§9](#9-documentation-language-convention-i18n) specifies and what
-`tests/smoke_test.py:878-895` imports as a drift gate.
+`tests/smoke_test.py` imports as a drift gate.
 
 ### One version string (v2.5)
 
@@ -830,9 +834,9 @@ Writers, for traceability: `MEMORY.md` ← `memory_writer.regenerate_memory_inde
 (`memory_writer.py:384-421`); `PROGRESS.md` ← `core.progress.write_progress_md`
 (`progress.py:498-677, 366`); `PLAN.md` ← `core.plan.write_plan_md`
 (`plan.py:783-832`); `.plan_history/` ← `plan.py:783-832`; `.last_save.json` ←
-`pre_compact.py:737, 771`; `.last_inject.json` ← `session_start.py:291-309`
-(tempfile + `os.replace`, genuinely atomic, unlike the plain write used for
-`.last_save.json`); `.last_consolidation.json` ←
+`pre_compact.py:398, 771`; `.last_inject.json` ← `session_start._write_inject_manifest`
+(through `core.atomic.write_atomic` since v2.16.0; `.last_save.json` keeps its
+plain write); `.last_consolidation.json` ←
 `core.consolidate.write_consolidation_marker` (one writer, async hook + CLI);
 `.consolidation.lock` ← `_acquire_lock` (`consolidate_async.py:121-155`);
 `.consolidation.kick` ← `stop.py:_maybe_kick_consolidation`;
@@ -842,7 +846,7 @@ with a 60 s horizon; `.llm_backoff.json` ←
 `core.auth.note_llm_failure` (one writer; every
 LLM-calling hook reads it through `core.auth.llm_backoff` and the first
 successful call unlinks it); `.pre_compact_attempt.json` ←
-`pre_compact.py:284-311`. `sessions/` and `topics/` are created by whichever
+`pre_compact._write_attempt` (through `core.atomic.write_atomic`, v2.16.0). `sessions/` and `topics/` are created by whichever
 path touches the project first — `user_prompt.py:57-63` on auto-init, or
 `pre_compact.py:342-343`.
 

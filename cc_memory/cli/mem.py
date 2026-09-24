@@ -216,7 +216,7 @@ def _neutralize(text):
 
     `/cc-mem` runs as a Bash command inside a Claude session, so its stdout
     lands in the model's context — which makes this a RENDER PATH in exactly
-    the sense `CLAUDE.md` means when it says the marker defence "runs on the
+    the sense `INVARIANTS.md` INV-051 means when it says the marker defence "runs on the
     write path and again on every render path". When this function was added
     that sentence named four renderers <!--ce:render_paths:asof--> and this
     file was not among them; the set is computed now (`python
@@ -2555,7 +2555,7 @@ def _judge_usage_section(db, pid, memory_dir, project):
         row = dict(row)
         if row.get("project_id") != pid:
             continue  # why: `memories.id` is global to the DB file and one
-            # file legitimately holds several projects (v2.9.0 rule 4)
+            # file legitimately holds several projects (INV-015; v2.9.0 rule 4)
         # strip_private on the way OUT of the database as well as in: a row
         # written before v2.5.0's fail-closed rewrite can still carry a span,
         # and this text is about to become an Anthropic request.
@@ -2577,7 +2577,7 @@ def _judge_usage_section(db, pid, memory_dir, project):
     for mid in [r["id"] for r in rows]:
         verdict, evidence = verdicts.get(mid, (VERDICT_UNKNOWN, ""))
         counts[verdict] = counts.get(verdict, 0) + 1
-        # A one-line slot is an INLINE slot (v2.14.0 rule 14). This text is
+        # A one-line slot is an INLINE slot (INV-051; v2.14.0 rule 14). This text is
         # model-writable — `memory_add` is an MCP tool — and `/cc-mem` output
         # is read by Claude whenever Claude is the one running the command, so
         # a newline in a stored row would forge a second verdict here. The

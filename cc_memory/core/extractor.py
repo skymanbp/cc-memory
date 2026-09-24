@@ -603,14 +603,14 @@ def find_transcript_dir(cwd: str) -> Optional["Path"]:
     `ui/dashboard._find_transcript_dir` — which re-spelled the slug convention
     by hand as a literal `re.sub` instead of calling `mangle_project_path` —
     and `cli/mem.py` was about to add a fifth. They all delegate here now.
-    CLAUDE.md's v2.5.0 entry had already claimed the dashboard's copy was
+    The v2.5.0 rules (CHANGELOG § [2.5.0]) had already claimed the dashboard's copy was
     deleted, which is exactly how a copy survives a sweep: the sweep gets
     written down as finished.
 
     `Path.home()` is guarded, unlike every copy it replaces. It raises
     RuntimeError when no home resolves (measured on Windows with
     USERPROFILE/HOMEPATH/HOMEDRIVE/HOME unset), and `find_latest_transcript`
-    is called from the SessionStart hook — the failure class CLAUDE.md rule 8
+    is called from the SessionStart hook — the failure class INV-039 (v2.14.0 rule 8)
     records for `core/auth._credentials_path`. A hook must never raise.
     """
     from pathlib import Path
@@ -618,7 +618,7 @@ def find_transcript_dir(cwd: str) -> Optional["Path"]:
         claude_projects = Path.home() / ".claude" / "projects"
     except RuntimeError:
         # why: no resolvable home is "no transcripts", never an exception on
-        # a hook path (CLAUDE.md v2.14.0 rule 8)
+        # a hook path (INV-039)
         return None
     if not claude_projects.is_dir():
         return None

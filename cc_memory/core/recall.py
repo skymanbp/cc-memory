@@ -77,7 +77,7 @@ MEASURED FACTS THIS MODULE IS BUILT ON (2026-09-07, sqlite 3.49.1)
    "hooks" and "block"). The signal gate and the relevance floor are both
    load-bearing, and neither is redundant with the other.
 
-The logic core is PURE (v2.10.1 rule 1): `build_query`, `select_recalls` and
+The logic core is PURE (INV-107; v2.10.1 rule 1): `build_query`, `select_recalls` and
 `render_recall_block` take plain data and return plain data, so the gate can
 drive them headlessly. `hooks/user_prompt.py` is plumbing only.
 """
@@ -373,7 +373,7 @@ def select_recalls(rows: Sequence[Dict], prompt: str,
 def render_recall_block(rows: Sequence[Dict], prompt: str = "") -> str:
     """The text handed to Claude, or "" for no rows. PURE.
 
-    THIS IS A RENDER PATH (CLAUDE.md v2.5.2 rule 1). Stored memory content is
+    THIS IS A RENDER PATH (INV-051; v2.5.2 rule 1). Stored memory content is
     model-writable — `memory_add` is an MCP tool — and this function's output
     goes STRAIGHT into the context window, so every interpolated value is
     `neutralize_inline`d: one line per row, so a newline in stored content

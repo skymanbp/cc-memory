@@ -43,7 +43,7 @@ ASSISTANT did with the memory, user text would double the payload, and the
 private spans anyway (`core.privacy.strip_private`) — defence in depth, since
 an assistant reply can quote one back.
 
-The logic core here is PURE (v2.10.1 rule 1): `build_judge_input` and
+The logic core here is PURE (INV-107; v2.10.1 rule 1): `build_judge_input` and
 `parse_verdicts` take plain data and return plain data, and `judge_usage`
 takes the LLM entry point as an ARGUMENT, so `tests/smoke_test.py` drives all
 three with no network and `tools/falsify_fixes.py` can break them.
@@ -164,7 +164,7 @@ def judge_usage(memories: Sequence[Dict], turns: Sequence[str], *, call,
 
     None is the tri-state's third value and is the ONLY thing a failure may
     produce. The caught set is the CLASS this call can raise, not a bare
-    `Exception` (v2.14.0 rule 18): `call_llm` catches per leg and raises
+    `Exception` (INV-040; v2.14.0 rule 18): `call_llm` catches per leg and raises
     `RuntimeError` when every candidate credential fails — that is its
     documented failure — while `OSError` and `ValueError` cover a socket or a
     decode escaping a leg. Nothing here may abort the layer-1 report that has

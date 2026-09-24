@@ -3374,6 +3374,15 @@ def _break_r16todosplit(root):
            "            for s in next_steps_text.split(\";\") if s.strip()][:8]\n")
 
 
+@case("r16manualsize", ["tests/smoke_test.py"],
+      "grow CLAUDE.md past the 45 KB manual bound again -> the narrative that "
+      "moved to CHANGELOG.md is back in the file every session loads")
+def _break_r16manualsize(root):
+    _patch(root, "CLAUDE.md",
+           "## See also\n",
+           "## See also\n\n" + ("A version narrative that belongs in CHANGELOG.md.\n" * 1200))
+
+
 def verify_anchors():
     """Count every registered case's breakage anchors WITHOUT running a gate.
 

@@ -1119,7 +1119,7 @@ def _refresh_progress_row(db, project_id, memory_dir, current_session_id=None,
 
     # ── Tier 2A: RETIRED (v2.16.0, B9) — `critical_context` has no reader ──────────────────────────────────
     # PROGRESS.md §5 reads `get_critical_memories` when it renders (the
-    # v2.15.1 rule §4 already follows), so a snapshot here was one more
+    # v2.15.1 rule §4 already follows — INV-066), so a snapshot here was one more
     # writer of a column nothing reads — and one more query per start.
 
     # ── Tier 2B: status + plan from latest session_summary ────────────────

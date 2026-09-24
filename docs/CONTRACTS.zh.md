@@ -1,4 +1,4 @@
-<!-- i18n-source: CONTRACTS.md | sha256: def7807d55e58862 | version: 2.15.2 | translated: 2026-09-24 | translation: c073a4d563e237b9 -->
+<!-- i18n-source: CONTRACTS.md | sha256: 4282e1d63761edbe | version: 2.16.0 | translated: 2026-09-24 | translation: bb12656421a21be3 -->
 > [English](CONTRACTS.md) · **简体中文**
 
 # cc-memory — 契约（Contracts）
@@ -10,7 +10,7 @@
 
 断言分布在哪里：`tests/smoke_test.py` 覆盖反补丁决策、PROGRESS.md 的整篇重写与
 「只填空字段」刷新，以及计划生命周期（v4 迁移 → 捕获 → 精炼 → TodoWrite 同步 →
-PLAN.md）。**R610 结转门禁**由它自己的套件 `tests/test_plan_carryover.py`（20 项
+PLAN.md）。**R610 结转门禁**由它自己的套件 `tests/test_plan_carryover.py`（v2.16.0 时 28 项
 检查）覆盖 —— `grep -n "carryover\|dispositions" tests/smoke_test.py` 仍然没有任何
 输出，所以两个都要跑。`tests/test_surfaces.py`（v2.5）覆盖这些契约被触达时所经过的
 发布表面。
@@ -22,8 +22,9 @@ PLAN.md）。**R610 结转门禁**由它自己的套件 `tests/test_plan_carryov
 （v2.5.2），并在 `tests/smoke_test.py` 内部运行。对每一条引用，它用 `ast` 解析出
 上下文散文里点到的符号，然后断言被引用的行号区间覆盖了该符号的定义，或者至少提到了
 它。第一次运行就查出 **594 条引用里有 163 条已经失效**，并已机械修复。如果一条引用
-所在的句子里没有任何可以唯一解析的函数、类或 ALL_CAPS 常量，它会被判为 SKIP，
-**不做检查**——所以请把这里的行号当作线索，把**符号名**当作事实：
+所在的句子里没有任何可以唯一解析的函数、类或 ALL_CAPS 常量，它只做边界检查——
+在文件之内且非空行，汇总里写作 "NOT verified against a symbol"（v2.14.0）——
+所以请把这里的行号当作线索，把**符号名**当作事实：
 `grep -n "def <symbol>" <file>` 才是权威，修行号请用
 `python tools/citation_check.py --fix`。
 
@@ -407,6 +408,8 @@ sid），每一行形如
    - `collect_progress_state(...)` 从
      `extracted_memories + observations + session_summaries` 构建完整状态
      （`progress.py:576`）。
+   - 只有高于 `MemoryDB.observer_cursor` 的观察才会送进 LLM 提取（v2.16.0，A4）：
+     游标及以下的行 Stop 观察者已经送过，无论提取是否运行，PreCompact 都会删掉它们。
    - `db.tag_progress_session(...)` **先**运行，这样标签才能存活
      （`pre_compact.py:788`；保留逻辑见 `db.py:3057-3081`）。
    - `db.upsert_progress(**all_fields)` 覆盖整行（`pre_compact.py:789`）。
@@ -680,9 +683,10 @@ cc-memory 的**实时计划锚点**：每个项目一份 `.ccm/PLAN.md`，它与
               [继续；若漂移严重则 `/cc-mem plan-replan`]
 ```
 
-钩子自己绝不派生子代理——它们只提示。Stop 钩子的回合计数器在每一个存在活动计划行的
-回合上累加（`stop.py:274-277`），而两种提示是互斥的：`needs_refine` 优先于 guardian
-提示（`stop.py:279-296`）。
+钩子自己绝不派生子代理——Stop 钩子会**拒绝**这一回合并点名补救措施（v2.11.0），逃逸预算
+耗尽后的提醒则寄存到下一次 UserPromptSubmit 打印（v2.16.0）。回合计数器在每一个存在活动
+计划行的回合上累加，续发的 Stop（`stop_hook_active`，v2.16.0）除外；
+`core.plan.blocking_reasons` 返回所有必须叫停本回合的条件，未精炼的计划排在最前。
 
 ### 数据模型：`plan_active`
 
