@@ -1,4 +1,4 @@
-<!-- i18n-source: ARCHITECTURE.md | sha256: aa4067504e8d1c1e | version: 2.15.0 | translated: 2026-09-18 | translation: 9e5261dfc14c7e87 -->
+<!-- i18n-source: ARCHITECTURE.md | sha256: 069843609b6f84f8 | version: 2.15.2 | translated: 2026-09-24 | translation: 9ace9e0519cc8cd1 -->
 > [English](ARCHITECTURE.md) · **简体中文**
 
 # cc-memory — 架构
@@ -324,7 +324,7 @@ SQLite 表（定义在 [`cc_memory/core/db.py`](../cc_memory/core/db.py)），�
 
 | 表 | 用途 |
 |-------|---------|
-| `projects` | 每个项目一行（`db.py:37`）——身份由它所在的数据库决定，而不是由行里记录的 `path` 字串决定：目录被移动或重命名后，重新挂接自己那一行，而不是再造一行（§7）；自迁移 `v2_project_mode` 起带有 `mode`（`db.py:130`），自 `v7_projects_obs_watermark` 起带有持久观察者游标 `obs_watermark` |
+| `projects` | 每个项目一行（`db.py:37`）——身份由它所在的数据库决定，而不是由行里记录的 `path` 字串决定：目录被移动或重命名后，重新挂接自己那一行，而不是再造一行（§7）；自迁移 `v2_project_mode` 起带有 `mode`（`db.py:165`），自 `v7_projects_obs_watermark` 起带有持久观察者游标 `obs_watermark` |
 | `sessions` | 每次压缩事件一行（`db.py:46`）；自 `v7_sessions_complete` 起带有 `complete`（已回填，v7 之前的行读作 complete） |
 | `memories` | 抽取出的事实（category、importance、topic、content_hash、**supersedes_id**、last_referenced_at）（`db.py:57`）。自 `v10_memories_recall_count` 起带有 `recall_count`——当 `core/recall.py` 因为一次真实的用户提问检索到该行时递增。它与 `last_referenced_at` 记录的是**两件事**：后者说的是「SessionStart 的重要度/新近度排序在还没有任何查询时选中了它」，前者说的是「确实有人问起过它」。这一对正是 `/cc-mem inject-usage` 分两条通道报告的东西——但它们都只是**送达**事实。Claude 是否真的**用**了送达的那一行，是对文本的判断，因此属于第 2 层（`--judge`，需显式开启，`llm/usage_judge.py`）：对该会话自己的回复做一次 LLM 调用，逐行给出 `used` / `unused` / `unknown`；判不了的一律记 `unknown`，绝不写成 `unused` |
 | `topics` | 按主题名的整理摘要（带版本）（`db.py:71`） |
@@ -344,17 +344,17 @@ SQLite 表（定义在 [`cc_memory/core/db.py`](../cc_memory/core/db.py)），�
 保持同步（`core/db.py:906-957`）；
 它的 `_MIGRATIONS` 条目是 `v2_fts5`（`db.py:163`）。
 它只在本地 SQLite 构建带 FTS5 时才会创建；否则
-`db.search_fts`（`core/db.py:3461-3509`）回退到 `LIKE ? ESCAPE '\'`
-（`core/db.py:3461-3509`）。FTS5 在 `.claude-plugin/plugin.json:4` 与 `:12` 中被
+`db.search_fts`（`core/db.py:3520-3568`）回退到 `LIKE ? ESCAPE '\'`
+（`core/db.py:3520-3568`）。FTS5 在 `.claude-plugin/plugin.json:4` 与 `:12` 中被
 宣传，`/cc-mem status` 会报告当前实际走哪条路径（`cli/mem.py` 的 `cmd_status`）。
 
-`memories` 上的 `supersedes_id` 列（迁移 `v3_supersedes`，`db.py:172`）把反补丁的
+`memories` 上的 `supersedes_id` 列（迁移 `v3_supersedes`，`db.py:173`）把反补丁的
 取代链显式化：当 `upsert_smart` 判定一条新记忆取代了一条旧记忆时，新行会回链到旧行
-的 ID（旧行被归档）。通过 `db.get_supersede_chain(memory_id)`（`db.py:1895-1910`）走一遍
+的 ID（旧行被归档）。通过 `db.get_supersede_chain(memory_id)`（`db.py:1954-1969`）走一遍
 链条，就能看到完整的更新历史。`content_hash`（迁移 `v2_content_hash`，位于
 `_MIGRATIONS`，`db.py:126`）是归一化内容的 `sha256[:16]`，用于廉价的精确重复检查
-（`db.compute_content_hash` 在 `db.py:2480-2482`，
-`db.find_by_hash` 在 `db.py:2493-2501`）。
+（`db.compute_content_hash` 在 `db.py:2539-2541`，
+`db.find_by_hash` 在 `db.py:2552-2560`）。
 
 迁移按 `_MIGRATIONS` 列表（`db.py:121-284`）的顺序应用，并记录在 `_migrations` 中。目前
 已交付的层级：**v1**（`topic` 列 + 索引）、**v2**（content_hash、observations、
@@ -799,7 +799,7 @@ agent 自己的 `cd` 走：一个在仓库根启动、却在 `cli/` 里跑过一
 共 **20** 个，其中 **4** 个是**合法地嵌套**在另一个项目里的——单是
 `Claude-Code-Local/companion` 就有 3725 条记忆，并且自带 `.git`。野生子库与刻意嵌套的
 子项目在磁盘上**逐字节不可区分**：两者都有 `.ccm/memory.db`，其 `projects` 行都写着
-自己那个目录，因为 `upsert_project`（`core/db.py:1371-1408`）记录的就是别人递给它的 cwd。
+自己那个目录，因为 `upsert_project`（`core/db.py:1474-1511`）记录的就是别人递给它的 cwd。
 "最外端胜"会把这种歧义无条件地朝毁数据的方向解决——升级后第一次在 `companion` 里开会话，
 3725 条记忆就会悄无声息地失联。
 

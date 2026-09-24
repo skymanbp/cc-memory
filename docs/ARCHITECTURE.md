@@ -361,7 +361,7 @@ project-local at `<project>/.ccm/memory.db`, WAL mode:
 
 | Table | Purpose |
 |-------|---------|
-| `projects` | One row per project (`db.py:37`) — identified by the database it sits in, not by the `path` string it records: a moved or renamed directory re-attaches its own row instead of minting a second one (§7); carries `mode` since migration `v2_project_mode` (`db.py:144`) and the durable observer cursor `obs_watermark` since `v7_projects_obs_watermark` |
+| `projects` | One row per project (`db.py:37`) — identified by the database it sits in, not by the `path` string it records: a moved or renamed directory re-attaches its own row instead of minting a second one (§7); carries `mode` since migration `v2_project_mode` (`db.py:165`) and the durable observer cursor `obs_watermark` since `v7_projects_obs_watermark` |
 | `sessions` | One row per compaction event (`db.py:46`); carries `complete` since `v7_sessions_complete` (backfilled, so pre-v7 rows read as complete) |
 | `memories` | Extracted facts (category, importance, topic, content_hash, **supersedes_id**, last_referenced_at) (`db.py:57`). Carries `recall_count` since `v10_memories_recall_count` — incremented when `core/recall.py` retrieves the row for a real user question, which is a different fact from `last_referenced_at`: that one records that SessionStart's importance/recency ranking chose the row with no query in existence, this one records that somebody asked. The pair is what `/cc-mem inject-usage` reports as two channels — both of them DELIVERY facts. Whether Claude USED a delivered row is a judgement about text, so it is layer 2 (`--judge`, opt-in, `llm/usage_judge.py`): one LLM call over that session's own replies, answering `used` / `unused` / `unknown` per row, where `unknown` covers every case in which the judge could not run and is never printed as `unused` |
 | `topics` | Consolidated summaries per topic name (versioned) (`db.py:71`) |
@@ -380,21 +380,21 @@ Plus `memories_fts` — an FTS5 virtual table over `memories` (`core/db.py:906-9
 kept in sync by three triggers that `db._setup_fts5` creates with it
 (`core/db.py:906-957`); its `_MIGRATIONS` entry is `v2_fts5` (`db.py:163`).
 It is created only when the local SQLite build has FTS5; otherwise
-`db.search_fts` (`core/db.py:3461-3509`) falls back to `LIKE ? ESCAPE '\'`
-(`core/db.py:3461-3509`). FTS5 is advertised in `.claude-plugin/plugin.json:4`
+`db.search_fts` (`core/db.py:3520-3568`) falls back to `LIKE ? ESCAPE '\'`
+(`core/db.py:3520-3568`). FTS5 is advertised in `.claude-plugin/plugin.json:4`
 and `:12`, and `/cc-mem status` reports which path is live (`cli/mem.py`,
 `cmd_status`).
 
 The `supersedes_id` column on `memories` (migration `v3_supersedes`,
-`db.py:172`) makes the anti-patch chain explicit: when `upsert_smart` decides a
+`db.py:173`) makes the anti-patch chain explicit: when `upsert_smart` decides a
 new memory supersedes an old one, the new row links back to the old row's ID
 (and the old row is archived). Walking the chain via
-`db.get_supersede_chain(memory_id)` (`db.py:1895-1910`) shows the full update
+`db.get_supersede_chain(memory_id)` (`db.py:1954-1969`) shows the full update
 history. `content_hash` (migration `v2_content_hash` in
 `_MIGRATIONS`, `db.py:126`) is `sha256[:16]` of the normalized content, used
 for the cheap exact-duplicate check
-(`db.compute_content_hash` at `db.py:2480-2482`,
-`db.find_by_hash` at `db.py:2493-2501`).
+(`db.compute_content_hash` at `db.py:2539-2541`,
+`db.find_by_hash` at `db.py:2552-2560`).
 
 Migrations are applied in order from the `_MIGRATIONS` list (`db.py:121-284`) and
 recorded in `_migrations`. Levels shipped so far: **v1** (`topic` column +
@@ -894,7 +894,7 @@ inside another one — `Claude-Code-Local/companion` alone holds 3725 memories
 and carries its own `.git`. A stray sub-database and a deliberate nested
 sub-project are **byte-for-byte indistinguishable on disk**: both have
 `.ccm/memory.db` whose `projects` row names their own directory, because
-`upsert_project` (`core/db.py:1371-1408`) records whatever cwd it was handed.
+`upsert_project` (`core/db.py:1474-1511`) records whatever cwd it was handed.
 Outermost-wins resolves that ambiguity unconditionally in the direction that
 destroys data, so the first post-upgrade session in `companion` would have
 moved 3725 memories out of reach, silently.

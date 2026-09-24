@@ -33,6 +33,7 @@ import os
 import re
 import sqlite3
 import json
+import zlib
 from pathlib import Path
 from datetime import datetime, timedelta
 from typing import Optional, List, Dict, Any
@@ -447,6 +448,24 @@ _MIGRATIONS = [
 ]
 
 
+def _bootstrap_stamp(schema_sql, migrations):
+    """The `PRAGMA user_version` a fully bootstrapped database carries (v2.16.0).
+
+    DERIVED from the schema text and the ledger's names, never typed: any
+    edit to either changes the number, so the next open re-runs the full
+    bootstrap path and no migration can be forgotten behind a stale stamp —
+    the same "derived, not hand-written" rule the version sites follow.
+    `& 0x7FFFFFFF` keeps it inside the signed 32-bit range `user_version`
+    stores; `or 1` reserves 0 for "never stamped", which is what every
+    pre-v2.16.0 database reads as.
+    """
+    text = schema_sql + "\n".join(name for name, _ in migrations)
+    return (zlib.crc32(text.encode("utf-8")) & 0x7FFFFFFF) or 1
+
+
+_BOOTSTRAP_STAMP = _bootstrap_stamp(SCHEMA_SQL, _MIGRATIONS)
+
+
 # THE category vocabulary (register M3). One tuple, imported by every
 # validator, argparse choice list, combobox, MCP schema and LLM prompt that
 # names the categories — it existed as 13+ hand-synced literals across 9
@@ -761,18 +780,58 @@ class MemoryDB:
                 # hooks never raise)
                 pass
 
+    # The stamp a fully bootstrapped file carries in `PRAGMA user_version`.
+    # Exposed on the class for the gates; the value is `_bootstrap_stamp`'s.
+    _BOOTSTRAP_STAMP = _BOOTSTRAP_STAMP
+
     def _bootstrap(self):
+        """Create or migrate the schema — the FULL path only when the stamp
+        disagrees (v2.16.0).
+
+        Every `MemoryDB(...)` used to executescript the schema, walk the
+        whole migration ledger and probe the topic column, on FIVE
+        connections, on every hook, CLI call and MCP tool: measured at
+        v2.15.2, 5 of the Stop hook's 17 opens per turn were this re-work.
+        `PRAGMA user_version` now records that the full path ran for THIS
+        schema text and THIS ledger (`_bootstrap_stamp`), so the settled
+        open reads one pragma and moves on; an older file reads 0 and takes
+        the full path once.
+
+        The two self-healing probes are deliberately NOT behind the stamp.
+        `_detect_fts5` notices an index a previous sqlite build could not
+        create (or a corrupted one) and `_ensure_active_hash_unique` notices
+        a dropped or redefined index; both answer the STATE of the file,
+        which a record of intent cannot vouch for. The stamp is such a
+        record, exactly like the `_migrations` ledger: a base table someone
+        DROPs by hand is no longer re-created by `IF NOT EXISTS` until the
+        schema or the ledger changes — recorded, not papered over.
+        """
         with self._connect() as conn:
-            conn.executescript(SCHEMA_SQL)
-        self._run_migrations()
+            row = conn.execute("PRAGMA user_version").fetchone()
+            stamped = int(row[0]) if row else 0
+        if stamped != _BOOTSTRAP_STAMP:
+            with self._connect() as conn:
+                conn.executescript(SCHEMA_SQL)
+            self._run_migrations()
+            # why: defensive — if v1_topic_column migration was skipped/lost
+            # we still want the topic column to exist (used by all read paths)
+            with self._connect() as conn:
+                cols = {r[1] for r in
+                        conn.execute("PRAGMA table_info(memories)").fetchall()}
+                if "topic" not in cols:
+                    conn.execute("ALTER TABLE memories ADD COLUMN topic TEXT")
+            try:
+                with self._connect() as conn:
+                    # A pragma takes no bound parameter; the value is an int
+                    # this module computed, never external input.
+                    conn.execute(f"PRAGMA user_version = {int(_BOOTSTRAP_STAMP)}")
+            except sqlite3.DatabaseError:
+                # why: a read-only volume refuses the write. The schema is
+                # complete regardless, and the next open re-runs the full
+                # path — the pre-v2.16.0 cost, which is why this is not a failure.
+                pass
         self._detect_fts5()
         self._ensure_active_hash_unique()
-        # why: defensive — if v1_topic_column migration was skipped/lost we
-        # still want the topic column to exist (used by all read paths)
-        with self._connect() as conn:
-            cols = {r[1] for r in conn.execute("PRAGMA table_info(memories)").fetchall()}
-            if "topic" not in cols:
-                conn.execute("ALTER TABLE memories ADD COLUMN topic TEXT")
 
     def _run_migrations(self):
         with self._connect() as conn:

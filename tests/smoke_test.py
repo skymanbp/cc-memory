@@ -7050,6 +7050,78 @@ def main():
           "unused), bounded, private-stripped, and never reaches the network "
           "unasked")
 
+    # ── v2.16.0 · MemoryDB bootstrap: the FULL path runs once per schema ────
+    # Every `MemoryDB(...)` used to executescript the schema, walk the whole
+    # migration ledger and probe the topic column — five connections of pure
+    # re-work per open, on every hook, CLI call and MCP tool (measured at
+    # v2.15.2: 5 of the Stop hook's 17 opens). `PRAGMA user_version` now
+    # carries a stamp DERIVED from the schema text and the ledger's names, so
+    # the settled case reads one pragma; a stamp that is typed by hand is a
+    # stamp that is forgotten on the next migration, which is why the test
+    # asks the derivation, not a literal.
+    from core import db as _st_dbmod
+    _st_root = Path(tempfile.mkdtemp(prefix="cc-memory-stamp-"))
+    _st_mem = _st_root / _MEM
+    _st_mem.mkdir(parents=True)
+    _st_db = MemoryDB(_st_mem / "memory.db")
+    with _st_db._connect() as _st_conn:
+        _st_uv = _st_conn.execute("PRAGMA user_version").fetchone()[0]
+    assert _st_uv == MemoryDB._BOOTSTRAP_STAMP and _st_uv != 0, (
+        f"a fresh database must carry the bootstrap stamp: user_version="
+        f"{_st_uv}, stamp={MemoryDB._BOOTSTRAP_STAMP}")
+    assert _st_dbmod._bootstrap_stamp(
+        _st_dbmod.SCHEMA_SQL,
+        list(_st_dbmod._MIGRATIONS) + [("v99_probe", "")]) \
+        != MemoryDB._BOOTSTRAP_STAMP, \
+        "one more ledger entry must change the stamp (it is DERIVED)"
+    assert _st_dbmod._bootstrap_stamp(
+        _st_dbmod.SCHEMA_SQL + "\n-- probe", _st_dbmod._MIGRATIONS) \
+        != MemoryDB._BOOTSTRAP_STAMP, \
+        "a schema edit must change the stamp (it is DERIVED)"
+    # The settled case must NOT walk the ledger: prove it by making the walk
+    # raise. Before the stamp every open raised here.
+    _st_saved = MemoryDB._run_migrations
+
+    def _st_boom(self):
+        raise AssertionError("full bootstrap path ran on a stamped database")
+
+    MemoryDB._run_migrations = _st_boom
+    try:
+        MemoryDB(_st_mem / "memory.db")
+        # ...and a hand-reset stamp re-enters the full path (the same probe,
+        # now expected to fire).
+        with _st_db._connect() as _st_conn:
+            _st_conn.execute("PRAGMA user_version = 0")
+        _st_reran = False
+        try:
+            MemoryDB(_st_mem / "memory.db")
+        except AssertionError as _st_exc:
+            _st_reran = "full bootstrap path ran" in str(_st_exc)
+        assert _st_reran, "user_version=0 must re-enter the full bootstrap path"
+    finally:
+        MemoryDB._run_migrations = _st_saved
+    MemoryDB(_st_mem / "memory.db")      # the full path re-stamps
+    with _st_db._connect() as _st_conn:
+        assert _st_conn.execute("PRAGMA user_version").fetchone()[0] \
+            == MemoryDB._BOOTSTRAP_STAMP, "the full path must re-stamp"
+    # The two self-healing probes stay OUTSIDE the stamp: they answer the
+    # STATE of the file, which a record of intent cannot vouch for. Drop the
+    # active-hash index on a stamped file; the next open must rebuild it.
+    with _st_db._connect() as _st_conn:
+        _st_conn.execute(f"DROP INDEX IF EXISTS {MemoryDB._ACTIVE_HASH_INDEX}")
+    MemoryDB(_st_mem / "memory.db")
+    with _st_db._connect() as _st_conn:
+        _st_idx = _st_conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'index' AND name = ?",
+            (MemoryDB._ACTIVE_HASH_INDEX,)).fetchone()
+    assert _st_idx is not None, \
+        "the active-hash heal must still run on a stamped database"
+    del _st_db
+    shutil.rmtree(_st_root)
+    print("[OK] v2.16.0 bootstrap stamp: derived from schema + ledger, read "
+          "on the settled open, re-entered on reset, and the self-healing "
+          "probes still run outside it")
+
     print("\nProduced files:")
     for f in sorted(mem_dir.rglob("*")):
         if f.is_file():

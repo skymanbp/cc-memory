@@ -3056,6 +3056,21 @@ def _break_r15gatecountcjk(root):
            '(?![\\w.])"  # BREAKAGE')
 
 
+# ── v2.16.0 ───────────────────────────────────────────────────────────────
+
+
+@case("r16stamp", ["tests/smoke_test.py"],
+      "ignore the bootstrap stamp -> every open re-runs the schema script and "
+      "the whole migration ledger again (five connections of re-work per hook)")
+def _break_r16stamp(root):
+    # The smoke check replaces `_run_migrations` with one that raises and
+    # opens a stamped database: the settled path must not reach it. With the
+    # stamp ignored the walk runs on every open, so the probe fires.
+    _patch(root, "cc_memory/core/db.py",
+           "        if stamped != _BOOTSTRAP_STAMP:",
+           "        if True:  # BREAKAGE: the stamp is written and never read")
+
+
 def verify_anchors():
     """Count every registered case's breakage anchors WITHOUT running a gate.
 
