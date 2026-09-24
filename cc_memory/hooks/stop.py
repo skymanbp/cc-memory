@@ -477,14 +477,25 @@ def _observer_evaluate(cwd, session_id, memory_dir, db=None):
     # having never been shown to the model. Feeding oldest-first catches the
     # backlog up one Stop at a time; rows past the slice keep ids above the
     # watermark and are fed next turn.
+    from core.extractor import is_handshake_read
     obs_fed = observations[:_OBS_FED_PER_STOP]
     obs_lines = []
     for o in obs_fed:
         tool = o["tool_name"]
+        if is_handshake_read(tool, o.get("tool_input", "")):
+            # The forced reminder's own Read (v2.16.0, B10): the model
+            # opening PROGRESS.md is the handshake working, not activity —
+            # consumed by the cursor below, never sent.
+            continue
         inp = (o.get("tool_input", "") or "")[:200]
         out = (o.get("tool_output", "") or "")[:100]
         obs_lines.append(f"[{tool}] {inp}" + (f" -> {out}" if out else ""))
 
+    if not obs_lines:
+        # Nothing but handshake Reads in the slice: consumed, not sent.
+        db.advance_observer_watermark(
+            project_id, max((o["id"] for o in obs_fed), default=0))
+        return 0
     obs_text = "\n".join(obs_lines)
     user_context = f"User request: {user_prompt}\n\n" if user_prompt else ""
     user_msg = f"{user_context}Tool observations:\n{obs_text}"
@@ -516,7 +527,17 @@ def _observer_evaluate(cwd, session_id, memory_dir, db=None):
                 "tags": ["observer", "realtime"],
             })
 
-        counts = upsert_batch(db, project_id, None, cleaned, memory_dir=memory_dir)
+        # The rows belong to THIS session (v2.16.0, B8). With `session_id`
+        # NULL they matched `get_recent_memories`' session-less arm forever,
+        # so an observer fact never aged out of the Recent layer; attached to
+        # the session's row — claimed here when PreCompact has not yet — it
+        # leaves the window three sessions later like every other fact.
+        session_row = db.session_row_for(project_id, session_id)
+        if session_row is None and session_id:
+            session_row = db.insert_session(project_id, session_id, "observer",
+                                            0, "", "")
+        counts = upsert_batch(db, project_id, session_row, cleaned,
+                              memory_dir=memory_dir)
         n_total = sum(counts.get(k, 0) for k in ("inserted", "merged", "superseded"))
 
         # write_marker, not write_text: it never raises, and it refuses to

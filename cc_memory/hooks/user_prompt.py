@@ -50,6 +50,7 @@ from core.privacy import clean_for_storage, strip_harness_blocks
 # the read-only twin, for the probes that must not write. `db_path` is
 # deliberately NOT imported: this module has a local of that name.
 from core.layout import DB_FILENAME, find_db_path, memory_dir
+from core.prompts import RESUME_TRIGGERS
 
 _TURN_FILE_PREFIX = "cc_mem_turns_"
 _PROMPT_FILE_PREFIX = "cc_mem_prompt_"
@@ -426,12 +427,10 @@ def main():
                     # Tagging trigger_type here makes the intent auditable.
                     normalized = prompt.strip().lower()
                     # i18n Tier 3: bilingual resume tokens are intentional — do NOT
-                    # reduce to English-only (see docs/ARCHITECTURE.md#9-documentation-language-convention-i18n §1). Keep in sync with
-                    # session_start.py RESUME PROTOCOL.
-                    resume_signals = {
-                        "", "继续", "接着", "接着做", "接着干", "继续干",
-                        "resume", "continue", "go on", "keep going",
-                    }
+                    # reduce to English-only (see docs/ARCHITECTURE.md#9-documentation-language-convention-i18n §1).
+                    # `core.prompts.RESUME_TRIGGERS` is the ONE spelling; the
+                    # session_start RESUME PROTOCOL prints the same tuple.
+                    resume_signals = set(RESUME_TRIGGERS)
                     trigger = "resume_request" if normalized in resume_signals else "user_prompt"
                     db.patch_progress(pid, current_request=prompt, trigger_type=trigger)
                     write_progress_md(db, pid, state_dir)

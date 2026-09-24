@@ -161,12 +161,17 @@ def _observations_to_feed(observations, obs_mark):
     per row — the first row is always taken, so one oversized row cannot
     stall the queue. Returns `(obs_fed, chars, unfed)`: the slice, its
     character cost, and every row above the cursor, of which the slice is
-    a prefix. A pure function, so the gate drives it with neither a
-    transcript nor a credential.
+    a prefix minus the handshake Reads (B10). A pure function, so the gate
+    drives it with neither a transcript nor a credential.
     """
+    from core.extractor import is_handshake_read
     unfed = [o for o in observations if o["id"] > obs_mark]
     obs_fed, chars = [], 0
     for o in unfed[:_OBS_PER_EXTRACTION]:
+        if is_handshake_read(o["tool_name"], o["tool_input"]):
+            # The forced reminder's own Read (v2.16.0, B10): the model
+            # opening PROGRESS.md is the handshake working, not activity.
+            continue
         cost = len((o["tool_input"] or "")[:_OBS_LINE_CHARS]) + len(
             o["tool_name"] or "") + 4
         if obs_fed and chars + cost > _OBS_CHARS_BUDGET:
@@ -663,8 +668,9 @@ def main():
                        f"is evidence")
             archive_rel = ""
 
-        # Session row
-        session_id = db.insert_session(
+        # Session row — CLAIMED, because the Stop observer may have claimed
+        # it first to attach its facts to (v2.16.0, B8).
+        session_id = db.claim_session(
             project_id=project_id,
             claude_session_id=claude_sid,
             trigger_type=trigger,

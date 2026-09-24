@@ -1,4 +1,4 @@
-<!-- i18n-source: ARCHITECTURE.md | sha256: af9160d9a4e95acb | version: 2.15.2 | translated: 2026-09-24 | translation: 3c4b7d25a2a7e557 -->
+<!-- i18n-source: ARCHITECTURE.md | sha256: e8903622c773ad78 | version: 2.15.2 | translated: 2026-09-24 | translation: 7f5ee5387b81e26f -->
 > [English](ARCHITECTURE.md) · **简体中文**
 
 # cc-memory — 架构
@@ -349,17 +349,17 @@ SQLite 表（定义在 [`cc_memory/core/db.py`](../cc_memory/core/db.py)），�
 保持同步（`core/db.py:906-957`）；
 它的 `_MIGRATIONS` 条目是 `v2_fts5`（`db.py:163`）。
 它只在本地 SQLite 构建带 FTS5 时才会创建；否则
-`db.search_fts`（`core/db.py:3520-3568`）回退到 `LIKE ? ESCAPE '\'`
-（`core/db.py:3520-3568`）。FTS5 在 `.claude-plugin/plugin.json:4` 与 `:12` 中被
+`db.search_fts`（`core/db.py:3592-3640`）回退到 `LIKE ? ESCAPE '\'`
+（`core/db.py:3592-3640`）。FTS5 在 `.claude-plugin/plugin.json:4` 与 `:12` 中被
 宣传，`/cc-mem status` 会报告当前实际走哪条路径（`cli/mem.py` 的 `cmd_status`）。
 
 `memories` 上的 `supersedes_id` 列（迁移 `v3_supersedes`，`db.py:173`）把反补丁的
 取代链显式化：当 `upsert_smart` 判定一条新记忆取代了一条旧记忆时，新行会回链到旧行
-的 ID（旧行被归档）。通过 `db.get_supersede_chain(memory_id)`（`db.py:1954-1969`）走一遍
+的 ID（旧行被归档）。通过 `db.get_supersede_chain(memory_id)`（`db.py:1999-2014`）走一遍
 链条，就能看到完整的更新历史。`content_hash`（迁移 `v2_content_hash`，位于
 `_MIGRATIONS`，`db.py:126`）是归一化内容的 `sha256[:16]`，用于廉价的精确重复检查
-（`db.compute_content_hash` 在 `db.py:2539-2541`，
-`db.find_by_hash` 在 `db.py:2552-2560`）。
+（`db.compute_content_hash` 在 `db.py:2592-2594`，
+`db.find_by_hash` 在 `db.py:2605-2613`）。
 
 迁移按 `_MIGRATIONS` 列表（`db.py:121-284`）的顺序应用，并记录在 `_migrations` 中。目前
 已交付的层级：**v1**（`topic` 列 + 索引）、**v2**（content_hash、observations、
@@ -435,11 +435,12 @@ regenerate_memory_index(db, project_id, memory_dir)   ← MEMORY.md 刷新
 形态：
 
 - `upsert_batch`（`memory_writer.py:318-360`）逐条循环调用 `upsert_smart`，并在最后
-  重新生成**一次**，但仅当传入了 `memory_dir` 时才会（`memory_writer.py:318-360`）。
-  所有钩子调用方都会传（`pre_compact.py:444`、`stop.py:325`、
-  `session_start.py:1144`）；同步 PreCompact 支路还会在其余状态变更之后再刷一次
-  （`pre_compact.py:850`）。
-- 单发调用方显式调用 `regenerate_memory_index`：`cli/mem.py:1213` 与 `:584`、
+  重新生成**一次**，但仅当传入了 `memory_dir` **且**这一批真的写了行——插入、合并、
+  取代或强化——时才会；一批纯 skip 什么都不渲染（`memory_writer.py:372`，v2.16.0）。
+  Stop 观察者与 SessionStart 的追溯保存会传（`stop.py:539`、
+  `session_start.py:1394`）；同步 PreCompact 支路不传（`pre_compact.py:729`），
+  而是在其余状态变更之后自己渲染一次（`pre_compact.py:856`）。
+- 单发调用方显式调用 `regenerate_memory_index`：`cli/mem.py:1220` 与 `:584`、
   `mcp/server.py:647`、`ui/dashboard.py:1716`、`ui/web_viewer.py:1035`，外加
   `skills/ccm-load` 的内联脚本（`skills/ccm-load/SKILL.md:290, 307`）。
   `core/idle.py:96` 与 `hooks/consolidate_async.py:276` 也会在维护之后刷新它。
@@ -532,9 +533,9 @@ SessionStart：
 ```
 
 上面的调用签名都是真实的：`write_progress_md(db, project_id, memory_dir)`
-（`core/progress.py:498-677`；调用点 `pre_compact.py:808`、`stop.py:662`、
+（`core/progress.py:498-677`；调用点 `pre_compact.py:814`、`stop.py:683`、
 `user_prompt.py:133`、`session_start.py:1107`、`mcp/server.py:243`、
-`cli/mem.py:1304`）。PROGRESS.md 的结构规格见
+`cli/mem.py:1311`）。PROGRESS.md 的结构规格见
 [docs/CONTRACTS.md](CONTRACTS.md#handoff-contract)。
 
 ### 被杀运行检测（v2.4.2）
@@ -565,7 +566,7 @@ slug 约定是：把 `[A-Za-z0-9]` 之外的**每一个**字符替换成 `-`。c
 
 三处改动关闭了它：
 
-1. `core.extractor.mangle_project_path`（`extractor.py:548-564`）成为该约定的唯一真源，
+1. `core.extractor.mangle_project_path`（`extractor.py:570-586`）成为该约定的唯一真源，
    由 `find_latest_transcript`、`hooks/session_start.py` 和 `ui/dashboard.py` 共用
    —— 后者此前逐字复制了旧解析器，连模糊分支一起。
 2. 模糊兜底被**删除**。未命中返回 `None`。调用方必须把它当作「没有 transcript」，
@@ -663,8 +664,8 @@ BudgetGate 来说仍是已知量。候选顺序与传输格式（`core/auth.py:2
 `get_api_key()` 是同一份候选列表的单凭据向后兼容视图（它不重试，
 `core/auth.py:60-93`）；它同时承载 `oauth_expired` 信号，支撑 SessionStart 的
 “[WARNING: OAuth expired — LLM extraction disabled]” 页脚
-（`session_start.py:674`）。钩子调用方用它来*提供*传给 `call_llm` 的凭据：
-`pre_compact.py:96 → :166`、`stop.py:99`、`session_start.py:674`、
+（`session_start.py:678`）。钩子调用方用它来*提供*传给 `call_llm` 的凭据：
+`pre_compact.py:96 → :166`、`stop.py:99`、`session_start.py:678`、
 `core/consolidate.py:425, 549, 724`。
 
 逐级回退是 v2.3.4 为一个具体故障加入的：一个失效的环境变量密钥（例如额度为零 →
@@ -1044,8 +1045,8 @@ MCP 服务器遵循同样的分岔。在市场类布局下，`.claude-plugin/plu
 ├── installed_surfaces.json  ← 写进了 ~/.claude 的东西（v2.5）
 ├── core/    atomic.py auth.py consolidate.py db.py encoding_setup.py
 │            extractor.py idle.py layout.py logger.py markers.py modes.py
-│            plan.py privacy.py progress.py recall.py roots.py textsim.py
-│            version.py
+│            plan.py privacy.py progress.py prompts.py recall.py roots.py
+│            textsim.py version.py
 ├── hooks/   _entry.py consolidate_async.py post_tool_use.py pre_compact.py
 │            session_start.py stop.py user_prompt.py
 ├── llm/     ccl_backend.py memory_writer.py parse.py usage_judge.py

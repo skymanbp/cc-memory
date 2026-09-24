@@ -45,7 +45,7 @@ from core.encoding_setup import enable_utf8_io
 enable_utf8_io()
 
 from core.db import CATEGORIES, MemoryDB
-from core.layout import DB_FILENAME, memory_dir as resolve_memory_dir
+from core.layout import DB_FILENAME, MEMORY_DIRNAME, memory_dir as resolve_memory_dir
 from core.extractor import find_transcript_dir, load_transcript_window
 from core.logger import get_logger
 # Shared entry ladder (v2.10.0): stdin parsing + the opt-out→anchor gate,
@@ -55,6 +55,10 @@ from hooks._entry import parse_payload, resolve_project, spawn_detached
 from core.privacy import (neutralize_document, neutralize_inline,
                           neutralize_markers)
 from core.progress import ACK_TEMPLATE, write_progress_md
+from core.prompts import (FALLBACK_SUMMARY_PREFIX, HANDSHAKE_ACK_LEAD,
+                          HANDSHAKE_LEAD, HANDSHAKE_READ_STEP, HANDSHAKE_TITLE,
+                          HANDSHAKE_WHY, RESUME_PROTOCOL_HEAD,
+                          RESUME_PROTOCOL_STEPS, RESUME_TRIGGER_LINES)
 from llm.memory_writer import upsert_batch
 
 _log = get_logger("session_start")
@@ -148,7 +152,14 @@ def _build_topics_layer(db, project_id, budget):
         # RAW name, deliberately: _build_critical_layer matches this set against
         # `memories.topic` straight out of the DB, so a neutralised copy here
         # would silently stop de-duplicating the critical layer.
-        topic_names.add(t["name"])
+        # A FALLBACK summary (no model ran) names the topic and counts its
+        # rows; it states no fact, so the topic is NOT covered and its
+        # critical rows must still be injected (v2.16.0, B6). The old fallback
+        # was the eight top facts verbatim, which is why "covered" used to be
+        # true for it — and why the Knowledge Base layer repeated the Critical
+        # layer's rows on every no-credential project.
+        if not str(t["content"]).startswith(FALLBACK_SUMMARY_PREFIX):
+            topic_names.add(t["name"])
     return "\n".join(lines), topic_names
 
 
@@ -311,23 +322,21 @@ def _build_directives_layer(db, project_id, budget):
         return "", []
     if not rows:
         return "", []
-    rows = sorted(rows, key=lambda r: 0 if r.get("kind") == "constraint" else 1)
+    # The ledger is rendered by `core.plan.render_directive_lines` alone
+    # (v2.16.0, B5): it draws PLAN.md's section too, so the two surfaces
+    # cannot drift.
+    # Imported here, not at module level: core.plan is the largest module in
+    # the package and this hook has a 15 s budget it spends on the injection.
+    from core.plan import render_directive_lines
     lines = ["### Standing directives (user intent — outlives every plan)", ""]
     used = sum(len(ln) + 1 for ln in lines)
     slugs = []
-    for r in rows:
-        demand = neutralize_inline(str(r.get("demand") or ""))
-        quote = neutralize_inline(str(r.get("quote") or ""))
-        entry = (f"- [{neutralize_inline(str(r.get('kind') or 'standing'))}] "
-                 f"{neutralize_inline(str(r.get('slug') or ''))} "
-                 f"(stated ×{int(r.get('times_stated') or 1)}): {demand}")
-        if quote:
-            entry += f' — "{quote}"'
+    for slug, entry in render_directive_lines(rows, style="inject"):
         if used + len(entry) + 1 > budget:
             continue
         lines.append(entry)
         used += len(entry) + 1
-        slugs.append(str(r.get("slug") or ""))
+        slugs.append(slug)
     if not slugs:
         return "", []
     return "\n".join(lines) + "\n", slugs
@@ -473,25 +482,27 @@ def _build_forced_reminder(memory_dir):
     if not (has_progress or has_memory):
         return ""
 
+    # Every sentence below is a `core.prompts` constant (v2.16.0): this block
+    # is the plugin's most-read text, and it was spelled inline here.
     lines = [
         "",
         "<system-reminder>",
-        "CC-MEMORY HANDOFF — MANDATORY READ-FIRST PROTOCOL",
+        HANDSHAKE_TITLE,
         "",
-        "Before responding to any user request in this session, you MUST:",
+        HANDSHAKE_LEAD,
     ]
     n = 1
     if has_progress:
-        lines.append(f"  {n}. Use the Read tool on `.ccm/PROGRESS.md` "
-                     f"(absolute: `{progress.as_posix()}`).")
+        lines.append(HANDSHAKE_READ_STEP.format(
+            n=n, rel=f"{MEMORY_DIRNAME}/PROGRESS.md", abs=progress.as_posix()))
         n += 1
     if has_memory:
-        lines.append(f"  {n}. Use the Read tool on `.ccm/MEMORY.md` "
-                     f"(absolute: `{memory_md.as_posix()}`).")
+        lines.append(HANDSHAKE_READ_STEP.format(
+            n=n, rel=f"{MEMORY_DIRNAME}/MEMORY.md", abs=memory_md.as_posix()))
         n += 1
     lines += [
         "",
-        "After reading, explicitly state in your first reply:",
+        HANDSHAKE_ACK_LEAD,
         # The sentence is `core.progress.ACK_TEMPLATE`, not a literal: this is
         # the DEMAND, and `/cc-mem inject-usage` is the DETECTOR that measures
         # whether it was stated. Two spellings drift, and the drift is silent
@@ -499,22 +510,15 @@ def _build_forced_reminder(memory_dir):
         # acknowledged" and the reader believes it.
         f"  {ACK_TEMPLATE}",
         "",
-        "RESUME PROTOCOL — if the user's first message is exactly one of:",
-        # i18n Tier 3: bilingual resume tokens INTENTIONAL — keep in sync with
-        # user_prompt.py resume_signals; do NOT reduce to English-only (docs/ARCHITECTURE.md#9-documentation-language-convention-i18n §1).
-        '    "" (empty)  ·  "继续"  ·  "接着"  ·  "接着做"  ·  "接着干"  ·',
-        '    "继续干"  ·  "resume"  ·  "continue"  ·  "go on"  ·  "keep going"',
-        "  then DO NOT ask for clarification. Instead:",
-        "    1. Read PROGRESS.md §3 (Open Todos) and §4 (Plan).",
-        "    2. If §3 has at least one open todo, announce",
-        '       "Resuming prior task: <todos[0].content>" and start executing it.',
-        "    3. If §3 is empty but §4 (Plan) is non-empty, follow the plan's first step.",
-        "    4. If both are empty, fall back to a one-sentence prior-progress",
-        '       summary plus "what would you like to do next?".',
+        RESUME_PROTOCOL_HEAD,
+        # i18n Tier 3: bilingual resume tokens INTENTIONAL. The vocabulary is
+        # `core.prompts.RESUME_TRIGGERS`, the ONE spelling user_prompt.py and
+        # core/recall.py read too (v2.16.0); do NOT reduce it to English-only
+        # (docs/ARCHITECTURE.md#9-documentation-language-convention-i18n §1).
+        *RESUME_TRIGGER_LINES,
+        *RESUME_PROTOCOL_STEPS,
         "",
-        "Why: this is the project's handoff contract (single source of truth).",
-        "Skipping it risks duplicating work or contradicting prior decisions.",
-        "Spec: `docs/CONTRACTS.md#handoff-contract`.",
+        *HANDSHAKE_WHY,
         "</system-reminder>",
         "",
     ]

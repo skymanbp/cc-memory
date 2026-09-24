@@ -323,6 +323,13 @@ _REQUIRED_PLUGIN_FILES = [
     # the recall channel and nothing else, which is precisely the shape
     # `status` has to be able to report rather than call healthy.
     "cc_memory/core/recall.py",
+    # v2.16.0: the one home of every string the model reads (the resume
+    # vocabulary, the handshake, the artifact notices). core/plan.py,
+    # core/progress.py, core/recall.py and llm/memory_writer.py import it at
+    # module level, and every hook imports at least one of those — an
+    # install missing this one file loses all six hooks <!--ce:hooks--> at
+    # import while `status` would certify the install healthy.
+    "cc_memory/core/prompts.py",
     # v2.6.0: every hook imports this at MODULE level, so an install missing
     # it does not degrade — all six die at import with a stderr traceback.
     # It was absent from this list, which is what let `status` report an
@@ -2150,7 +2157,21 @@ def cmd_dashboard(args):
 
 def cmd_inject_show(args):
     """Dump .ccm/.last_inject.json — exactly what the last SessionStart
-    injected (ground truth, independent of whether Claude echoed it)."""
+    injected (ground truth, independent of whether Claude echoed it).
+
+    `--templates` (v2.16.0) lists every Claude-visible text template in
+    `core/prompts.py` with its size instead — the plugin's prompts, in one
+    place, without opening a database."""
+    if getattr(args, "templates", False):
+        from core import prompts as _prompts
+        names = sorted(n for n in dir(_prompts) if n.isupper())
+        print(f"Claude-visible text templates (core/prompts.py): {len(names)}")
+        for n in names:
+            v = getattr(_prompts, n)
+            text = v if isinstance(v, str) else "\n".join(str(x) for x in v)
+            kind = f"tuple[{len(v)}]" if isinstance(v, tuple) else "str"
+            print(f"  {n:<24} {len(text.encode('utf-8')):>6} B  {kind}")
+        return
     memory_dir, db_path, _ = _resolve_db(args.project)
     manifest = memory_dir / ".last_inject.json"
     if not manifest.exists():
@@ -2809,7 +2830,10 @@ def make_parser():
                      choices=["done", "superseded", "dropped"])
 
     # ── observability + encoding (v2.3) ────────────────────────────────────
-    sub.add_parser("inject-show", help="Show what the last SessionStart injected")
+    pis = sub.add_parser("inject-show", help="Show what the last SessionStart injected")
+    pis.add_argument("--templates", action="store_true",
+                     help="list the Claude-visible text templates (core/prompts.py) "
+                          "with their sizes instead")
     piu = sub.add_parser("inject-usage",
                          help="Deterministic signals: did Claude read the memory?")
     piu.add_argument("--window", type=_bounded_limit,

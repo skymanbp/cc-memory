@@ -388,8 +388,8 @@ Plus `memories_fts` — an FTS5 virtual table over `memories` (`core/db.py:906-9
 kept in sync by three triggers that `db._setup_fts5` creates with it
 (`core/db.py:906-957`); its `_MIGRATIONS` entry is `v2_fts5` (`db.py:163`).
 It is created only when the local SQLite build has FTS5; otherwise
-`db.search_fts` (`core/db.py:3520-3568`) falls back to `LIKE ? ESCAPE '\'`
-(`core/db.py:3520-3568`). FTS5 is advertised in `.claude-plugin/plugin.json:4`
+`db.search_fts` (`core/db.py:3592-3640`) falls back to `LIKE ? ESCAPE '\'`
+(`core/db.py:3592-3640`). FTS5 is advertised in `.claude-plugin/plugin.json:4`
 and `:12`, and `/cc-mem status` reports which path is live (`cli/mem.py`,
 `cmd_status`).
 
@@ -397,12 +397,12 @@ The `supersedes_id` column on `memories` (migration `v3_supersedes`,
 `db.py:173`) makes the anti-patch chain explicit: when `upsert_smart` decides a
 new memory supersedes an old one, the new row links back to the old row's ID
 (and the old row is archived). Walking the chain via
-`db.get_supersede_chain(memory_id)` (`db.py:1954-1969`) shows the full update
+`db.get_supersede_chain(memory_id)` (`db.py:1999-2014`) shows the full update
 history. `content_hash` (migration `v2_content_hash` in
 `_MIGRATIONS`, `db.py:126`) is `sha256[:16]` of the normalized content, used
 for the cheap exact-duplicate check
-(`db.compute_content_hash` at `db.py:2539-2541`,
-`db.find_by_hash` at `db.py:2552-2560`).
+(`db.compute_content_hash` at `db.py:2592-2594`,
+`db.find_by_hash` at `db.py:2605-2613`).
 
 Migrations are applied in order from the `_MIGRATIONS` list (`db.py:121-284`) and
 recorded in `_migrations`. Levels shipped so far: **v1** (`topic` column +
@@ -481,13 +481,15 @@ regenerate_memory_index(db, project_id, memory_dir)   ← MEMORY.md refresh
 caller's responsibility, and there are exactly two shapes:
 
 - `upsert_batch` (`memory_writer.py:318-360`) loops `upsert_smart` per item and
-  regenerates ONCE at the end, but only when a `memory_dir` is passed
-  (`memory_writer.py:334`). All hook callers pass it
-  (`pre_compact.py:716`, `stop.py:166`, `session_start.py:1144`); the sync
-  PreCompact leg additionally touches it again after the rest of its state
-  changes (`pre_compact.py:850`).
+  regenerates ONCE at the end, only when a `memory_dir` is passed AND the batch
+  wrote a row — inserted, merged, superseded or reinforced; a batch of pure
+  skips renders nothing (`memory_writer.py:372`, v2.16.0). The Stop observer
+  and the SessionStart retroactive save pass it (`stop.py:539`,
+  `session_start.py:1394`); the sync PreCompact leg passes none and renders
+  once itself, after the rest of its state changes (`pre_compact.py:729`,
+  `pre_compact.py:856`).
 - Single-shot callers call `regenerate_memory_index` explicitly:
-  `cli/mem.py:1213` and `:584`, `mcp/server.py:647`, `ui/dashboard.py:1716`,
+  `cli/mem.py:1220` and `:584`, `mcp/server.py:647`, `ui/dashboard.py:1716`,
   `ui/web_viewer.py:1034`, plus the `skills/ccm-load` inline script
   (`skills/ccm-load/SKILL.md:290, 307`). `core/idle.py:96` and
   `hooks/consolidate_async.py:276` also refresh it after maintenance.
@@ -499,7 +501,7 @@ by grepping `upsert_smart|upsert_batch` across `cc_memory/`.)
 
 Thresholds live in ONE place — `memory_writer.HIGH_SIM = 0.80`,
 `MID_SIM = 0.50`, `MIN_CONTENT_LEN = 10`, `MAX_CANDIDATES_TO_SCAN = 50`
-(`memory_writer.py:81`). They are no longer mirrored in `config.json`: that
+(`memory_writer.py:82`). They are no longer mirrored in `config.json`: that
 `writer` block was read by nothing and was deleted in v2.5, because an inert
 tunable is worse than no tunable. See
 [docs/CONTRACTS.md](CONTRACTS.md#anti-patch-contract) for the full contract.
@@ -588,9 +590,9 @@ SessionStart:
 ```
 
 Call signatures above are the real ones: `write_progress_md(db, project_id,
-memory_dir)` (`core/progress.py:498-677`; call sites `pre_compact.py:808`,
-`stop.py:519`, `user_prompt.py:52`, `session_start.py:955`, `mcp/server.py:243`,
-`cli/mem.py:1304`). See
+memory_dir)` (`core/progress.py:498-677`; call sites `pre_compact.py:814`,
+`stop.py:540`, `user_prompt.py:52`, `session_start.py:959`, `mcp/server.py:243`,
+`cli/mem.py:1311`). See
 [docs/CONTRACTS.md](CONTRACTS.md#handoff-contract) for the PROGRESS.md
 schema.
 
@@ -627,7 +629,7 @@ its own memories.
 Three changes close it:
 
 1. `core.extractor.mangle_project_path` is the single source of truth for the
-   convention (`extractor.py:614-635`), used by `find_latest_transcript`,
+   convention (`extractor.py:636-657`), used by `find_latest_transcript`,
    `hooks/session_start.py` and `ui/dashboard.py` — which had carried a verbatim
    copy of the old resolver, fuzzy branch included.
 2. The fuzzy fallback is **deleted**. A miss returns `None`. Callers must treat
@@ -738,9 +740,9 @@ while the same token via Bearer + beta gets HTTP 200 (`core/auth.py:14-15`).
 `get_api_key()` is the single-credential back-compat view of that same list (it
 does not retry, `core/auth.py:60-93`); it also carries the `oauth_expired`
 signal behind SessionStart's "[WARNING: OAuth expired — LLM extraction
-disabled]" footer (`session_start.py:674`). Hook callers use it to *supply*
+disabled]" footer (`session_start.py:678`). Hook callers use it to *supply*
 the credential passed into `call_llm`: `pre_compact.py:96 → :166`,
-`stop.py:99`, `session_start.py:674`, `core/consolidate.py:426, 549, 724`.
+`stop.py:99`, `session_start.py:678`, `core/consolidate.py:427, 549, 724`.
 
 Fall-through was added in v2.3.4 for a concrete failure: a dead env key (e.g.
 zero credit → HTTP 400) used to blackhole the healthy subscription token behind
@@ -1214,8 +1216,8 @@ segment**, and `_make_hooks_config` (`installer.py:735-757`) builds commands as
 ├── installed_surfaces.json  ← what was written into ~/.claude (v2.5)
 ├── core/    atomic.py auth.py consolidate.py db.py encoding_setup.py
 │            extractor.py idle.py layout.py logger.py markers.py modes.py
-│            plan.py privacy.py progress.py recall.py roots.py textsim.py
-│            version.py
+│            plan.py privacy.py progress.py prompts.py recall.py roots.py
+│            textsim.py version.py
 ├── hooks/   _entry.py consolidate_async.py post_tool_use.py pre_compact.py
 │            session_start.py stop.py user_prompt.py
 ├── llm/     ccl_backend.py memory_writer.py parse.py usage_judge.py

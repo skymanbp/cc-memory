@@ -3395,7 +3395,7 @@ Two of the six turned out to be worse than they were written up as.
 - **Doc citation coverage nearly doubled.** `tools/citation_check.py` could only
   anchor a citation when the symbol was defined in the *cited* file, so the most
   common shape in these docs — a call site, `` `db.tag_progress_session(...)`
-  (`user_prompt.py:421`) `` — went unchecked: 370 of 594, 62 %. It now anchors
+  (`user_prompt.py:422`) `` — went unchecked: 370 of 594, 62 %. It now anchors
   cross-file citations on the text of the cited range, and **341 of 594 are
   checked** (was 224).
 
@@ -3404,8 +3404,8 @@ Two of the six turned out to be worse than they were written up as.
   that occurred in the file (the word *guardian* appears at five lines of
   `core/plan.py`, so a correct citation that missed those was reported as rot) —
   candidates must now be real symbols somewhere in the tree; and `--fix` used
-  substring replacement, which turned `memory_writer.py:83-83` into
-  `memory_writer.py:55-83`, a range that never existed. It splices by character
+  substring replacement, which turned `memory_writer.py:84-84` into
+  `memory_writer.py:55-84`, a range that never existed. It splices by character
   offset, right to left, so a line carrying four citations repairs correctly.
 
 ### Known limits (what is left, honestly)

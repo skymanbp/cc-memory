@@ -87,6 +87,8 @@ import re
 from typing import Dict, List, Optional, Sequence
 
 from core.privacy import neutralize_inline
+from core.prompts import (ACK_TOKENS, RECALL_FRAME_CLOSE, RECALL_FRAME_OPEN,
+                          RECALL_PREAMBLE, RESUME_TRIGGERS)
 from core.textsim import shingle_set, word_set
 
 # ── Budget and bar ─────────────────────────────────────────────────────────
@@ -163,16 +165,13 @@ _STOPWORDS = frozenset("""
     这样 那样 一下 现在 然后 因为 所以 如果 但是 而且 就是 不是 没有 需要
 """.split())
 
-# A resume signal is not a query. These are the tokens `hooks/user_prompt.py`
-# and `hooks/session_start.py` already share as the RESUME PROTOCOL vocabulary;
+# A resume signal is not a query, and neither is a bare acknowledgement:
 # recalling against "继续" would retrieve on the word "continue", which is in
-# half the database. i18n Tier 3: bilingual by design — keep in sync with
-# `user_prompt.resume_signals` and session_start's RESUME PROTOCOL block.
-_NO_QUERY_TOKENS = frozenset({
-    "", "继续", "接着", "接着做", "接着干", "继续干",
-    "resume", "continue", "go on", "keep going", "ok", "okay", "yes", "no",
-    "好", "好的", "行", "对", "是", "嗯", "go", "next", "下一步",
-})
+# half the database. Both vocabularies are `core.prompts` constants (v2.16.0)
+# — the resume set is the one `hooks/user_prompt.py` types the first prompt
+# with and `hooks/session_start.py` prints in the RESUME PROTOCOL. i18n
+# Tier 3: bilingual by design.
+_NO_QUERY_TOKENS = frozenset(RESUME_TRIGGERS) | frozenset(ACK_TOKENS)
 
 # FTS5 treats these as operators / syntax. A term carrying one is quoted, and
 # an all-punctuation term is dropped: both forms of `_match_fts`'s expression
@@ -388,16 +387,12 @@ def render_recall_block(rows: Sequence[Dict], prompt: str = "") -> str:
     """
     if not rows:
         return ""
-    lines = [
-        "<cc-memory-recall>",
-        f"{len(rows)} stored memory(ies) matched this message "
-        f"(lexical retrieval — may be irrelevant; ignore if so):",
-    ]
+    lines = [RECALL_FRAME_OPEN, RECALL_PREAMBLE.format(n=len(rows))]
     for row in rows:
         cat = neutralize_inline(str(row.get("category") or "note"))
         content = neutralize_inline(str(row.get("content") or ""))
         topic = str(row.get("topic") or "").strip()
         suffix = f"  [topic: {neutralize_inline(topic)}]" if topic else ""
         lines.append(f"  - [{cat}] {content}{suffix}")
-    lines.append("</cc-memory-recall>")
+    lines.append(RECALL_FRAME_CLOSE)
     return "\n".join(lines) + "\n"

@@ -27,6 +27,8 @@ import re
 from collections import Counter, namedtuple
 from typing import Any, Dict, List, Optional, Tuple
 
+from core.layout import LEGACY_MEMORY_DIRNAME, MEMORY_DIRNAME
+
 
 # ── Generic category detection (project-neutral) ───────────────────────────
 # i18n Tier 3: these patterns match BOTH Chinese and English INTENTIONALLY —
@@ -330,15 +332,35 @@ def load_transcript_window(
         )
 
 
+# The generated files the forced reminder tells Claude to open. A Read of one
+# of them is the handshake WORKING, not activity (v2.16.0, B10): fed to the
+# observer it became a "fact" about the model reading its own notes, and in
+# PROGRESS.md §6 it listed the plugin's file as one the session touched. The
+# observation row itself is KEPT — `/cc-mem inject-usage` counts those Reads
+# to measure whether the handshake happened.
+_HANDSHAKE_FILES = frozenset({"PROGRESS.md", "MEMORY.md", "PLAN.md"})
+
+
+def is_handshake_read(tool_name, tool_input) -> bool:
+    """True for a Read of `<state dir>/PROGRESS.md|MEMORY.md|PLAN.md`."""
+    if tool_name != "Read" or not tool_input:
+        return False
+    parts = str(tool_input).replace("\\", "/").rstrip("/").rsplit("/", 2)
+    return (len(parts) >= 2 and parts[-1] in _HANDSHAKE_FILES
+            and parts[-2] in (MEMORY_DIRNAME, LEGACY_MEMORY_DIRNAME))
+
+
 def files_from_observations(observations, cap=None):
     """(files_read, files_modified) from observation rows — deduped,
     order-preserving, optionally capped. THE one implementation: it existed
     as three hand-rolled copies (pre_compact, session_start refresh, stop's
     per-turn patch) with three different caps, which is the same copy-drift
-    shape as the transcript summariser above (register M2)."""
+    shape as the transcript summariser above (register M2). A handshake
+    Read is not a file the session touched (`is_handshake_read`)."""
     reads = list(dict.fromkeys(
         o["tool_input"] for o in observations
-        if o["tool_name"] == "Read" and o["tool_input"]))
+        if o["tool_name"] == "Read" and o["tool_input"]
+        and not is_handshake_read("Read", o["tool_input"])))
     mods = list(dict.fromkeys(
         o["tool_input"] for o in observations
         if o["tool_name"] in ("Edit", "Write", "MultiEdit") and o["tool_input"]))

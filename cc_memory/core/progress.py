@@ -181,6 +181,7 @@ from core.logger import get_logger
 # naturally with bare helper names; ensure_memory_dir above resolves it at
 # call time, after this module-level import has run.
 from core.markers import _is_link as _markers_is_link
+from core.prompts import PROGRESS_MD_FOOTER, PROGRESS_MD_NOTICE
 from core.privacy import (neutralize_block, neutralize_document,
                           neutralize_inline, neutralize_markers)
 
@@ -540,8 +541,7 @@ def write_progress_md(db: MemoryDB, project_id: int, memory_dir: Path) -> Path:
         + (f" · via {trigger}" if trigger else "")
         + (f" · {project_path}" if project_path else ""),
         "",
-        "> SINGLE SOURCE OF TRUTH for session handoff. Always full-rewrite from SQLite",
-        "> table `progress`. **Never append. Never patch by hand.**",
+        *PROGRESS_MD_NOTICE,
         "",
     ]
 
@@ -652,11 +652,7 @@ def write_progress_md(db: MemoryDB, project_id: int, memory_dir: Path) -> Path:
     lines += [""]
 
     # --- Footer --------------------------------------------------------------
-    lines += [
-        "---",
-        "*This file is the handoff contract for the next session. Read it FIRST.*",
-        "*Spec: `docs/CONTRACTS.md#handoff-contract` · Anti-patch contract: `docs/CONTRACTS.md#anti-patch-contract`*",
-    ]
+    lines += list(PROGRESS_MD_FOOTER)
 
     out = memory_dir / "PROGRESS.md"
     # neutralize_document, not a bare join: every slot above is already escaped

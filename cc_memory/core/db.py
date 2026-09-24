@@ -1542,6 +1542,51 @@ class MemoryDB:
                 "UPDATE sessions SET complete = 1 WHERE id = ?",
                 (session_id,)).rowcount
 
+    def session_row_for(self, project_id, claude_session_id):
+        """The NEWEST `sessions` row id of one Claude session, or None.
+
+        v2.16.0 (B8): the Stop observer attaches the facts it writes to the
+        session they came from. With `session_id` NULL they matched
+        `get_recent_memories`' session-less arm forever, so an observer fact
+        never left the Recent layer; attached to a row it ages out three
+        sessions later like every compaction's facts.
+        """
+        if not claude_session_id:
+            return None
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT id FROM sessions WHERE project_id = ? "
+                "AND claude_session_id = ? ORDER BY id DESC LIMIT 1",
+                (project_id, claude_session_id)).fetchone()
+            return int(row["id"]) if row else None
+
+    def claim_session(self, project_id, claude_session_id, trigger_type,
+                      msg_count, archive_path, brief_summary):
+        """`insert_session`, reusing the session's INCOMPLETE claim row.
+
+        v2.16.0 (B8): by the time PreCompact claims a session the observer
+        may already have claimed it (an `"observer"` row, complete=0) to
+        attach its facts to; a second row for the same session would count
+        the session twice. A COMPLETE row is never reused — every compaction
+        is its own session row, and a session that compacts twice keeps two.
+        """
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT id FROM sessions WHERE project_id = ? "
+                "AND claude_session_id = ? AND complete = 0 "
+                "ORDER BY id DESC LIMIT 1",
+                (project_id, claude_session_id)).fetchone()
+            if row:
+                conn.execute(
+                    "UPDATE sessions SET trigger_type = ?, compacted_at = ?, "
+                    "msg_count = ?, archive_path = ?, brief_summary = ? "
+                    "WHERE id = ?",
+                    (trigger_type, self._now(), msg_count, archive_path,
+                     brief_summary, row["id"]))
+                return int(row["id"])
+        return self.insert_session(project_id, claude_session_id, trigger_type,
+                                   msg_count, archive_path, brief_summary)
+
     # ── Ordering: `id`, never a timestamp string ────────────────────────────
     # `_now()` is `datetime.now()` — NAIVE LOCAL time — and every "most
     # recent" query below used to sort on it as a string. Local wall time is
@@ -1980,6 +2025,14 @@ class MemoryDB:
         which NULL can never satisfy, so everything the user saved by hand was
         invisible to every consumer of this method: SessionStart injection
         (hooks/session_start.py), the web viewer, and MCP memory_recent.
+
+        "Recent" means NEWEST (v2.16.0, B8): `ORDER BY id DESC`, the row id
+        being the monotonic insertion order this file already refuses to
+        replace with a wall-clock string (see the ordering note above
+        `get_recent_session_ids`). It was `importance DESC, created_at DESC`,
+        so with `limit` rows on offer an old important fact displaced the
+        newest ones and the injection's "Recent" layer was a second
+        importance ranking.
         """
         session_ids = self.get_recent_session_ids(project_id, sessions_back)
         params = [project_id, min_importance]
@@ -2004,7 +2057,7 @@ class MemoryDB:
                       AND importance >= ?
                       {session_clause}
                       {cat_clause}
-                    ORDER BY importance DESC, created_at DESC
+                    ORDER BY id DESC
                     LIMIT ?""",
                 params
             ).fetchall()

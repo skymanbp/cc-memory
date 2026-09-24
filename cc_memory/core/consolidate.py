@@ -34,6 +34,7 @@ if str(_PKG_ROOT) not in sys.path:
 from core.db import MemoryDB
 from core.layout import DB_FILENAME, memory_dir as resolve_memory_dir
 from core.logger import get_logger
+from core.prompts import FALLBACK_SUMMARY_PREFIX
 
 _log = get_logger("consolidate")
 
@@ -795,9 +796,24 @@ def _summarize_topic_llm(topic_name, memories, deadline=None):
 
 
 def _summarize_topic_fallback(topic_name, memories):
-    """No-LLM bullet summary."""
+    """No-LLM summary: ONE line, prefixed, at most 120 characters (v2.16.0, B6).
+
+    It used to be the eight top facts verbatim, which the SessionStart
+    Knowledge Base layer then injected ABOVE the Critical layer carrying the
+    same rows — every no-credential project paid for its critical facts
+    twice. A line that names the topic, counts its rows and hints at the top
+    three states no fact, so `session_start._build_topics_layer` does not
+    treat the topic as covered (it tests `FALLBACK_SUMMARY_PREFIX`) and the
+    Critical layer still shows the rows once.
+    """
     sorted_mems = sorted(memories, key=lambda m: -m["importance"])
-    return "\n".join(f"- {m['content']}" for m in sorted_mems[:8])
+    tops = []
+    for m in sorted_mems[:3]:
+        c = " ".join(str(m.get("content") or "").split())
+        tops.append(c[:30] + "…" if len(c) > 30 else c)
+    line = (f"{FALLBACK_SUMMARY_PREFIX}{len(memories)} memories; top: "
+            + " · ".join(tops))
+    return line[:120]
 
 
 def consolidate_topics(db, project_id, use_llm=True, min_memories_per_topic=3,

@@ -3150,6 +3150,27 @@ def _break_r16noregen(root):
            "    if memory_dir is not None:  # BREAKAGE: render regardless")
 
 
+@case("r16handshake", ["tests/smoke_test.py"],
+      "treat no Read as the handshake -> the forced reminder's own Read of "
+      "PROGRESS.md is fed to the observer as activity and listed in §6 as a "
+      "file the session touched")
+def _break_r16handshake(root):
+    _patch(root, "cc_memory/core/extractor.py",
+           '    if tool_name != "Read" or not tool_input:\n        return False',
+           '    if True:  # BREAKAGE: nothing is a handshake read\n        return False')
+
+
+@case("r16fallbackcover", ["tests/smoke_test.py"],
+      "count a fallback topic summary as coverage again -> every critical row "
+      "of a no-credential project's topics vanishes from the injection")
+def _break_r16fallbackcover(root):
+    _patch(root, "cc_memory/hooks/session_start.py",
+           '        if not str(t["content"]).startswith(FALLBACK_SUMMARY_PREFIX):\n'
+           '            topic_names.add(t["name"])',
+           '        if True:  # BREAKAGE: a fallback line counts as coverage\n'
+           '            topic_names.add(t["name"])')
+
+
 def verify_anchors():
     """Count every registered case's breakage anchors WITHOUT running a gate.
 

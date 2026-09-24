@@ -1482,7 +1482,7 @@ not be imported at all — `cli/plan.py` now has a `main()`.
 
 **Residual limits, recorded rather than papered over:**
 
-- `core/db.py`'s three plan mutators — `update_plan_status` (`db.py:3697-3741`),
+- `core/db.py`'s three plan mutators — `update_plan_status` (`db.py:3769-3813`),
   `delete_plan` (`:1410`) and `update_plan_content` (`:1427`) — all accept
   `project_id`, and `cli/plan.py` + `ui/dashboard.py` pass it at every call
   site, but none of them *requires* it (it defaults to `None`). An unscoped raw
@@ -2330,7 +2330,7 @@ file and non-blank, NOT verified against a symbol — and the summary says so
 in those words since v2.14.0 (261 of 631 at v2.14.0; the class was 253 of
 594 as `SKIP` at v2.5.4, down from 370 once v2.5.3 taught it to anchor
 CROSS-FILE citations on the text of the cited range — the
-`` `db.tag_progress_session(...)` (`user_prompt.py:421`) `` shape, which is
+`` `db.tag_progress_session(...)` (`user_prompt.py:422`) `` shape, which is
 the commonest in these docs). A bounds-only citation can rot silently: six
 had, all in prose that names a section rather than a symbol, and were
 repointed by hand in v2.14.0. `--fix`
