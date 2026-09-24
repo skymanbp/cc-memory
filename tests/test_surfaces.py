@@ -419,7 +419,7 @@ def test_mcp():
                               3, [], "charlie")
     m_new = db.supersede_memory(m_old, "alpha revised note about the widget pipeline",
                                 pid, None, "note", 3, [], "alpha")
-    db.archive_memory(m_arch)
+    db.archive_if_unchanged([(m_arch, "bravo note that gets archived by hand")])
 
     # Non-ASCII row seeded through the DB so the OUT direction is byte-exact by
     # construction (no writer normalisation in the way).
@@ -625,6 +625,16 @@ def test_mcp():
         raw_conn.close()
     assert stored == unicode_in.encode("utf-8"), \
         f"IN direction not byte-identical under gbk: {stored[:80]!r}"
+    # v2.16.0 (D7): an MCP add is a manual save — session_id NULL like the
+    # CLI, the dashboard and the web viewer, never credited to whichever
+    # session happened to be the project's most recent.
+    _sid_conn = sqlite3.connect(str(mem / "memory.db"))
+    try:
+        _sid = _sid_conn.execute("SELECT session_id FROM memories WHERE id = ?",
+                                 (add_result["id"],)).fetchone()[0]
+    finally:
+        _sid_conn.close()
+    assert _sid is None, f"memory_add attached the row to session {_sid!r}"
     print("[OK] MCP unicode: CJK/emoji/math/Cyrillic byte-identical in BOTH "
           "directions under PYTHONIOENCODING=gbk + PYTHONUTF8=0")
 
@@ -3387,8 +3397,9 @@ def _cli_archive_retires_a_wrong_memory(pkg):
     There was none: `sql` is read-only, and `add` reconciles only when the
     new text scores similar enough — which, before the CJK-aware substrate,
     a Chinese correction of a Chinese fact never did (0.23 measured on a live
-    database). The only route left was to bypass the CLI and call
-    `db.bulk_archive` by hand.
+    database). The only route left was to bypass the CLI and archive by hand
+    (through `db.bulk_archive` then; through a raw UPDATE now — the helper
+    was deleted in v2.16.0, D4).
     """
     box = Path(tempfile.mkdtemp(prefix="ccm-archive-"))
     proj = box / "proj"

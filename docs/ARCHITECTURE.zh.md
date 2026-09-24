@@ -1,4 +1,4 @@
-<!-- i18n-source: ARCHITECTURE.md | sha256: 394c3b710178ed03 | version: 2.15.2 | translated: 2026-09-24 | translation: da6f578123d39290 -->
+<!-- i18n-source: ARCHITECTURE.md | sha256: f45ee5c2705de757 | version: 2.15.2 | translated: 2026-09-24 | translation: 829f3eb0f9fcd748 -->
 > [English](ARCHITECTURE.md) · **简体中文**
 
 # cc-memory — 架构
@@ -165,7 +165,7 @@ cc-memory/
 是**扁平**目录树，在那种布局下 `import cc_memory` 会抛 `ModuleNotFoundError`，因此
 任何必须在两种布局下都能跑的模块都不能用 `from cc_memory import __version__`。
 `from core.version import __version__` 在两种布局下都成立，而
-`cc_memory/__init__.py:64` 把它转出口，使得可从 wheel 导入的写法继续可用。
+`cc_memory/__init__.py:7` 把它转出口，使得可从 wheel 导入的写法继续可用。
 
 有四份**不可导入**的清单读不到它，必须一同 bump：`.claude-plugin/plugin.json`、
 `.claude-plugin/marketplace.json`、`cc_memory/config.json`（其中的 `version` 是给
@@ -355,11 +355,11 @@ SQLite 表（定义在 [`cc_memory/core/db.py`](../cc_memory/core/db.py)），�
 
 `memories` 上的 `supersedes_id` 列（迁移 `v3_supersedes`，`db.py:173`）把反补丁的
 取代链显式化：当 `upsert_smart` 判定一条新记忆取代了一条旧记忆时，新行会回链到旧行
-的 ID（旧行被归档）。通过 `db.get_supersede_chain(memory_id)`（`db.py:2016-2031`）走一遍
+的 ID（旧行被归档）。通过 `db.get_supersede_chain(memory_id)`（`db.py:2048-2063`）走一遍
 链条，就能看到完整的更新历史。`content_hash`（迁移 `v2_content_hash`，位于
 `_MIGRATIONS`，`db.py:126`）是归一化内容的 `sha256[:16]`，用于廉价的精确重复检查
-（`db.compute_content_hash` 在 `db.py:2609-2611`，
-`db.find_by_hash` 在 `db.py:2622-2630`）。
+（`db.compute_content_hash` 在 `db.py:2619-2621`，
+`db.find_by_hash` 在 `db.py:2632-2640`）。
 
 迁移按 `_MIGRATIONS` 列表（`db.py:121-284`）的顺序应用，并记录在 `_migrations` 中。目前
 已交付的层级：**v1**（`topic` 列 + 索引）、**v2**（content_hash、observations、
@@ -439,9 +439,9 @@ regenerate_memory_index(db, project_id, memory_dir)   ← MEMORY.md 刷新
   取代或强化——时才会；一批纯 skip 什么都不渲染（`memory_writer.py:376`，v2.16.0）。
   Stop 观察者与 SessionStart 的追溯保存会传（`stop.py:539`、
   `session_start.py:1394`）；同步 PreCompact 支路不传（`pre_compact.py:729`），
-  而是在其余状态变更之后自己渲染一次（`pre_compact.py:856`）。
-- 单发调用方显式调用 `regenerate_memory_index`：`cli/mem.py:1244` 与 `:584`、
-  `mcp/server.py:647`、`ui/dashboard.py:1738`、`ui/web_viewer.py:1035`，外加
+  而是在其余状态变更之后自己渲染一次（`pre_compact.py:832`）。
+- 单发调用方显式调用 `regenerate_memory_index`：`cli/mem.py:1241` 与 `:584`、
+  `mcp/server.py:642`、`ui/dashboard.py:1735`、`ui/web_viewer.py:1030`，外加
   `skills/ccm-load` 的内联脚本（`skills/ccm-load/SKILL.md:290, 307`）。
   `core/idle.py:96` 与 `hooks/consolidate_async.py:276` 也会在维护之后刷新它。
 
@@ -534,9 +534,9 @@ SessionStart：
 ```
 
 上面的调用签名都是真实的：`write_progress_md(db, project_id, memory_dir)`
-（`core/progress.py:498-677`；调用点 `pre_compact.py:814`、`stop.py:683`、
+（`core/progress.py:498-677`；调用点 `pre_compact.py:790`、`stop.py:666`、
 `user_prompt.py:133`、`session_start.py:1107`、`mcp/server.py:243`、
-`cli/mem.py:1335`）。PROGRESS.md 的结构规格见
+`cli/mem.py:1332`）。PROGRESS.md 的结构规格见
 [docs/CONTRACTS.md](CONTRACTS.md#handoff-contract)。
 
 ### 被杀运行检测（v2.4.2）
@@ -544,9 +544,9 @@ SessionStart：
 被宿主超时杀死的 `PreCompact` 死于 `TerminateProcess`：不走 `except`，也不走
 `finally`，所以 `.last_save.json` 仍然描述着*上一次*成功的运行，失败因此不可见。
 为此，同步支路会在加载 transcript **之前**写入
-`.ccm/.pre_compact_attempt.json`（`pre_compact.py:596-609`），并且只在运行完整
-结束时才移除它（`pre_compact.py:883`）——包括在它自己的错误路径上
-（`pre_compact.py:941`），这样一次*报错*的运行绝不会被报告成一次*被杀*的运行。
+`.ccm/.pre_compact_attempt.json`（`pre_compact.py:581`），并且只在运行完整
+结束时才移除它（`pre_compact.py:874`）——包括在它自己的错误路径上
+（`pre_compact.py:929`），这样一次*报错*的运行绝不会被报告成一次*被杀*的运行。
 `SessionStart` 会报告残留的标记，但只在它至少已存在 10 分钟之后才报，因此一次仍在
 进行中的运行绝不会被误标（`session_start.py:187-206`）。
 
@@ -598,7 +598,7 @@ transcript 得到 0 条腿、0 条记忆。第 3 级从
 `core.plan.is_sensitive_tool_call`，`plan.py:1440-1463`）一次加 20。一旦
 `turns_since_last_guardian >= 8` 或 `edits_since_last_guardian >= 12`
 （`core.plan.guardian_verdict`——自 v2.15.0 起**唯一的策略点**，
-`should_nudge_guardian`、`blocking_reasons` 与 `/cc-mem plan-status` 全部读它，
+`blocking_reasons` 与 `/cc-mem plan-status` 都读它，
 因此用户看到的数字和闸门据以拒绝的数字不可能分歧），Stop 钩子就**拒绝
 收官**而不是给建议（v2.11.0——这句话从前描述的那个限速提示已被删除；逃生预算见
 [CONTRACTS.md](CONTRACTS.md#the-stop-hook-can-refuse-the-turn-v2110)）。钩子自己
@@ -645,9 +645,9 @@ BudgetGate 来说仍是已知量。候选顺序与传输格式（`core/auth.py:2
 `core/auth.py:60-93`）；它同时承载 `oauth_expired` 信号，支撑 SessionStart 的
 “[WARNING: OAuth expired — LLM extraction, semantic de-dup, obsolescence check
 and topic summaries disabled]” 页脚
-（`session_start.py:812`）。钩子调用方用它来*提供*传给 `call_llm` 的凭据：
-`pre_compact.py:96 → :166`、`stop.py:99`、`session_start.py:812`、
-`core/consolidate.py:425, 549, 724`。
+（`session_start.py:808`）。钩子调用方用它来*提供*传给 `call_llm` 的凭据：
+`pre_compact.py:96 → :166`、`stop.py:102`、`session_start.py:808`、
+`core/consolidate.py:439, 549, 724`。
 
 逐级回退是 v2.3.4 为一个具体故障加入的：一个失效的环境变量密钥（例如额度为零 →
 HTTP 400）过去会把排在它后面的健康订阅令牌黑洞掉，从而无声地把每一次 LLM 调用推给

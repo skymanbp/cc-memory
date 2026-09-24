@@ -22,8 +22,8 @@ _HERE = Path(__file__).resolve().parent
 _PKG_ROOT = _HERE.parent
 sys.path.insert(0, str(_PKG_ROOT))
 
-# Force UTF-8 on stdio (defensive — UserPromptSubmit's stdout is empty by
-# contract, but error tracebacks could contain user prompt content).
+# Force UTF-8 on stdio: this hook's stdout is the query-time recall block
+# (v2.15.0), injected into Claude's context and free to carry CJK.
 from core.encoding_setup import enable_utf8_io
 enable_utf8_io()
 
@@ -38,7 +38,8 @@ from hooks._entry import parse_payload, resolve_project
 # <!--ce:hooks:asof--> each had one; truncation cross-wired any two sessions
 # sharing a 16-char prefix). read_marker never raises and refuses to follow a
 # planted symlink.
-from core.markers import marker_path, read_marker, safe_id as _safe_id, write_marker
+from core.markers import (PROMPT_MARKER_PREFIX, TURN_MARKER_PREFIX, marker_path,
+                          read_marker, safe_id as _safe_id, write_marker)
 
 # Privacy opt-out. `<private>…</private>` was honoured on the observation path
 # (hooks/post_tool_use.py) and on every memory-write path (llm/memory_writer.py,
@@ -51,9 +52,10 @@ from core.privacy import clean_for_storage, strip_harness_blocks
 # deliberately NOT imported: this module has a local of that name.
 from core.layout import DB_FILENAME, find_db_path, memory_dir
 from core.prompts import RESUME_TRIGGERS
+from core.recall import RECALL_MANIFEST
 
-_TURN_FILE_PREFIX = "cc_mem_turns_"
-_PROMPT_FILE_PREFIX = "cc_mem_prompt_"
+_TURN_FILE_PREFIX = TURN_MARKER_PREFIX       # spelled once, in core.markers (v2.16.0, D3)
+_PROMPT_FILE_PREFIX = PROMPT_MARKER_PREFIX
 # Written once, when the seed below lands. It answers "has this SESSION
 # already seeded progress.current_request?" — a question the prompt marker
 # cannot answer, because that marker is deliberately overwritten with "" on a
@@ -138,7 +140,7 @@ def _init_project_if_needed(cwd):
         return False
 
 
-_RECALL_MANIFEST = ".last_recall.json"
+_RECALL_MANIFEST = RECALL_MANIFEST   # spelled once, in core.recall (v2.16.0, D3)
 
 
 def _already_shown(state_dir, session_id=""):
@@ -354,11 +356,9 @@ def main():
                 # why: corrupted turn file — reset to 1; observer will still
                 # work, just doesn't know how many turns we've had
                 turn_count = 1
-        try:
-            write_marker(turn_file, str(turn_count))
-        except OSError:
-            # why: can't persist turn count; observer falls back to recent-20
-            pass
+        # write_marker never raises (its docstring's first line): a refused
+        # write returns False and the observer falls back to the recent window.
+        write_marker(turn_file, str(turn_count))
 
         prompt = data.get("prompt", "")
         if not isinstance(prompt, str):
@@ -383,19 +383,17 @@ def main():
         # should ever be Claude Code's own slash-command scaffolding.
         prompt = clean_for_storage(strip_scaffolding(prompt))[:500]
         prompt_file = marker_path(_PROMPT_FILE_PREFIX, safe)
-        try:
-            # Written even when cleaning emptied it — AND when the raw prompt
-            # was already empty: this marker is per-SESSION and reused every
-            # turn, so skipping the write leaves the PREVIOUS turn's prompt in
-            # place for stop.py to splice into the observer's Anthropic
-            # request. The old `if prompt` guard around this whole block did
-            # exactly that for a raw "" prompt (measured: turn 2's empty
-            # prompt left turn 1's text in the marker), so the write sits
-            # ABOVE any truthiness test now.
-            write_marker(prompt_file, prompt)
-        except OSError:
-            # why: prompt context for observer is enrichment, not required
-            pass
+        # Written even when cleaning emptied it — AND when the raw prompt
+        # was already empty: this marker is per-SESSION and reused every
+        # turn, so skipping the write leaves the PREVIOUS turn's prompt in
+        # place for stop.py to splice into the observer's Anthropic
+        # request. The old `if prompt` guard around this whole block did
+        # exactly that for a raw "" prompt (measured: turn 2's empty
+        # prompt left turn 1's text in the marker), so the write sits
+        # ABOVE any truthiness test now. write_marker never raises, and the
+        # prompt is enrichment for the observer, so a refused write is
+        # nothing to handle.
+        write_marker(prompt_file, prompt)
 
         if prompt:
             # The session's FIRST NON-SCAFFOLDING prompt seeds PROGRESS.md

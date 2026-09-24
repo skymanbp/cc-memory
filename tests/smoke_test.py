@@ -441,9 +441,12 @@ def main():
     assert "Migrated schema" in post["status_done"]
     assert "pgvector index" in post["status_in_flight"]
     assert "hybrid BM25" in post["plan"]
-    assert len(post["open_todos"]) == 3, \
-        f"open_todos derived from next_steps split: expected 3, got {len(post['open_todos'])}"
-    assert any(t["content"].startswith("Add hybrid") for t in post["open_todos"])
+    # v2.16.0 (D6): next_steps is the PLAN (§4) and is never split into §3 —
+    # the RESUME PROTOCOL executes `todos[0]` of §3 without asking, and prose
+    # cut on ';' was masquerading as a todo list. No TodoWrite snapshot in
+    # this fixture, so §3 stays EMPTY rather than inventing three todos.
+    assert post["open_todos"] == [], \
+        f"next_steps was split into open_todos again: {post['open_todos']!r}"
     assert len(post["files_touched"]) >= 2
     assert post["trigger_type"] == "session_start_refresh"
     print(f"[OK] _refresh_progress_row fills empty fields: "
@@ -852,7 +855,15 @@ def main():
         _a2_calls = []
 
         def _a2_worker():
+            # A worker is a FRESH process and its retro budget
+            # (_RETRO_DEADLINE_S) runs from _HOOK_T0, captured at import.
+            # Driven in-process, seconds after this suite imported the module,
+            # that budget was already spent on a slow enough machine —
+            # `retroactive_save` broke at its loop top with 0 calls (falsify's
+            # baseline of r14retroempty, 2026-09-24: 1 red in 12 runs). Model
+            # the fresh process: the clock starts when the worker does.
             sys.argv = ["session_start.py", "--retro", str(tmp8), "live"]
+            _ss9._HOOK_T0 = time.monotonic()
             try:
                 _ss9.main()
             except SystemExit as _exc:
@@ -1064,25 +1075,27 @@ def main():
 
     # Guardian nudge thresholds
     row = db_p.get_plan_active(pid_p)
-    nudge, reason = plan_mod.should_nudge_guardian(row)
-    assert not nudge, f"should not nudge on fresh plan: {reason}"
+    _gv = plan_mod.guardian_verdict(row)
+    assert not _gv["should"], f"should not nudge on fresh plan: {_gv['reason']}"
 
     # Bump turns past threshold
     for _ in range(10):
         db_p.bump_plan_turn_counter(pid_p)
     row = db_p.get_plan_active(pid_p)
-    nudge, reason = plan_mod.should_nudge_guardian(row, turn_threshold=8)
-    assert nudge and "turn_threshold" in reason, f"turn nudge missing: {reason}"
-    print(f"[OK] guardian nudge: triggered on turn threshold ({reason})")
+    _gv = plan_mod.guardian_verdict(row)
+    assert _gv["should"] and "turn_threshold" in _gv["reason"], \
+        f"turn nudge missing: {_gv['reason']}"
+    print(f"[OK] guardian nudge: triggered on turn threshold ({_gv['reason']})")
 
     # Reset, then bump edits
     db_p.reset_plan_guardian_counters(pid_p)
     for _ in range(15):
         db_p.bump_plan_edit_counter(pid_p)
     row = db_p.get_plan_active(pid_p)
-    nudge, reason = plan_mod.should_nudge_guardian(row, edit_threshold=12)
-    assert nudge and "edit_threshold" in reason, f"edit nudge missing: {reason}"
-    print(f"[OK] guardian nudge: triggered on edit threshold ({reason})")
+    _gv = plan_mod.guardian_verdict(row)
+    assert _gv["should"] and "edit_threshold" in _gv["reason"], \
+        f"edit nudge missing: {_gv['reason']}"
+    print(f"[OK] guardian nudge: triggered on edit threshold ({_gv['reason']})")
 
     # Sensitive tool detection
     assert plan_mod.is_sensitive_tool_call("Bash", {"command": "git push origin main"})
@@ -1096,9 +1109,9 @@ def main():
     # needs_refine=1 should NOT trigger guardian nudge (refiner nudge takes priority)
     db_p.upsert_plan_active(pid_p, needs_refine=1)
     row = db_p.get_plan_active(pid_p)
-    nudge, reason = plan_mod.should_nudge_guardian(row)
-    assert not nudge and reason == "needs_refine_first", \
-        f"expected needs_refine_first, got {reason}"
+    _gv = plan_mod.guardian_verdict(row)
+    assert not _gv["should"] and _gv["reason"] == "needs_refine_first", \
+        f"expected needs_refine_first, got {_gv['reason']}"
     print("[OK] guardian suppressed while needs_refine=1 (refiner takes priority)")
 
     # plan-clear pathway. v2.8.0: clear is a TOMBSTONE, not a DELETE — the
@@ -2349,7 +2362,6 @@ def main():
     # wrong signal: well-formed tags are cheap for the regex engine, an
     # UNTERMINATED one is the quadratic case (measured 16000 tags = 9517 ms).
     from core.privacy import (strip_private as _v5_strip,
-                              strip_context_tags as _v5_strip_ctx,
                               clean_for_storage as _v5_clean,
                               has_private as _v5_has_priv)
     _v5_leak = "".join("keep%d <private>SECRET%d</private> " % (i, i)
@@ -2368,23 +2380,14 @@ def main():
         "an upper-case <PRIVATE> span reached the storage/LLM gate verbatim"
     assert _v5_strip("x <PRIVATE>dangling upper") == "x", \
         "an upper-case dangling open must fail closed like the lower-case one"
-    assert "BLOB" not in _v5_clean(
-        "k <CC-MEMORY-CONTEXT>BLOB</cc-memory-context>"), \
-        "the anti-recursion tag must be case-insensitive too"
     assert "SECRET" not in _v5_strip(_v5_leak), \
         "101 <private> tags came back verbatim — the tag cap still fails OPEN"
     assert "SECRET" not in _v5_clean(_v5_leak), \
         "clean_for_storage (the storage + LLM-prompt gate) leaked above the cap"
     assert "keep100" in _v5_strip(_v5_leak), "non-private text must survive"
-    # ...and the same must hold for the anti-recursion tag at 101 spans
-    _v5_ctx_leak = "".join("ok%d <cc-memory-context>BLOB</cc-memory-context> " % i
-                           for i in range(101))
-    assert "BLOB" not in _v5_clean(_v5_ctx_leak), \
-        "cc-memory-context spans leaked above the cap (recursive re-storage)"
     # fail CLOSED: a dangling open tag drops the remainder rather than emit it
     assert _v5_strip("public prefix <private>everything here is secret") \
         == "public prefix", "unterminated <private> emitted its remainder"
-    assert _v5_strip_ctx("kept <cc-memory-context>injected blob") == "kept"
     assert _v5_clean("a <private>x</private> b <private>dangling") == "a  b"
     # text with no open tag is returned byte-identical (no gratuitous .strip())
     assert _v5_strip("  no tags at all  ") == "  no tags at all  "
@@ -4277,42 +4280,41 @@ def main():
     # insert + archive used to commit separately, so a process killed between
     # them left BOTH rows active — the new fact and the fact it replaces,
     # contradicting each other in every render (measured).
-    _sp_before = MemoryDB.archive_memory
     _sp_old = _tg_db.insert_memory(
         _tg_pid, None, "note",
         "the api gateway rate limit is one hundred per minute", 3, [], "gw")
+    # ONE transaction means ONE connection (v2.16.0: `archive_memory`, the
+    # old vehicle of the second-transaction shape, is deleted, so the probe
+    # counts `_connect` calls instead of trapping a method that no longer
+    # exists).
+    _sp_connects = []
+    _sp_real_connect = MemoryDB._connect
 
-    def _sp_boom(self, mid):
-        raise OSError("simulated kill between the two halves of a supersede")
-    MemoryDB.archive_memory = _sp_boom
+    def _sp_counting_connect(self, *a, **k):
+        _sp_connects.append(1)
+        return _sp_real_connect(self, *a, **k)
+    MemoryDB._connect = _sp_counting_connect
     try:
         _tg_db.supersede_memory(
             _sp_old, "the api gateway rate limit is two hundred per minute",
             _tg_pid, None, "note")
-    except OSError:
-        # why: only relevant if the monkeypatch is still REACHED; the point of
-        # the assertion below is that it is not, because the archive happens
-        # inside the same transaction as the insert.
-        pass
     finally:
-        MemoryDB.archive_memory = _sp_before
-    assert _tg_db.get_memory(_sp_old)["is_active"] == 0, \
-        ("supersede_memory left the OLD row active — insert and archive are "
-         "in separate transactions again, so a kill between them publishes "
-         "two contradictory active facts")
+        MemoryDB._connect = _sp_real_connect
+    assert len(_sp_connects) == 1 and _tg_db.get_memory(_sp_old)["is_active"] == 0, \
+        (f"supersede_memory opened {len(_sp_connects)} connection(s) — insert "
+         "and archive are in separate transactions again, so a kill between "
+         "them publishes two contradictory active facts")
 
     # ── v2.8.0 · every `id IN (...)` writer survives past the SQLite cap ─────
     # SQLITE_MAX_VARIABLE_NUMBER is 32766 on this interpreter and 999 on builds
-    # before 3.32; an unchunked bulk_archive raised OperationalError: too many
+    # before 3.32; an unchunked bulk writer raised OperationalError: too many
     # SQL variables (measured at 32767 ids).
     _big_ids = list(range(1, 40000))
     for _bulk_name, _bulk_call in (
-            ("bulk_archive", lambda: _tg_db.bulk_archive(_big_ids)),
             ("bulk_set_topic", lambda: _tg_db.bulk_set_topic(_big_ids, "t")),
             ("bump_last_referenced",
              lambda: _tg_db.bump_last_referenced(_big_ids)),
-            ("archive_obsolete", lambda: _tg_db.archive_obsolete(_big_ids)),
-            ("delete_memories", lambda: _tg_db.delete_memories(_big_ids))):
+            ("archive_obsolete", lambda: _tg_db.archive_obsolete(_big_ids))):
         _bulk_call()   # an unchunked statement raises here
 
     # ── v2.8.0 · a snapshot verdict must not archive repaired content ────────
@@ -5099,7 +5101,7 @@ def main():
         "dispositions": [{"old_title": "t", "action": "dropped",
                           "reason": "replaced wholesale"}]},
         memory_dir=_g_root / _MEM)
-    assert not _pl.should_nudge_guardian(_g_db.get_plan_active(_g_pid))[0], (
+    assert not _pl.guardian_verdict(_g_db.get_plan_active(_g_pid))["should"], (
         "the drift counters survived a full plan replacement, so the guardian "
         "nudge fires on turn 0 of a BRAND NEW plan — a nudge with nothing to "
         "check trains the reader to ignore the ones that matter. A replan IS "
@@ -5207,13 +5209,20 @@ def main():
         strip_protected_spans as _r5_sps
     _lt, _gt = "<", ">"
     _po, _pc = _lt + "private" + _gt, _lt + "/private" + _gt
-    _co, _cc2 = _lt + "cc-memory-context" + _gt, _lt + "/cc-memory-context" + _gt
+    # B2's interleaving pair is two HARNESS families since v2.16.0 (the
+    # `<cc-memory-context>` family is deleted); the one-pass property is the
+    # same, and `strip_harness_blocks` is the caller that still needs it.
+    from core.privacy import strip_harness_blocks as _r5_shb
+    _co, _cc2 = _lt + "local-command-caveat" + _gt, _lt + "/local-command-caveat" + _gt
+    _no, _nc = _lt + "command-name" + _gt, _lt + "/command-name" + _gt
     assert "leak" not in _r5_sp("keep " + _po + "a " + _po + "b" + _pc + " leak"), \
         "B1 regressed: nested-unclosed private emits its tail"
-    assert _r5_sps(_po + "a" + _co + "b" + _pc + "c" + _cc2 + "d") == "d", \
+    assert _r5_sps(_po + "a" + _po + "b" + _pc + "c") == "", \
+        "B1 regressed: a nested private open needs an equal number of closes"
+    assert _r5_shb(_co + "a" + _no + "b" + _cc2 + "c" + _nc + "d") == "d", \
         "B2 regressed: interleaved spans let content escape"
     print("[OK] v2.8.0 r5 B1/B2: depth-true fail-closed scanner, one pass "
-          "over both families")
+          "over every family")
 
     # X3: the staleness net's write re-asserts never-referenced.
     _r5_mid = _r5_db.insert_memory(_r5_pid, None, "note",
@@ -6327,8 +6336,8 @@ def main():
     assert "SECRET" not in _r8_pv.strip_private("safe <private>SECRET sk-abc"), \
         "a dangling <private> stopped failing closed: that is the leak"
     assert _r8_pv.strip_protected_spans(
-        "<private>a<cc-memory-context>b</private>c</cc-memory-context>") == "", \
-        "interleaved protected spans stopped failing closed"
+        "<private>a</private> b <private>c") == "b", \
+        "a dangling <private> after a closed one stopped failing closed"
 
     # (c) the timeline collapses on IDENTITY, and '' is not an identity. The
     #     dedup's escape hatch was `IS NULL`, true of NULL and false of the
@@ -7364,7 +7373,7 @@ def main():
     assert all(isinstance(getattr(_p10_P, n), (str, tuple))
                for n in dir(_p10_P) if n.isupper()), \
         "every public name in core.prompts is a str or a tuple"
-    assert set(_p10_P.RESUME_TRIGGERS) <= set(_p10_recall._NO_QUERY_TOKENS), \
+    assert all(not _p10_recall.is_query_like(_t) for _t in _p10_P.RESUME_TRIGGERS if _t), \
         "the recall gate must refuse every resume trigger"
     _p10_up_src = (_REPO / "cc_memory" / "hooks" / "user_prompt.py").read_text(encoding="utf-8")
     assert "resume_signals = set(RESUME_TRIGGERS)" in _p10_up_src \
@@ -7521,10 +7530,11 @@ def main():
         _b1_db, _b1_pid, _b1_root / _MEM, _b1_bud)
     assert _b1_layer == "file" and "B1FILEONLY" in _b1_txt, (_b1_layer, _b1_txt[:120])
     # a row + a refined plan -> the digest: §1–§4 and nothing of §0/§5–§7.
-    # §5 reads the STORE (v2.16.0, B9): importance 4 reaches the file's §5
-    # (>= 4) but not the injection's Critical layer (>= 5).
+    # §5 reads the STORE (v2.16.0, B9) at CRITICAL_IMPORTANCE — D3 unified
+    # the file's §5 floor with the injection's Critical layer at 5, so the
+    # row reaches the file's §5 and the Critical layer, never the digest.
     _b1_db.insert_memory(_b1_pid, None, "note", "B1CRIT must not appear",
-                         importance=4, topic="b1")
+                         importance=5, topic="b1")
     _b1_db.upsert_progress(
         _b1_pid, current_request="B1REQ: wire the exporter",
         status_done="B1DONE parsed the config",
@@ -7952,6 +7962,113 @@ def main():
           "-> 1 (chain intact) and every LLM stage recorded as skipped in the marker, "
           "the footer and `status`; the idle reorg defers to a live lock only; with a "
           "credential the judge merges the reworded pairs in both languages")
+
+    # ── v2.16.0 · D2-D7: one extraction prompt, one spelling per constant, ──
+    # dead code gone, the PROGRESS writers tidied, MCP adds unattached.
+    from core.db import CRITICAL_IMPORTANCE as _d_crit
+    from core.modes import MODES as _d_modes, get_extraction_suffix as _d_suffix
+    from llm.parse import (build_extraction_prompt as _d_bep,
+                           normalize_memories as _d_norm)
+    _d_sys, _d_user = _d_bep("transcript", "T-BODY", mode_suffix=_d_suffix("research"))
+    assert _d_modes["research"]["extraction_prompt_suffix"].strip() in _d_sys, \
+        "the research mode's extraction suffix never reached the prompt"
+    assert _d_user.endswith("T-BODY") and '"topic"' in _d_sys, (_d_sys[-200:], _d_user)
+    _d_sys2, _d_user2 = _d_bep("observations", "O-BODY")
+    assert _d_user2 == "O-BODY" and "memory observer" in _d_sys2 \
+        and _d_suffix("code") == "", (_d_user2, _d_sys2[:80])
+    _d_rows = _d_norm([{"category": "bogus", "content": "  a fact long enough to keep  ",
+                        "importance": "9", "topic": 7},
+                       {"content": "short"}, "not a dict", {"content": None},
+                       {"category": "bug", "content": "<private>secret</private> x",
+                        "importance": "many"}])
+    assert _d_rows == [{"category": "note", "content": "a fact long enough to keep",
+                        "importance": 5, "topic": ""}], _d_rows
+    _d_pkg = {p.relative_to(_d_repo).as_posix(): p.read_text(encoding="utf-8")
+              for _d_repo in [Path(__file__).resolve().parent.parent]
+              for p in (_d_repo / "cc_memory").rglob("*.py")}
+    for _d_rel in ("cc_memory/hooks/stop.py", "cc_memory/hooks/pre_compact.py",
+                   "cc_memory/hooks/session_start.py", "cc_memory/ui/dashboard.py"):
+        assert "len(content) < 10" not in _d_pkg[_d_rel] \
+            and "You are a memory extraction system" not in _d_pkg[_d_rel] \
+            and "You are a memory observer" not in _d_pkg[_d_rel], \
+            f"{_d_rel} re-grew a private extraction prompt or content floor"
+
+    def _d_spellings(literal):
+        return sorted(rel for rel, src in _d_pkg.items() if literal in src)
+    assert _d_spellings('"cc_mem_turns_"') == _d_spellings('"cc_mem_prompt_"') == \
+        ["cc_memory/core/markers.py", "cc_memory/ui/installer.py"], \
+        (_d_spellings('"cc_mem_turns_"'), _d_spellings('"cc_mem_prompt_"'))
+    from ui.installer import _TEMP_MARKER_PREFIXES as _d_tmp
+    from core.markers import PROMPT_MARKER_PREFIX as _d_pmp, TURN_MARKER_PREFIX as _d_tmp2
+    assert _d_pmp in _d_tmp and _d_tmp2 in _d_tmp, "the installer's sweep lost a prefix"
+    # Three spellings, each with a reason: the constant (`core/recall.py`),
+    # the `.ccm/.gitignore` line list (`core/progress.py`), and the
+    # installer's stdlib-only twin of that list (`ui/installer.py` cannot
+    # import the package; the three-copy parity check keeps it in step).
+    assert _d_spellings('".last_recall.json"') == \
+        ["cc_memory/core/progress.py", "cc_memory/core/recall.py",
+         "cc_memory/ui/installer.py"], \
+        _d_spellings('".last_recall.json"')
+    assert _d_spellings("32 << 20") == ["cc_memory/core/extractor.py"], \
+        _d_spellings("32 << 20")
+    _d_plan_src = _d_pkg["cc_memory/core/plan.py"]
+    _d_stop_src = _d_pkg["cc_memory/hooks/stop.py"]
+    assert _d_plan_src.count("turn_threshold: int = ") == 1 \
+        and _d_plan_src.count("= 25\n") == 1 and "DIRECTIVE_IDLE_TURNS = 25\n" in _d_plan_src \
+        and "_BLOCK_STALE_DIRECTIVE_TURNS = plan_mod.DIRECTIVE_IDLE_TURNS" in _d_stop_src \
+        and "idle_turns=plan_mod.DIRECTIVE_IDLE_TURNS" in _d_stop_src, \
+        "a guardian threshold or the directive-idle horizon grew a second spelling"
+    for _d_rel in ("cc_memory/cli/mem.py", "cc_memory/ui/dashboard.py",
+                   "cc_memory/ui/web_viewer.py"):
+        assert "compacted_at DESC" not in _d_pkg[_d_rel], \
+            f"{_d_rel} spells its own session listing again"
+    # ...the ONE session listing orders by id, and carries the memory count
+    _d_root = Path(tempfile.mkdtemp(prefix="cc-memory-d3-"))
+    _d_db = MemoryDB(_d_root / _MEM / "memory.db")
+    _d_pid = _d_db.upsert_project(str(_d_root))
+    _d_s1 = _d_db.insert_session(_d_pid, "d3-a", "auto", 1, "", "")
+    _d_s2 = _d_db.insert_session(_d_pid, "d3-b", "auto", 2, "", "")
+    with _d_db._connect() as _d_c:
+        _d_c.execute("UPDATE sessions SET compacted_at = '2099-01-01 00:00:00' "
+                     "WHERE id = ?", (_d_s1,))
+    _d_db.insert_memory(_d_pid, _d_s2, "note", "a memory attached to the newer session", 3)
+    _d_sess = _d_db.list_sessions(_d_pid, limit=5)
+    assert [r["id"] for r in _d_sess] == [_d_s2, _d_s1] \
+        and [r["n_mem"] for r in _d_sess] == [1, 0], _d_sess
+    # ...the critical floor is ONE number, and PROGRESS.md §5 reads it
+    assert _d_crit == 5
+    _d_db.insert_memory(_d_pid, None, "decision", "an important-4 fact that is not critical", 4)
+    _d_db.insert_memory(_d_pid, None, "decision", "a critical-5 fact that must be listed", 5)
+    assert [m["importance"] for m in _d_db.get_critical_memories(_d_pid)] == [5]
+    _d_db.upsert_progress(_d_pid, current_request="d3 request", trigger_type="auto")
+    _d_text = write_progress_md(_d_db, _d_pid, _d_root / _MEM).read_text(encoding="utf-8")
+    assert "critical-5 fact" in _d_text and "important-4 fact" not in _d_text, \
+        "§5 is not on the store's critical floor"
+    # ...Blocked is rendered only when a patch set it
+    assert "**Blocked**" not in _d_text, "an empty status_blocked still renders a line"
+    _d_db.patch_progress(_d_pid, status_blocked="waiting on the d3 reviewer")
+    _d_text = write_progress_md(_d_db, _d_pid, _d_root / _MEM).read_text(encoding="utf-8")
+    assert "**Blocked** —  waiting on the d3 reviewer" in _d_text, _d_text[:600]
+    del _d_db
+    shutil.rmtree(_d_root, ignore_errors=True)
+    # ...the dead code stays dead, and the writers are the ones named
+    for _d_gone in ("archive_memory", "bulk_archive", "delete_memories"):
+        assert not hasattr(MemoryDB, _d_gone), f"MemoryDB.{_d_gone} is back"
+    assert not hasattr(plan_mod, "should_nudge_guardian")
+    assert "cc-memory-context" not in _d_pkg["cc_memory/core/privacy.py"].split("D4.)")[1]
+    assert "_resolve_session_id" not in _d_pkg["cc_memory/mcp/server.py"]
+    assert "latest_todos or ext.get" not in _d_pkg["cc_memory/hooks/pre_compact.py"]
+    assert "next_steps_text.split" not in _d_pkg["cc_memory/hooks/session_start.py"]
+    # The CALL shapes, not the words: the D5 docstring names what it replaced.
+    assert "mkstemp(" not in _d_pkg["cc_memory/hooks/session_start.py"] \
+        and "tmp.write_text" not in _d_pkg["cc_memory/hooks/pre_compact.py"], \
+        "a hand-rolled atomic write is back beside core.atomic"
+    assert "Order matters: run the @plan-guardian subagent FIRST" in _d_pkg["cc_memory/cli/mem.py"]
+    print("[OK] v2.16.0 D2-D7: one extraction prompt carries the mode suffix and one "
+          "normaliser drops the junk; markers/recall manifest/tail window/guardian "
+          "thresholds/idle horizon/critical floor each spelled once; the session "
+          "listing orders by id; §5 reads the store's floor; Blocked renders only "
+          "when set; the dead writers, the tuple view and the context family are gone")
 
     # ── v2.16.0 · PreCompact feeds only rows ABOVE the observer cursor ──────
     # Every observation used to reach a model twice: the Stop observer fed it

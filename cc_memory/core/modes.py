@@ -500,6 +500,16 @@ def get_injection_priority(mode_name: str) -> List[str]:
     return get_mode(mode_name).get("injection_priority", MODES["code"]["injection_priority"])
 
 
+def get_extraction_suffix(mode_name: str) -> str:
+    """The mode's `extraction_prompt_suffix`, for `llm.parse.build_extraction_prompt`.
+
+    Declared by every mode for as long as the modes have existed and read by
+    nothing until v2.16.0 (D2): four extractors each spelled their own prompt,
+    and none of them had a slot for it.
+    """
+    return get_mode(mode_name).get("extraction_prompt_suffix", "") or ""
+
+
 def list_modes() -> List[Dict]:
     return [
         {"name": name, "description": mode["description"]}

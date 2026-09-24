@@ -4,14 +4,16 @@ Stop hook — fires after each Claude response.
 
 Three jobs:
   1. OBSERVER: extract memories from this turn's tool observations via Haiku.
-     Saves through llm.memory_writer.upsert_smart (anti-patch). Since
+     Saves through llm.memory_writer.upsert_batch (anti-patch). Since
      v2.16.0 the LLM call runs in a DETACHED worker (`stop.py --observe
      <cwd> <session_id>`, spawned by _maybe_spawn_observer) so the harness
      never waits on it; the hook itself pays one cursor read and a Popen.
-  2. IDLE REORG: every 5 turns, run lightweight no-LLM cleanup +
-     MEMORY.md regen + PROGRESS.md patch.
-  3. PROGRESS.md PATCH: every turn, update files_touched and open_todos
-     based on observations.
+  2. IDLE REORG: every 5 turns, `core.idle.maybe_run_idle` — garbage
+     cleanup, topic assignment, stale-claim GC and a MEMORY.md regen; no
+     LLM, and it does not touch PROGRESS.md.
+  3. PROGRESS.md PATCH: every turn, `files_touched` from the latest
+     observations (`_patch_progress_from_recent_obs`) — that column only;
+     `open_todos` belongs to PreCompact and the SessionStart refresh.
 A continuation Stop (`stop_hook_active`, v2.16.0) skips all three and only
 re-judges plan enforcement.
 
@@ -41,7 +43,7 @@ sys.path.insert(0, str(_PKG_ROOT))
 from core.encoding_setup import enable_utf8_io
 enable_utf8_io()
 
-from core.db import CATEGORIES, MemoryDB
+from core.db import MemoryDB
 from core.layout import DB_FILENAME, memory_dir as resolve_memory_dir
 from core.logger import get_logger
 # read_marker, not bare read_text: it refuses to follow a planted symlink —
@@ -49,7 +51,8 @@ from core.logger import get_logger
 # Anthropic request. safe_id replaces this hook's private `[:16]` truncating
 # copy (three hooks <!--ce:hooks:asof--> each had one, and truncation
 # cross-wired any two sessions sharing a 16-char prefix).
-from core.markers import marker_path, read_marker, safe_id as _safe_id, write_marker
+from core.markers import (PROMPT_MARKER_PREFIX, TURN_MARKER_PREFIX, marker_path,
+                          read_marker, safe_id as _safe_id, write_marker)
 # Shared entry ladder (v2.10.0): stdin parsing + the opt-out→anchor gate,
 # once, in hooks/_entry.py — six hand-rolled copies is how guard drift
 # between hooks kept becoming shipped defects.
@@ -75,8 +78,8 @@ _OBS_FED_PER_STOP = 20
 # below, and the gate refuses a second spelling of it in this file.
 OBSERVER_LOCK = ".observer.lock"
 _OBSERVER_STALE_LOCK_S = 60.0
-_TURN_FILE_PREFIX = "cc_mem_turns_"
-_PROMPT_FILE_PREFIX = "cc_mem_prompt_"
+_TURN_FILE_PREFIX = TURN_MARKER_PREFIX       # spelled once, in core.markers (v2.16.0, D3)
+_PROMPT_FILE_PREFIX = PROMPT_MARKER_PREFIX
 # (the observer watermark used to live in a `cc_mem_eval_` marker here; it is
 # `projects.obs_watermark` since v2.8.0 — see _observer_evaluate. The prefix
 # stays in ui/installer.py's sweep list so an uninstall still removes the
@@ -89,7 +92,7 @@ _PROMPT_FILE_PREFIX = "cc_mem_prompt_"
 # Plan state is now ENFORCED at Stop; see _block_attempt / _emit_block and
 # core.plan.blocking_reasons. The prefix stays in ui/installer.py's sweep
 # list so an uninstall still removes files an older install wrote.)
-_BLOCK_STALE_DIRECTIVE_TURNS = 25
+_BLOCK_STALE_DIRECTIVE_TURNS = plan_mod.DIRECTIVE_IDLE_TURNS   # ONE spelling (v2.16.0, D3)
 
 # ── LLM wall-clock envelope (v2.5.0) ───────────────────────────────────────
 # hooks/hooks.json gives Stop 22s. TWO bounds, because per-leg timeouts alone
@@ -129,23 +132,9 @@ _API_TIMEOUT = 7
 _FALLBACK_TIMEOUT = 3
 _LLM_DEADLINE_S = 14.0
 
-_OBSERVER_PROMPT = """\
-You are a memory observer. Given a user's request and a batch of tool observations \
-from a Claude Code session, extract ONLY the observations worth remembering long-term.
-
-Output a JSON array of objects:
-- "category": """ + "|".join(CATEGORIES) + """
-- "content": one concise, self-contained sentence with specific values
-- "importance": 1-5 (5=critical, 4=important, 3=useful, 2=minor)
-- "topic": short keyword for grouping
-
-Rules:
-- Only save CONCLUSIONS and OUTCOMES, not intermediate steps
-- Skip: file reads without insight, routine git commands, navigation
-- Each memory must be understandable WITHOUT conversation context
-- Include specific values: file names, numbers, error messages
-- 0-5 memories max per batch. Return [] if nothing worth saving.
-- Output ONLY valid JSON array."""
+# The observer's prompt is `llm.parse.build_extraction_prompt("observations",
+# ...)` since v2.16.0 (D2): ONE prompt builder and ONE row normaliser for every
+# extractor in the package, carrying the project mode's focus line.
 
 
 def _read_turn_count(session_id):
@@ -262,7 +251,8 @@ def _block_reset(session_id):
         write_marker(f, "")
 
 
-def _idle_directives(db, project_id, idle_turns=25, plan_row=None):
+def _idle_directives(db, project_id, idle_turns=plan_mod.DIRECTIVE_IDLE_TURNS,
+                     plan_row=None):
     """Active directives that have gone `idle_turns` turns untouched.
 
     Idleness is measured from the plan's own turn counter rather than from
@@ -501,9 +491,14 @@ def _observer_evaluate(cwd, session_id, memory_dir, db=None):
     user_msg = f"{user_context}Tool observations:\n{obs_text}"
 
     try:
+        from core.modes import get_extraction_suffix
         from llm.ccl_backend import call_llm
-        from llm.parse import extract_json
-        text = call_llm(_OBSERVER_PROMPT, user_msg, api_key,
+        from llm.parse import (build_extraction_prompt, extract_json,
+                               normalize_memories)
+        system, user_msg = build_extraction_prompt(
+            "observations", user_msg,
+            mode_suffix=get_extraction_suffix(db.get_project_mode(project_id)))
+        text = call_llm(system, user_msg, api_key,
                         max_tokens=1000, timeout=_API_TIMEOUT,
                         fallback_timeout=_FALLBACK_TIMEOUT,
                         deadline=_HOOK_T0 + _LLM_DEADLINE_S)
@@ -511,21 +506,9 @@ def _observer_evaluate(cwd, session_id, memory_dir, db=None):
         if memories is None:
             return 0
 
-        # Sanitize content and route through memory_writer
-        cleaned = []
-        for m in memories:
-            if not isinstance(m, dict):
-                continue
-            content = clean_for_storage((m.get("content") or "").strip())
-            if not content or len(content) < 10:
-                continue
-            cleaned.append({
-                "category": m.get("category", "note"),
-                "content": content,
-                "importance": max(1, min(int(m.get("importance", 3)), 5)),
-                "topic": m.get("topic", "") if isinstance(m.get("topic", ""), str) else "",
-                "tags": ["observer", "realtime"],
-            })
+        # ONE normaliser (v2.16.0, D2); this hook adds its provenance tags.
+        cleaned = [dict(m, tags=["observer", "realtime"])
+                   for m in normalize_memories(memories)]
 
         # The rows belong to THIS session (v2.16.0, B8). With `session_id`
         # NULL they matched `get_recent_memories`' session-less arm forever,

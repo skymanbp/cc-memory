@@ -371,14 +371,17 @@ _neutralize_block = neutralize_block
 
 
 def _render_plan_section(db: MemoryDB, project_id: int, prog: Dict) -> List[str]:
-    """§4, read from the LIVE plan store rather than a column nothing writes any more.
+    """§4, read from the LIVE plan store first; `progress.plan` is the fallback.
 
-    This section rendered `progress.plan`, a free-text column the structured plan store
-    replaced. On a project with a 31-step plan loaded and an active step, §4 still said
-    "(no plan recorded)" on every regeneration, because that column is empty — measured at
-    0 characters on 2026-09-18 while `plan-status` reported "6/31 steps done · active step
-    #5". Two readers of the same concept, one of them reading a field with no writer: the
-    artifact says "nothing here" where the truth is "here, and this far along".
+    This section used to render only `progress.plan` — the free-text column
+    `collect_progress_state` fills with the session summary's `next_steps` on every
+    PreCompact (and the SessionStart refresh fills when empty). On a project with a
+    31-step structured plan and an active step, §4 still said "(no plan recorded)" on
+    every regeneration because that column happened to be empty — measured at 0
+    characters on 2026-09-18 while `plan-status` reported "6/31 steps done · active step
+    #5". Two readers of the same concept, and the artifact said "nothing here" where the
+    truth was "here, and this far along". (The v2.15.1 wording here called the column
+    one "nothing writes"; it has a writer — corrected in v2.16.0, D5.)
 
     The summary is deliberately short. PLAN.md is the full document; this is the handoff
     view, so it carries the goal, how far along, and the steps still to do — capped, and
@@ -448,11 +451,15 @@ def _render_status_lines(prog: Dict) -> List[str]:
     done = _neutralize_block((prog.get("status_done") or "").strip())
     in_flight = _neutralize_block((prog.get("status_in_flight") or "").strip())
     blocked = _neutralize_block((prog.get("status_blocked") or "").strip())
-    return [f"**Done** —    {done or '*(none yet)*'}",
-            "",
-            f"**In-flight** — {in_flight or '*(none active)*'}",
-            "",
-            f"**Blocked** —  {blocked or '*(none)*'}"]
+    lines = [f"**Done** —    {done or '*(none yet)*'}",
+             "",
+             f"**In-flight** — {in_flight or '*(none active)*'}"]
+    if blocked:
+        # No writer fills `status_blocked` (v2.16.0, D6): every PreCompact
+        # rewrite stores "", so a permanent "**Blocked** — *(none)*" line was
+        # structure, not information. Rendered only when a patch set it.
+        lines += ["", f"**Blocked** —  {blocked}"]
+    return lines
 
 
 def _render_todo_lines(prog: Dict, max_todos: int = _MAX_TODOS_RENDERED) -> List[str]:
@@ -487,7 +494,7 @@ def _render_critical_lines(db: MemoryDB, project_id: int) -> List[str]:
     frozen. Nothing fills the column now and nothing reads it.
     """
     try:
-        crit = db.get_critical_memories(project_id, min_importance=4)[:10]
+        crit = db.get_critical_memories(project_id)[:10]
     except Exception as error:  # why: PROGRESS.md must still render when the store cannot be read
         _log.debug(f"progress: critical memories unreadable: {error}")
         return [f"*(critical memories unavailable: {type(error).__name__})*"]

@@ -1,9 +1,9 @@
 """
 Privacy tag filtering.
 
-Strip <private>...</private> and <cc-memory-context>...</cc-memory-context>
-from any text before storage. The latter prevents recursive storage of
-already-injected context.
+Strip <private>...</private> from any text before storage. (A second span
+family, <cc-memory-context>, guarded against re-storing an injection wrapper
+no shipped renderer emits; it was deleted in v2.16.0, D4.)
 
 Why this is a hand-rolled linear scan and not a regex
 ----------------------------------------------------
@@ -87,7 +87,6 @@ longer run.
 import re
 
 _PRIVATE_OPEN, _PRIVATE_CLOSE = "<private>", "</private>"
-_CONTEXT_OPEN, _CONTEXT_CLOSE = "<cc-memory-context>", "</cc-memory-context>"
 
 # ── Structural / authority markers stored content must never be able to forge ──
 # Claude Code's own control vocabulary plus the plugin's. The `antml` branch
@@ -96,7 +95,6 @@ _CONTEXT_OPEN, _CONTEXT_CLOSE = "<cc-memory-context>", "</cc-memory-context>"
 _MARKER_TAG_RE = re.compile(
     r"</?\s*(?:"
     r"system[-_]reminder"
-    r"|cc-memory-context"
     # The query-time recall frame (v2.15.0, `core/recall.py`). EVERY frame this
     # plugin emits belongs in THIS list rather than being escaped by its own
     # renderer: a renderer that owns half the policy is a renderer whose other
@@ -160,8 +158,7 @@ def _escape_control(m) -> str:
     return "\\x%02x" % cp if cp < 0x100 else "\\u%04x" % cp
 
 
-_SPAN_FAMILIES = ((_PRIVATE_OPEN, _PRIVATE_CLOSE),
-                  (_CONTEXT_OPEN, _CONTEXT_CLOSE))
+_SPAN_FAMILIES = ((_PRIVATE_OPEN, _PRIVATE_CLOSE),)
 
 # Claude Code's own wrappers around a slash command. These are HARNESS
 # scaffolding, not the user speaking, and they are deliberately NOT in
@@ -308,29 +305,19 @@ def _strip_spans(text: str, families=_SPAN_FAMILIES, fail_closed=True) -> str:
 
 
 def strip_protected_spans(text: str) -> str:
-    """Remove <private> AND <cc-memory-context> spans in one combined pass.
-    The write-path entry — see _strip_spans for why one pass is load-bearing."""
+    """The write-path entry: every protected span family in ONE pass (see
+    _strip_spans for why one pass is load-bearing; one family since v2.16.0)."""
     return _strip_spans(text)
 
 
-# The two single-family accessors below have NO production caller by design,
-# and an audit that greps for callers will keep re-flagging them, so the reason
-# is recorded here rather than rediscovered: the write path deliberately uses
-# `strip_protected_spans` (both families in ONE pass — see `_strip_spans` for
-# why one pass is load-bearing), and these exist so the suite can prove each
-# family's behaviour SEPARATELY. Without them a regression in one family is
-# only observable through the combined function, where the other family's
-# result can mask it. They are the tested primitives of a combined path, not
-# leftovers — do not delete them for having no caller.
-
 def strip_private(text: str) -> str:
-    """Remove all <private>…</private> spans. No tag count cap; fails closed."""
+    """Remove all <private>…</private> spans. No tag count cap; fails closed.
+
+    The named form of `strip_protected_spans` for the readers that mean the
+    private family specifically (`/cc-mem inject-usage --judge`, the usage
+    judge); the write path calls `strip_protected_spans`.
+    """
     return _strip_spans(text, (_SPAN_FAMILIES[0],))
-
-
-def strip_context_tags(text: str) -> str:
-    """Remove all <cc-memory-context>…</cc-memory-context> spans (anti-recursion)."""
-    return _strip_spans(text, (_SPAN_FAMILIES[1],))
 
 
 def strip_harness_blocks(text: str) -> str:

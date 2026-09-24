@@ -956,12 +956,9 @@ class DashboardApp:
         for item in self.sess_tree.get_children():
             self.sess_tree.delete(item)
 
-        with self.db._connect() as conn:
-            rows = conn.execute(
-                "SELECT id, trigger_type, compacted_at, msg_count, archive_path "
-                "FROM sessions WHERE project_id = ? ORDER BY compacted_at DESC LIMIT 50",
-                (self.project_id,)
-            ).fetchall()
+        # ONE session listing (v2.16.0, D3), ordered by id — see
+        # MemoryDB.list_sessions.
+        rows = self.db.list_sessions(self.project_id, limit=50)
 
         for r in rows:
             archive = Path(r["archive_path"]).name if r["archive_path"] else "-"
@@ -1012,7 +1009,7 @@ Category Breakdown:
             text += f"\nTop Keywords:\n  {', '.join(kws)}\n"
 
         # Critical memories
-        critical = self.db.get_critical_memories(self.project_id, min_importance=5)
+        critical = self.db.get_critical_memories(self.project_id)
         if critical:
             text += f"\nCritical Memories ({len(critical)}):\n"
             for m in critical:
@@ -1762,17 +1759,6 @@ Memories:
         ttk.Button(bf, text="Save", command=save).pack(side=tk.LEFT, padx=5)
         ttk.Button(bf, text="Cancel", command=dlg.destroy).pack(side=tk.LEFT)
 
-    _EXTRACTION_PROMPT = """\
-You are a memory extraction system. Given a Claude Code conversation transcript, extract the most important information worth remembering across sessions.
-
-Output a JSON array of objects: {"category": str, "content": str, "importance": int}
-- category: """ + "|".join(CATEGORIES) + """
-- content: one concise, self-contained sentence with specific values
-- importance: 1-5 (5=critical, 4=important, 3=useful)
-
-Rules: Only conclusions, not process. Self-contained. Specific values. 5-15 items max.
-Output ONLY valid JSON array."""
-
     def _build_transcript_summary(self, messages, max_chars=12000):
         """Condensed transcript for the LLM prompt. Delegates to THE one
         implementation in core.extractor (register M2) — this was the third
@@ -1789,30 +1775,22 @@ Output ONLY valid JSON array."""
             return None
 
         try:
+            from core.modes import get_extraction_suffix
             from llm.ccl_backend import call_llm
-            from llm.parse import extract_json
-            text_content = call_llm(
-                self._EXTRACTION_PROMPT,
-                f"Extract memories:\n\n{transcript_text}",
-                api_key, max_tokens=2000, timeout=25,
-            )
+            from llm.parse import (build_extraction_prompt, extract_json,
+                                   normalize_memories)
+            # ONE prompt and ONE normaliser (v2.16.0, D2): this copy never
+            # asked the model for `topic`, so Save Session rows had none.
+            system, user = build_extraction_prompt(
+                "transcript", transcript_text,
+                mode_suffix=get_extraction_suffix(
+                    self.db.get_project_mode(self.project_id)))
+            text_content = call_llm(system, user, api_key,
+                                    max_tokens=2000, timeout=25)
             memories = extract_json(text_content, kind="array")
             if memories is None:
                 return None
-
-            valid = []
-            for m in memories:
-                if not isinstance(m, dict):
-                    continue
-                cat = m.get("category", "note")
-                content = m.get("content", "").strip()
-                imp = m.get("importance", 3)
-                if not content or len(content) < 10:
-                    continue
-                if cat not in CATEGORIES:
-                    cat = "note"
-                valid.append({"category": cat, "content": content,
-                              "importance": max(1, min(int(imp), 5))})
+            valid = normalize_memories(memories)
             return valid if valid else None
         except Exception:
             # why: deliberately broad, and `None` is a documented outcome, not a

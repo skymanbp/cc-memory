@@ -171,13 +171,15 @@ def _break_supersede(root):
         "            importance=importance, tags=tags, topic=topic,\n"
         "            supersedes_id=old_id,\n"
         "        )\n"
-        "        self.archive_memory(old_id)   # BREAKAGE: second transaction\n"
+        "        with self._connect() as conn:  # BREAKAGE: second transaction\n"
+        "            conn.execute(\"UPDATE memories SET is_active = 0, \"\n"
+        "                         \"updated_at = ? WHERE id = ?\", (self._now(), old_id))\n"
         "        return new_id\n\n") + text[end:]
     path.write_text(text, encoding="utf-8")
 
 
 @case("sqlvars", ["tests/smoke_test.py"],
-      "un-chunk bulk_archive -> 'too many SQL variables' past 32766 ids")
+      "un-chunk the id-list writers -> 'too many SQL variables' past 32766 ids")
 def _break_sqlvars(root):
     _patch(root, "cc_memory/core/db.py", "    _SQL_VAR_CHUNK = 900",
            "    _SQL_VAR_CHUNK = 10 ** 9  # BREAKAGE")
@@ -1665,12 +1667,9 @@ def _break_r9bigstdin(root):
       "guard the marker write on a truthy prompt -> the previous turn's request survives")
 def _break_r9emptypr(root):
     _patch(root, f"{PKG}/hooks/user_prompt.py",
-           "        prompt_file = marker_path(_PROMPT_FILE_PREFIX, safe)\n"
-           "        try:",
-           "        prompt_file = marker_path(_PROMPT_FILE_PREFIX, safe)\n"
-           "        try:\n"
-           "            if not prompt:  # BREAKAGE: skip the overwrite\n"
-           "                raise OSError(\"skipped\")")
+           "        write_marker(prompt_file, prompt)\n",
+           "        if prompt:  # BREAKAGE: skip the overwrite\n"
+           "            write_marker(prompt_file, prompt)\n")
 
 
 @case("r9jsonrpc", ["tests/test_surfaces.py"],
@@ -2236,11 +2235,9 @@ def _break_r14stalelock(root):
       "decide 'already seeded?' from the PREVIOUS turn's prompt marker -> a scaffolding or entirely-private turn re-arms the gate and a mid-session prompt overwrites the session's opening request (and can stamp trigger_type=resume_request)")
 def _break_r14seedprev(root):
     _patch(root, f"{PKG}/hooks/user_prompt.py",
+           "        prompt_file = marker_path(_PROMPT_FILE_PREFIX, safe)\n",
            "        prompt_file = marker_path(_PROMPT_FILE_PREFIX, safe)\n"
-           "        try:",
-           "        prompt_file = marker_path(_PROMPT_FILE_PREFIX, safe)\n"
-           "        prev_prompt = read_marker(prompt_file, \"\").strip()\n"
-           "        try:")
+           "        prev_prompt = read_marker(prompt_file, \"\").strip()\n")
     _patch(root, f"{PKG}/hooks/user_prompt.py",
            "            if not read_marker(seeded_file, \"\").strip():",
            "            if not prev_prompt:  # BREAKAGE: the last turn, not the seed")
@@ -2353,8 +2350,8 @@ def _break_r14curtranscript(root):
 def _break_r14retroempty(root):
     _patch(root, f"{PKG}/hooks/session_start.py",
            '        # saving. Only None means "no answer" (see the docstring).\n'
-           '        return valid',
-           '        return valid if valid else None  # BREAKAGE: empty reads as no answer')
+           '        return normalize_memories(memories)',
+           '        return normalize_memories(memories) or None  # BREAKAGE: empty reads as no answer')
 
 
 @case("r14retrokey", ["tests/smoke_test.py"],
@@ -3298,6 +3295,62 @@ def _break_r16nominatecross(root):
            '        return floor if a["category"] == b["category"] else 2.0  # BREAKAGE\n')
 
 
+@case("r16suffix", ["tests/smoke_test.py"],
+      "drop the mode suffix from the ONE extraction prompt -> the research/"
+      "writing focus line is declared and never sent, as before D2")
+def _break_r16suffix(root):
+    _patch(root, f"{PKG}/llm/parse.py",
+           '    suffix = (mode_suffix or "").strip()\n',
+           '    suffix = ""  # BREAKAGE: the mode line is read by nothing again\n')
+
+
+@case("r16normfloor", ["tests/smoke_test.py"],
+      "drop the writer's floor from normalize_memories -> a 5-character row "
+      "and an empty one reach the batch")
+def _break_r16normfloor(root):
+    _patch(root, f"{PKG}/llm/parse.py",
+           "        if len(content) < MIN_CONTENT_LEN:\n            continue\n",
+           "        if False:  # BREAKAGE: no floor\n            continue\n")
+
+
+@case("r16blockedline", ["tests/smoke_test.py"],
+      "render **Blocked** unconditionally -> a column no writer fills prints "
+      "a line forever")
+def _break_r16blockedline(root):
+    _patch(root, f"{PKG}/core/progress.py",
+           "    if blocked:\n        # No writer fills",
+           "    if True:  # BREAKAGE\n        # No writer fills")
+
+
+@case("r16sessorder", ["tests/smoke_test.py"],
+      "sort the ONE session listing on compacted_at -> a stepped clock lists "
+      "the older session first")
+def _break_r16sessorder(root):
+    _patch(root, f"{PKG}/core/db.py",
+           "GROUP BY se.id ORDER BY se.id DESC LIMIT ?",
+           "GROUP BY se.id ORDER BY se.compacted_at DESC LIMIT ?  -- BREAKAGE")
+
+
+@case("r16critical4", ["tests/smoke_test.py"],
+      "put PROGRESS.md §5 back on its private floor of 4 -> 'must-know' lists "
+      "what the injection calls merely important")
+def _break_r16critical4(root):
+    _patch(root, f"{PKG}/core/progress.py",
+           "crit = db.get_critical_memories(project_id)[:10]",
+           "crit = db.get_critical_memories(project_id, min_importance=4)[:10]  # BREAKAGE")
+
+
+@case("r16mcpsession", ["tests/test_surfaces.py"],
+      "attach an MCP add to a session row again -> a manual save is credited "
+      "to a conversation it never happened in")
+def _break_r16mcpsession(root):
+    _patch(root, f"{PKG}/mcp/server.py",
+           "    result = upsert_smart(\n        db, pid, None,\n",
+           "    result = upsert_smart(\n"
+           "        db, pid, db.insert_session(pid, None, \"mcp\", 0, None, "
+           "\"MCP session\"),  # BREAKAGE\n")
+
+
 @case("r16queuegone", ["tests/smoke_test.py"],
       "ship a console script for the deleted plans CLI again -> `pip install` "
       "writes a `cc-memory-plan` that cannot import its module (the v2.4.3 shape)")
@@ -3306,6 +3359,19 @@ def _break_r16queuegone(root):
            'cc-memory = "cc_memory.cli.mem:main"\n',
            'cc-memory = "cc_memory.cli.mem:main"\n'
            'cc-memory-plan = "cc_memory.cli.plan:main"  # BREAKAGE\n')
+
+
+@case("r16todosplit", ["tests/smoke_test.py"],
+      "split next_steps on ';' into open_todos again -> prose masquerades as "
+      "the todo list the RESUME PROTOCOL executes")
+def _break_r16todosplit(root):
+    _patch(root, f"{PKG}/hooks/session_start.py",
+           "    # PROTOCOL executes `todos[0]` of §3 without asking.)\n",
+           "    # PROTOCOL executes `todos[0]` of §3 without asking.)\n"
+           "    if needs_todos and next_steps_text:  # BREAKAGE\n"
+           "        patch[\"open_todos\"] = [\n"
+           "            {\"content\": s.strip()[:300], \"priority\": \"medium\", \"status\": \"pending\"}\n"
+           "            for s in next_steps_text.split(\";\") if s.strip()][:8]\n")
 
 
 def verify_anchors():

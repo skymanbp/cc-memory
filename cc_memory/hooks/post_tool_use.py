@@ -136,8 +136,9 @@ def _apply_plan_integration(db, project_id, cwd, tool_name, tool_input):
 
     # Sensitive tool calls (git push, rm -rf, drop table, deploys, ...)
     # bump the counter by a lot — semantically "this single act carries
-    # the same drift risk as ~20 ordinary edits", so the next Stop hook
-    # will surface a guardian-recommendation line immediately.
+    # the same drift risk as ~20 ordinary edits", so the next Stop REFUSES
+    # the turn until a guardian check is recorded (v2.11.0; the advisory
+    # line this comment used to promise is gone).
     if plan_mod.is_sensitive_tool_call(tool_name, tool_input):
         if plan_mod.is_live_plan(db.get_plan_active(project_id)):
             db.bump_plan_edit_counter(project_id, n=20)

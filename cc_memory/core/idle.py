@@ -54,14 +54,9 @@ def _last_idle_turn(session_id):
 
 
 def _record_idle_turn(session_id, turn):
-    marker = marker_path(_MARKER_PREFIX, _safe_id(session_id))
-    try:
-        write_marker(marker, str(turn))
-    except OSError:
-        # why: tempfile write failure (read-only fs / disk full) — skip the
-        # marker update; worst case we re-run idle reorg next turn, which
-        # is idempotent
-        pass
+    # write_marker never raises: a refused write returns False, and the worst
+    # case is one more idle reorg next turn, which is idempotent.
+    write_marker(marker_path(_MARKER_PREFIX, _safe_id(session_id)), str(turn))
 
 
 def maybe_run_idle(cwd: str, session_id: str, turn_count: int,

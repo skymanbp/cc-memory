@@ -1,13 +1,16 @@
 """
 Topic-based memory consolidation pipeline.
 
-Pipeline:
-  1. cleanup_garbage()           archive known junk patterns (recoverable)
-  2. merge_near_duplicates()     fuzzy dedup within active memories (trigram Jaccard)
-  3. assign_topics_auto()        keyword-based topic tagging
-  4. consolidate_topics()        LLM summarize each topic -> topics table
-  5. decay_and_archive()         reference-aware decay + zero-false-archive net
-  6. archive_consolidated()      archive memories captured in summaries
+Pipeline (`run_consolidation`, in this order):
+  cleanup_garbage()          archive known junk patterns (recoverable)
+  merge_near_duplicates()    lexical near-duplicates (CJK-aware shingles)
+  semantic_dedup()           LLM-judged rewordings -> MERGE with a chain link
+  assign_topics_auto()       keyword-based topic tagging
+  canonicalize_topics()      fold near-identical topic labels together
+  consolidate_topics()       LLM summarize each topic -> topics table
+  decay_and_archive()        reference-aware decay + zero-false-archive net
+  detect_obsolete_llm()      LLM-judged contradictions -> archive the older
+  archive_consolidated()     archive memories captured in summaries
 
 Anti-patch design: consolidation is the cleanup *backstop*. The primary
 anti-patch mechanism is llm.memory_writer.upsert_smart, which prevents
@@ -202,13 +205,13 @@ def _min_content_len():
 def cleanup_garbage(db, project_id):
     """Archive transcript noise. NEVER deletes — see `core/db.py`'s contract.
 
-    `db.py:176-180` states that every delete path must archive, because a hard
-    DELETE strands any `supersedes_id` pointing at the row and nothing catches
-    it; `delete_memories()` is reserved there for USER-DRIVEN purges. This
-    function is neither user-driven nor a purge — it runs unattended from the
-    Stop hook every 5 turns (`core/idle.py`) and as stage 1 of every
-    consolidation — and it was `delete_memories`'s only caller in the tree.
-    Archived rows stay recoverable and keep the supersede chain walkable.
+    `core/db.py`'s migration ledger states that every delete path must
+    archive, because a hard DELETE strands any `supersedes_id` pointing at the
+    row and nothing catches it. This function runs unattended from the Stop
+    hook every 5 turns (`core/idle.py`) and as stage 1 of every consolidation;
+    it used to be the one caller of a hard-deleting `delete_memories`, which
+    is gone (v2.16.0, D4). Archived rows stay recoverable and keep the
+    supersede chain walkable.
     """
     floor = _min_content_len()
     memories = db.get_all_active_memories(project_id)
@@ -323,7 +326,9 @@ def merge_near_duplicates(db, project_id, threshold=0.65):
                     break
 
     if to_archive:
-        # Hash-guarded, same rationale as cleanup_garbage: the pairwise loop
+        # Content-guarded (`archive_if_unchanged` compares the exact text the
+        # verdict saw, not its hash — its docstring says why), same rationale
+        # as cleanup_garbage: the pairwise loop
         # above can run for seconds on a large set, and a row rewritten by a
         # concurrent PreCompact merge in that window is no longer the row this
         # verdict judged near-duplicate.
@@ -1128,7 +1133,7 @@ def archive_consolidated(db, project_id, keep_per_topic=5, dup_threshold=0.65):
                 to_archive.append((m["id"], m["content"]))
 
     if to_archive:
-        # Hash-guarded like the other two snapshot-verdict stages above.
+        # Content-guarded like the other two snapshot-verdict stages above.
         return db.archive_if_unchanged(to_archive)
     return 0
 
@@ -1321,8 +1326,8 @@ def run_consolidation(cwd, use_llm=True, verbose=True, budget=None):
 
     results = {}
     # 1. cheap, deterministic, no-LLM cleanup first
-    # "archived", not "deleted": cleanup_garbage stopped calling
-    # delete_memories, and a caller reading `garbage_deleted` would report an
+    # "archived", not "deleted": cleanup_garbage archives (the hard-deleting
+    # writer is gone), and a caller reading `garbage_deleted` would report an
     # irreversible purge for rows that are still recoverable and still on the
     # supersede chain. The key IS the report on every consumer.
     results["garbage_archived"] = cleanup_garbage(db, project_id)

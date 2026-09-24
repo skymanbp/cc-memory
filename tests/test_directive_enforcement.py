@@ -931,9 +931,12 @@ def section_10():
         encoding="utf-8")
     check("blocking_reasons reads guardian_verdict, not its own thresholds",
           "guardian_verdict(plan_row)" in plan_src
-          and plan_src.count("edit_threshold: int = 12") == 2,
+          and plan_src.count("edit_threshold: int = ") == 1
+          and "edit_threshold: int = GUARDIAN_EDIT_THRESHOLD" in plan_src
+          and plan_src.count("GUARDIAN_EDIT_THRESHOLD = 12") == 1,
           "a second copy of the threshold policy is how plan-status and the "
-          "Stop gate came to disagree in the first place")
+          "Stop gate came to disagree in the first place (v2.16.0: the number "
+          "is a module constant with ONE signature reading it)")
     check("cmd_plan_status prints the GATE's verdict",
           "guardian_verdict(row)" in cli_src,
           "plan-status must not re-interpret the counters privately")

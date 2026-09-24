@@ -626,7 +626,7 @@ Inside Claude Code (path-agnostic — the wrapper resolves the plugin root):
 /cc-mem plan-set --raw-file FILE    Same, from a file
 /cc-mem plan-set --from-refiner     Store structured JSON from stdin (audits
                                     directive step references on replacement)
-/cc-mem plan-check                  Reset drift counters + emit guardian hint
+/cc-mem plan-check                  Record a guardian check just run (resets counters)
 /cc-mem plan-replan                 Re-arm needs_refine on the stored raw
 /cc-mem plan-clear --reason "<why>" Drop the active plan (reason required if unfinished)
 

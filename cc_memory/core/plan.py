@@ -99,6 +99,14 @@ def _has_cjk(*texts) -> bool:
 # considered "off-plan" and counted as a drift signal.
 MATCH_THRESHOLD = 0.35
 
+# The guardian drift thresholds and the directive-idle horizon, spelled ONCE
+# (v2.16.0, D3). `guardian_verdict` is the policy point that reads the first
+# two; `blocking_reasons` and hooks/stop.py read the third. Before this they
+# were literal defaults in two signatures here and one more in the Stop hook.
+GUARDIAN_TURN_THRESHOLD = 8
+GUARDIAN_EDIT_THRESHOLD = 12
+DIRECTIVE_IDLE_TURNS = 25
+
 
 # ── Schema validation ───────────────────────────────────────────────────────
 
@@ -465,7 +473,7 @@ def enforcement_enabled() -> bool:
 
 def blocking_reasons(plan_row: Optional[Dict],
                      directives: Optional[list] = None,
-                     stale_turns: int = 25) -> list:
+                     stale_turns: int = DIRECTIVE_IDLE_TURNS) -> list:
     """Conditions that should stop the turn, worst first. Empty = let it end.
 
     `directives` is the v8 ledger (list of rows). A directive is only ever
@@ -812,9 +820,10 @@ def write_plan_md(db, project_id: int, memory_dir: Path) -> Path:
     Never raises on a write failure, and that is a deliberate asymmetry with
     `core.progress.write_progress_md`, which does. PLAN.md is a PROJECTION of
     the `plan_active` row, which is already committed by the time this runs, and
-    three of its five call sites (`capture_raw_plan`, `apply_todowrite_sync`,
-    `bump_guardian_counters`) sit on the PostToolUse path where an escaping
-    exception would be caught and logged anyway. PROGRESS.md is different: it
+    two of its five call sites (`capture_exit_plan_mode`, `apply_todowrite_sync`)
+    sit on the PostToolUse path where an escaping exception would be caught and
+    logged anyway; the other three are `apply_refined_plan` and the two CLI
+    commands `plan-show` / `plan-check`. PROGRESS.md is different: it
     IS the handoff contract, so its failure must be reported, not absorbed.
 
     v2.5.2 got this "for free" by having its private writer fall back to a
@@ -1373,19 +1382,19 @@ def apply_todowrite_sync(db, project_id: int, todos: List[Dict],
 # ── Drift / guardian-nudge logic ────────────────────────────────────────────
 
 def guardian_verdict(plan_row: Optional[Dict], *,
-                     turn_threshold: int = 8,
-                     edit_threshold: int = 12) -> Dict:
+                     turn_threshold: int = GUARDIAN_TURN_THRESHOLD,
+                     edit_threshold: int = GUARDIAN_EDIT_THRESHOLD) -> Dict:
     """THE guardian decision, as data. ONE policy point (v2.15.0).
 
     Returns a dict with `should`, `reason`, `turns`, `edits`,
-    `checked_this_turn` and both thresholds. `should_nudge_guardian`,
-    `blocking_reasons` and `/cc-mem plan-status` all read THIS and nothing
-    else, so the number a user is shown and the number the gate acts on are
-    the same number by construction.
+    `checked_this_turn` and both thresholds. `blocking_reasons` and
+    `/cc-mem plan-status` both read THIS and nothing else, so the number a
+    user is shown and the number the gate acts on are the same number by
+    construction.
 
     They were not. `plan-status` printed `turns_since_last_guardian` and
     `edits_since_last_guardian` raw and never mentioned a threshold, while
-    `should_nudge_guardian` applied its own defaults on the Stop path — two
+    the Stop path applied its own defaults — two
     readers of one row, each interpreting it privately, which is the shape
     v2.14.0 rule 15 records for the consolidation lock (`stop.py` held a copy
     of the policy minus its staleness rule and vetoed the only process that
@@ -1433,24 +1442,14 @@ def guardian_verdict(plan_row: Optional[Dict], *,
     return verdict
 
 
-def should_nudge_guardian(plan_row: Dict, *,
-                          turn_threshold: int = 8,
-                          edit_threshold: int = 12) -> Tuple[bool, str]:
-    """(should_nudge, reason) — the tuple view of `guardian_verdict`.
-
-    Kept as the name the Stop hook and the tests are written against; the
-    POLICY is one function up. Do not re-implement the thresholds here.
-    """
-    v = guardian_verdict(plan_row, turn_threshold=turn_threshold,
-                         edit_threshold=edit_threshold)
-    return v["should"], v["reason"]
-
-
-# Tool names that are "sensitive" and warrant an immediate guardian nudge
-# regardless of counters. Examples: pushing code, dropping DB, deleting files.
-# Commands whose EXECUTION is high-stakes enough to recommend a guardian
-# check. cc-memory does NOT block; it flags. See `is_sensitive_tool_call` for
-# why these are anchored rather than substring-matched.
+# Commands whose EXECUTION is high-stakes enough to demand a guardian check:
+# pushing code, dropping a table, deleting trees, deploying. A match bumps
+# `edits_since_last_guardian` by 20 (hooks/post_tool_use.py) — past
+# GUARDIAN_EDIT_THRESHOLD in one step — so the next Stop REFUSES the turn
+# until a check is recorded (v2.11.0; this comment said "flags" for five
+# releases after enforcement replaced the advisory). See
+# `is_sensitive_tool_call` for why these are anchored rather than
+# substring-matched.
 _SENSITIVE_COMMANDS = (
     r"git\s+push", r"rm\s+-rf", r"drop\s+table", r"drop\s+database",
     r"npm\s+publish", r"cargo\s+publish", r"twine\s+upload", r"pypi-upload",

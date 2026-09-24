@@ -428,9 +428,12 @@ def _has_db(directory):
             # exists to close, open on the primary platform).
             if _markers_is_link(mem) or _markers_is_link(mem / DB_FILENAME):
                 continue
-        except OSError:
+        except (OSError, ValueError):
             # why: a probe that cannot even lstat proves nothing — treat as no
-            # database, same degradation as _exists on an unreadable ancestor
+            # database, same degradation as _exists on an unreadable ancestor.
+            # `_is_link` swallows its own OSError; what escapes it is the
+            # ValueError an embedded NUL raises out of os.lstat (measured,
+            # v2.16.0 D4), which this handler used not to name.
             continue
         if _exists(mem / DB_FILENAME):
             return True

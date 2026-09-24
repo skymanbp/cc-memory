@@ -1913,7 +1913,7 @@ The `plan_active` table (one row per project) backs PLAN.md. Lifecycle:
   `ui/installer.py` so an uninstall still sweeps what older installs wrote.)
 
 **All of the `PostToolUse` legs above run in EVERY mode, above the
-`should_observe` gate** (`hooks/post_tool_use.py:191`). They shipped below it
+`should_observe` gate** (`hooks/post_tool_use.py:192`). They shipped below it
 from v2.2 through v2.4.3, which made the entire anchor dead through its own
 hook — `TodoWrite` is in every mode's `skip_tools` and `ExitPlanMode` is in no
 mode's `observe_tools`. Plan control is not observation: mode selects what is
@@ -2332,7 +2332,7 @@ file and non-blank, NOT verified against a symbol — and the summary says so
 in those words since v2.14.0 (261 of 631 at v2.14.0; the class was 253 of
 594 as `SKIP` at v2.5.4, down from 370 once v2.5.3 taught it to anchor
 CROSS-FILE citations on the text of the cited range — the
-`` `db.tag_progress_session(...)` (`user_prompt.py:442`) `` shape, which is
+`` `db.tag_progress_session(...)` (`user_prompt.py:440`) `` shape, which is
 the commonest in these docs). A bounds-only citation can rot silently: six
 had, all in prose that names a section rather than a symbol, and were
 repointed by hand in v2.14.0. `--fix`

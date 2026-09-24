@@ -51,9 +51,11 @@ sys.path.insert(0, str(_PKG_ROOT))
 from core.encoding_setup import enable_utf8_io
 enable_utf8_io()
 
-from core.db import CATEGORIES, MemoryDB
+from core.db import MemoryDB
 from core.layout import DB_FILENAME, MEMORY_DIRNAME, memory_dir as resolve_memory_dir
-from core.extractor import find_transcript_dir, load_transcript_window
+from core.atomic import write_atomic
+from core.extractor import (_DEFAULT_TAIL_BYTES, find_transcript_dir,
+                            load_transcript_window)
 from core.logger import get_logger
 # Shared entry ladder (v2.10.0): stdin parsing + the opt-out→anchor gate,
 # once, in hooks/_entry.py — six hand-rolled copies is how guard drift
@@ -175,7 +177,7 @@ def _build_topics_layer(db, project_id, budget):
 
 
 def _build_critical_layer(db, project_id, budget, topic_names, covered_out=None):
-    critical = db.get_critical_memories(project_id, min_importance=5)
+    critical = db.get_critical_memories(project_id)
     unmerged = [
         m for m in critical
         if not m.get("topic") or m.get("topic") not in topic_names
@@ -600,20 +602,14 @@ def _build_forced_reminder(memory_dir, demand_ack=True):
 def _write_inject_manifest(memory_dir, manifest):
     """Atomically persist the inject manifest to .ccm/.last_inject.json.
 
-    tempfile + os.replace is genuinely atomic (unlike the plain write_text used
-    by .last_save.json), so a concurrent /cc-mem inject-show never reads a
-    half-written file. Best-effort: failure must not break SessionStart.
+    Through `core.atomic.write_atomic` (v2.16.0, D5 — this was a hand-rolled
+    mkstemp+replace beside the package's ONE atomic implementation), so a
+    concurrent /cc-mem inject-show never reads a half-written file.
+    Best-effort: failure must not break SessionStart.
     """
     try:
-        fd, tmp = tempfile.mkstemp(dir=str(memory_dir), prefix=".last_inject.",
-                                   suffix=".tmp")
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as fh:
-                json.dump(manifest, fh, ensure_ascii=False, indent=2)
-            os.replace(tmp, str(memory_dir / ".last_inject.json"))
-        finally:
-            if os.path.exists(tmp):
-                os.remove(tmp)
+        write_atomic(memory_dir / ".last_inject.json",
+                     json.dumps(manifest, ensure_ascii=False, indent=2))
     except OSError as e:
         _log.error(f".last_inject.json write failed: {e}")
 
@@ -826,18 +822,9 @@ _API_TIMEOUT = 10
 _FALLBACK_TIMEOUT = 5
 _RETRO_DEADLINE_S = 13.0
 
-_RETROACTIVE_PROMPT = """\
-You are a memory extraction system. Given a Claude Code conversation transcript, \
-extract the most important information worth remembering across sessions.
-
-Output a JSON array of objects: {"category": str, "content": str, "importance": int, "topic": str}
-- category: """ + "|".join(CATEGORIES) + """
-- content: one concise, self-contained sentence with specific values
-- importance: 1-5 (5=critical, 4=important, 3=useful)
-- topic: a short keyword for the topic
-
-Rules: Only conclusions, not process. Self-contained. Specific values. 5-15 items max.
-Output ONLY valid JSON array."""
+# The retroactive prompt is `llm.parse.build_extraction_prompt("transcript",
+# ...)` since v2.16.0 (D2): ONE prompt builder and ONE row normaliser for every
+# extractor in the package, carrying the project mode's focus line.
 
 
 def _find_transcript_dir(project_path):
@@ -957,7 +944,7 @@ from core.extractor import summarize_transcript as _summarize_transcript
 
 
 def _retroactive_extract(messages, total_records=None, deadline=None,
-                         state_dir=None):
+                         state_dir=None, mode_suffix=""):
     """Returns a (possibly EMPTY) list when extraction RAN, None when it
     did not — no key, nothing to summarise, or a failed call.
 
@@ -979,35 +966,20 @@ def _retroactive_extract(messages, total_records=None, deadline=None,
         return None
     try:
         from llm.ccl_backend import call_llm
-        from llm.parse import extract_json
-        text = call_llm(_RETROACTIVE_PROMPT,
-                        f"Extract memories:\n\n{transcript_text}",
-                        api_key, max_tokens=2000, timeout=_API_TIMEOUT,
-                        fallback_timeout=_FALLBACK_TIMEOUT,
+        from llm.parse import (build_extraction_prompt, extract_json,
+                               normalize_memories)
+        # ONE prompt and ONE normaliser for every extractor (v2.16.0, D2).
+        system, user = build_extraction_prompt("transcript", transcript_text,
+                                               mode_suffix=mode_suffix)
+        text = call_llm(system, user, api_key, max_tokens=2000,
+                        timeout=_API_TIMEOUT, fallback_timeout=_FALLBACK_TIMEOUT,
                         deadline=deadline)
         memories = extract_json(text, kind="array")
         if memories is None:
             return None
-        valid = []
-        for m in memories:
-            if not isinstance(m, dict):
-                continue
-            cat = m.get("category", "note")
-            content = m.get("content", "").strip()
-            imp = m.get("importance", 3)
-            topic = m.get("topic", "")
-            if not content or len(content) < 10:
-                continue
-            if cat not in CATEGORIES:
-                cat = "note"
-            valid.append({
-                "category": cat, "content": content,
-                "importance": max(1, min(int(imp), 5)),
-                "topic": topic if isinstance(topic, str) else "",
-            })
         # An empty list is a RESULT: the model ran and found nothing worth
         # saving. Only None means "no answer" (see the docstring).
-        return valid
+        return normalize_memories(memories)
     except Exception as e:
         # why: retroactive save is best-effort; any LLM/JSON failure
         # should be silent — the rest of the hook still works. A
@@ -1106,7 +1078,6 @@ def _refresh_progress_row(db, project_id, memory_dir, current_session_id=None,
         - status_done       ← latest session_summary.completed
         - status_in_flight  ← latest session_summary.learned
         - plan              ← latest session_summary.next_steps
-        - open_todos        ← split next_steps by ';' (heuristic)
         - files_touched     ← recent observations table
 
       Tier 3 (the transcript JSONL holding this project's history —
@@ -1152,10 +1123,9 @@ def _refresh_progress_row(db, project_id, memory_dir, current_session_id=None,
     # writer of a column nothing reads — and one more query per start.
 
     # ── Tier 2B: status + plan from latest session_summary ────────────────
-    # NOTE: open_todos is deliberately NOT filled here. Tier 3 (transcript
-    # mining) gives much cleaner data via TodoWrite tool_use blocks; we let
-    # tier 3 fire first and only fall back to next_steps split below if
-    # tier 3 has nothing.
+    # NOTE: open_todos is NOT filled here — tier 3 (the last TodoWrite
+    # snapshot in the transcript) is its only source since v2.16.0 (D6);
+    # next_steps is the PLAN (§4), never a todo list.
     summary = db.get_latest_summary(project_id) or {}
     next_steps_text = (summary.get("next_steps") or "").strip()
     if summary:
@@ -1187,7 +1157,6 @@ def _refresh_progress_row(db, project_id, memory_dir, current_session_id=None,
     needs_files = (not settled and "files_touched" not in patch
                    and not cur.get("files_touched"))
     needs_ptr   = not cur.get("transcript_ptr")
-    todos_from_transcript = None
 
     if needs_todos or needs_files or needs_ptr:
         try:
@@ -1227,13 +1196,12 @@ def _refresh_progress_row(db, project_id, memory_dir, current_session_id=None,
                         pending = [t for t in mined
                                    if t.get("status") != "completed"]
                         if pending:
-                            todos_from_transcript = [
+                            patch["open_todos"] = [
                                 {"content": t["content"][:300],
                                  "priority": t.get("priority", "medium"),
                                  "status": t.get("status", "pending")}
                                 for t in pending[:10]
                             ]
-                            patch["open_todos"] = todos_from_transcript
                     if needs_files:
                         mined_files = extract_file_changes(prior_msgs)[:15]
                         if mined_files:
@@ -1244,18 +1212,10 @@ def _refresh_progress_row(db, project_id, memory_dir, current_session_id=None,
         except Exception as e:
             _log.error(f"tier-3 transcript mine failed: {e}")
 
-    # ── Tier 2B (deferred): next_steps split as LAST-RESORT open_todos ─────
-    # Only fires if tier 3 transcript mining didn't find a TodoWrite snapshot.
-    # The split-by-semicolon heuristic produces low-quality items (a single
-    # long prose sentence collapses to one phantom todo) so we keep it as a
-    # final fallback to avoid an empty §3 in PROGRESS.md.
-    if needs_todos and todos_from_transcript is None and next_steps_text:
-        steps = [s.strip() for s in next_steps_text.split(";") if s.strip()]
-        if steps:
-            patch["open_todos"] = [
-                {"content": s[:300], "priority": "medium", "status": "pending"}
-                for s in steps[:8]
-            ]
+    # (The "split next_steps on ';' into open_todos" fallback that stood here
+    # is gone — v2.16.0, D6. §4 renders the same text as the plan already;
+    # copying it into §3 made prose masquerade as a todo list, and the RESUME
+    # PROTOCOL executes `todos[0]` of §3 without asking.)
 
     if patch:
         # trigger_type goes through the SAME conditional fill as every other
@@ -1292,7 +1252,7 @@ def _refresh_progress_row(db, project_id, memory_dir, current_session_id=None,
 # Predicted vs measured: 2.11 GiB -> 3.39s / 3.37s; 1.49 GiB -> 2.77s / 2.36s;
 # 4 GiB synthetic -> 5.28s / 3.67s. The model never under-predicted; _LOAD_SAFETY
 # on top covers a cold page cache and a contended disk.
-_WINDOW_TAIL_BYTES = 32 << 20   # keep in sync with extractor._DEFAULT_TAIL_BYTES
+_WINDOW_TAIL_BYTES = _DEFAULT_TAIL_BYTES   # THE window (v2.16.0, D3): no copy to keep in sync
 _DECODE_BYTES_S = 25 << 20
 _SCAN_BYTES_S = 1 << 30
 _LOAD_SAFETY = 1.5
@@ -1450,6 +1410,8 @@ def retroactive_save(cwd, db, project_id, current_session_id="", deadline=None):
         return
 
     from core.auth import clear_llm_backoff, llm_backoff
+    from core.modes import get_extraction_suffix
+    mode_suffix = get_extraction_suffix(db.get_project_mode(project_id))
     candidates = _retro_candidates(cwd, db, project_id, current_session_id)
     if not candidates:
         _log.info(f"retroactive save: no unsaved transcript for {cwd} — skipped")
@@ -1504,7 +1466,8 @@ def retroactive_save(cwd, db, project_id, current_session_id="", deadline=None):
             memories = _retroactive_extract(messages,
                                             total_records=window.total_records,
                                             deadline=deadline,
-                                            state_dir=memory_dir)
+                                            state_dir=memory_dir,
+                                            mode_suffix=mode_suffix)
             # `is None`, because an EMPTY list is a RESULT (register C1 and
             # _retroactive_extract's docstring). `not memories` read "the
             # model found nothing worth keeping" as "extraction never ran",

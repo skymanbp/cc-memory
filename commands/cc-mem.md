@@ -43,7 +43,7 @@ someone who knows the command exists.
 | `plan-set --raw '<text>'` | Capture a raw plan, mark `needs_refine=1` |
 | `plan-set --raw-file FILE` | Same, but read raw from a file (UTF-8, a BOM tolerated; any other encoding is refused with a one-line remedy) |
 | `plan-set --from-refiner` | Read structured JSON from stdin (refiner output; a leading BOM, as PowerShell 5.1's `>` writes, is stripped) |
-| `plan-check` | Reset guardian counters + emit plan-guardian invocation hint |
+| `plan-check` | Record a guardian check you have just run (resets the drift counters) — guardian FIRST, then this |
 | `plan-replan` | Re-arm `needs_refine` on the current raw |
 | `plan-clear` | Drop the active plan + delete PLAN.md. Archived to `.ccm/.plan_history/` first; **`--reason "<why>"` is required when unfinished steps exist** (refuses and exits 1 otherwise — v2.4.0 carryover gate) |
 | `directive-list [--status active\|blocked\|done\|superseded\|dropped\|all] [--json\|--full]` | Standing user directives, **most-repeated first**. A directive is a unit of user INTENT and outlives every plan; a plan step is a unit of execution and dies with its plan. Default filter is `active`; `blocked` rows show as `[b]`. `--full` lifts the per-field truncation, `--json` emits full rows as pure-ASCII JSON |

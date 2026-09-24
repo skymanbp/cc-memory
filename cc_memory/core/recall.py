@@ -134,6 +134,9 @@ RECALL_MIN_RELEVANCE = 0.45
 # answer it from the LIKE fallback, which is substring matching on two or three
 # characters. Measured: "ok" returned five rows at relevance 0.000.
 RECALL_MIN_PROMPT_CHARS = 12
+# The recall manifest — what earlier turns of THIS session recalled — spelled
+# ONCE (v2.16.0, D3). hooks/user_prompt.py writes it, cli/mem.py reads it.
+RECALL_MANIFEST = ".last_recall.json"
 RECALL_MIN_CONTENT_WORDS = 2
 
 # How many candidates BM25 ranks before the floor and the budget cut them down.
@@ -171,8 +174,6 @@ _STOPWORDS = frozenset("""
 # — the resume set is the one `hooks/user_prompt.py` types the first prompt
 # with and `hooks/session_start.py` prints in the RESUME PROTOCOL. i18n
 # Tier 3: bilingual by design.
-_NO_QUERY_TOKENS = frozenset(RESUME_TRIGGERS) | frozenset(ACK_TOKENS)
-
 # FTS5 treats these as operators / syntax. A term carrying one is quoted, and
 # an all-punctuation term is dropped: both forms of `_match_fts`'s expression
 # would otherwise raise out of the fts5 parser, and its double-failure branch
@@ -189,11 +190,14 @@ def is_query_like(prompt: str) -> bool:
     (measured — "ok" matched inside "hooks" and "block", five rows, relevance
     0.000), so filtering afterwards would spend a query and rely entirely on
     the floor. Two independent gates, because they fail differently.
+
+    (A third — "is the whole prompt a resume trigger or an ack token?" — stood
+    between them until v2.16.0, D4. Measured: the longest such token is 10
+    characters and `RECALL_MIN_PROMPT_CHARS` is 12, so the length test refused
+    every one of them first and the branch could not be reached.)
     """
     text = (prompt or "").strip()
     if len(text) < RECALL_MIN_PROMPT_CHARS:
-        return False
-    if text.lower() in _NO_QUERY_TOKENS:
         return False
     return len(_content_words(text)) >= RECALL_MIN_CONTENT_WORDS
 

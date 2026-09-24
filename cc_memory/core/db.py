@@ -181,9 +181,9 @@ _MIGRATIONS = [
     # install in the field, which is out of scope for a point release. The
     # consequence is that a HARD DELETE of a superseded row leaves a dangling
     # supersedes_id that nothing catches — so every delete path must archive
-    # (is_active = 0) via archive_memory / bulk_archive / archive_obsolete
-    # instead of DELETE. delete_memories() is the one exception and is for
-    # user-driven purges only.
+    # (is_active = 0) via archive_if_unchanged / archive_obsolete instead of
+    # DELETE. Nothing in the tree hard-deletes a memory row: the last such
+    # writer, delete_memories(), had no caller and was removed (v2.16.0, D4).
     ("v3_supersedes",
      "ALTER TABLE memories ADD COLUMN supersedes_id INTEGER"),
     ("v3_supersedes_idx",
@@ -474,6 +474,14 @@ _BOOTSTRAP_STAMP = _bootstrap_stamp(SCHEMA_SQL, _MIGRATIONS)
 # deliberate literal left is the web viewer's in-browser JS constant, which
 # cannot import Python; its comment points here.
 CATEGORIES = ("decision", "result", "config", "bug", "task", "arch", "note")
+
+# "Critical" on the extraction scale (5 = critical/never-forget, 4 =
+# important): the floor `get_critical_memories` applies, spelled ONCE
+# (v2.16.0, D3). The SessionStart layer and the dashboard asked for 5 while
+# PROGRESS.md §5 and this method's own default asked for 4, so the file's
+# "must-know" list and the injection's "Critical" list disagreed on what
+# critical meant.
+CRITICAL_IMPORTANCE = 5
 
 
 def _readonly_uri(posix_path):
@@ -1643,6 +1651,28 @@ class MemoryDB:
                 (project_id,)
             ).fetchone()[0]
 
+    def list_sessions(self, project_id, limit=20):
+        """The project's newest compaction rows with their active-memory counts.
+
+        ONE listing (v2.16.0, D3) for `/cc-mem sessions`, the dashboard's
+        Sessions tab and the web viewer's /api/sessions, which each spelled
+        the join and sorted on `compacted_at` — the naive local-time string
+        the ordering note above refuses to sort by. Newest first, by `id`.
+        One row per COMPACTION, `archive_path` included: this is the surface
+        listing, not `list_sessions`, the PROGRESS.md §0 timeline that
+        collapses a session's compactions onto one row and joins summaries.
+        """
+        with self._connect() as conn:
+            rows = conn.execute(
+                """SELECT se.*, COUNT(m.id) AS n_mem
+                   FROM sessions se
+                   LEFT JOIN memories m ON m.session_id = se.id AND m.is_active = 1
+                   WHERE se.project_id = ?
+                   GROUP BY se.id ORDER BY se.id DESC LIMIT ?""",
+                (project_id, limit)
+            ).fetchall()
+            return [dict(r) for r in rows]
+
     def count_memories_since(self, project_id, row_id=0, since_ts=""):
         """Memories written after a consolidation watermark (v2.12.0).
 
@@ -1680,7 +1710,9 @@ class MemoryDB:
 
     def insert_memory(self, project_id, session_id, category, content,
                       importance=2, tags=None, topic=None, supersedes_id=None):
-        """Direct insert. Most callers should go through llm.memory_writer.upsert_smart."""
+        """Direct insert — for the tests and for `supersede_memory` (the writer's
+        own SUPERSEDE step). Every caller PATH goes through
+        llm.memory_writer.upsert_smart (docs/CONTRACTS.md#anti-patch-contract)."""
         now = self._now()
         content_hash = self.compute_content_hash(content)
         with self._connect() as conn:
@@ -2034,9 +2066,9 @@ class MemoryDB:
                             categories=None, min_importance=1, limit=30):
         """Memories from the last N sessions PLUS every session-less memory.
 
-        `session_id IS NULL` is not an edge case — it is what ALL FOUR manual
-        save paths produce (cli/mem.py add, mcp/server.py memory_add,
-        ui/dashboard.py, ui/web_viewer.py POST /api/memory, plus the
+        `session_id IS NULL` is not an edge case — it is what every manual
+        save path produces (cli/mem.py add, mcp/server.py memory_add,
+        ui/dashboard.py, ui/web_viewer.py POST /api/memory and the
         save-memories skill), because a `sessions` row only exists after a
         compaction. The pre-v2.5 filter was a bare `AND session_id IN (...)`,
         which NULL can never satisfy, so everything the user saved by hand was
@@ -2080,7 +2112,8 @@ class MemoryDB:
             ).fetchall()
             return [dict(r) for r in rows]
 
-    def get_critical_memories(self, project_id, min_importance=4):
+    def get_critical_memories(self, project_id, min_importance=CRITICAL_IMPORTANCE):
+        """Active rows at or above CRITICAL_IMPORTANCE, most important first."""
         with self._connect() as conn:
             rows = conn.execute(
                 """SELECT * FROM memories
@@ -2160,25 +2193,10 @@ class MemoryDB:
                     [topic, now] + chunk
                 )
 
-    def archive_memory(self, memory_id):
-        with self._connect() as conn:
-            conn.execute(
-                "UPDATE memories SET is_active = 0, updated_at = ? WHERE id = ?",
-                (self._now(), memory_id)
-            )
-
-    def bulk_archive(self, memory_ids):
-        if not memory_ids:
-            return
-        now = self._now()
-        with self._connect() as conn:
-            for chunk in self._id_chunks(list(memory_ids)):
-                ph = ",".join("?" * len(chunk))
-                conn.execute(
-                    f"UPDATE memories SET is_active = 0, updated_at = ? "
-                    f"WHERE id IN ({ph})",
-                    [now] + chunk
-                )
+    # (`archive_memory` and `bulk_archive` were deleted in v2.16.0, D4: no
+    # caller in the tree. Every retirement goes through `archive_if_unchanged`
+    # — a snapshot verdict — or `archive_obsolete` — a chain link — or the
+    # writer's own transactions.)
 
     def archive_if_unchanged(self, id_content_pairs):
         """Archive each id ONLY while its content is what the verdict saw.
@@ -2389,14 +2407,6 @@ class MemoryDB:
                 (project_id, cutoff))
             return cur.rowcount
 
-    def delete_memories(self, memory_ids):
-        if not memory_ids:
-            return
-        with self._connect() as conn:
-            for chunk in self._id_chunks(list(memory_ids)):
-                ph = ",".join("?" * len(chunk))
-                conn.execute(f"DELETE FROM memories WHERE id IN ({ph})", chunk)
-
     # ── reference-aware aging (v6) ──────────────────────────────────────────
 
     def bump_last_referenced(self, memory_ids):
@@ -2456,8 +2466,8 @@ class MemoryDB:
 
         Distinct from supersede_memory: NO new row is inserted (the canonical
         already exists), so this never duplicates content. Distinct from
-        bulk_archive: it sets supersedes_id so get_supersede_chain can still
-        trace the lineage.
+        archive_if_unchanged: it sets supersedes_id so get_supersede_chain can
+        still trace the lineage.
 
         Snapshot-verdict guards (v2.8.0) — every caller's verdict is computed
         from a read that happened BEFORE this write, so the write re-asserts
@@ -2954,7 +2964,7 @@ class MemoryDB:
     def patch_progress(self, project_id, **fields):
         """Update only specified fields without touching others.
 
-        Used by Stop-hook to drip-update files_touched and open_todos each turn
+        Used by the Stop hook to drip-update files_touched each turn
         while leaving the full state intact. Distinct from upsert_progress which
         is the PreCompact full rewrite.
 

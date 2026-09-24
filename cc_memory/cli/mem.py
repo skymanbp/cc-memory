@@ -1077,20 +1077,17 @@ def cmd_sessions(args):
     # printed the OTHER project's sessions — archive_path basenames included —
     # under this project's heading.
     pid = _require_project_id(conn, args.project, db_path)
-    rows = conn.execute(
-        """SELECT s.id, s.trigger_type, s.compacted_at, s.msg_count,
-                  COUNT(m.id) n_mem, s.archive_path
-           FROM sessions s LEFT JOIN memories m ON m.session_id=s.id AND m.is_active=1
-           WHERE s.project_id = ?
-           GROUP BY s.id ORDER BY s.compacted_at DESC LIMIT 10""",
-        (pid,)
-    ).fetchall()
+    conn.close()
+    # ONE session listing (v2.16.0, D3): this command, the dashboard's
+    # Sessions tab and the web viewer's /api/sessions each spelled the join
+    # and sorted on `compacted_at`, the wall-clock string core/db.py refuses
+    # to order by; `list_sessions` orders by id.
+    rows = MemoryDB(db_path).list_sessions(pid, limit=10)
     print(f"\nSessions for {name}:\n")
     _table(["ID", "Trigger", "Compacted At", "Msgs", "Memories", "Archive"],
            [(r["id"], r["trigger_type"], r["compacted_at"][:16],
              r["msg_count"], r["n_mem"],
              Path(r["archive_path"]).name if r["archive_path"] else "-") for r in rows])
-    conn.close()
 
 
 # ── `sql` is a READ-ONLY query tool ─────────────────────────────────────────
@@ -1548,8 +1545,9 @@ def cmd_archive(args):
     scores similar enough to the old, and — before v2.8.0's CJK-aware
     substrate — a Chinese correction of a Chinese fact scored 0.23 and was
     INSERTED beside the thing it corrected. The only remaining route was to
-    bypass the CLI entirely and call `db.bulk_archive` by hand, which is how
-    this maintainer actually did it (ids 291/293/294 on a live database).
+    bypass the CLI entirely and archive by hand through a raw UPDATE, which is
+    how this maintainer actually did it (ids 291/293/294 on a live database;
+    the `bulk_archive` helper used then was deleted in v2.16.0, D4).
 
     Archive, matching `cleanup_garbage` and `core/db.py`'s standing rule that
     every retirement path keeps the row: a hard DELETE strands any
@@ -1958,9 +1956,12 @@ def cmd_plan_replan(args):
 
 
 def cmd_plan_check(args):
-    """Recommend a guardian check. Resets the guardian counters so the next
-    nudge waits a full interval. The CLI itself doesn't invoke the subagent —
-    the calling Claude is expected to follow up with `Task(...)`."""
+    """RECORD a guardian check the calling Claude has just run: reset the
+    drift counters and stamp the one-turn immunity. The CLI never invokes the
+    subagent, and the order is the one the Stop refusal states — guardian
+    FIRST, then this command — because a reset taken before the check lets
+    everything the guardian's turn does re-arm the block (v2.15.0 remedy
+    order; until v2.16.0 D5 this command's own output said the reverse)."""
     from core.plan import (is_live_plan, is_valid_structured,
                            raw_pending_refinement, write_plan_md)
     db, pid, memory_dir = _plan_db(args.project)
@@ -1995,12 +1996,13 @@ def cmd_plan_check(args):
     write_plan_md(db, pid, memory_dir)
     db.reset_plan_guardian_counters(pid)
     steps = row["structured"]["steps"]
-    print(f"PLAN guardian check requested.")
+    print("PLAN guardian check RECORDED (drift counters reset).")
     print(f"  Goal: {row['structured']['goal']}")
     print(f"  Progress: {sum(1 for s in steps if s['status']=='done')}/{len(steps)} done")
     print(f"  Active step: #{row.get('active_step', 0)}")
     print()
-    print("Now invoke the plan-guardian subagent:")
+    print("Order matters: run the @plan-guardian subagent FIRST, then this command.")
+    print("If the check has not happened yet, run it now and record it again:")
     print("  Task(subagent_type='plan-guardian', prompt='Read .ccm/PLAN.md and")
     print("       .ccm/PROGRESS.md, compare against the last 20 messages of this")
     print("       session, and report: (a) current step alignment, (b) any drift,")
@@ -2243,10 +2245,10 @@ def cmd_inject_show(args):
 # which the command reports "0 time(s)" for a file that WAS read.
 _INJECT_USAGE_WINDOW = 200
 
-# The recall manifest's filename, spelled once. `hooks/user_prompt.py` owns
-# the writer; this is the reader, and a second literal is how the .gitignore
-# line list came to need three hand-synced copies.
-_RECALL_MANIFEST_NAME = ".last_recall.json"
+# The recall manifest's filename, spelled once in core.recall (v2.16.0, D3).
+# `hooks/user_prompt.py` owns the writer; this is the reader, and a second
+# literal is how the .gitignore line list came to need three hand-synced copies.
+from core.recall import RECALL_MANIFEST as _RECALL_MANIFEST_NAME
 
 
 def _assistant_texts(rec):

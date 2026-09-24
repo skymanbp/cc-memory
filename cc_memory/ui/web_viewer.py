@@ -922,15 +922,10 @@ class MemoryHandler(BaseHTTPRequestHandler):
             self._json_response({"results": db.get_recent_observations(pid, limit=limit)})
 
         elif path == "/api/sessions":
-            with db._connect() as conn:
-                rows = conn.execute(
-                    """SELECT s.*, COUNT(m.id) AS n_mem
-                       FROM sessions s LEFT JOIN memories m ON m.session_id=s.id AND m.is_active=1
-                       WHERE s.project_id = ?
-                       GROUP BY s.id ORDER BY s.compacted_at DESC LIMIT 20""",
-                    (pid,)
-                ).fetchall()
-            self._json_response({"results": [dict(r) for r in rows]})
+            # ONE session listing (v2.16.0, D3), ordered by id — see
+            # MemoryDB.list_sessions; `/cc-mem sessions` and the
+            # dashboard's Sessions tab read the same rows.
+            self._json_response({"results": db.list_sessions(pid, limit=20)})
 
         elif path == "/api/stats":
             stats = db.get_stats(pid)

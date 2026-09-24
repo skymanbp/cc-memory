@@ -562,33 +562,6 @@ def _anchor_mcp_project(project):
         return project
 
 
-def _resolve_session_id(db, pid):
-    """Session id to attribute an MCP write to.
-
-    `db.get_recent_memories` filters on the last N session ids, so a row stored
-    with session_id NULL is invisible to memory_recent and to the SessionStart
-    "Recent" injection layer at importance 1-3. Reuse the project's most recent
-    session; only create a row when the project has none at all (creating one
-    per add would distort every "last session" computation in the hooks).
-    """
-    recent = db.get_recent_session_ids(pid, 1)
-    if recent:
-        return recent[0]
-    try:
-        sid = db.insert_session(pid, None, "mcp", 0, None, "MCP session")
-        # Complete at birth: this row is an attribution container with no
-        # pending transcript work behind it (insert_session now writes
-        # complete=0 as a claim for the hooks that DO have such work —
-        # register X6 — and this caller has none).
-        db.mark_session_complete(sid)
-        return sid
-    except Exception as e:
-        # why: attribution is a convenience for recall — failing to create the
-        # session row must not lose the memory write itself.
-        _log.error(f"could not create an mcp session row: {e}")
-        return None
-
-
 # ── tool handlers ──────────────────────────────────────────────────────────
 # A handler returns a plain dict. A truthy "error" key marks the call failed
 # (the dispatcher then sets isError: true), so the model is never told that a
@@ -645,9 +618,14 @@ def handle_memory_add(args):
     if err:
         return {"error": err}
     from llm.memory_writer import upsert_smart, regenerate_memory_index
-    session_id = _resolve_session_id(db, pid)
+    # session_id NULL, like every other manual save path (v2.16.0, D7). This
+    # tool used to attach the row to the project's most recent session — or
+    # mint an "mcp" session row — so an add from a NEW conversation was
+    # credited to the previous one; its docstring's premise ("a NULL row is
+    # invisible to memory_recent") stopped being true in v2.5.0, when
+    # `get_recent_memories` grew its session-less arm.
     result = upsert_smart(
-        db, pid, session_id,
+        db, pid, None,
         category=args["category"],
         content=args["content"],
         importance=args.get("importance", 3),

@@ -50,7 +50,7 @@ sys.path.insert(0, str(_PKG_ROOT))
 from core.encoding_setup import enable_utf8_io
 enable_utf8_io()
 
-from core.db import CATEGORIES, MemoryDB
+from core.db import MemoryDB
 from core.extractor import (build_extraction, load_transcript_window, group_sentences,
                             summarize_transcript, files_from_observations,
                             CATEGORY_ORDER, CATEGORY_LABELS)
@@ -181,25 +181,9 @@ def _observations_to_feed(observations, obs_mark):
     return obs_fed, chars, unfed
 
 
-_EXTRACTION_PROMPT = """\
-You are a memory extraction system. Given a Claude Code conversation transcript, \
-extract the most important information worth remembering across sessions.
-
-Output a JSON array of objects with these fields:
-- "category": one of """ + ", ".join(f'"{c}"' for c in CATEGORIES) + """
-- "content": one concise, self-contained sentence with specific values (numbers, file names, parameters)
-- "importance": 1-5 (5=critical/never-forget, 4=important, 3=useful, 2=minor, 1=trivial)
-- "topic": a short lowercase keyword for grouping (e.g. "auth", "pipeline", "config", "ui")
-
-Rules:
-- Only save CONCLUSIONS, not discussion process or debugging steps
-- Each memory must be understandable WITHOUT context
-- Include specific values: "lr=3e-4 chosen over 1e-3 because val_loss flatlined" not "tuned lr"
-- Skip: conversation logistics, tool errors, meta-discussion, trivial Q&A
-- Output 5-15 memories maximum. Quality over quantity.
-- Do NOT include memories about the memory plugin itself unless it's a critical bug fix
-
-Output ONLY a valid JSON array, no markdown, no explanation."""
+# The extraction prompt is `llm.parse.build_extraction_prompt("transcript",
+# ...)` since v2.16.0 (D2): ONE prompt builder and ONE row normaliser for every
+# extractor in the package, carrying the project mode's focus line.
 
 
 # THE transcript summariser lives in core.extractor (register M2): this
@@ -208,7 +192,8 @@ Output ONLY a valid JSON array, no markdown, no explanation."""
 _build_transcript_summary = summarize_transcript
 
 
-def _extract_via_llm(messages, observations=None, total_records=None):
+def _extract_via_llm(messages, observations=None, total_records=None,
+                     mode_suffix=""):
     """Returns a (possibly EMPTY) list when extraction RAN, None when it did
     not — no key, nothing to summarise, or a failed call. The distinction is
     load-bearing (register C1): the caller deletes the observations it fed
@@ -237,12 +222,14 @@ def _extract_via_llm(messages, observations=None, total_records=None):
         if obs_lines:
             obs_context = "\n\nTool observations (for context):\n" + "\n".join(obs_lines)
 
-    user_content = f"Extract memories from this conversation:\n\n{transcript_text}{obs_context}"
-
     try:
         from llm.ccl_backend import call_llm
-        from llm.parse import extract_json
-        text = call_llm(_EXTRACTION_PROMPT, user_content, api_key,
+        from llm.parse import (build_extraction_prompt, extract_json,
+                               normalize_memories)
+        # ONE prompt and ONE normaliser for every extractor (v2.16.0, D2).
+        system, user_content = build_extraction_prompt(
+            "transcript", transcript_text + obs_context, mode_suffix=mode_suffix)
+        text = call_llm(system, user_content, api_key,
                         max_tokens=2500, timeout=_API_TIMEOUT,
                         fallback_timeout=_FALLBACK_TIMEOUT,
                         deadline=_HOOK_T0 + _LLM_DEADLINE_S)
@@ -250,23 +237,7 @@ def _extract_via_llm(messages, observations=None, total_records=None):
         if memories is None:
             return None
 
-        valid = []
-        for m in memories:
-            if not isinstance(m, dict):
-                continue
-            cat = m.get("category", "note")
-            content = m.get("content", "").strip()
-            imp = m.get("importance", 3)
-            topic = m.get("topic", "")
-            if not content or len(content) < 10:
-                continue
-            if cat not in CATEGORIES:
-                cat = "note"
-            imp = max(1, min(int(imp), 5))
-            valid.append({
-                "category": cat, "content": content, "importance": imp,
-                "topic": topic if isinstance(topic, str) else "",
-            })
+        valid = normalize_memories(memories)
         _log.info(f"LLM extracted {len(valid)} memories")
         # An empty list is a RESULT (the model ran and found nothing worth
         # keeping), not a failure — see the docstring. `valid if valid else
@@ -420,12 +391,12 @@ def _write_attempt(memory_dir, trigger, claude_sid, transcript_bytes):
             "pid": os.getpid(),
             "transcript_bytes": transcript_bytes,
         }
-        # PID-suffixed temp name: a fixed one is shared by any concurrent run,
-        # and two interleaved truncating writes would leave a mangled marker
-        # that the reader has to defend against.
-        tmp = memory_dir / f"{_ATTEMPT_FILE}.{os.getpid()}.tmp"
-        tmp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
-        os.replace(str(tmp), str(memory_dir / _ATTEMPT_FILE))
+        # THE atomic writer (v2.16.0, D5): this was a hand-rolled temp+replace
+        # beside `core.atomic`'s "ONE implementation" — a private temp name per
+        # PID, no fsync, no retry on a Windows sharing violation.
+        from core.atomic import write_atomic
+        write_atomic(memory_dir / _ATTEMPT_FILE,
+                     json.dumps(payload, ensure_ascii=False))
     except OSError as e:
         # why: the marker is diagnostic only; failing to write it must never
         # stop the compaction work it is meant to observe
@@ -715,8 +686,10 @@ def main():
         # LLM extraction → upsert through memory_writer (anti-patch path).
         # None = did not run / failed; a list (even empty) = ran. Register C1:
         # the observations below are deleted only when extraction RAN.
-        extracted = _extract_via_llm(messages, obs_fed,
-                                     total_records=window.total_records)
+        from core.modes import get_extraction_suffix
+        extracted = _extract_via_llm(
+            messages, obs_fed, total_records=window.total_records,
+            mode_suffix=get_extraction_suffix(db.get_project_mode(project_id)))
         llm_ok = extracted is not None
         extracted = extracted or []
         method = "llm" if extracted else "none"
@@ -798,7 +771,10 @@ def main():
         progress_state = collect_progress_state(
             db, project_id, memory_dir,
             current_request=first_user_msg,
-            todos=latest_todos or ext.get("todos", []),
+            # The LAST TodoWrite snapshot only (v2.16.0, D6): `ext["todos"]`
+            # is every todo the transcript ever carried, and falling back to
+            # it re-listed finished work as open in §3.
+            todos=latest_todos,
             files_read=obs_files_read,
             files_modified=obs_files_modified,
             transcript_ptr=str(Path(transcript_path).resolve()),

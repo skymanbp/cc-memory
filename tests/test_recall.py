@@ -222,7 +222,7 @@ def section1_substring_recall(tmp):
     # MERGE branch both retire rows with is_active=0, and a retired fact
     # resurfacing in search is the repudiation failing to take effect.
     row = db.search_fts(pid, "向量库", limit=5)[0]
-    db.archive_memory(row["id"])
+    db.archive_if_unchanged([(row["id"], row["content"])])
     _check(not [r for r in db.search_fts(pid, "向量库", limit=20)
                 if r["id"] == row["id"]],
            "§1e an archived row is not a search result")
@@ -295,17 +295,18 @@ def section3_query_time_recall(tmp):
     for q in ("why did the PreCompact hook time out",
               "PreCompact 钩子的超时是多少"):
         _check(R.is_query_like(q), f"§3a is a query: {q!r}")
-    # The gate is THREE tests, and every probe above is refused by the token
-    # list or the content-word count — measured 2026-09-07 by neutering each
-    # test in turn, which is why `falsify --case r15recallgate` (drop the
-    # minimum-length half) ran GREEN against the seven of them. This one is
-    # refused by the LENGTH test alone, so the constant is measured rather
-    # than merely present. The precondition is asserted, not assumed: lower
-    # the floor past this probe and the test says the probe stopped isolating
-    # it instead of quietly certifying nothing.
+    # The gate is TWO tests since v2.16.0 (D4 deleted the token list: every
+    # token was shorter than RECALL_MIN_PROMPT_CHARS, so the length test
+    # refused them first and the list was unreachable — measured). Every
+    # probe above is refused by the content-word count — measured 2026-09-07
+    # by neutering each test in turn, which is why `falsify --case
+    # r15recallgate` (drop the minimum-length half) ran GREEN against the
+    # seven of them. This one is refused by the LENGTH test alone, so the
+    # constant is measured rather than merely present. The precondition is
+    # asserted, not assumed: lower the floor past this probe and the test
+    # says the probe stopped isolating it instead of quietly certifying nothing.
     _shortq = "hooks fail"
     _check(len(_shortq) < R.RECALL_MIN_PROMPT_CHARS
-           and _shortq not in R._NO_QUERY_TOKENS
            and len(R._content_words(_shortq)) >= R.RECALL_MIN_CONTENT_WORDS,
            "§3a the short probe isolates RECALL_MIN_PROMPT_CHARS",
            f"len={len(_shortq)} floor={R.RECALL_MIN_PROMPT_CHARS}")

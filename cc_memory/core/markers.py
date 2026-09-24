@@ -59,6 +59,15 @@ import stat
 import tempfile
 from pathlib import Path
 
+# The per-session marker prefixes user_prompt and stop share, spelled ONCE
+# (v2.16.0, D3).
+# hooks/user_prompt.py writes both; hooks/stop.py reads both. The stdlib-only
+# installer keeps a literal copy in `_TEMP_MARKER_PREFIXES` for its uninstall
+# sweep — the one permitted duplicate, and the smoke gate holds it to these.
+TURN_MARKER_PREFIX = "cc_mem_turns_"
+PROMPT_MARKER_PREFIX = "cc_mem_prompt_"
+
+
 def _owner_tag():
     """A stable per-user component for the directory name.
 

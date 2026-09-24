@@ -1,4 +1,4 @@
-<!-- i18n-source: README.md | sha256: f47e929f2e0a7301 | version: 2.15.2 | translated: 2026-09-24 | translation: 89e54d7358b049b5 -->
+<!-- i18n-source: README.md | sha256: 7f48f87220d8cfd4 | version: 2.15.2 | translated: 2026-09-24 | translation: 7901ac6f802cd281 -->
 > [English](README.md) · **简体中文**
 
 <div align="center">
@@ -583,7 +583,7 @@ You MUST Read .ccm/PROGRESS.md before responding …
 /cc-mem plan-set --raw-file FILE    同上，从文件读
 /cc-mem plan-set --from-refiner     从 stdin 存入结构化 JSON（替换时会审计
                                     指令里的步骤引用）
-/cc-mem plan-check                  重置漂移计数器 + 给出 guardian 提示
+/cc-mem plan-check                  登记刚跑完的 guardian 巡检（重置计数器）
 /cc-mem plan-replan                 对已存的原始计划重新置位 needs_refine
 /cc-mem plan-clear --reason "<why>" 丢弃活跃计划（有未完成步骤时必须给理由）
 

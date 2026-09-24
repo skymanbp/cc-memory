@@ -181,7 +181,7 @@ importing flat (`from core.db import MemoryDB`) — the standalone installer lay
 the tree out FLAT, so under that layout `import cc_memory` raises
 `ModuleNotFoundError` and `from cc_memory import __version__` cannot be used by
 any module that must run from both layouts. `from core.version import
-__version__` resolves under both, and `cc_memory/__init__.py:64` re-exports it so
+__version__` resolves under both, and `cc_memory/__init__.py:7` re-exports it so
 the wheel-importable form keeps working.
 
 Four **non-importable** manifests cannot read it and must be bumped alongside:
@@ -397,12 +397,12 @@ The `supersedes_id` column on `memories` (migration `v3_supersedes`,
 `db.py:173`) makes the anti-patch chain explicit: when `upsert_smart` decides a
 new memory supersedes an old one, the new row links back to the old row's ID
 (and the old row is archived). Walking the chain via
-`db.get_supersede_chain(memory_id)` (`db.py:2016-2031`) shows the full update
+`db.get_supersede_chain(memory_id)` (`db.py:2048-2063`) shows the full update
 history. `content_hash` (migration `v2_content_hash` in
 `_MIGRATIONS`, `db.py:126`) is `sha256[:16]` of the normalized content, used
 for the cheap exact-duplicate check
-(`db.compute_content_hash` at `db.py:2609-2611`,
-`db.find_by_hash` at `db.py:2622-2630`).
+(`db.compute_content_hash` at `db.py:2619-2621`,
+`db.find_by_hash` at `db.py:2632-2640`).
 
 Migrations are applied in order from the `_MIGRATIONS` list (`db.py:121-284`) and
 recorded in `_migrations`. Levels shipped so far: **v1** (`topic` column +
@@ -487,9 +487,9 @@ caller's responsibility, and there are exactly two shapes:
   and the SessionStart retroactive save pass it (`stop.py:539`,
   `session_start.py:1394`); the sync PreCompact leg passes none and renders
   once itself, after the rest of its state changes (`pre_compact.py:729`,
-  `pre_compact.py:856`).
+  `pre_compact.py:832`).
 - Single-shot callers call `regenerate_memory_index` explicitly:
-  `cli/mem.py:1244` and `:584`, `mcp/server.py:647`, `ui/dashboard.py:1738`,
+  `cli/mem.py:1241` and `:584`, `mcp/server.py:642`, `ui/dashboard.py:1735`,
   `ui/web_viewer.py:1034`, plus the `skills/ccm-load` inline script
   (`skills/ccm-load/SKILL.md:290, 307`). `core/idle.py:96` and
   `hooks/consolidate_async.py:276` also refresh it after maintenance.
@@ -591,9 +591,9 @@ SessionStart:
 ```
 
 Call signatures above are the real ones: `write_progress_md(db, project_id,
-memory_dir)` (`core/progress.py:498-677`; call sites `pre_compact.py:814`,
-`stop.py:540`, `user_prompt.py:52`, `session_start.py:1093`, `mcp/server.py:243`,
-`cli/mem.py:1335`). See
+memory_dir)` (`core/progress.py:498-677`; call sites `pre_compact.py:790`,
+`stop.py:540`, `user_prompt.py:53`, `session_start.py:1065`, `mcp/server.py:243`,
+`cli/mem.py:1332`). See
 [docs/CONTRACTS.md](CONTRACTS.md#handoff-contract) for the PROGRESS.md
 schema.
 
@@ -603,8 +603,8 @@ A `PreCompact` killed by the host timeout dies on `TerminateProcess`: no
 `except`, no `finally`, so `.last_save.json` still describes the *previous*
 successful run and the failure is invisible. The sync leg therefore writes
 `.ccm/.pre_compact_attempt.json` **before** the transcript load
-(`pre_compact.py:596-609`) and removes it only on a completed run
-(`pre_compact.py:883`) — including on its own error path (`pre_compact.py:941`),
+(`pre_compact.py:581`) and removes it only on a completed run
+(`pre_compact.py:874`) — including on its own error path (`pre_compact.py:929`),
 so an *errored* run is never reported as a *killed* one. `SessionStart` reports
 a surviving marker, but only once it is at least 10 minutes old, so a run still
 in flight is never mislabelled (`session_start.py:187-206`).
@@ -665,7 +665,7 @@ LLM); `Edit`/`Write`/`MultiEdit`/`NotebookEdit` bump
 `core.plan.is_sensitive_tool_call`, `plan.py:1440-1463`) bump it by 20. Once
 `turns_since_last_guardian >= 8` OR `edits_since_last_guardian >= 12`
 (`core.plan.guardian_verdict` — THE policy point since v2.15.0, read by
-`should_nudge_guardian`, `blocking_reasons` AND `/cc-mem plan-status`, so the
+`blocking_reasons` AND `/cc-mem plan-status`, so the
 numbers a user is shown and the numbers the gate acts on cannot disagree), the
 Stop hook
 **refuses the turn** rather than advising (v2.11.0 — the rate-limited nudge
@@ -720,9 +720,9 @@ while the same token via Bearer + beta gets HTTP 200 (`core/auth.py:14-15`).
 `get_api_key()` is the single-credential back-compat view of that same list (it
 does not retry, `core/auth.py:60-93`); it also carries the `oauth_expired`
 signal behind SessionStart's "[WARNING: OAuth expired — LLM extraction,
-semantic de-dup, obsolescence check and topic summaries disabled]" footer (`session_start.py:812`). Hook callers use it to *supply*
+semantic de-dup, obsolescence check and topic summaries disabled]" footer (`session_start.py:808`). Hook callers use it to *supply*
 the credential passed into `call_llm`: `pre_compact.py:96 → :166`,
-`stop.py:99`, `session_start.py:812`, `core/consolidate.py:434, 549, 724`.
+`stop.py:102`, `session_start.py:808`, `core/consolidate.py:439, 549, 724`.
 
 Fall-through was added in v2.3.4 for a concrete failure: a dead env key (e.g.
 zero credit → HTTP 400) used to blackhole the healthy subscription token behind
