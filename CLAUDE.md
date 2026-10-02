@@ -2,7 +2,7 @@
 
 ## Project: cc-memory
 
-**Claude Code persistent memory plugin (v2.16.0)** — anti-patch reconcile-on-write
+**Claude Code persistent memory plugin (v2.16.1)** — anti-patch reconcile-on-write
 with LLM-judged semantic de-duplication and backpressure-triggered consolidation,
 a forced PROGRESS.md handoff, a live PLAN.md anchor with plan-refiner /
 plan-guardian subagents and a mandatory carryover gate, an enforced directive
@@ -11,7 +11,7 @@ recall, CJK-capable FTS5 search, and Haiku extraction from detached workers
 (optional local Ollama fallback).
 
 - **Language**: Python 3.8+ (pure stdlib, zero pip dependencies at runtime)
-- **Version**: 2.16.0 — what changed in this version is `CHANGELOG.md` § [2.16.0]
+- **Version**: 2.16.1 — what changed in this version is `CHANGELOG.md` § [2.16.1]
 - **License**: MIT
 - **Platform**: Windows-primary; CI runs every gate on Windows and Linux
   (Tkinter required for the GUI)
@@ -388,7 +388,7 @@ the GitHub Release, which lays the package FLAT under
 ## See also
 
 - `INVARIANTS.md` — the numbered rules, with their gates and falsification cases
-- `CHANGELOG.md` — version history; § [2.16.0] is this version
+- `CHANGELOG.md` — version history; § [2.16.1] is this version
 - `docs/ARCHITECTURE.md` — module map, data flow, install layouts, the i18n convention
 - `docs/CONTRACTS.md` — the three contracts in specification form
 - `commands/cc-mem.md` — every `/cc-mem` subcommand

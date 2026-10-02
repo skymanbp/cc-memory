@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [2.16.1] — 2026-10-02
+
+### The dashboard stopped showing a field that no longer exists
+
+The dashboard's Progress/Plan tab still printed `critical_context` as field 7: the
+count and up to ten rows of whatever an old `progress` row had left in that column.
+Nothing has written it since v2.16.0 (PROGRESS.md §5 reads the store), so the tab was
+showing stale content as if it were current. `cc_memory/ui/dashboard.py` no longer
+renders it, and the fields after it renumber 7–10. Gate: `tests/test_surfaces.py`
+asserts a legacy value left in the column is not shown; `tools/falsify_fixes.py` case
+`r16dashcrit` puts the old rendering back and turns that check red; INV-057 names both.
+
+### Documentation checked against the v2.16.0 code
+
+Every reader-facing document was re-read claim by claim against the code, and what
+had drifted was corrected: README (en + zh), `CLAUDE.md`, the skills, agents and
+commands, `CONTRIBUTING.md`, the config notes, `INVARIANTS.md` (each entry's gates and
+cases now name what actually runs; entries no gate stands behind are marked), and
+`docs/ARCHITECTURE.md` / `docs/CONTRACTS.md` (en + zh: MERGE chain-links rather than
+editing in place, the 500-row scan with a cross-category pass, `critical_context`
+retired, migrations v8–v10, `.last_recall.json`, `plan_active` columns, citations
+re-anchored). Comment and docstring fixes only in the code besides the dashboard.
+
 ## [2.16.0] — 2026-09-24
 
 ### Hooks that get out of the way, an injection that says each fact once, and a manual that is a manual
