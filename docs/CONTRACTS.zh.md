@@ -1,4 +1,4 @@
-<!-- i18n-source: CONTRACTS.md | sha256: 83b79843fc2169b7 | version: 2.16.0 | translated: 2026-10-02 | translation: 704b7427b4dc8e9d -->
+<!-- i18n-source: CONTRACTS.md | sha256: 0d60f52bf4664494 | version: 2.16.0 | translated: 2026-10-02 | translation: 47625fc0b7bab484 -->
 > [English](CONTRACTS.md) · **简体中文**
 
 # cc-memory — 契约（Contracts）
@@ -222,9 +222,9 @@ v2.0 有四条互相独立的保存路径（`pre_compact`、`stop` 观察者、`
 | `/save-memories` 技能 | `upsert_batch(db, pid, None, memories, memory_dir=mem_dir)`（`skills/save-memories/SKILL.md:180`）; `mem_dir` 是 `core.layout.memory_dir(project)`，绝不是手写的路径拼接 |
 | `mem.py add` CLI | `upsert_smart(...)`（`cli/mem.py:1250`）; 然后 `regenerate_memory_index(...)`（`cli/mem.py:1280`） |
 | `mcp/server.py handle_memory_add` | `upsert_smart(...)`（`mcp/server.py:627`）; 然后 `regenerate_memory_index(...)`（`mcp/server.py:642`） |
-| Dashboard UI 的 “Add Memory” | `upsert_smart(...)`（`ui/dashboard.py:1728`）; 然后 `regenerate_memory_index(...)`（`ui/dashboard.py:1735`）; 自 v2.2 起改为路由。`ui/dashboard.py` 中没有任何 `db.insert_memory` 调用。 |
-| Dashboard UI 的 “Save Session” | `upsert_batch(...)`（`ui/dashboard.py:1952`） |
-| Dashboard UI 的 “Init Project” 扫描 | `upsert_batch(db, pid, None, batch, memory_dir=memory_dir)`（`ui/dashboard.py:2128`） |
+| Dashboard UI 的 “Add Memory” | `upsert_smart(...)`（`ui/dashboard.py:1722`）; 然后 `regenerate_memory_index(...)`（`ui/dashboard.py:1729`）; 自 v2.2 起改为路由。`ui/dashboard.py` 中没有任何 `db.insert_memory` 调用。 |
+| Dashboard UI 的 “Save Session” | `upsert_batch(...)`（`ui/dashboard.py:1946`） |
+| Dashboard UI 的 “Init Project” 扫描 | `upsert_batch(db, pid, None, batch, memory_dir=memory_dir)`（`ui/dashboard.py:2122`） |
 | web_viewer 的 POST `/api/memory` | `upsert_smart(...)`（`ui/web_viewer.py:1015`）; 然后 `regenerate_memory_index(...)`（`ui/web_viewer.py:1030`） |
 
 ### 整理兜底的例外（Consolidation backstop，v2.3）
@@ -375,7 +375,7 @@ SQL 行生成。Schema 见 `cc_memory/core/db.py:_MIGRATIONS:v3_progress`（`db.
 | `status_blocked` | TEXT | 显式的 `patch_progress(status_blocked=...)` —— 今天树内没有任何调用方这样做；它是留给外部工具的 API; 全仓库 grep 只能找到 schema 默认值（`_MIGRATIONS`，`core/db.py:204`; `upsert_progress` 的默认值，`:2887`）; 空播种（`collect_progress_state`，`core/progress.py:283`）; 以及读取处（`_render_status_lines`，`core/progress.py:453`） |
 | `open_todos` | JSON | PreCompact 的 `extract_latest_todo_state(window)`（`core/extractor.py:532`），经 `ext["latest_todos"]`（`build_extraction`，`core/extractor.py:813`; 在 `pre_compact.py:773-779` 读进 `collect_progress_state`）→ SessionStart 第 3 级：挖掘 transcript（`_refresh_progress_row`，`session_start.py:1195-1205`）—— 自 v2.16.0（D6）起这是它唯一的兜底：把 `session_summary.next_steps` 按 `;` 切分的最后手段已被移除。只保留非 `completed` 的 todo（`collect_progress_state`，`progress.py:253-262`） |
 | `plan` | TEXT | §4 的**旧版**兜底：§4 先渲染实时的 `plan_active` 行（`_render_plan_section`，`progress.py:373-440`）。这一列存的是 `session_summaries.next_steps` —— 若有最新 TodoWrite 的 pending 项则取自它，否则取自 LLM 抽取出的 `task` 类记忆（那次 `insert_session_summary` 调用，`pre_compact.py:729-759`）; 由 `collect_progress_state` 传播（`progress.py:277,285`）; 由 `_refresh_progress_row` 按“空则填”补齐（`session_start.py:1137-1138`） |
-| `critical_context` | JSON | 已退役（v2.16.0）：写入 `[]`，无读者——§5 在渲染时读 `db.get_critical_memories`（`progress.py:_render_critical_lines`），于是被归档或被取代的行在下一次渲染就从文件里消失，而不是在快照里活下来；仪表盘的 Progress/Plan 页仍显示原始列 |
+| `critical_context` | JSON | 已退役（v2.16.0）：写入 `[]`，无读者——§5 在渲染时读 `db.get_critical_memories`（`progress.py:_render_critical_lines`），于是被归档或被取代的行在下一次渲染就从文件里消失，而不是在快照里活下来；仪表盘的 Progress/Plan 页也不再显示它 |
 | `files_touched` | JSON | `observations` 表（`files_from_observations`，`pre_compact.py:721`; `collect_progress_state`，`progress.py:264-271`）; Stop 每回合打补丁（`_patch_progress_from_recent_obs`，`stop.py:672`）; SessionStart 第 2C 级（`_refresh_progress_row`，`session_start.py:1141-1150`）→ 第 3 级：对 transcript 跑 `extract_file_changes`（`_refresh_progress_row`，`session_start.py:1206-1212`） |
 | `transcript_ptr` | TEXT | PreCompact 解析为绝对路径的 `transcript_path`（`collect_progress_state(transcript_ptr=…)`，`pre_compact.py:773-782`）→ 第 3 级 `find_latest_transcript(cwd, exclude_session_id=...)`（`_refresh_progress_row`，`session_start.py:1168-1170`） |
 | `updated_at` | TEXT | ISO 时间戳，由 `upsert_progress`（`db.py:2872-2948`）与 `patch_progress`（`:2968-3007`）打戳 |

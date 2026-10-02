@@ -512,9 +512,11 @@ r16resume` / `r16ackdemand`. *Source:* v2.16.0 B4.
 never appended, and `.ccm/PLAN.md` from `plan_active`.** PROGRESS.md §4 reads
 `get_plan_active` and §5 reads the memories store through
 `_render_critical_lines` at `CRITICAL_IMPORTANCE`; the `critical_context` column
-is retired and stays empty; `**Blocked**` renders only when set. *Gate:*
+is retired and stays empty, and the dashboard's Progress/Plan tab does not
+render it; `**Blocked**` renders only when set. *Gate:*
 `tests/test_plan_carryover.py` §8; `tests/smoke_test.py` § B9 and § D2-D7;
-`falsify --case r16critstore` / `r16blockedline` / `r16critical4`. *Source:*
+`tests/test_surfaces.py` (`_render_progress_plan`); `falsify --case
+r16critstore` / `r16blockedline` / `r16critical4` / `r16dashcrit`. *Source:*
 v2.1.0; v2.15.1 §1; v2.16.0 B9 and D6.
 
 **INV-058 · ONE seen set.** The inject manifest records `shown_ids` (the rows the

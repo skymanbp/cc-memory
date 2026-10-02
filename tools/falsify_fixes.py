@@ -3383,6 +3383,16 @@ def _break_r16manualsize(root):
            "## See also\n\n" + ("A version narrative that belongs in CHANGELOG.md.\n" * 1200))
 
 
+@case("r16dashcrit", ["tests/test_surfaces.py"],
+      "render the retired critical_context column in the dashboard's "
+      "Progress/Plan tab again -> a legacy row's stale snapshot reads as live")
+def _break_r16dashcrit(root):
+    _patch(root, f"{PKG}/ui/dashboard.py",
+           "            # legacy value left in an old row is not shown here either.\n",
+           "            # legacy value left in an old row is not shown here either.\n"
+           "            for m in (prog.get(\"critical_context\") or [])[:10]:  # BREAKAGE\n"
+           "                out.append(f\" -. critical_context : {_ni(str(m))[:90]}\")\n")
+
 def verify_anchors():
     """Count every registered case's breakage anchors WITHOUT running a gate.
 

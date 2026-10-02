@@ -435,7 +435,7 @@ specifics, each of which cost a measured defect to learn:
   <!--ce:gates:subset-->, plus build checks. A falsification register
   (`tools/falsify_fixes.py`) reverts each registered fix on a temporary copy
   and asserts its gate actually FAILS there: a check that cannot go red is a
-  comment that costs CI time. 294 registered breakage cases as of v2.16.0,
+  comment that costs CI time. 295 registered breakage cases (`--list` prints them),
   every one driven red individually before being kept.
 - **Documentation is under the same gates as code.** Every `file.py:LINE`
   citation in the docs is mechanically verified against the tree; every

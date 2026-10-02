@@ -3995,6 +3995,9 @@ def _dashboard_generates_a_swept_claude_md():
         "register E3, the exact leak the extraction pinned")
     assert "current_request" in text and "Goal: G" in text \
         and "1/1 done" in text, text[:200]
+    # v2.16.0: the retired column is not rendered, even when a legacy row
+    # still carries a value in it
+    assert "critical_context" not in text and "armed" not in text, text
     empty = DA._render_progress_plan(None, None)
     assert "no progress row yet" in empty and "no live plan" in empty
     checks += 2

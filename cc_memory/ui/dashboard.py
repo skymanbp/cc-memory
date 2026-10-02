@@ -1093,26 +1093,20 @@ Category Breakdown:
             for ln in plan_lines[1:20]:
                 out.append(f"                       {ln}")
 
-            crit = prog.get("critical_context") or []
-            out.append(f" 7. critical_context : {len(crit)}")
-            for m in crit[:10]:
-                if isinstance(m, dict):
-                    out.append(f"        #{m.get('id', '?')} [{_ni(str(m.get('category', '')))}] "
-                               f"{_ni(str(m.get('content') or ''))[:90]}")
-                else:
-                    out.append(f"        {_ni(str(m))[:90]}")
-
+            # `critical_context` (former field 7) is RETIRED since v2.16.0:
+            # nothing writes it and PROGRESS.md §5 reads the store, so a
+            # legacy value left in an old row is not shown here either.
             files = prog.get("files_touched") or []
-            out.append(f" 8. files_touched    : {len(files)}")
+            out.append(f" 7. files_touched    : {len(files)}")
             for f in files[:20]:
                 if isinstance(f, dict):
                     out.append(f"        {_ni(str(f.get('action', '?'))):<8} {_ni(str(f.get('path', '')))}")
                 else:
                     out.append(f"        {_ni(str(f))}")
 
-            out.append(f" 9. transcript_ptr   : {_ni(prog.get('transcript_ptr') or '(none)')}")
-            out.append(f"10. updated_at       : {prog.get('updated_at') or '-'}")
-            out.append(f"11. trigger_type     : {prog.get('trigger_type') or '-'}")
+            out.append(f" 8. transcript_ptr   : {_ni(prog.get('transcript_ptr') or '(none)')}")
+            out.append(f" 9. updated_at       : {prog.get('updated_at') or '-'}")
+            out.append(f"10. trigger_type     : {prog.get('trigger_type') or '-'}")
             out.append(f"    session tag      : "
                        f"{prog.get('current_session_id') or '(untagged)'}"
                        f"  started {prog.get('session_started_at') or '-'}")
