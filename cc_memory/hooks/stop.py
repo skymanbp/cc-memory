@@ -2,7 +2,7 @@
 """
 Stop hook — fires after each Claude response.
 
-Three jobs:
+Jobs:
   1. OBSERVER: extract memories from this turn's tool observations via Haiku.
      Saves through llm.memory_writer.upsert_batch (anti-patch). Since
      v2.16.0 the LLM call runs in a DETACHED worker (`stop.py --observe
@@ -14,8 +14,16 @@ Three jobs:
   3. PROGRESS.md PATCH: every turn, `files_touched` from the latest
      observations (`_patch_progress_from_recent_obs`) — that column only;
      `open_todos` belongs to PreCompact and the SessionStart refresh.
-A continuation Stop (`stop_hook_active`, v2.16.0) skips all three and only
-re-judges plan enforcement.
+  4. BACKPRESSURE PROBE (v2.12.0): `_maybe_kick_consolidation` spawns
+     `consolidate_async.py --cwd` DETACHED when
+     `core.consolidate.consolidation_backlog` says a run is due.
+  5. PLAN ENFORCEMENT (v2.11.0): on a live plan, bump the turn counter and
+     REFUSE the turn (`{"decision": "block"}`, the only stdout) when
+     `core.plan.blocking_reasons` returns conditions; once the escape budget
+     is spent the advisory is parked for the next UserPromptSubmit.
+A continuation Stop (`stop_hook_active`, v2.16.0) skips the observer, the idle
+reorg, the PROGRESS patch, the backpressure probe and the plan turn bump, and
+only re-judges plan enforcement.
 
 NOTE: The previous "save-memories reminder" text spam has been REMOVED.
 The forced <system-reminder> in SessionStart and the auto-saves above do
@@ -31,7 +39,7 @@ from pathlib import Path
 # Captured as early as possible: the reference instant for this hook's
 # wall-clock budget (see _LLM_DEADLINE_S below). Taken BEFORE the package
 # imports so their cost is charged against the budget instead of hidden from
-# it. Same idiom as hooks/session_start.py:31.
+# it. Same idiom as `hooks/session_start.py:_HOOK_T0`.
 _HOOK_T0 = time.monotonic()
 
 _HERE = Path(__file__).resolve().parent

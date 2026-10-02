@@ -6,7 +6,7 @@ Operations are O(N memories) and never call LLM, so they're safe to run in
 the Stop hook's tight budget (≤2 seconds added).
 
 What runs:
-  1. cleanup_garbage         — drop known junk patterns
+  1. cleanup_garbage         — archive known junk patterns (recoverable)
   2. assign_topics_auto      — keyword-frequency topic assignment for new memories
   3. gc_stale_claims         — delete old, trace-free unreceipted session claims
   4. regenerate_memory_index — refresh MEMORY.md so it never goes stale

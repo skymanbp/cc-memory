@@ -8,7 +8,7 @@ Code binary, same model, same working tree, same prompt.
 
   handoff   session A does real work with cc-memory on; then session B asks
             "what were we doing last time?" twice at the SAME path — once
-            with cc-memory (its memory/ present), once without (memory/
+            with cc-memory (its .ccm/ present), once without (.ccm/
             moved out of the tree, plugin off).
   guardian  a refined plan + one standing directive are seeded through the
             CLI; session C is asked to do the migration AND two things the
@@ -326,7 +326,7 @@ def mem(project: Path, *args, stdin=None) -> str:
 
 def init_memory(project: Path) -> None:
     """What the UserPromptSubmit hook does on a project's first message, so a
-    plan can be seeded BEFORE any session: memory/ + schema + project row."""
+    plan can be seeded BEFORE any session: .ccm/ + schema + project row."""
     sys.path.insert(0, str(REPO / "cc_memory"))
     # reason for the late imports: the package is only importable once the
     # repo-local path above is on sys.path; this script is stdlib otherwise.

@@ -20,7 +20,7 @@ import argparse, json, re, sqlite3, subprocess, sys, os
 # why: this module never references urllib - it is a PyInstaller anchor, not
 # dead code, and deleting it silently breaks the frozen dashboard. build_exe.py
 # ships core/ and llm/ as --add-data, which PyInstaller never analyses, so the
-# `import urllib.request` in llm/ccl_backend.py:25 is invisible to the build.
+# module-level `import urllib.request` in llm/ccl_backend.py is invisible to the build.
 # Measured on two probe builds of this file's exact import set: without this
 # line the Analysis TOC contains no urllib.request, urllib.error, http.client or
 # ssl; with it, all four are collected. Losing them kills Tidy Memories and LLM
@@ -922,8 +922,8 @@ class DashboardApp:
                 # metacharacter: `50%` also returned "500 units", `snake_case`
                 # also returned "snakeXcase", and a one-character `%` or `_`
                 # dumped every row in the project. core/db.py's `_like_escape`
-                # is THE implementation (search_fts pairs it with ESCAPE '\'
-                # at core/db.py:1216-1222, and CLI / MCP / web viewer all reach
+                # is THE implementation (`MemoryDB.search_fts` pairs it with
+                # ESCAPE '\', and CLI / MCP / web viewer all reach
                 # it through there) — a second copy here would be one more
                 # thing to keep in sync.
                 search_clause = "AND content LIKE ? ESCAPE '\\'"
@@ -1736,9 +1736,10 @@ Memories:
             msg = f"Add Memory: {result['action']} #{result.get('id')}"
             sim = result.get("similarity")
             # Only report a similarity that was actually COMPUTED. The writer
-            # returns `sim if similar else 0.0` (llm/memory_writer.py:157) and
-            # _find_similar only keeps a candidate on `s > best_sim`
-            # (:87-92), so a genuine comparison result is always > 0 — a 0.0
+            # returns `sim if similar is not None else 0.0`
+            # (core.db.MemoryDB.reconcile_upsert) and the pick built by
+            # llm.memory_writer._make_pick only keeps a candidate on
+            # `s > best_sim`, so a genuine comparison result is always > 0 — a 0.0
             # here means no comparison happened at all, and printing
             # "(sim=0.00)" invented a measurement that was never taken.
             if isinstance(sim, (int, float)) and not isinstance(sim, bool) and sim > 0:
@@ -2403,7 +2404,7 @@ def _scan_project_deep(project: Path) -> dict:
             # ValueError: json.loads on malformed JSON, and its UnicodeDecodeError
             # subclass on a non-UTF-8 file; RecursionError: json.loads on a
             # deeply nested document (a RuntimeError, not a ValueError — the
-            # same pair `_process_line` catches in mcp/server.py:792);
+            # same pair `mcp/server.py:_process_line` catches);
             # AttributeError: it parsed but is
             # not the assumed shape, so `.get` / `.keys()` hit a list or a str.
             # A manifest we cannot read costs a suggested memory; it must not

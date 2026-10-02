@@ -55,8 +55,8 @@ def _get_surface_root():
 BUNDLE_DIR = _get_bundle_root()
 
 # Prime sys.path HERE, at module scope, the way every other surface does
-# (`cli/mem.py:25`, `ui/dashboard.py:40`, `ui/web_viewer.py:59`,
-# `mcp/server.py:92`). This file was the only one that primed it inside a
+# (the module-level `sys.path.insert` in `cli/mem.py`, `ui/dashboard.py`,
+# `ui/web_viewer.py` and `mcp/server.py`). This file was the only one that primed it inside a
 # function — `_init_project` did it 34 lines AFTER its own opt-out and
 # anchoring guards, so on the first Initialize Project click of a process both
 # guards raised ModuleNotFoundError: the opt-out was swallowed by
@@ -176,8 +176,10 @@ _SETTINGS_FIX_HINT = ("Fix that file (or move it aside) and re-run the "
 _TEMP_MARKER_PREFIXES = ("cc_mem_turns_", "cc_mem_prompt_", "cc_mem_seeded_",
                          "cc_mem_eval_", "cc_mem_refine_", "cc_mem_block_",
                          "cc_mem_idle_", "cc_memory_reminded_")
-# Marker suffix = hooks/stop.py:_safe_id(session_id) -> a 16-char session id with
-# path separators replaced. Anything else in %TEMP% is not ours; leave it alone.
+# Marker suffix = core.markers.safe_id(session_id) -> the first 16 hex digits of
+# the sha256 of the WHOLE id (older installs wrote a truncated id with path
+# separators replaced; the pattern accepts both). Anything else in %TEMP% is
+# not ours; leave it alone.
 _TEMP_MARKER_SUFFIX_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 
 
@@ -236,8 +238,8 @@ except ImportError:
 # new version introduces are added.
 #
 # Two top-level keys are PAYLOAD-owned and are refreshed on every install:
-#   version : cli/mem.py:64-70 and mcp/server.py:133-139 read it as the
-#             LAST-RESORT version for a flat standalone install - exactly the
+#   version : `cli/mem.py:_resolve_version` and `mcp/server.py:_resolve_version`
+#             read it as the LAST-RESORT version for a flat standalone install - exactly the
 #             layout this installer writes. Preserving it would make /cc-mem
 #             report the version the user just upgraded away from.
 #   notes   : pure documentation (the readers table + removed_keys). A kept
@@ -1426,7 +1428,8 @@ def _init_project(project_path, log_fn=print):
     # - fusing the user's last rule with our first comment and DESTROYING that
     # rule (measured: `sessions/` gone, archived transcripts git-trackable
     # until the next hook self-healed it). The three-line read / normalise /
-    # write shape below is deliberately identical to core/progress.py:70-76 so
+    # write shape below is deliberately identical to
+# `core/progress.py:ensure_memory_gitignore` so
     # the two can be diffed by eye. skills/ccm-load/SKILL.md is copy #3 and
     # carries the same shape.
     gi = memory_dir / ".gitignore"

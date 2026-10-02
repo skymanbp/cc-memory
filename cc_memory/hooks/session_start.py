@@ -4,8 +4,9 @@ SessionStart hook — forced-handoff injection point.
 
 Fires on every new session (startup, resume, post-compaction). Three jobs:
 
-  1. INJECT layered context (topics, critical memories, recent timeline,
-     handoff summary, footer). The START REASON picks the shape (v2.16.0,
+  1. INJECT layered context (the directive ledger first, then topics,
+     critical memories, recent timeline, the PROGRESS digest, footer).
+     The START REASON picks the shape (v2.16.0,
      B4; `_injection_mode`): a fresh window gets every layer and the ack
      demand; a post-compaction window gets every layer and the reminder
      but no ack demand; a resumed or forked session — whose startup
@@ -1118,8 +1119,8 @@ def _refresh_progress_row(db, project_id, memory_dir, current_session_id=None,
     settled = progress_was_fully_written(cur)
 
     # ── Tier 2A: RETIRED (v2.16.0, B9) — `critical_context` has no reader ──────────────────────────────────
-    # PROGRESS.md §5 reads `get_critical_memories` when it renders (the
-    # v2.15.1 rule §4 already follows — INV-066), so a snapshot here was one more
+    # PROGRESS.md §5 reads `get_critical_memories` when it renders (INV-057;
+    # §4 already followed the v2.15.1 rule), so a snapshot here was one more
     # writer of a column nothing reads — and one more query per start.
 
     # ── Tier 2B: status + plan from latest session_summary ────────────────

@@ -75,7 +75,8 @@ def _called_names(tree):
     this, `from core.privacy import neutralize_inline as _ni` followed by
     `_ni(...)` is invisible from both ends — the import binds `_ni`, the call
     loads `_ni`, and the guard's real name appears nowhere in the AST. That
-    is not hypothetical: `ui/dashboard.py:1095` does exactly this, and it is
+    is not hypothetical: `ui/dashboard.py:DashboardApp._render_progress_plan`
+    does exactly this, and it is
     half of why the render-path registry under-counted the marker defence.
 
     Two shapes stay invisible by choice — `getattr(mod, "guard_name")`

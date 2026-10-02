@@ -5,9 +5,11 @@ PreCompact hook (SYNC leg).
 Triggered by Claude Code BEFORE context compaction. Two jobs — the fast,
 handoff-critical work that must complete before the next session:
 
-  1. Extract memories from the full transcript via Haiku LLM,
-     routing every save through llm.memory_writer.upsert_smart so
-     reconciliation (merge / supersede / insert) happens at write time.
+  1. Extract memories via Haiku from a BOUNDED transcript window
+     (core.extractor.load_transcript_window) plus the observations above
+     the observer cursor (`_observations_to_feed`), routing every save
+     through llm.memory_writer.upsert_batch so reconciliation (merge /
+     supersede / reinforce / insert) happens at write time.
 
   2. FULL-REWRITE .ccm/PROGRESS.md from the `progress` SQLite table.
      This is the handoff contract for the next session.
@@ -39,7 +41,7 @@ from pathlib import Path
 # Captured as early as possible: the reference instant for this hook's
 # wall-clock budget (see _LLM_DEADLINE_S below). Taken BEFORE the package
 # imports so their cost is charged against the budget instead of hidden from
-# it. Same idiom as hooks/session_start.py:31.
+# it. Same idiom as `hooks/session_start.py:_HOOK_T0`.
 _HOOK_T0 = time.monotonic()
 
 _HERE = Path(__file__).resolve().parent

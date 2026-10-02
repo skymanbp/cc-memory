@@ -301,7 +301,8 @@ that do not exist; `core/modes.py`'s docstring listed jobs it no longer has. Als
 write_atomic` like every other generated artifact.
 
 **The PROGRESS writers (D6).** The "Blocked:" line renders only when something is
-blocked; the Stop patch keeps the LAST TodoWrite snapshot only; and `next_steps` is
+blocked; the PreCompact rewrite keeps the LAST TodoWrite snapshot only (Stop patches
+`files_touched` alone); and `next_steps` is
 the PLAN (§4) and is never split on `;` into §3 — the RESUME PROTOCOL executes
 `todos[0]` of §3 without asking, and prose cut on semicolons was masquerading as a
 todo list. Falsify: `r16blockedline`, `r16todosplit`.
@@ -335,8 +336,9 @@ supports 2.16.x.
 #### Decisions recorded, on purpose
 
 - **No lazy loading.** Package import was about 60% of a hook's wall clock at the
-  Linux baseline; the user decided against it, and the installer's required-files
-  list is derived from the hooks' import graph, which lazy imports would hide.
+  Linux baseline; the user decided against it, and `cli/mem.py`'s
+  `_REQUIRED_PLUGIN_FILES` is gated against the hooks' module-level import graph,
+  which lazy imports would hide.
 - **The `lru_cache` the plan proposed on `read_config` / `marker_dir` is skipped**:
   measured at ≤ 2 config reads and ~4 `marker_dir` calls per hook, and a cache
   across a hook's lifetime risks serving a stale config to a long-lived surface

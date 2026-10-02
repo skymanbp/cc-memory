@@ -20,7 +20,7 @@ and is marked *ungated* on purpose.
 
 | Version | Recorded here as |
 |---|---|
-| v2.16.0 | INV-016, INV-017, INV-018, INV-019, INV-020, INV-028, INV-030, INV-038, INV-041, INV-042, INV-043, INV-044, INV-045, INV-049, INV-050, INV-052, INV-053, INV-054, INV-055, INV-056, INV-057, INV-058, INV-059, INV-060, INV-061, INV-062, INV-063, INV-065, INV-069, INV-081, INV-082, INV-088, INV-089, INV-094, INV-095, INV-096, INV-112, INV-121, INV-122 |
+| v2.16.0 | INV-001, INV-005, INV-010, INV-015, INV-016, INV-017, INV-018, INV-019, INV-020, INV-028, INV-030, INV-038, INV-041, INV-042, INV-043, INV-044, INV-045, INV-049, INV-050, INV-052, INV-053, INV-054, INV-055, INV-056, INV-057, INV-058, INV-059, INV-060, INV-061, INV-062, INV-063, INV-065, INV-069, INV-076, INV-081, INV-082, INV-088, INV-089, INV-094, INV-095, INV-096, INV-112, INV-121, INV-122 |
 | v2.15.2 | INV-086 |
 | v2.15.1 | INV-057, INV-066, INV-109 |
 | v2.15.0 | INV-013, INV-051, INV-055, INV-063, INV-067, INV-068, INV-074, INV-081, INV-082, INV-106, INV-116, INV-122 |
@@ -35,17 +35,17 @@ and is marked *ungated* on purpose.
 | v2.11.4 | INV-109, INV-115 |
 | v2.11.3 | INV-120 |
 | v2.11.2 | INV-084, INV-104 |
-| v2.11.1 | INV-028, INV-079, INV-080, INV-083, INV-090, INV-100, INV-105, INV-109, INV-116 |
+| v2.11.1 | INV-028, INV-051, INV-079, INV-080, INV-083, INV-090, INV-100, INV-105, INV-109, INV-116 |
 | v2.11.0 | INV-079, INV-083, INV-088 |
 | v2.10.1 | INV-098, INV-107, INV-108 |
 | v2.10.0 | INV-031 |
 | v2.9.0 | INV-006, INV-008, INV-011, INV-012, INV-015, INV-027, INV-031, INV-046, INV-047, INV-048, INV-101 |
-| v2.8.0 | INV-002, INV-003, INV-004, INV-005, INV-006, INV-027, INV-034, INV-035, INV-037, INV-047, INV-097, INV-099, INV-108, INV-112 |
+| v2.8.0 | INV-002, INV-003, INV-004, INV-005, INV-006, INV-013, INV-027, INV-034, INV-035, INV-037, INV-047, INV-097, INV-099, INV-108, INV-112 |
 | v2.6.0 | INV-026 |
-| v2.5.4 | INV-010, INV-098, INV-103, INV-111 |
+| v2.5.4 | INV-010, INV-098, INV-101, INV-103, INV-111 |
 | v2.5.3 | INV-010, INV-015, INV-033, INV-101 |
 | v2.5.2 | INV-011, INV-012, INV-032, INV-033, INV-051, INV-073, INV-075, INV-111 |
-| v2.5.0 | INV-013, INV-014, INV-032, INV-034, INV-045, INV-046, INV-047, INV-048, INV-063, INV-071, INV-074, INV-077, INV-097, INV-102, INV-105, INV-106 |
+| v2.5.0 | INV-014, INV-032, INV-034, INV-045, INV-046, INV-047, INV-048, INV-063, INV-071, INV-074, INV-077, INV-097, INV-102, INV-105, INV-106 |
 | v2.4.3 | INV-100 |
 | v2.4.2 | INV-035, INV-036, INV-038, INV-105 |
 | v2.4.0, v2.4.1 | INV-078 |
@@ -133,38 +133,45 @@ archiveatomic`. *Source:* v2.5.3 §1; v2.5.4 §3; v2.16.0 D5.
 **INV-011 · Generated artifacts are named uniquely.** Session archives carry
 millisecond stems AND an `O_CREAT|O_EXCL` claim of the exact path;
 `.plan_history/` likewise; `write_session_archive` derives `YYYY/MM` from the
-stem it is given, never from its own clock. *Gate:* `falsify --case r7arcname` /
-`r8arcorder`. *Source:* v2.5.2 §4; v2.9.0.
+stem it is given, never from its own clock; MEMORY.md ranks archives by that
+name, never by mtime. *Gate:* `tests/smoke_test.py`; `falsify --case r8arcorder`.
+*Source:* v2.5.2 §4; v2.9.0.
 
 **INV-012 · `MemoryDB._connect` is a context manager that CLOSES, and MEMORY.md's
 moved-under-us probe is `PRAGMA data_version` on a HELD connection.** *Why:* the
 retired fingerprint (row counts + `MAX(id)` + `MAX(updated_at)`) was blind to an
 in-place UPDATE inside one clock second. Do not "optimise" `_connect` back into a
 factory: the +340 % per-operation cost was measured and accepted. *Gate:*
-`tests/smoke_test.py` handle-count regression; `falsify --case r9dataver`.
-*Source:* v2.5.2 §5; v2.9.0 §3.
+`tests/smoke_test.py` handle-count regression; `falsify --case r9dataver` /
+`r7render`. *Source:* v2.5.2 §5; v2.9.0 §3.
 
 **INV-013 · `memories_fts` is built with the trigram tokenizer, chosen by a
 runtime PROBE, and an empty MATCH is never an answer.** `_retokenize_if_stale`
 self-heals an index built by an earlier version; `_match_fts` routes an empty
 FTS result to the LIKE fallback unconditionally. *Why:* unicode61 indexed a
 whole Chinese clause as ONE token, and `mcp/server.py:_is_failed_result` counts
-an empty result as SUCCESS. *Gate:* `tests/test_recall.py` §1-§2; `falsify --case
-r8ftsempty` / `r7ftsprobe`. *Source:* v2.15.0 §1.
+an empty result as SUCCESS. *Gate:* `tests/test_recall.py` §1-§2;
+`tests/smoke_test.py` (both cases run it); `falsify --case r8ftsempty` /
+`r7ftsprobe`. *Source:* v2.8.0 rounds 7-8 (the probe, the untrusted empty
+MATCH); v2.15.0 §1.
 
 **INV-014 · `_MAX_SEARCH_LIMIT` is clamped at both ends, `LIKE ? ESCAPE '\'`,
 and a bare `%` or `_` returns 0 rows.** SQLite reads `LIMIT -1` as no limit.
 *Gate:* `tests/test_recall.py` §2 (eleven hostile query shapes, none dumps the
-table); `falsify --case r5y5limit`. *Source:* v2.5.0 §4.
+table); `tests/smoke_test.py`; `falsify --case r5y5limit`. *Source:* v2.5.0 §4.
 
-**INV-015 · `project_id` is REQUIRED and keyword-only on every plan mutator,
-and every `/cc-mem` command that touches a table scopes it to the project.**
-`memories.id` and `plans.id` are global to the database FILE, which
-legitimately holds several projects. *Gate:* `tests/test_surfaces.py` §9 CLI
-scoping; `falsify --case r9cliscope` / `r9supscope` / `planid`. *Source:*
-v2.5.3 §2; v2.9.0 §4.
+**INV-015 · Every `/cc-mem` command that touches a table scopes it to the
+project.** `memories.id` is global to the database FILE, which legitimately
+holds several projects, so an id taken from the user or from a manifest is
+checked against the resolved `project_id` before it is read, printed or
+changed. The v2.0 plans queue whose mutators took `project_id` keyword-only was
+deleted in v2.16.0 D1 (`cli/plan.py`, the `cc-memory-plan` console script, the
+nine `MemoryDB` queue methods and the dashboard's Plans tab); the `plans` table
+stays with no reader, and it stays deleted. *Gate:* `tests/test_surfaces.py` §9
+CLI scoping; `tests/smoke_test.py` § v2.16.0 D1; `falsify --case r9cliscope` /
+`r9supscope` / `r16queuegone`. *Source:* v2.5.3 §2; v2.9.0 §4; v2.16.0 D1.
 
-**INV-016 · Rows are ordered by `id`, never by a timestamp string.**
+**INV-016 · Recency listings order by `id`, never by a timestamp string.**
 `get_recent_memories`, `list_sessions` (the ONE listing behind `/cc-mem
 sessions`, the dashboard's Sessions tab and `/api/sessions`) and the
 `get_recent_sessions` timeline all order on ids; `compacted_at` is a naive
@@ -251,8 +258,9 @@ and `/c` beside `C:\` and `/`; `_home_dirs` carries every spelling RESOLVED.
 A directory that already owns a `.ccm/memory.db` is never re-rooted, and a
 container of projects is never returned. `_is_container`'s NEGATIVE verdict is
 bounded by `_CONTAINER_SCAN_CAP`. *Gate:* `tests/test_surfaces.py` §7 (the
-ladder over a real filesystem); `falsify --case r14a1b` / `r14depcut` /
-`r14depdb` / `r12scancap` / `r5y1roots`. *Source:* v2.6.0; v2.12.2 §4;
+ladder over a real filesystem); `tests/smoke_test.py` (every case but
+`r12scancap` runs it); `falsify --case r14a1b` / `r14depcut` / `r14depdb` /
+`r12scancap` / `r5y1roots` / `r13home`. *Source:* v2.6.0; v2.12.2 §4;
 v2.14.0 §1 and §11.
 
 **INV-027 · Markers refuse links, hash the WHOLE session id, and never land
@@ -262,9 +270,11 @@ refuse a symlink through `os.lstat` (`O_NOFOLLOW` is 0 on Windows);
 `core.markers._is_link` is THE link probe, junctions included, for every
 fail-closed guard; `marker_dir()` returns None rather than a directory inside
 the cwd (`_is_cwd` is equality, not containment), and `marker_path` propagates
-the None into `read_marker` / `write_marker`, which refuse it. *Gate:*
-`tests/smoke_test.py` § markers; `falsify --case symlink` / `r7junc` /
-`r9junction` / `r14markercwd` / `r14markernone`. *Source:* v2.8.0 §7; v2.9.0
+the None into `read_marker` / `write_marker`, which refuse it; a marker
+directory is used only while `_dir_is_private` says this user alone can write
+it, re-checked on every read and write. *Gate:* `tests/smoke_test.py` § markers;
+`falsify --case symlink` / `r7junc` / `r9junction` / `r14markercwd` /
+`r14markernone` / `r7dirpriv`. *Source:* v2.8.0 §7; v2.9.0
 §7; v2.14.0 §20.
 
 **INV-028 · `core.markers.write_marker` never raises.** Its three failure paths
@@ -300,7 +310,8 @@ dropped the whole event) and routes cwd through `resolve_project`, which owns
 the order `is_excluded` on the RAW cwd THEN `project_root`. No hook imports
 `is_excluded` or `project_root` directly; field POLICIES stay per hook. Logging
 goes through `core.logger`. *Gate:* `tests/test_surfaces.py` §4 and §7;
-`falsify --case r10entryorder` / `r7stderr` / `r9bigstdin`. *Source:* v2.1.0;
+`tests/smoke_test.py` (`r7stderr`); `falsify --case r10entryorder` / `r7stderr`
+/ `r9bigstdin`. *Source:* v2.1.0;
 v2.9.0 §8; v2.10.0 §1.
 
 **INV-032 · `core.modes.is_excluded` is consulted by every surface that can open
@@ -314,8 +325,8 @@ call reaches, so no MCP handler opens a database path itself. *Gate:*
 `utf-8-sig`, and fails CLOSED but VISIBLE.** A file that exists and cannot be
 used excludes every project, and `config_fault()` reports why through one
 SessionStart line; a project the user genuinely LISTED stays completely
-silent; `_norm_path` cannot raise. *Gate:* `tests/test_surfaces.py` §5;
-`falsify --case r6failopen`. *Source:* v2.5.2 §3; v2.5.3 §3.
+silent; `_norm_path` cannot raise. *Gate:* `tests/test_surfaces.py` §5; no
+falsification case. *Source:* v2.5.2 §3; v2.5.3 §3.
 
 **INV-034 · Every LLM-calling hook passes an absolute `deadline`, and
 `call_llm`'s deadline is TRUE wall-clock.** Clamping the socket timeout bounds
@@ -349,7 +360,8 @@ PROGRESS.md rewrite or escape the observer. *Gate:*
 **INV-039 · Never call `Path.home()` bare on a hook path.**
 `core/auth._credentials_path` returns None when no home resolves, so an explicit
 `ANTHROPIC_API_KEY` is returned instead of discarded with the exception.
-*Gate:* `tests/smoke_test.py` § auth; `falsify --case r13authhome` / `r13home`.
+*Gate:* `tests/smoke_test.py` § auth; `falsify --case r13authhome` (the
+boundary set's resolved home spelling, `r13home`, is INV-026's).
 *Source:* v2.14.0 §8.
 
 **INV-040 · The CLI boundary catches the CLASS external input can raise and keys
@@ -399,8 +411,9 @@ every mode's `observe_tools` plus `PLAN_CONTROL_TOOLS`, `EDIT_TOOLS` and
 `SENSITIVE_TOOLS` (which the hook and `core.plan.is_sensitive_tool_call` read);
 `hooks/hooks.json` declares it and `ui/installer.py:HOOK_MATCHERS` carries it
 for the flat install. The plan legs run in EVERY mode, above `should_observe`.
-*Gate:* `tests/smoke_test.py` § A5; `falsify --case r16matcher` /
-`r16matcherfrozen` / `r8planhook`. *Source:* v2.5.0 §2; v2.16.0 A5.
+*Gate:* `tests/smoke_test.py` § A5; `tests/test_surfaces.py` §8
+(`r8planhook`); `falsify --case r16matcher` / `r16matcherfrozen` /
+`r8planhook`. *Source:* v2.5.0 §2; v2.16.0 A5.
 
 **INV-046 · MCP is correct on the wire and enforced at the schema.** UTF-8 + LF
 forced on both handles; exactly one frame per parsed id; `jsonrpc == "2.0"` or
@@ -416,20 +429,20 @@ header phase bounded by `_HEADER_DEADLINE_S`; `_MAX_CONCURRENT` admission with
 a drained 503. *Gate:* `tests/test_surfaces.py` §2 and §9; `falsify --case shed`
 / `r9hdrdead`. *Source:* v2.5.0 §5; v2.8.0; v2.9.0 §9.
 
-**INV-048 · Every hook's stdin is read to EOF, and the PostToolUse `is_private`
-classification runs on the RAW input.** `_truncate_output` turns a Read body
-into `"(file content)"`, so classifying after it shipped a private path to the
-API. *Gate:* `falsify --case r9bigstdin` / `r7dirpriv`. *Source:* v2.5.0 §3;
-v2.9.0 §8.
+**INV-048 · Kept as a pointer: stdin read to EOF is INV-031, the raw-input
+`is_private` classification is INV-074.** The number is kept because older
+records cite it; the gates and cases live with those two entries. *Source:*
+v2.5.0 §3; v2.9.0 §8.
 
 **INV-049 · Stop's stdout is EMPTY on a turn that may close, and PreCompact's
 always is.** Claude Code shows only SessionStart and UserPromptSubmit stdout to
 the model, so a status line printed anywhere else goes to the log; a refusal
 writes the `{"decision": "block"}` document and nothing else, and the advisory a
 spent escape budget degrades to is PARKED on the block marker for the next
-UserPromptSubmit, which is a channel the model reads. *Gate:*
-`tests/test_directive_enforcement.py` §9(b); `tests/test_surfaces.py`;
-`falsify --case r16advisorychannel` / `r7stdout`. *Source:* v2.16.0 D8.
+UserPromptSubmit, which is a channel the model reads (the marker itself is
+INV-089). *Gate:* `tests/test_directive_enforcement.py` §9(b);
+`tests/test_surfaces.py`; `tests/smoke_test.py` (`r7stdout`); `falsify --case
+r16advisorychannel` / `r7stdout`. *Source:* v2.16.0 D8.
 
 **INV-050 · Extraction has ONE prompt builder and ONE normaliser.**
 `llm.parse.build_extraction_prompt(kind, body, mode_suffix=)` and
@@ -445,12 +458,14 @@ reads.** `core.privacy.neutralize_markers` (escape, never delete) runs on the
 write path via `clean_for_storage` AND again on every render path —
 `neutralize_inline` for one-line slots, `neutralize_block` for slots whose
 newlines are structure; `python tools/contracts.py` lists the render paths.
-The refusal's `[key]` / `what` / `fix` slots and the parked advisory are inline
-slots; `cc-memory-recall` is registered in `_MARKER_TAG_RE` with every other
+The refusal's `[key]` / `what` / `fix` slots (INV-090) and the parked advisory
+are inline slots, and so is a session archive's filename in MEMORY.md;
+`cc-memory-recall` is registered in `_MARKER_TAG_RE` with every other
 frame the plugin emits. *Why:* a memory row forged a complete
 `<system-reminder>` block, and `memory_add` is model-invokable. *Gate:*
 `tests/smoke_test.py` forgery resistance; `tests/test_recall.py` §3e;
-`falsify --case r7render` / `r14advisoryslug` / `r14blockinline` /
+`tests/test_directive_enforcement.py` (`r14advisoryslug`, `r14blockinline`);
+`falsify --case r7arcname` / `r14advisoryslug` / `r14blockinline` /
 `r15recallframe`. *Source:* v2.5.2 §1; v2.11.1 §2; v2.14.0 §14; v2.15.0 §4.
 
 **INV-052 · The directive ledger is the FIRST layer of the SessionStart
@@ -483,7 +498,7 @@ block; `demand_ack=False` keeps the RESUME PROTOCOL and drops the ack sentence.
 `ack_present` the one detector; the measurement is tri-state and `unmeasured`
 is never printed as `no`. *Gate:* `tests/smoke_test.py` § B3 and § ack;
 `falsify --case r16memoryread` / `r15ackspell` / `r15acktemplate` /
-`r15acktristate`. *Source:* v2.15.0 §3; v2.16.0 B3.
+`r15acktristate` / `r15acktoolarg`. *Source:* v2.15.0 §3; v2.16.0 B3.
 
 **INV-056 · The injection is shaped by `source`.** `_injection_mode`: `startup`
 and `clear` build the full layered context; `resume` and `fork` restate the
@@ -509,7 +524,7 @@ already rendered — recorded, NOT fed to recall); `build_context` hands
 layer carries; `user_prompt._already_shown` reads `shown_ids` and skips a
 manifest whose `session_id` belongs to another session. *Gate:*
 `tests/smoke_test.py` § B2; `tests/test_recall.py` §3i-§3j; `falsify --case
-r16seenset` / `r16recallscope`. *Source:* v2.16.0 B2.
+r16seenset` / `r16recallscope` / `r15recalldedup`. *Source:* v2.16.0 B2.
 
 **INV-059 · A topic's fallback summary is one line and does NOT cover its
 critical rows.** `_summarize_topic_fallback` emits `FALLBACK_SUMMARY_PREFIX` and
@@ -557,13 +572,14 @@ marker, never by the prompt marker being empty. *Gate:*
 **INV-065 · A todo list is the LAST TodoWrite snapshot, and a plan is not a
 todo list.** PreCompact stores the latest snapshot only, with no fall-back to
 extracted todos; SessionStart never splits `next_steps` into open todos, because
-the RESUME PROTOCOL executes `todos[0]`. *Gate:* `tests/smoke_test.py` § D2-D7.
-*Source:* v2.16.0 D6.
+the RESUME PROTOCOL executes `todos[0]`. *Gate:* `tests/smoke_test.py` § D2-D7;
+`falsify --case r16todosplit`. *Source:* v2.16.0 D6.
 
 **INV-066 · A generated document reads the STORE, not the column the store
-replaced.** `core/progress.py:_render_plan_section` renders §4 from
-`get_plan_active`; a free-text column with no writer is not a source. *Gate:*
-`tests/test_plan_carryover.py` §8. *Source:* v2.15.1 §1.
+replaced.** The general form of INV-057, which carries the PROGRESS.md
+instances (§4 through `core/progress.py:_render_plan_section` from
+`get_plan_active`, §5 from the memories store) and their gates; a free-text
+column with no writer is not a source. *Gate:* see INV-057. *Source:* v2.15.1 §1.
 
 **INV-067 · Query-time recall is CONSERVATIVE and emits ZERO BYTES when nothing
 clears the bar.** `core/recall.py` retrieves with FTS5 BM25 plus the CJK-aware
@@ -594,7 +610,7 @@ ids reached the model.** The manifest records `directive_slugs`, `progress_layer
 **INV-070 · A gate that only runs on clean machines measures clean machines.**
 `tests/test_surfaces.py` §7 counts `_is_container`'s probes rather than timing
 them, because the reporting machine's temp directory holds thousands of
-subdirectories and CI's runners hold none. *Source:* v2.12.2 §4.
+subdirectories and CI's runners hold none. *Ungated.* *Source:* v2.12.2 §4.
 
 ## 4. Privacy
 
@@ -602,7 +618,7 @@ subdirectories and CI's runners hold none. *Source:* v2.12.2 §4.
 left-to-right scan (`_strip_spans`) with no cap; a dangling open tag drops the
 remainder. *Why:* the regex-plus-cap version returned the text UNCHANGED past
 100 tags, into the API call and the table. *Gate:* `tests/smoke_test.py`
-privacy block; `falsify --case r6quadratic`. *Source:* v2.5.0 §3.
+privacy block; `falsify --case r6quadratic` / `r6failopen`. *Source:* v2.5.0 §3.
 
 **INV-072 · Span tags match case-insensitively, through `privacy._token_re`.**
 `has_private` (the `is_private` classifier) uses the same regex; never test for
@@ -614,20 +630,26 @@ a tag with `in` or `str.find`. *Gate:* `falsify --case r13privatecase`.
 `hooks/pre_compact.py:_first_user_request` clean before they cut, so a span
 straddling the cut stays a matched pair. PROGRESS.md is not in the state
 directory's `.gitignore`, so a leak there is a leak into the repository.
-*Gate:* `tests/smoke_test.py`; `falsify --case r9emptypr`. *Source:* v2.5.2 §6.
+*Gate:* `tests/smoke_test.py`; `tests/test_surfaces.py` (`r9emptypr`);
+`falsify --case r9emptypr`. *Source:* v2.5.2 §6.
 
 **INV-074 · `is_private` is classified on the raw tool input and response, and
 a private row never reaches an Anthropic request.** The judge and the observer
-run `strip_private` on what they send. *Gate:* `falsify --case r7dirpriv`.
-*Source:* v2.5.0 §3; v2.15.0 §3.
+run `strip_private` on what they send. `_truncate_output` turns a Read body
+into `"(file content)"`, so classifying after it shipped a private path to the
+API. *Gate:* `tests/smoke_test.py` § v2.5.0 PostToolUse (classified on the RAW
+response); no falsification case. *Source:* v2.5.0 §3; v2.15.0 §3.
 
 **INV-075 · `core/consolidate.py`'s `^</?(ide_opened_file|system-reminder|antml)`
 pattern is garbage cleanup, NOT the marker defence.** It is anchored at position
-0 and one leading word evades it; INV-051 is the defence. *Source:* v2.5.2 §1.
+0 and one leading word evades it; INV-051 is the defence. *Ungated.* *Source:*
+v2.5.2 §1.
 
 **INV-076 · No token or app password is ever hard-coded, written to a file or
 printed.** `core.auth` reads credentials at call time; the backoff record holds
 timestamps only. *Ungated by design* (a gate would have to spell the secret).
+*Source:* v2.16.0 E1 (first written down with this file; no earlier entry
+records it).
 
 ## 5. Plan and directives
 
@@ -638,15 +660,16 @@ every mode's `skip_tools` and `ExitPlanMode` in no mode's `observe_tools`, so
 moving the block below the gate kills the anchor through its own hook. A raw
 plan awaiting refinement leads PLAN.md and `plan-status` with a PENDING
 REFINEMENT banner (`core.plan.raw_pending_refinement`). *Gate:*
-`tests/test_surfaces.py` §8 drives the hook in every mode; `falsify --case
-r8planhook` / `r6rawguard`. *Source:* v2.2.0; v2.5.0 §2.
+`tests/test_surfaces.py` §8 drives the hook in every mode; `tests/smoke_test.py`
+(`r6rawguard`); `falsify --case r8planhook` / `r6rawguard`. *Source:* v2.2.0; v2.5.0 §2.
 
 **INV-078 · The carryover gate has no force flag.** Replacing `plan_active`
 requires each unfinished step to be auto-carried (trigram-Jaccard at or above
 0.5, bare titles included) or explicitly dispositioned; `plan-clear` refuses
 without `--reason`; every outgoing plan is archived by `archive_plan` to
-`.ccm/.plan_history/`. *Gate:* `tests/test_plan_carryover.py`; `falsify --case
-dispreuse` / `donebar`. *Source:* v2.4.0; v2.4.1.
+`.ccm/.plan_history/`. *Gate:* `tests/test_plan_carryover.py`;
+`tests/smoke_test.py` (both cases run it); `falsify --case dispreuse` /
+`donebar`. *Source:* v2.4.0; v2.4.1.
 
 **INV-079 · Stop enforcement refuses with a guaranteed escape.**
 `core.plan.blocking_reasons` returns the conditions; `stop._emit_block` writes
@@ -708,24 +731,31 @@ three digits on BOTH sides, so `#437832` is an issue number, not step 437.
 
 **INV-087 · `plan-set --from-refiner` judges the plan it WROTE.** The carryover
 gate reads the normalised `result`, not the raw payload; `goal` and `context`
-are TEXT by one rule in `normalize_structured`. *Gate:* `falsify --case
-r14criteriacore` / `r14criteriaraw` / `r14goalrepr`. *Source:* v2.14.0 §18.
+are TEXT by one rule in `normalize_structured`, and a step id it cannot read
+falls back to the enumeration index instead of raising. *Gate:*
+`tests/test_surfaces.py` (the three `r14` cases); `tests/smoke_test.py`
+(`planid`); `falsify --case r14criteriacore` / `r14criteriaraw` / `r14goalrepr`
+/ `planid`. *Source:* v2.14.0 §18.
 
 **INV-088 · A sensitive Bash call bumps the drift counter by 20, and the next
 Stop REFUSES the turn.** `core.plan.is_sensitive_tool_call` reads
 `SENSITIVE_TOOLS`; nothing in the tree still says "flags". *Gate:*
-`tests/test_surfaces.py` §8; `falsify --case sensitive`. *Source:* v2.2.0;
+`tests/test_surfaces.py` §8; `tests/smoke_test.py` (`sensitive`); `falsify
+--case sensitive`. *Source:* v2.2.0;
 v2.11.0; v2.16.0 D5.
 
 **INV-089 · Hooks never spawn subagents; the parked advisory rides
 `core.plan.BLOCK_MARKER_PREFIX`.** `stop._note_advisory` writes one spelling;
-UserPromptSubmit prints it neutralised and clears it. *Gate:*
-`tests/test_directive_enforcement.py` §9. *Source:* v2.2.0; v2.16.0 D8.
+UserPromptSubmit prints it neutralised and clears it. INV-049 owns the channel
+rule (why the advisory is parked rather than printed by Stop). *Gate:*
+`tests/test_directive_enforcement.py` §9; `falsify --case r16advisorychannel`.
+*Source:* v2.2.0; v2.16.0 D8.
 
-**INV-090 · Every refusal slot is a render path.** `render_block_reason` runs
-`neutralize_inline` on `[key]`, `what` and `fix`; a stored directive slug reached
-the model as a live authority marker before this. See INV-051. *Source:*
-v2.11.1 §2; v2.14.0 §14.
+**INV-090 · Every refusal slot is a render path — the refusal's share of
+INV-051.** `render_block_reason` runs `neutralize_inline` on `[key]`, `what` and
+`fix`; a stored directive slug reached the model as a live authority marker
+before this. *Gate:* `tests/test_directive_enforcement.py`; `falsify --case
+r11blockmarker` / `r14blockinline`. *Source:* v2.11.1 §2; v2.14.0 §14.
 
 ## 6. Consolidation and the workers
 
@@ -745,7 +775,9 @@ canonical-path fallback for unstamped markers. *Gate:* `tests/smoke_test.py`
 **INV-092 · The budget cost model is honest.** `_worst_call_cost` is
 `2*haiku + fallback`; `consolidate_topics` is budget-gated; `BudgetGate`
 guarantees the run finishes by `total_s - safety_s`, inside the async timeout,
-so a worker is never killed mid-write. *Source:* v2.3.2; v2.3.4.
+so a worker is never killed mid-write. *Gate:* `tests/smoke_test.py` § v2.3.2
+(`_worst_call_cost`, the budget-gated `consolidate_topics`, `BudgetGate`); no
+falsification case. *Source:* v2.3.2; v2.3.4.
 
 **INV-093 · `deep_dedup` converges because judged groups are REMEMBERED.**
 `skip_signatures` records a group even when the judge errors; nomination
@@ -777,14 +809,17 @@ v2.16.0 C3.
 is genuinely read-only, and the dashboard's console names any non-`SELECT`
 statement before running it.** `core.db._readonly_uri` is a pure function
 asserted for the POSIX, drive and UNC path shapes on EVERY platform. *Gate:*
-`tests/test_surfaces.py` §8; `falsify --case r12posixuri` / `r14sqlrows`.
+`tests/test_surfaces.py` §8 (`r14sqlrows`); `tests/smoke_test.py`
+(`r12posixuri`); `falsify --case r12posixuri` / `r14sqlrows`.
 *Source:* v2.5.0; v2.8.0 §10; v2.12.1 §3.
 
 **INV-098 · Every gate copy and every test sandbox is a `tempfile` directory
 that is torn down in a `finally`, on the failure path too.** All suites
 redirect `USERPROFILE`/`HOME` and `TMPDIR`/`TEMP`/`TMP` before importing the
 package and assert `Path.home()` moved; every subprocess capture passes
-`encoding="utf-8"`. *Source:* v2.5.4; v2.10.1; v2.14.1.
+`encoding="utf-8"`. *Gate:* each suite's own `Path.home()` assertion;
+`tests/test_plan_carryover.py`; `falsify --case r9gateleak`. *Source:* v2.5.4;
+v2.10.1; v2.14.1.
 
 **INV-099 · The extractor and the consolidator are plugin-agnostic.** No
 project-specific vocabulary in `core/extractor.py` or `core/consolidate.py`.
@@ -796,8 +831,9 @@ project-specific vocabulary in `core/extractor.py` or `core/consolidate.py`.
 form.** The standalone installer lays the package FLAT under
 `~/.claude/hooks/cc-memory/` with no `cc_memory/` segment; `cli/mem.py`'s
 `_REQUIRED_PLUGIN_FILES` is DERIVED from the hooks' module-level import graph.
-*Gate:* `tests/test_surfaces.py` §3 manifest parity; `falsify --case r11entryreq`
-/ `r11flattree`. *Source:* v2.4.3 §3; v2.11.1.
+*Gate:* `tests/test_surfaces.py` §3 manifest parity; `tests/smoke_test.py`
+§ required plugin files and the flat-install diagram (both cases run it);
+`falsify --case r11entryreq` / `r11flattree`. *Source:* v2.4.3 §3; v2.11.1.
 
 **INV-101 · The `settings.json` write is a compare-and-swap, verified BEFORE and
 AFTER the rename, judged per ENTRY on both paths, and follows a symlink.**
@@ -811,7 +847,8 @@ v2.5.3 §4-§5; v2.5.4 §2; v2.9.0 §5-§6; v2.14.0 §19.
 
 **INV-102 · The frozen installer never runs a `.py` through `sys.executable`,
 and a manifest value is rendered at its sink.** `_python_for_script` hands
-scripts to the interpreter the hooks use; `_manifest_slot` bounds, flattens and
+scripts to the interpreter the hooks use; `ui/dashboard.py:_manifest_slot`
+bounds, flattens and
 escapes every value the CLAUDE.md generator interpolates; `_read_settings`
 validates before anything is copied and preserves malformed hook groups
 verbatim. *Gate:* `tests/test_surfaces.py` §3 asserts nothing else reads
@@ -825,8 +862,9 @@ verbatim. *Gate:* `tests/test_surfaces.py` §3 asserts nothing else reads
 an unknown flag, and attaches the exes to the Release with the CHANGELOG
 section as body (`scripts/release_notes.py`, which fails loud without a `###`
 headline). A pwsh step that expects a NON-ZERO native exit reads it through
-`Start-Process`. A moved tag is a rewritten history. *Source:* v2.5.4 §4;
-v2.12.0; v2.12.1 §1.
+`Start-Process`. A moved tag is a rewritten history. *Gate:*
+`.github/workflows/release.yml` itself (a failed step publishes nothing); no
+local gate or falsification case. *Source:* v2.5.4 §4; v2.12.0; v2.12.1 §1.
 
 **INV-104 · A platform-dependent expectation is asserted per platform, never
 skipped, and Linux runs EVERY gate.** *Gate:* `.github/workflows/gates.yml`
@@ -838,19 +876,27 @@ copies (`core.progress.ensure_memory_gitignore`, the installer, `ccm-load`)
 kept in parity; the repository's own `.gitignore` re-includes `.ccm/` under
 its `.*/` blanket and `.github/` stays tracked; `SURFACE_FILES` are recorded in
 `installed_surfaces.json` and removed BY NAME. *Gate:* `tests/smoke_test.py`
-§ gitignore; `falsify --case gitignore` / `r11gitignore`. *Source:* v2.4.2 §5;
+§ gitignore; `tests/test_surfaces.py` (`gitignore`); `falsify --case gitignore`
+/ `r11gitignore`. *Source:* v2.4.2 §5;
 v2.5.0 §6; v2.11.1.
 
-**INV-106 · The `~/.claude/projects` slug convention has one implementation.**
+**INV-106 · The `~/.claude/projects` slug convention has one implementation —
+INV-063's ladder, seen from the convention's side.**
 `core.extractor.mangle_project_path` replaces every character outside
 `[A-Za-z0-9]`; `find_transcript_dir` is the ladder with the `Path.home()` guard.
-See INV-063. *Source:* v2.5.0 §1; v2.15.0.
+*Gate:* `tests/smoke_test.py` § A2; `falsify --case r15ladder`. *Source:*
+v2.5.0 §1; v2.15.0.
 
-**INV-107 · The dashboard's logic cores are PURE staticmethods.**
-`DashboardApp._render_progress_plan` and `_normalize_tidy_verdict` take plain
-data and return plain data; the Tk callbacks keep widget plumbing only, which
-is what makes their zero coverage tolerable. *Gate:* `tests/test_surfaces.py`
-§8; `falsify --case r10dashrender`. *Source:* v2.10.1 §1.
+**INV-107 · A surface's logic core is PURE: plain data in, plain data out.**
+The dashboard's `DashboardApp._render_progress_plan` and
+`_normalize_tidy_verdict` are staticmethods; `core/recall.py` (`build_query`,
+`select_recalls`, `render_recall_block`) and `llm/usage_judge.py`
+(`build_judge_input`, `parse_verdicts`, and `judge_usage`, which takes the LLM
+entry point as its `call=` argument) follow the same rule. The Tk callbacks and
+the hooks keep plumbing only, which is what makes their thin coverage
+tolerable. *Gate:* `tests/test_surfaces.py` §8; `tests/test_recall.py`;
+`tests/smoke_test.py` § judge; `falsify --case r10dashrender`. *Source:*
+v2.10.1 §1.
 
 **INV-108 · `tools/contracts.py` counts the BACKSTOP creators and fails LOUD
 when its proxy goes hollow.** `_BACKSTOP_CREATORS` is verified against each
@@ -872,14 +918,16 @@ v2.11.4; v2.15.1 §2.
 **INV-110 · `tools/falsify_fixes.py --anchors` is a CI step OUTSIDE the runner
 and is run before tagging; a repaired anchor is re-driven RED.** A green gate run
 is not the evidence CI produces; an anchor edited until it merely matches proves
-nothing. *Source:* v2.13.1.
+nothing. *Gate:* `.github/workflows/gates.yml` job `falsify-anchors`. *Source:*
+v2.13.1.
 
 **INV-111 · No `file:line` citation may be UNCHECKED, and quoted evidence is
 never repaired.** `tools/citation_check.py` anchors on a symbol where it can and
 bounds-checks where it cannot, saying "NOT verified against a symbol" in those
 words; `TRACKED` is the list of files it scans; a `<!-- verbatim: <capture> -->`
 region is verified IN ORDER against its capture and never scanned or fixed.
-*Gate:* `tests/smoke_test.py` § citations; `falsify --case r12verbatim` /
+*Gate:* `tests/smoke_test.py` § citations; `tools/citation_check.py`
+(`r12verbatim`, `r12verbatimskip`); `falsify --case r12verbatim` /
 `r12verbatimskip` / `r14verbatimorder` / `r14dotdirs`. *Source:* v2.5.2 §7;
 v2.5.4 §1; v2.12.2 §2; v2.14.0 §9 and §20.
 
@@ -891,19 +939,21 @@ with `:asof`; a history heading (`Previously`, `What's new`, `What changed`,
 must-be-bound requirement, not the verification; fenced blocks are literal.
 `tools/doc_claims.py` scans the tracked markdown, `cc_memory/config.json` and
 the docstrings and comment runs of the shipped package. *Gate:*
-`tests/smoke_test.py` § doc claims; `falsify --case claimword` / `claimof` /
+`tests/smoke_test.py` § doc claims; `tests/test_surfaces.py` (`claimword`,
+`claimof`); `tools/doc_claims.py` (`r8claimpy`, `r8claimjson`); `falsify --case
+claimword` / `claimof` /
 `r13claimsgap` / `r8claimpy` / `r8claimjson`. *Source:* v2.8.0; v2.14.0 §9;
 v2.16.0 E5.
 
 **INV-113 · The demo is evidence, not a mockup.** `demo/run_demo.py` is the
 protocol as code; the committed captures are what the README text was written
 against, and a README quote is copied from them inside a verbatim region.
-*Source:* v2.12.2 §2.
+*Ungated.* *Source:* v2.12.2 §2.
 
 **INV-114 · `CHANGELOG.md` is never swept to a new name, and a dated measurement
 keeps its number.** Entries describe the tree as it was; documents that describe
 CURRENT behaviour are swept. State the SET where a fresh number would rot the
-same way the last one did. *Source:* v2.13.0; v2.14.1 §1.
+same way the last one did. *Ungated.* *Source:* v2.13.0; v2.14.1 §1.
 
 **INV-115 · A gate's condition must be SUFFICIENT for the sentence it
 certifies.** `tools/doc_coverage.py` requires NAMING (a code span or a quoted
@@ -911,38 +961,39 @@ JSON key) of every schema table, `ALTER`-added column, MCP tool and config key
 by its owning document in both languages; `tools/i18n_check.py --emit-marker`
 refuses to re-stamp an untranslated sibling (`--translation-unchanged "<why>"`
 for an English-only change). *Gate:* `tests/smoke_test.py` § gate checkers;
-`falsify --case r13i18nrestamp` / `r13coveragename` / `r13coverageenum` /
+`tools/doc_coverage.py` (`r11doccoverage`); `falsify --case r13i18nrestamp` / `r13coveragename` / `r13coverageenum` /
 `r13coveragetools` / `r11doccoverage`. *Source:* v2.11.4; v2.14.0 §9.
 
 **INV-116 · A ZERO-BYTES assertion is evidence only when paired with a control
 that EMITS, and a falsification case that runs GREEN indicts the check.** Each
 input-side gate of the recall channel is a PAIR in a project of its own;
 `--case <id>` is driven RED before a case is kept; a red untouched copy reports
-UNSOUND. *Source:* v2.11.1; v2.14.0 §20; v2.15.0 §3.
+UNSOUND. *Gate:* `tests/test_recall.py` §3 (the pairs); `falsify --case
+r14baseline` (INV-029). *Source:* v2.11.1; v2.14.0 §20; v2.15.0 §3.
 
 **INV-117 · An unbound sentence rots silently; a matrix stated as a product
 invents lanes; a symbol quoted from a previous shape survives the citation
 gate.** Name the lanes the workflow declares, re-anchor prose to the symbol, and
 keep `SECURITY.md`'s supported-versions table at the current minor.
-*Source:* v2.14.1.
+*Ungated.* *Source:* v2.14.1.
 
 **INV-118 · A rename sweep covers the strings the user or the model READS, and
 a file is never rewritten with `splitlines()` + `"\n".join()`.** Grep `help=`,
 `print(`, and every list a renderer joins; pass `newline=""` when writing.
-*Source:* v2.13.2.
+*Ungated.* *Source:* v2.13.2.
 
 **INV-119 · A test that spells the same literal as the code cannot catch the
 code.** Assertions about a rendered path take the name from the fixture.
-*Source:* v2.13.2 §2.
+*Ungated.* *Source:* v2.13.2 §2.
 
 **INV-120 · A new invariant goes into the specification, not only into the
 CHANGELOG.** `docs/CONTRACTS.md` for a contract, this file for a rule; the
 person about to break it reads the specification. Known limit: no gate detects
-an undocumented design. *Source:* v2.11.3.
+an undocumented design. *Ungated.* *Source:* v2.11.3.
 
 **INV-121 · `CLAUDE.md` is an operating manual, bounded at 45 KB.** Version
 narratives live in `CHANGELOG.md`, rules live here. *Gate:* `tests/smoke_test.py`
-§ manual size. *Source:* v2.16.0 E1 and E5.
+§ manual size; `falsify --case r16manualsize`. *Source:* v2.16.0 E1 and E5.
 
 **INV-122 · Comments and code agree.** A comment that names a function names
 one that exists; "flags" is not "refuses"; a stage count is the count in the
