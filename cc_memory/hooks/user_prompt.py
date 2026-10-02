@@ -2,10 +2,16 @@
 """
 UserPromptSubmit hook — fires on every user message.
 
-Three jobs:
-  1. Auto-initialize memory/ + DB on first contact (zero-config UX).
+Jobs:
+  1. Auto-initialize `.ccm/` + DB on first contact (zero-config UX), migrating
+     a pre-v2.13.0 `memory/` directory once it is positively identified.
   2. Track turn count per session (temp file used by Stop hook).
   3. Save user prompt text so the Stop observer has "what the user wants" context.
+  4. Query-time recall (`core.recall`): when the prompt reads as a question,
+     print a small block of stored memories that clear the relevance floor —
+     zero bytes otherwise.
+  5. Print, once, the plan advisory a Stop parked on the block marker when its
+     escape budget was spent, then clear it.
 
 On the session's FIRST NON-SCAFFOLDING user message it also seeds
 `progress.current_request`, so PROGRESS.md captures the goal right away

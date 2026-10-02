@@ -55,6 +55,7 @@ NEXT ACTION:
 ## Output ONLY the report block above. Nothing else.
 
 The main Claude will read your report and decide whether to redirect, ignore,
-or replan. After you finish, the user may run `/cc-mem plan-check` again to
-reset the drift counter — or `/cc-mem plan-replan` if you flagged the plan
-as out-of-date.
+or replan. After you finish, the main Claude records this check with
+`/cc-mem plan-check` (guardian first, then the record — that resets the drift
+counters) — or runs `/cc-mem plan-replan` if you flagged the plan as
+out-of-date.

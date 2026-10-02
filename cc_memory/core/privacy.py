@@ -58,7 +58,7 @@ plus U+202E RTL override, zero-width joiners, NUL and ANSI ESC bytes verbatim.
 README, fetched page, dependency source) persists into `memory.db` and is
 re-injected as authoritative context at EVERY future SessionStart — and written
 into PROGRESS.md, which the plugin's own forced reminder ORDERS the next Claude
-to Read first. `core/consolidate.py:141` half-knew this, but only as a garbage
+to Read first. `core/consolidate.py:_GARBAGE_PATTERNS` half-knew this, but only as a garbage
 heuristic anchored at position 0 and only during consolidation; one leading word
 bypasses it.
 
@@ -116,7 +116,8 @@ _MARKER_TAG_RE = re.compile(
     re.IGNORECASE,
 )
 
-# The plugin's own injection banners (hooks/session_start.py:323 and :236).
+# The plugin's own injection banners (`hooks/session_start.py:_BANNER_HEAD` and
+# `_BANNER_TAIL`).
 _BANNER_RE = re.compile(
     r"={3,64}[ \t]*(?:END[ \t]+CC-MEMORY|CC-MEMORY)\b[^\n=]*={3,64}",
     re.IGNORECASE,

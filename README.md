@@ -290,8 +290,10 @@ boundary: per turn (a Haiku observer reads that turn's tool observations),
 at compaction (a bounded transcript window, head + tail, so a 2 GiB transcript
 cannot kill the hook), and retroactively at session start for transcripts no
 compaction ever processed. AI-judged `{category, content, importance, topic}`
-records, with a project-neutral regex fallback when no credential is
-available. English and Chinese are both first-class.
+records. Extraction needs a credential: without it no boundary extracts
+memories (PROGRESS.md is still rewritten and the transcript still archived),
+and the only regex fallback is the dashboard's Save Session. English and Chinese are
+both first-class.
 
 **Capability 2 — reconcile-on-write (the anti-patch contract).** Every save
 path routes through one writer that decides **SKIP** (exact duplicate that
@@ -323,9 +325,11 @@ a turn while a plan sits unrefined or a directive sits idle — with a
 guaranteed escape budget, because an unbreakable block is worse than no block.
 
 **Capability 5 — retrieval and injection.** FTS5 full-text search, topic
-summaries, a keyword vocabulary, and a layered SessionStart injection (topics
-+ critical memories + recent timeline + a PROGRESS digest, §1–§4 of the row
-rather than the whole file since v2.16.0) under per-layer budgets. `.last_inject.json` records exactly what was injected, so the
+summaries, a keyword vocabulary, and a layered SessionStart injection (the
+directive ledger first, then topics + critical memories + recent timeline + a
+PROGRESS digest, §1–§4 of the row rather than the whole file since v2.16.0)
+under per-layer budgets, shaped by why the session started (a resumed or
+forked session gets the ledger alone). `.last_inject.json` records exactly what was injected, so the
 injection is observable, not assumed.
 
 **Capability 6 — consolidation with backpressure (v2.12.0).** Background
@@ -333,7 +337,7 @@ maintenance — LLM-judged semantic de-duplication of reworded same-facts,
 obsolescence detection, topic re-summarisation, staleness decay — runs off
 the blocking path under a wall-clock budget. It triggers on compaction
 cadence **or on write backlog** (50 unconsolidated rows, or 7 stale days with
-new rows), because the cadence-only trigger starved projects that never
+at least 10 new rows), because the cadence-only trigger starved projects that never
 compact: this repository measured 349 memories accumulated in one month
 against a 17-day-old consolidation marker. `/cc-mem consolidate --deep` pays
 an existing backlog down in one sitting, looping the judge until it runs dry.
@@ -372,16 +376,20 @@ is not retrieved.
 │                       TodoWrite → step sync, edits → drift counters)      │
 │                       + one observation row per observed tool call        │
 │                                                                           │
-│  Stop            ──▶ Haiku reads this turn's observations and writes      │
-│                       memories · patches PROGRESS.md · enforces the plan  │
-│                       · spawns background consolidation on write backlog  │
+│  Stop            ──▶ spawn the detached observer (Haiku reads this turn's │
+│                       observations → memories) · patch PROGRESS.md ·      │
+│                       enforce the plan · spawn background consolidation   │
+│                       on write backlog                                    │
 │                                                                           │
 │  PreCompact      ──▶ sync leg  : extract from a bounded transcript window │
 │                       → reconcile → FULL-REWRITE PROGRESS.md → archive    │
 │                       async leg: LLM consolidation, off the blocking path │
 │                                                                           │
-│  SessionStart    ──▶ inject topics + critical memories + timeline, then   │
+│  SessionStart    ──▶ inject directive ledger + topics + critical          │
+│                       memories + timeline + PROGRESS digest, shaped by    │
+│                       the start reason (resume/fork: ledger only), then   │
 │                       FORCE: "Read .ccm/PROGRESS.md before responding"    │
+│                       · spawn the detached retroactive-save worker        │
 └───────────────────────────────────────────────────────────────────────────┘
                                     │
                                     ▼
@@ -393,8 +401,9 @@ is not retrieved.
 
 Everything is **project-local**. `.ccm/` lives inside your repository, is
 git-ignored by a `.gitignore` cc-memory writes itself, and never leaves your
-machine except for the extraction call to Anthropic (which you can scope with
-`<private>` tags, or switch off per-project entirely).
+machine except for model calls to Anthropic — extraction, the consolidation
+judges, and `inject-usage --judge` (which you can scope with `<private>` tags,
+or switch off per-project entirely).
 
 ## Why this one is different
 
@@ -426,7 +435,7 @@ specifics, each of which cost a measured defect to learn:
   <!--ce:gates:subset-->, plus build checks. A falsification register
   (`tools/falsify_fixes.py`) reverts each registered fix on a temporary copy
   and asserts its gate actually FAILS there: a check that cannot go red is a
-  comment that costs CI time. 238 registered breakage cases as of v2.14.0,
+  comment that costs CI time. 295 registered breakage cases (`--list` prints them),
   every one driven red individually before being kept.
 - **Documentation is under the same gates as code.** Every `file.py:LINE`
   citation in the docs is mechanically verified against the tree; every
@@ -479,7 +488,8 @@ To opt a directory out completely, list it in `excluded_projects` — see
 
 Real output, not mockups. Below: the anti-patch writer refusing to stack, then
 a deep consolidation run converging — captured verbatim from a v2.12.0 demo
-project on 2026-08-26. The `cc-mem` prompt is a shell alias for
+project on 2026-08-26 (output as of v2.12.0; later releases reformat some of
+these lines). The `cc-mem` prompt is a shell alias for
 `cc-memory --project .`: `cc-memory` is the installed console script, and
 `--project` is required.
 
@@ -564,7 +574,7 @@ tagged with the release that measured it.
 | MCP stdio, non-ASCII payload round-trip on a GBK box | 1 of 7 | 7 of 7 (forced UTF-8) | v2.5.0 |
 | Web viewer under one idle TCP connection | wedged permanently | 200 in 0.02 s (threaded + deadlines) | v2.5.0 |
 | Stop hook worst case with stalled LLM legs (22 s budget) | 25.45 s (killed mid-write) | 15.99 s (absolute deadline) | v2.5.0 |
-| Consolidation on a no-compaction workflow | never ran (349 rows / 17 days) | due at 50 rows or 7 stale days | v2.12.0 |
+| Consolidation on a no-compaction workflow | never ran (349 rows / 17 days) | due at 50 rows, or 7 stale days with at least 10 new rows | v2.12.0 |
 | Doc citations verified mechanically, first run | 163 of 594 stale | 0 stale, gated on every change | v2.5.2 |
 
 Costs are measured too, not only wins: closing every DB connection per
@@ -602,16 +612,21 @@ Inside Claude Code (path-agnostic — the wrapper resolves the plugin root):
 /cc-mem sql "<SELECT ...>" [--json|--full]   Read-only query (writes refused)
 
 # ── writing memory ─────────────────────────────────────────────────────────
-/cc-mem add <category> "<text>" [--importance N]   Anti-patch upsert
+/cc-mem add <category> "<text>" [--importance N] [--tags T] [--topic T]
+                                    Anti-patch upsert
 /cc-mem archive <id>... [--supersedes ID]          Retire a WRONG fact (recoverable)
-/cc-mem consolidate [--deep]        Full LLM-backed consolidation; --deep loops
-                                    the dedup judge until it runs dry
+/cc-mem consolidate [--deep] [--no-llm]
+                                    Full LLM-backed consolidation; --deep loops
+                                    the dedup judge until it runs dry; --no-llm
+                                    skips the LLM stages
 /cc-mem cleanup                     Lightweight no-LLM cleanup + MEMORY.md regen
 /cc-mem encoding-check [--apply]    U+FFFD corruption scan
 
 # ── handoff ────────────────────────────────────────────────────────────────
 /cc-mem progress                    Regenerate .ccm/PROGRESS.md and print it
-/cc-mem inject-show                 What the last SessionStart injected
+/cc-mem inject-show [--templates]   What the last SessionStart injected;
+                                    --templates lists the Claude-visible text
+                                    templates with their sizes instead
 /cc-mem inject-usage [--window N] [--judge]
                                     Layer 1 (free, deterministic): did Claude
                                     read PROGRESS.md / MEMORY.md, was the ack
@@ -638,7 +653,8 @@ Inside Claude Code (path-agnostic — the wrapper resolves the plugin root):
 
 # ── interfaces ─────────────────────────────────────────────────────────────
 /cc-mem dashboard                   Launch the Tkinter GUI
-/cc-mem serve [--port N]            Launch the loopback web viewer
+/cc-mem serve [--port N] [--no-open]  Launch the loopback web viewer
+                                    (--no-open: don't open a browser tab)
 ```
 
 Three output conventions worth knowing: `--full` lifts the 60-char table
@@ -718,6 +734,7 @@ config key.
 | `ANTHROPIC_API_KEY` | Preferred credential; falls through to the Claude Code OAuth token when absent or dead |
 | `CLAUDE_PROJECT_DIR` | Consulted by the project-root resolver when it names a directory in the ancestor chain |
 | `CC_MEMORY_PLAN_ENFORCE=0` | Kill switch for Stop-hook plan enforcement |
+| `CC_MEMORY_LOG_LEVEL` | Log verbosity under `~/.claude/hooks/cc-memory/logs/`: `DEBUG`, `INFO` (default), `WARN`, `ERROR` or `SILENT`; an unknown value means `INFO` |
 
 ### On disk and in the database
 
@@ -808,7 +825,8 @@ Annotated in [docs/ARCHITECTURE.md §2](docs/ARCHITECTURE.md#2-repository-layout
 short: `cc_memory/` is the package (`core/`, `hooks/`, `llm/`, `cli/`,
 `mcp/`, `ui/`); `tests/` holds the test suites and `run_gates.py`; `tools/`
 holds the dev-time checkers, which are never packaged; `docs/` holds the two
-specifications with their Chinese siblings.
+specifications with their Chinese siblings, the 2026-09 debug-pass evidence
+record (`debug-pass-2026-09.md` and its directory) and `plans/`.
 
 ### Release gates
 
@@ -832,7 +850,7 @@ python tools/contracts.py       # print what the code currently says each set co
 python tools/falsify_fixes.py   # revert each registered fix on a COPY, assert its gate goes RED
 ```
 
-Tests must use `tempfile` directories only and must remove them: all four
+Tests must use `tempfile` directories only and must remove them: all five
 suites redirect `HOME`/`USERPROFILE` **and** `TMPDIR`/`TEMP`/`TMP` into a
 sandbox before importing the package, assert `Path.home()` really moved, and
 tear the sandbox down in a `finally`. An uncleanable leak is a test failure.
@@ -866,7 +884,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md). Security reports: [SECURITY.md](SECURITY
 
 | Symptom | Cause and fix |
 |---|---|
-| Hooks never fire on Windows | `hooks/hooks.json` invokes `python3`, and the python.org installer ships no `python3.exe`. Tick "Add Python to PATH" + "py launcher", or shim `python3 → python` |
+| Hooks never fire on Windows | `hooks/hooks.json` invokes `python3`, and the python.org installer ships no `python3.exe` — the `py` launcher does not provide one either. Install with "Add Python to PATH", then alias or shim `python3 → python` |
 | `/cc-mem` says the plugin is not found | Both install layouts must be probed. Run `/cc-mem status` — it inspects the layout and reports which files are missing |
 | Nothing is being extracted | No credential. `/cc-mem status` checks it. Log in to Claude Code, or set `ANTHROPIC_API_KEY` |
 | Where is the database, actually? | `/cc-mem paths` prints the resolved DB / PROGRESS.md / PLAN.md / MEMORY.md with exists/absent verdicts — do not hunt with a recursive glob; the first `*.db` it finds may belong to another tool |
@@ -893,12 +911,13 @@ has to rediscover:
   `#N` shapes; a directive that references a step by a paraphrased number
   ("the twelfth step") is not matched. The durable rule is to reference steps
   by title — the audit exists for when the rule was broken anyway.
-- **Backlog thresholds are module constants** (50 rows / 7 days), not config
+- **Backlog thresholds are module constants** (50 rows / 7 days with at least
+  10 new rows), not config
   keys — deliberately, until real usage shows they need per-project tuning.
   Raising a threshold means editing `core/consolidate.py` and knowing why.
 - **The Tkinter dashboard's shells have no executable coverage.** Their logic
   cores were extracted into pure functions and tested headlessly (v2.10.1);
-  refactoring the remaining 3.1k-line GUI without tests was deliberately
+  refactoring the remaining 2.7k-line GUI without tests was deliberately
   deferred.
 - **Gate limits recorded, not designed away (v2.14.0).** A citation whose
   sentence names no symbol is only bounds-checked (inside the file, non-blank)
@@ -921,8 +940,8 @@ has to rediscover:
 ## What's new in v2.16.0
 
 **The hooks got out of the way, the injection got smaller and shaped, and the
-manual became a manual.** Every change was measured on the same 600-memory
-sandbox before and after (`scripts/bench_hooks.py`; the table is in
+manual became a manual.** The release was measured as a whole on the same
+600-memory sandbox before and after (`scripts/bench_hooks.py`; the table is in
 `CHANGELOG.md` § [2.16.0]).
 
 - **No hook waits on the model any more.** The Stop observer and the
@@ -936,8 +955,9 @@ sandbox before and after (`scripts/bench_hooks.py`; the table is in
   returning early for most of them. The matcher is derived from the modes and
   the plan legs, and spelled once.
 - **A refused turn is one turn.** A continuation Stop (the harness re-firing
-  after a refusal) re-ran every job and counted twice; a database opened five
-  times per hook opens three; Stop opens one handle per turn; PreCompact feeds
+  after a refusal) re-ran every job and counted twice; constructing the
+  database opens three connections instead of five, because a settled schema
+  is stamped; Stop opens one handle per turn; PreCompact feeds
   the extraction only what the observer has not already sent.
 - **SessionStart injects a digest, not the file.** PROGRESS.md was embedded
   whole and then demanded as a Read — the same text twice. The layer is now a
@@ -992,6 +1012,8 @@ say it has.
 | [CLAUDE.md](CLAUDE.md) | The operating manual for Claude Code working *on* this repository |
 | [INVARIANTS.md](INVARIANTS.md) | The numbered rules a change must not break, each with its gate and falsification case |
 | [CHANGELOG.md](CHANGELOG.md) | The complete version history |
+| [docs/debug-pass-2026-09.md](docs/debug-pass-2026-09.md) | The 2026-09 debug pass's evidence record (English only, never edited) |
+| [demo/README.md](demo/README.md) | How the before/after captures were produced and what they redact |
 | [CONTRIBUTING.md](CONTRIBUTING.md) · [SECURITY.md](SECURITY.md) | How to contribute; how to report a vulnerability |
 
 English is the canonical skeleton; each `*.zh.md` is a drift-tracked sibling

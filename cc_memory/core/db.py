@@ -7,11 +7,15 @@ Schema (3NF normalized, see docs/ARCHITECTURE.md §4 "Database schema"):
   memories          extracted facts (category + importance + topic + content_hash + supersedes_id)
   topics            consolidated summaries (L1 in hierarchy)
   keywords          auto-detected project vocabulary with frequency
-  plans             execution queue (status: draft/evaluating/ready/executing/done/failed/skipped)
+  plans             legacy v2.0 queue table; kept for existing databases, no
+                    reader or writer since v2.16.0 (D1)
   observations      raw PostToolUse events (cleaned up after extraction)
   session_summaries 6-field structured summary per session
   progress          per-project PROGRESS.md backing store (single row per project)
+  plan_active       per-project live plan, backing store of PLAN.md (single row)
+  directives        the user-INTENT ledger (directive-add / -edit / -close)
   _migrations       migration tracking
+  (plus the `memories_fts` index over `memories`)
 
 Memory hierarchy:
   L0 Global overview   (derived from all topic summaries)
@@ -1710,8 +1714,8 @@ class MemoryDB:
 
     def insert_memory(self, project_id, session_id, category, content,
                       importance=2, tags=None, topic=None, supersedes_id=None):
-        """Direct insert — for the tests and for `supersede_memory` (the writer's
-        own SUPERSEDE step). Every caller PATH goes through
+        """Direct insert — for the tests only (`supersede_memory` and the
+        writer's `reconcile_upsert` do their own INSERT). Every caller PATH goes through
         llm.memory_writer.upsert_smart (docs/CONTRACTS.md#anti-patch-contract)."""
         now = self._now()
         content_hash = self.compute_content_hash(content)

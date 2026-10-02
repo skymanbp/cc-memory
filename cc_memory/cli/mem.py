@@ -3,14 +3,14 @@
 CLI query/management tool for cc-memory databases.
 
   python -m cc_memory.cli.mem --project . stats
-  python -m cc_memory.cli.mem --project . list decisions
+  python -m cc_memory.cli.mem --project . list decision
   python -m cc_memory.cli.mem --project . search "keyword"
   python -m cc_memory.cli.mem --project . add decision "Chose X" --importance 4 --topic auth
   python -m cc_memory.cli.mem --project . consolidate
   python -m cc_memory.cli.mem --project . progress       # show / regenerate PROGRESS.md
 
-`add` and `import-batch` route through llm.memory_writer.upsert_smart so the
-anti-patch reconcile contract is honored from the CLI too.
+`add` routes through llm.memory_writer.upsert_smart so the anti-patch
+reconcile contract is honored from the CLI too.
 """
 import argparse
 import json
@@ -387,7 +387,7 @@ def _read_user_settings():
     by default and `json.loads` rejects the leading U+FEFF, so a settings.json
     the user once edited from a PS prompt made ONE healthy marketplace install
     report `[FAIL] No cc-memory install detected.` here — while
-    ui/installer.py:687 read the same file as `utf-8-sig` (with a comment naming
+    `ui/installer.py:_read_settings` read the same file as `utf-8-sig` (with a comment naming
     PowerShell) and `skills/ccm-load` reported ACTIVATED. Same machine, three
     verdicts. `utf-8-sig` is a strict superset for READING: it drops a BOM when
     one is present and is byte-identical to `utf-8` otherwise, so this can only
@@ -1114,7 +1114,7 @@ _SQL_READ_HEADS = ("select", "pragma", "explain", "with", "values")
 # The parenthesised form is also how the read-only INTROSPECTION pragmas take
 # their argument, so those are allow-listed BY NAME rather than by syntax.
 #
-# DELIBERATE DUPLICATE of ui/dashboard.py:99-137 (`_pragma_is_read_only` plus
+# DELIBERATE DUPLICATE of ui/dashboard.py's `_pragma_is_read_only` (plus
 # both frozensets), which fixed this class first: that module is a Tk GUI the
 # CLI must never import. The two name lists are hand-synced — a divergence
 # means one surface refuses what the other happily runs.
@@ -2826,7 +2826,9 @@ def make_parser():
                           "they are being dropped (recorded in .plan_history)")
     sub.add_parser("plan-replan", help="Re-arm needs_refine on the current raw")
     sub.add_parser("plan-check",
-                   help="Reset guardian counters + emit subagent invocation hint")
+                   help="Record a guardian check run just now (@plan-guardian "
+                        "FIRST): reset drift counters + one-turn immunity; "
+                        "refuses while a raw plan awaits refinement")
 
     # ── directive ledger (v2.11.0) ─────────────────────────────────────────
     # A directive is what the USER asked for; a plan step is what WE decided

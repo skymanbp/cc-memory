@@ -3,12 +3,12 @@ PROGRESS.md generator — single source of truth for session handoff.
 
 Replaces v2.0's SESSION_HANDOFF.md (which got polluted by patch-style writes).
 
-Contract:
-  - PROGRESS.md is ALWAYS regenerated from the `progress` SQL table.
-  - NEVER append, NEVER patch the file in place.
-  - Updates happen in two places:
-      * PreCompact hook: full rewrite from all signals (todos, summary, files).
-      * Stop hook (per-turn): patch_progress() for files_touched / open_todos.
+Contract: PROGRESS.md is ALWAYS regenerated from the `progress` SQL table —
+NEVER append, NEVER patch the file in place. The row's writers:
+  * PreCompact: upsert_progress(), a full rewrite (last TodoWrite snapshot).
+  * Stop (per-turn): patch_progress() for files_touched only.
+  * UserPromptSubmit: seeds current_request once per session.
+  * SessionStart: fill_empty_progress() fills only still-empty fields.
 
 Schema (see core.db, table `progress`):
   current_request   the user's primary task (first prompt of session)
@@ -247,7 +247,7 @@ def collect_progress_state(db: MemoryDB, project_id: int,
     summary = db.get_latest_summary(project_id) or {}
 
     # `critical_context` is RETIRED (v2.16.0, B9): §5 reads the store at
-    # render time (INV-066, the v2.15.1 rule §4 already follows), so the column is
+    # render time (INV-057; §4 already followed the v2.15.1 rule), so the column is
     # written empty and nothing reads it.
 
     # Open todos: filter to non-completed if provided

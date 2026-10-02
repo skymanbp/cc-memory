@@ -9,8 +9,10 @@ every drift between the copies became a shipped defect: v2.7.0's release
 theme was rungs that missed a guard, and v2.9.0 fixed the one hook
 <!--ce:hooks:subset--> whose missing isinstance check let `{"cwd": 123}`
 plant a database in the hook process's own directory. This module is the
-ladder, once — the same consolidation `cli_opt_out_notice` gave the three
-CLI surfaces after three inline `is_excluded` copies drifted there too.
+ladder, once — the same consolidation `cli_opt_out_notice` gave the
+hand-run CLI surfaces after three inline `is_excluded` copies drifted there
+too (today `cli/mem.py` and `ui/dashboard.py`; `cli/plan.py` was deleted in
+v2.16.0, D1).
 
 What stays IN the hooks, deliberately: field policies (which payload keys
 are load-bearing enough to abort on, which are annotation to coerce —

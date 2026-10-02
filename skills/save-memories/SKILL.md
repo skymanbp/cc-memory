@@ -7,9 +7,9 @@ description: Save important memories from this conversation to the cc-memory dat
 
 Review the current conversation and persist **structured memories** through the
 **anti-patch writer** (`llm.memory_writer.upsert_smart`). Never bypass this path:
-it auto-decides whether to MERGE (overwrite an existing high-similarity memory),
-SUPERSEDE (archive an old version and insert a refined one with a chain link),
-or INSERT (genuinely new fact). This prevents stacked duplicates.
+it decides MERGE (archive a near-identical memory, insert the refined wording
+with a chain link, keep its `created_at`), SUPERSEDE (the same, for a restated
+fact, `created_at` fresh) or INSERT (new fact). This prevents stacked duplicates.
 
 ### Step 1 — Review the conversation
 
@@ -190,7 +190,7 @@ print(f\"inserted={counts.get('inserted',0)} \"
 
 Tell the user the breakdown:
 - **Inserted**: brand-new facts
-- **Merged**: refined an existing high-similarity memory in place
+- **Merged**: refined the wording of an existing high-similarity memory (old row archived, chain link kept)
 - **Superseded**: replaced an older version of the same fact (preserved as chain)
 - **Reinforced**: an exact duplicate that carried a HIGHER importance or new tags — no new row, but those were folded into the row it matched
 - **Skipped**: exact duplicates already present that added nothing

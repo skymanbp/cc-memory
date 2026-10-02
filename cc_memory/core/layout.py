@@ -365,8 +365,8 @@ def canonical_path(value):
     `resolve()` follows links, absolutises a relative spelling against the
     process cwd and — on Windows — canonicalises drive letter and component
     case from the filesystem; `normcase` then folds what the platform's
-    filesystem folds and nothing more (INV-104, the v2.12.1 rule: a different-case
-    path IS another directory on POSIX). The degradation order is the one
+    filesystem folds and nothing more (INV-021; the v2.12.1 rule, asserted per
+    platform under INV-104: a different-case path IS another directory on POSIX). The degradation order is the one
     `core/modes._norm_path` proved out for the opt-out list, which now
     delegates here: an unreachable share or illegal name falls back to
     `abspath`, an embedded NUL to the raw text, and a value that is not a

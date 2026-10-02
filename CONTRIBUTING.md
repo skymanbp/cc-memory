@@ -75,8 +75,8 @@ project's prose is trustworthy:
 | `tools/doc_coverage.py` | Every public surface the code exposes — schema tables, `ALTER`-added columns, MCP tools, config keys — is **mentioned at all** by the document that owns it, in both language siblings |
 | `tools/i18n_check.py` | Every `*.zh.md` is bound to a hash of its English source and has not drifted |
 
-The fourth is newer than the others and exists because the first three all
-check the docs that **already exist**. A schema migration landed with its two
+`tools/doc_coverage.py` is newer than the others and exists because the other
+three all check the docs that **already exist**. A schema migration landed with its two
 new columns mentioned zero times in the specification, and every gate passed —
 so if you add a table, an `ALTER` column, an MCP tool or a config key, the
 build now fails until the owning document names it. It answers "is this written
