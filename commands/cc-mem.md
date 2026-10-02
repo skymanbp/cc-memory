@@ -20,12 +20,12 @@ someone who knows the command exists.
 | `stats` | Database statistics + supersede-chain count |
 | `status` | Full health check (hooks, DB, API key, PROGRESS state, consolidation: last run, backlog and which LLM stages ran — v2.16.0) |
 | `search <q>` | Search active memories. FTS5 ranked by bm25, with a `LIKE` substring fallback whenever the index answers empty. **CJK and Latin do not behave identically, and the difference is the tokenizer's, not a bug**: the index is built with `tokenize='trigram'`, which segments Chinese / Japanese / Korean but has a **3-character floor**, so a 1- or 2-character CJK query (`超时`) is answered by the substring fallback rather than by the index — same rows, no ranking. Latin text tokenises into words, so a multi-word query matches non-contiguously (`deploy rotated` finds "the deploy key is **rotated** monthly"), which the substring fallback cannot do. A query that strips to empty returns nothing — `list` is the surface that means "show me everything" |
-| `list [category]` | List memories (filter by `decision`/`result`/`bug`/...) |
-| `add <category> "<text>"` | Add one memory through the anti-patch writer |
+| `list [category] [--limit N] [--sessions N]` | List memories (filter by `decision`/`result`/`bug`/...). `--limit` caps the rows (default 20); `--sessions` scopes to memories from the N most recent sessions (default 5) plus every session-less manual save |
+| `add <category> "<text>" [--importance 1-5] [--tags a,b] [--topic T]` | Add one memory through the anti-patch writer. Defaults: importance 3, tags `manual` (`--tags` replaces it, comma-separated), no topic |
 | `topics` | Show topic summaries |
 | `keywords` | Top project vocabulary by frequency |
 | `sessions` | Compaction history with archive paths |
-| `observations` | Raw PostToolUse rows still awaiting extraction |
+| `observations [--limit N]` | Raw PostToolUse rows still awaiting extraction (default 30) |
 | `schema` | Print the live SQLite schema (tables, indexes, migrations) |
 | `paths [--json]` | Print the resolved project artifact paths — database, `PROGRESS.md`, `PLAN.md`, `MEMORY.md` — each with an exists/absent verdict. Read-only: an absent artifact is an answer, not an error. Exists because `status` reports counts with no locations, and hunting for the DB with an rglob found another project's file first |
 | `sql "<SELECT ...>" [--json\|--full]` | Run a **read-only** query. Write statements are refused — only plain `SELECT`, `WITH … SELECT`, `EXPLAIN` and read-only `PRAGMA` run, and the `PRAGMA name(value)` setter form is refused too (an `=`-only test used to let it through). The default table truncates cells at 60 chars; `--full` prints untruncated `column: value` blocks, and `--json` emits pure-ASCII JSON (`\uXXXX` escapes), which no capturing shell's decode codec can garble — use it whenever CJK text comes back as `�` |
@@ -36,7 +36,7 @@ someone who knows the command exists.
 | `cleanup` | Lightweight no-LLM cleanup + MEMORY.md regen |
 | `summary` | Latest session summary (request/done/next_steps) |
 | `mode [name]` | Show/set project mode (code/research/writing) |
-| `serve [--port N]` | Launch the browser-based web viewer (stdlib http.server) |
+| `serve [--port N] [--no-open]` | Launch the browser-based web viewer (stdlib http.server; port 9377 by default). `--no-open` skips opening a browser tab |
 | `dashboard` | Launch the Tkinter GUI dashboard for this project |
 | `plan-status` | Live-plan counters + freshness summary (no LLM) |
 | `plan-show` | Regenerate + print `.ccm/PLAN.md` |

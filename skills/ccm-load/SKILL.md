@@ -18,7 +18,8 @@ deliberately disjoint (see the table at the end of this file).
 1. **Verify activation, PER INSTALL LAYOUT.** The two shipped layouts are
    activated by *different* mechanisms, so one check cannot serve both:
    - **marketplace / dev checkout** — `~/.claude/settings.json`
-     `enabledPlugins["cc-memory@cc-memory"]=true`, root from
+     `enabledPlugins` holds an enabled `cc-memory@<marketplace>` key (any
+     marketplace name, as `cli/mem.py:_marketplace_enabled_key` matches), root from
      `extraKnownMarketplaces.cc-memory` **or** `plugins/installed_plugins.json`
      (a `/plugin marketplace add <github-repo>` install has no local path),
      hooks declared by `<root>/hooks/hooks.json`.
@@ -83,7 +84,7 @@ def _l(x):
 # README recommends to Windows users — and then skip bootstrap entirely,
 # while /cc-mem status on the same machine reported '5/5 registered'. Two
 # shipped surfaces, opposite verdicts on one healthy install.
-#   marketplace / dev checkout — enabledPlugins['cc-memory@cc-memory'] true;
+#   marketplace / dev checkout — an enabledPlugins['cc-memory@*'] key true;
 #       root from extraKnownMarketplaces.source.path or
 #       plugins/installed_plugins.json; hooks declared by
 #       <root>/hooks/hooks.json; tree is NESTED (<root>/cc_memory/core/db.py)
@@ -285,8 +286,9 @@ if not db_path.exists():
     # against an existing .gitignore whose last line had no trailing newline it
     # emitted 'sessions/# cc-memory: generated state, not content' - fusing the
     # user's last rule with our first comment and destroying that rule. The
-    # read / normalise / write shape below matches core/progress.py:70-76 line
-    # for line; cc_memory/ui/installer.py:_init_project is copy #3.
+    # read / normalise / write shape below matches
+    # core.progress.ensure_memory_gitignore line for line;
+    # cc_memory/ui/installer.py:_init_project is copy #3.
     gi = mem_dir / '.gitignore'
     _ign = ['# cc-memory: generated state, not content', 'memory.db', 'memory.db-wal',
             'memory.db-shm', 'sessions/', '.last_save.json', '.last_inject.json',
@@ -339,7 +341,7 @@ print(f'[stats] {stats[\"n_memories\"]} memories | {stats[\"n_sessions\"]} sessi
 print()
 print('cc-memory is loaded for this project. Hooks will fire automatically:')
 print('  - UserPromptSubmit: track turn count + seed PROGRESS.md current_request')
-print('  - PostToolUse:      capture observations')
+print('  - PostToolUse:      live plan anchor (ExitPlanMode / TodoWrite, every mode) + observations')
 print('  - Stop:             Haiku observer + idle reorg every 5 turns')
 print('  - PreCompact:       full extraction + PROGRESS.md rewrite')
 print('  - SessionStart:     inject context + FORCED <system-reminder> for read-first')
@@ -361,8 +363,8 @@ Summarize to the user in 1-2 sentences:
 - **New project** that should benefit from cross-session memory.
 - **After cloning** a repo that has a `.ccm/` directory but you've not yet
   loaded the project under cc-memory globally.
-- **After upgrading** cc-memory (e.g. v2.0 → v2.1) to confirm the new
-  PROGRESS.md mechanism initialized correctly.
+- **After upgrading** cc-memory to a new version, to confirm PROGRESS.md
+  and the state directory initialized correctly.
 - **Whenever PROGRESS.md or MEMORY.md is missing** but you expected them
   (e.g. you suspect a partial uninstall).
 

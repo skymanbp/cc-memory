@@ -36,6 +36,7 @@ cc-memory/
 ├── commands/cc-mem.md           ← the /cc-mem slash command
 ├── docs/                        ← ARCHITECTURE.md, CONTRACTS.md (+ .zh.md siblings),
 │   │                              debug-pass-2026-09.md (evidence record),
+│   ├── debug-pass-2026-09/        its evidence + repros
 │   └── plans/                     the v2.16.0 plan (.txt, unscanned)
 ├── demo/                        ← run_demo.py + tally/ fixture + captures/
 ├── cc_memory/
@@ -53,7 +54,8 @@ cc-memory/
 ├── tests/                       ← run_gates.py + five suites (see § Tests)
 ├── tools/                       ← dev/CI checkers, never packaged
 ├── scripts/                     ← build_exe.py, release_notes.py, bench_hooks.py
-├── .github/workflows/           ← gates.yml, release.yml
+├── .github/                     ← workflows/ (gates.yml, release.yml),
+│                                  PULL_REQUEST_TEMPLATE.md, ISSUE_TEMPLATE/
 ├── INVARIANTS.md                ← the numbered rules
 ├── CHANGELOG.md · CONTRIBUTING.md · SECURITY.md · README.md · README.zh.md
 └── CLAUDE.md                    ← this file
@@ -123,11 +125,12 @@ Specified in `docs/CONTRACTS.md`; the sentences below are the operating summary.
 
 **Anti-patch** (`docs/CONTRACTS.md#anti-patch-contract`). Every memory save path
 routes through `llm.memory_writer.upsert_smart` / `upsert_batch`, which MERGES
-in place, SUPERSEDES with a chain link, REINFORCES an exact-hash duplicate
-(importance max + tags union, no new row) or INSERTS, on `core.textsim`
-similarity (`HIGH_SIM` / `MID_SIM`; CJK bigrams, ASCII trigrams). Never call
-`db.insert_memory` from a caller path — its only callers are the writer's own
-`supersede_memory` and the tests. The save paths: `hooks/pre_compact.py`,
+at `HIGH_SIM` (archive + insert with a chain link, `created_at` carried
+forward), SUPERSEDES at `MID_SIM` (archive + insert with a chain link),
+REINFORCES an exact-hash duplicate (importance max + tags union, no new row) or
+INSERTS, on `core.textsim` similarity (CJK bigrams, ASCII trigrams), all inside
+one `MemoryDB.reconcile_upsert` transaction. Never call `db.insert_memory` from
+a caller path — its only callers are the tests. The save paths: `hooks/pre_compact.py`,
 the `stop.py --observe` worker, `cli/mem.py add`, `mcp/server.py memory_add`,
 `skills/save-memories/SKILL.md`, `ui/dashboard.py` (Add Memory, Save Session,
 new-project init), `ui/web_viewer.py` POST `/api/memory`, and the
@@ -266,7 +269,9 @@ hides everything but PROGRESS.md, PLAN.md and MEMORY.md; a pre-v2.13.0
   `["metric","manual"]` (Save Session), `["auto-detected","init"]`
   (new-project init), `["web"]`, `["llm-dedup","merged"]`
   (`core/consolidate.py`). The writer appends `"merged"` / `"supersedes"`.
-  The PreCompact LLM path sets no `tags` key, so those rows store `[]`.
+  `cli/mem.py add --tags` replaces the `["manual"]` default. The PreCompact
+  LLM path, the `session_start.py --retro` worker and the save-memories skill
+  template set no `tags` key, so those rows store `[]`.
 - `.ccm/PROGRESS.md`, `.ccm/PLAN.md` and `.ccm/MEMORY.md` are generated
   artifacts written through `core.atomic.write_atomic`. Edit the SQL source of
   truth, never the file.
@@ -358,14 +363,16 @@ disagrees with `core/version.py`; runs `python tests/run_gates.py` on the tagged
 commit; builds both exes and RUNS them (a real `--cli` install and `--uninstall`
 against a sandboxed home, exit 2 on an unknown flag, `--help` exits 0);
 publishes the Release with the CHANGELOG section as body
-(`scripts/release_notes.py`, whose title is the section's first `###`).
+(`scripts/release_notes.py`, whose title is the section's first `###`) and
+both exes plus `SHA256SUMS.txt` attached.
 Procedure: bump the five version sites (`core/version.py`, `pyproject.toml`,
 `.claude-plugin/plugin.json`, `.claude-plugin/marketplace.json`,
 `cc_memory/config.json` — `run_gates.py` asserts they agree) plus this file's
 version line, the README badges and `SECURITY.md`'s supported minor → write the
 CHANGELOG entry → gates green → `python tools/falsify_fixes.py --anchors` green →
 commit → `git tag vX.Y.Z` → `git push origin main vX.Y.Z` → watch `gates.yml`
-and `release.yml` → verify the attached assets by downloading them. A moved tag
+and `release.yml` → verify the attached assets by downloading them and
+checking them against `SHA256SUMS.txt`. A moved tag
 is a rewritten history.
 
 **Sync.** On this machine Claude Code runs cc-memory from the git working tree

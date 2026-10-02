@@ -3,7 +3,7 @@ Unified memory write entry — the anti-patch contract.
 
 EVERY save path (PreCompact, Stop observer, /save-memories skill, MCP server,
 CLI mem.py add) MUST go through `upsert_smart`. Direct calls to
-`MemoryDB.insert_memory` are reserved for migration / bulk-load.
+`MemoryDB.insert_memory` are for the tests only.
 
 Decision tree for a new memory M about topic T:
 
@@ -31,9 +31,9 @@ Decision tree for a new memory M about topic T:
 This is the OPPOSITE of "always append + dedup later". It prevents the
 patch-style stacking the user flagged (cf. docs/CONTRACTS.md#anti-patch-contract).
 
-After every successful upsert, `regenerate_memory_index(project_id, memory_dir)`
-is called so .ccm/MEMORY.md is always fresh (anti the 50-day-stale failure
-mode observed in v2.0).
+`upsert_batch(..., memory_dir)` calls `regenerate_memory_index` only after a batch
+that wrote something, so .ccm/MEMORY.md stays fresh (anti the 50-day-stale
+failure mode observed in v2.0); `upsert_smart` alone never regenerates it.
 """
 import json
 import os
