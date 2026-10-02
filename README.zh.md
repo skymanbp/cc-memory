@@ -1,4 +1,4 @@
-<!-- i18n-source: README.md | sha256: a1b4343464abd65e | version: 2.16.0 | translated: 2026-09-24 | translation: 68f806feddad7717 -->
+<!-- i18n-source: README.md | sha256: d40113fdf9260992 | version: 2.16.0 | translated: 2026-10-02 | translation: 9925c38027567a84 -->
 > [English](README.md) · **简体中文**
 
 <div align="center">
@@ -285,8 +285,9 @@ v2.12.2 的重跑，开头那段账本注入层就是它买到的东西。
 **能力一——采集。** 记忆在每个对话边界被抽取：按轮（Haiku 观察者读该轮的工具
 observation）、压缩时（有界的 head+tail transcript 窗口，2 GiB 的 transcript
 也杀不死钩子），以及会话启动时对压缩从未处理过的 transcript 做追溯保存。AI 判定
-的 `{category, content, importance, topic}` 结构化记录，没有凭据时退化为与项目
-无关的正则兜底。中英文都是一等公民。
+的 `{category, content, importance, topic}` 结构化记录。抽取需要凭据：没有凭据时
+任何边界都不抽取记忆（PROGRESS.md 照样重写，transcript 照样归档），唯一的正则兜底在
+看板的 Save Session 里。中英文都是一等公民。
 
 **能力二——写入即调和（反补丁契约）。** 每条保存路径都经由同一个 writer，由它
 决定 **SKIP**（完全重复且不带任何新信息）、**REINFORCE**（完全重复，但带着更高的
@@ -312,13 +313,14 @@ importance 或新的 tags —— 不新增行，只把它们合入命中的那�
 结束这一轮——带保证释放的逃生预算，因为一个逃不出去的拦截比没有拦截更糟。
 
 **能力五——检索与注入。** FTS5 全文检索、主题摘要、关键词词汇表，以及各层带
-预算的分层 SessionStart 注入（主题 + 关键记忆 + 近期时间线 + PROGRESS 摘要——自
-v2.16.0 起是 `progress` 行的 §1–§4，而不是整个文件）。
+预算的分层 SessionStart 注入（指令账本打头，然后是主题 + 关键记忆 + 近期时间线 +
+PROGRESS 摘要——自 v2.16.0 起是 `progress` 行的 §1–§4，而不是整个文件），并按会话
+启动的原因成形（续接或分叉的会话只拿到账本）。
 `.last_inject.json` 精确记录注入了什么，所以注入是可观测的，不是想当然的。
 
 **能力六——带背压的整理（v2.12.0）。** 后台维护——LLM 判定的同事实换述去重、
 过时检测、主题重摘要、陈旧度衰减——在阻塞路径之外、墙钟预算之下运行。它按压缩
-节奏触发，**也按写入积压触发**（50 条未整理行，或 7 天未动且有新行），因为只按
+节奏触发，**也按写入积压触发**（50 条未整理行，或 7 天未动且至少有 10 条新行），因为只按
 节奏触发会饿死从不压缩的项目：本仓库实测一个月积了 349 条记忆，整理标记 17 天
 没动。`/cc-mem consolidate --deep` 把已有的积压一次清完——循环裁判直到跑干。
 没有凭据时，LLM 工序会跳过，而且**说出来**（v2.16.0）：整理标记记下 `llm_stages`，
@@ -350,16 +352,19 @@ BM25 加上本项目已有的 CJK 感知相似度，不需要向量、不需要�
 │                       TodoWrite → 步骤同步、编辑 → 漂移计数器）          │
 │                       + 每次被观察的工具调用写一行 observation           │
 │                                                                          │
-│  Stop            ──▶ Haiku 读本轮 observation 写记忆 · 增量更新          │
-│                       PROGRESS.md · 强制执行计划 · 写入积压到期时        │
-│                       拉起后台整理                                       │
+│  Stop            ──▶ 拉起分离的观察者（Haiku 读本轮 observation          │
+│                       写记忆）· 增量更新 PROGRESS.md · 强制执行计划 ·    │
+│                       写入积压到期时拉起后台整理                         │
 │                                                                          │
 │  PreCompact      ──▶ 同步腿：从有界的 transcript 窗口抽取                │
 │                       → 调和 → 全量重写 PROGRESS.md → 归档               │
 │                       异步腿：LLM 整理，不在阻塞路径上                   │
 │                                                                          │
-│  SessionStart    ──▶ 注入主题 + 关键记忆 + 时间线，然后                  │
+│  SessionStart    ──▶ 注入指令账本 + 主题 + 关键记忆 + 时间线 +           │
+│                       PROGRESS 摘要，按启动原因成形（resume/fork：       │
+│                       只有账本），然后                                   │
 │                       强制："回应之前先读 .ccm/PROGRESS.md"              │
+│                       · 拉起分离的追溯保存工作进程                       │
 └──────────────────────────────────────────────────────────────────────────┘
                                     │
                                     ▼
@@ -370,8 +375,9 @@ BM25 加上本项目已有的 CJK 感知相似度，不需要向量、不需要�
 ```
 
 一切都是**项目本地**的。`.ccm/` 就在你的仓库里，由 cc-memory 自己写的
-`.gitignore` 忽略掉，除了发往 Anthropic 的抽取调用之外不出本机——而那次调用你
-可以用 `<private>` 标签划定范围，或者按项目整个关掉。
+`.gitignore` 忽略掉，除了发往 Anthropic 的模型调用——抽取、整理裁判和
+`inject-usage --judge`——之外不出本机，而这些调用你可以用 `<private>` 标签划定
+范围，或者按项目整个关掉。
 
 ## 这一个为什么不一样
 
@@ -396,7 +402,7 @@ BM25 加上本项目已有的 CJK 感知相似度，不需要向量、不需要�
 - **闸门能变红，而且这一点本身被检查。** 每次改动跑十二道发布闸门——五个测试
   套件、四道文档闸门 <!--ce:gates:subset-->，外加构建检查。一份可证伪登记册（`tools/falsify_fixes.py`）
   把每条已登记的修复在临时副本上撤销，断言它的闸门在那里确实**失败**：一个不
-  可能变红的检查只是一条消耗 CI 时间的注释。截至 v2.14.0 已登记 238 个破坏
+  可能变红的检查只是一条消耗 CI 时间的注释。截至 v2.16.0 已登记 294 个破坏
   用例，每一个都被单独驱动到红过才保留。
 - **文档和代码过同样的闸门。** 文档里每条 `file.py:LINE` 引用都被机械核对；
   每个计数断言（"全部六个钩子……" <!--ce:hooks-->）都绑定到从代码算出的集合；中文文档以哈希
@@ -445,7 +451,8 @@ Windows 上也可以从 [Releases](https://github.com/skymanbp/cc-memory/release
 ## 实战实录
 
 真实输出，不是摆拍。下面是反补丁 writer 拒绝堆叠的样子，以及一次深度整理收敛的
-样子——2026-08-26 从一个 v2.12.0 演示项目里逐字截取。提示符里的 `cc-mem` 是
+样子——2026-08-26 从一个 v2.12.0 演示项目里逐字截取（输出为 v2.12.0 时的样子；
+之后的版本改动了其中几行的格式）。提示符里的 `cc-mem` 是
 `cc-memory --project .` 的 shell 别名：装出来的控制台脚本叫 `cc-memory`，
 且 `--project` 是必填的。
 
@@ -524,7 +531,7 @@ You MUST Read .ccm/PROGRESS.md before responding …
 | GBK 机器上 MCP stdio 非 ASCII 载荷往返 | 7 中 1 | 7 中 7（强制 UTF-8） | v2.5.0 |
 | 一条空闲 TCP 连接下的网页查看器 | 永久卡死 | 0.02 秒内 200（多线程 + 截止时限） | v2.5.0 |
 | LLM 腿全部卡死时 Stop 钩子最坏情况（预算 22 秒） | 25.45 秒（写到一半被杀） | 15.99 秒（绝对截止时刻） | v2.5.0 |
-| 从不压缩的工作流下的整理 | 从不运行（349 行 / 17 天） | 50 行或 7 天陈旧即到期 | v2.12.0 |
+| 从不压缩的工作流下的整理 | 从不运行（349 行 / 17 天） | 50 行，或 7 天陈旧且至少 10 条新行，即到期 | v2.12.0 |
 | 文档引用的首次机械核查 | 594 条中 163 条已失效 | 0 条失效，每次改动都被闸门看住 | v2.5.2 |
 
 代价也被测量了，不只测收益：每次操作都关闭数据库连接的成本是每操作 +340%
@@ -560,16 +567,20 @@ You MUST Read .ccm/PROGRESS.md before responding …
 /cc-mem sql "<SELECT ...>" [--json|--full]   只读查询（写语句被拒）
 
 # ── 写入记忆 ───────────────────────────────────────────────────────────────
-/cc-mem add <category> "<text>" [--importance N]   反补丁式 upsert
+/cc-mem add <category> "<text>" [--importance N] [--tags T] [--topic T]
+                                    反补丁式 upsert
 /cc-mem archive <id>... [--supersedes ID]          退役一条**错的**事实（可恢复）
-/cc-mem consolidate [--deep]        完整的 LLM 整理；--deep 循环去重裁判
-                                    直到跑干
+/cc-mem consolidate [--deep] [--no-llm]
+                                    完整的 LLM 整理；--deep 循环去重裁判
+                                    直到跑干；--no-llm 跳过 LLM 工序
 /cc-mem cleanup                     轻量、不用 LLM 的清理 + 重建 MEMORY.md
 /cc-mem encoding-check [--apply]    U+FFFD 损坏扫描
 
 # ── 交接 ───────────────────────────────────────────────────────────────────
 /cc-mem progress                    重建 .ccm/PROGRESS.md 并打印
-/cc-mem inject-show                 上次 SessionStart 注入了什么
+/cc-mem inject-show [--templates]   上次 SessionStart 注入了什么；
+                                    --templates 改为列出 Claude 可见的文本
+                                    模板及其大小
 /cc-mem inject-usage [--window N] [--judge]
                                     第 1 层（免费、确定性）：Claude 到底有没有读
                                     PROGRESS.md / MEMORY.md、有没有说出确认句、
@@ -595,7 +606,8 @@ You MUST Read .ccm/PROGRESS.md before responding …
 
 # ── 接口 ───────────────────────────────────────────────────────────────────
 /cc-mem dashboard                   启动 Tkinter 图形界面
-/cc-mem serve [--port N]            启动仅回环的网页查看器
+/cc-mem serve [--port N] [--no-open]  启动仅回环的网页查看器
+                                    （--no-open：不打开浏览器标签页）
 ```
 
 三条值得记住的输出约定：`--full` 取消表格的 60 字符截断；`--json` 输出**纯
@@ -670,6 +682,7 @@ LF 换行——**不需要任何 `PYTHONUTF8` / `PYTHONIOENCODING` 环境变量*
 | `ANTHROPIC_API_KEY` | 优先使用的凭据；缺失或失效时回落到 Claude Code 的 OAuth token |
 | `CLAUDE_PROJECT_DIR` | 当它指向祖先链中的某个目录时，项目根解析器会采信它 |
 | `CC_MEMORY_PLAN_ENFORCE=0` | Stop 钩子计划强制执行的关闭开关 |
+| `CC_MEMORY_LOG_LEVEL` | `~/.claude/hooks/cc-memory/logs/` 下的日志详细程度：`DEBUG`、`INFO`（默认）、`WARN`、`ERROR` 或 `SILENT`；未知值按 `INFO` 处理 |
 
 ### 磁盘上与数据库里
 
@@ -747,7 +760,8 @@ schema（含每张表的定义位置）见 [§4](docs/ARCHITECTURE.zh.md#4-数�
 （给在这棵树上工作的 Claude Code 看的版本在 [CLAUDE.md](CLAUDE.md)）。一句话：
 `cc_memory/` 是 Python 包（`core/`、`hooks/`、`llm/`、`cli/`、`mcp/`、`ui/`）；
 `tests/` 放测试套件和 `run_gates.py`；`tools/` 放从不打包的开发期检查器；
-`docs/` 放两份规格及其中文兄弟文件。
+`docs/` 放两份规格及其中文兄弟文件、2026-09 调试审查的证据记录
+（`debug-pass-2026-09.md` 及其同名目录）和 `plans/`。
 
 ### 发布闸门
 
@@ -768,7 +782,7 @@ python tools/contracts.py       # 打印代码当前认为每个集合包含什�
 python tools/falsify_fixes.py   # 在副本上撤销每条已登记的修复，断言其闸门变红
 ```
 
-测试只能用 `tempfile` 目录，且必须清理干净：四个套件都在 import 这个包**之前**
+测试只能用 `tempfile` 目录，且必须清理干净：五个套件都在 import 这个包**之前**
 把 `HOME`/`USERPROFILE` **和** `TMPDIR`/`TEMP`/`TMP` 重定向进沙箱，断言
 `Path.home()` 确实移动了，并在 `finally` 里拆掉沙箱。清不掉的泄漏算测试失败。
 
@@ -799,7 +813,7 @@ Release，附上两个 exe，并以对应的 CHANGELOG 段落作为正文。与 
 
 | 现象 | 原因与处理 |
 |---|---|
-| Windows 上钩子从不触发 | `hooks/hooks.json` 调用的是 `python3`，而 python.org 的安装包默认不提供 `python3.exe`。勾选 "Add Python to PATH" + "py launcher"，或在 PATH 上把 `python3` 指向 `python` |
+| Windows 上钩子从不触发 | `hooks/hooks.json` 调用的是 `python3`，而 python.org 的安装包默认不提供 `python3.exe`——`py` 启动器也不提供。安装时勾选 "Add Python to PATH"，然后用别名或 shim 把 `python3` 指向 `python` |
 | `/cc-mem` 说找不到插件 | 两种布局都必须探测。跑 `/cc-mem status`——它会检查布局并报告缺了哪些文件 |
 | 什么都没被抽取 | 没有凭据。`/cc-mem status` 会检查。登录 Claude Code，或设置 `ANTHROPIC_API_KEY` |
 | 数据库到底在哪？ | `/cc-mem paths` 打印解析后的 DB / PROGRESS.md / PLAN.md / MEMORY.md 及各自的存在/缺失结论——不要用递归 glob 去找；它先找到的那个 `*.db` 可能属于别的工具 |
@@ -823,11 +837,11 @@ Release，附上两个 exe，并以对应的 CHANGELOG 段落作为正文。与 
 - **步骤引用审计是词法层面的。** 它抓 `步骤 N` / `step #N` / `#N` 这些形状；
   用文字转述编号的指令（"第十二步"）匹配不到。长期规则是按标题引用步骤——审计
   是为规则已经被违反的场合准备的。
-- **积压阈值是模块常量**（50 行 / 7 天），不是配置键——这是刻意的，等真实使用
+- **积压阈值是模块常量**（50 行 / 7 天且至少 10 条新行），不是配置键——这是刻意的，等真实使用
   证明它们需要按项目调整再说。提高阈值意味着编辑 `core/consolidate.py`，并且
   知道自己为什么这么做。
 - **Tkinter 看板的外壳没有可执行覆盖。** 其逻辑核心已被抽成纯函数并做了无头
-  测试（v2.10.1）；在没有测试的前提下重构剩下的 3.1k 行 GUI 被刻意推迟。
+  测试（v2.10.1）；在没有测试的前提下重构剩下的 2.7k 行 GUI 被刻意推迟。
 - **闸门的限制被记录下来，而不是被设计掉（v2.14.0）。** 所在句子没有点名任何
   符号的引文只做边界检查（在文件内、非空行），烂掉了也不会变红；名词不在
   `doc_claims` 触发词表里的计数句不是闸门看得见的断言。（`verbatim` 引用自
@@ -844,8 +858,8 @@ Release，附上两个 exe，并以对应的 CHANGELOG 段落作为正文。与 
 
 ## v2.16.0 有什么新东西
 
-**钩子不再挡路，注入变小且按场景成形，手册重新成了手册。** 每一项改动都在同一个
-600 条记忆的沙箱里前后各量了一次（`scripts/bench_hooks.py`；表格在
+**钩子不再挡路，注入变小且按场景成形，手册重新成了手册。** 整个版本作为一个整体
+在同一个 600 条记忆的沙箱里前后各量了一次（`scripts/bench_hooks.py`；表格在
 `CHANGELOG.md` § [2.16.0]）。
 
 - **再没有钩子在等模型。** Stop 观察者和追溯保存各自在钩子的预算里跑一次 Haiku
@@ -857,7 +871,7 @@ Release，附上两个 exe，并以对应的 CHANGELOG 段落作为正文。与 
   都付一次解释器启动，然后对大多数调用提前返回。匹配器现在从模式和计划三条腿推导，
   只拼写一次。
 - **被拒绝的回合只算一回合。** 续发的 Stop（拒绝之后宿主重新触发）过去重跑每一项工作、
-  记两次数；一个钩子里开五次的数据库现在开三次；Stop 每回合只开一个句柄；PreCompact
+  记两次数；构造一次数据库对象现在开三个连接而不是五个，因为已就绪的 schema 盖了戳；Stop 每回合只开一个句柄；PreCompact
   只把观察者还没送过的观察喂给提取。
 - **SessionStart 注入摘要，不再注入整个文件。** PROGRESS.md 过去被整篇内嵌，然后又
   被要求 Read 一遍——同一段文字出现两次。这一层现在是由文件自己的渲染器画出的
@@ -901,6 +915,8 @@ Release，附上两个 exe，并以对应的 CHANGELOG 段落作为正文。与 
 | [CLAUDE.md](CLAUDE.md) | 给在这个仓库**上**工作的 Claude Code 的操作手册 |
 | [INVARIANTS.md](INVARIANTS.md) | 编号的不变量：每条改动不得打破的规则，附它的闸门与证伪用例 |
 | [CHANGELOG.md](CHANGELOG.md) | 完整版本历史 |
+| [docs/debug-pass-2026-09.md](docs/debug-pass-2026-09.md) | 2026-09 调试审查的证据记录（仅英文，从不改动） |
+| [demo/README.md](demo/README.md) | 前后对照的捕获是怎么产生的、脱敏了什么 |
 | [CONTRIBUTING.md](CONTRIBUTING.md) · [SECURITY.md](SECURITY.md) | 怎么参与贡献；怎么报告漏洞 |
 
 英文是规范骨架；每个 `*.zh.md` 都是被漂移跟踪的兄弟文件，绑定在其英文源的
