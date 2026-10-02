@@ -31,7 +31,8 @@ repaired them mechanically.
 That is a gate against rot, not a proof of correctness. A citation whose
 sentence names no uniquely resolvable function, class or ALL_CAPS constant is
 reported `bounds` — checked for being inside the file and non-blank, **not**
-verified against a symbol (257 of 631 today). Treat a line number as a hint
+verified against a symbol (its summary line prints the current count, which
+moves with every edit, so this file does not repeat it). Treat a line number as a hint
 and the **symbol name** as the fact: `grep -n "def <symbol>" <file>` is
 authoritative, and `python tools/citation_check.py --fix` is how you repair a
 number rather than hand-counting.
@@ -56,8 +57,8 @@ Three design constraints drive everything else:
 
 1. **Anti-patch writes.** Every memory save goes through one entry
    (`llm.memory_writer.upsert_smart`) which either **merges** the new content
-   into an existing similar memory, **supersedes** an older version (preserving
-   a chain), **reinforces** an exact duplicate (no new row — only its higher
+   with an existing near-identical memory (archiving it behind a chain link
+   since v2.15.0), **supersedes** an older version (preserving a chain), **reinforces** an exact duplicate (no new row — only its higher
    importance and any new tags are folded into the row it matched), or
    **inserts** as a new fact — chosen by similarity, not by the
    caller. There is no "append + dedup later" path.
@@ -91,9 +92,11 @@ Claude Code's own hook budget:
 ### Bilingual by design — memory content is language-agnostic
 
 Memory **content** is deliberately language-neutral. The category detectors
-(`core/extractor.py` `_PATTERNS` at `extractor.py:73-77` / `_IMPORTANCE_BOOST`
-at `extractor.py:73-77`) and the resume-signal sets (`hooks/user_prompt.py:127-130`,
-`hooks/session_start.py:269-273` RESUME PROTOCOL) match both Chinese and English
+(`core/extractor.py` `_PATTERNS` at `extractor.py:37` — `_IMPORTANCE_BOOST`
+at `extractor.py:75`) and the one resume vocabulary (`core.prompts.RESUME_TRIGGERS`,
+`prompts.py:26` — read by `hooks/user_prompt.py` to type the first prompt, by
+`hooks/session_start.py` to print the RESUME PROTOCOL, and by `core/recall.py`
+to refuse retrieval on it; v2.16.0) match both Chinese and English
 on purpose, and stored memories may be in any language. This is **Tier 3** of
 the documentation language model — separate from the English-skeleton *docs*
 convention (Tier 1). Those detectors carry inline `i18n Tier 3` comments and
@@ -128,8 +131,10 @@ cc-memory/
 │   ├── CONTRACTS.zh.md          ← drift-tracked translation (see §9)
 │   ├── debug-pass-2026-09.md    ← the v2.14.0 debug-pass evidence record:
 │   │                              never edited, no Chinese sibling
-│   └── debug-pass-2026-09/      ← its evidence, repros and report.html
-│                                  (88 tracked files)
+│   ├── debug-pass-2026-09/      ← its evidence, repros and report.html
+│   │                              (88 tracked files)
+│   └── plans/                   ← the v2.16.0 optimization plan (.txt, so no
+│                                  doc gate scans it)
 ├── cc_memory/                   ← Python package (subpackaged)
 │   ├── __init__.py              (re-exports core/version.py)
 │   ├── config.json
@@ -147,9 +152,12 @@ cc-memory/
 │   ├── cli/                     ← mem.py
 │   ├── mcp/                     ← server.py (MCP stdio)
 │   └── ui/                      ← installer, dashboard, web_viewer
-├── .github/workflows/           ← gates.yml (every gate, on push/PR) +
-│                                  release.yml (tag → gates → exes → RUN
-│                                  them → GitHub Release, v2.12.0)
+├── .github/
+│   ├── workflows/               ← gates.yml (every gate, on push/PR) +
+│   │                              release.yml (tag → gates → exes → RUN
+│   │                              them → GitHub Release, v2.12.0)
+│   ├── PULL_REQUEST_TEMPLATE.md ← carries a gate count the smoke test checks
+│   └── ISSUE_TEMPLATE/          ← bug_report.yml, feature_request.yml
 ├── tests/                       ← run_gates.py (THE gate runner) + the five
 │                                  suites: smoke_test, test_plan_carryover,
 │                                  test_surfaces, test_directive_enforcement,
@@ -159,6 +167,7 @@ cc-memory/
 │                                  contracts, falsify_fixes
 ├── scripts/                     ← build_exe.py (PyInstaller) +
 │                                  release_notes.py (CHANGELOG → release body)
+│                                  + bench_hooks.py (per-hook cost; not a gate)
 ├── pyproject.toml
 ├── README.md
 ├── README.zh.md                 ← drift-tracked translation (see §9)
@@ -277,16 +286,16 @@ the event:
   PROGRESS.md, ~1-5s; `pre_compact.py:5-20`).
 - The **async leg** runs `core.consolidate.run_consolidation` under a
   `BudgetGate` with `_BUDGET_TOTAL_S = 240.0` and `_BUDGET_SAFETY_S = 8.0`
-  (`consolidate_async.py:71`), so the last LLM call it starts finishes by
+  (`consolidate_async.py:70-71`), so the last LLM call it starts finishes by
   `total_s - safety_s` = 232s < the hook's own 300s timeout — the worker is
   never killed mid-write.
 - Cadence is an **interval marker + lock**, not a fragile
   `session_count % N` check: `.ccm/.last_consolidation.json` records the
   session count at the last successful run and
   `.ccm/.consolidation.lock` prevents overlapping workers (a lock older than
-  `_STALE_LOCK_S = 360.0`, `consolidate_async.py:75`, is reclaimed). This is
+  `core.consolidate.STALE_LOCK_S = 360.0`, `consolidate.py:1162`, is reclaimed). This is
   race-immune against the concurrent sync leg — a ±1 drift in the count can
-  cause neither a double-run nor a miss (`consolidate_async.py:19-28`).
+  cause neither a double-run nor a miss (`consolidate_async.py:19-30`).
 - **Backpressure is the third trigger (v2.12.0).** The sessions interval
   assumes compactions happen; a project worked in short sessions never
   compacts, and starved — measured on this repository, 349 rows written in
@@ -307,24 +316,29 @@ the event:
   cadence contract:
   [CONTRACTS.md § When consolidation actually runs](CONTRACTS.md#when-consolidation-actually-runs-v2120--backpressure).
 
-### Timeouts are declared twice and must stay in lockstep
+### Hook settings are declared in three places and must stay in lockstep
 
 `hooks/hooks.json` is the marketplace/dev declaration and is the source of
-truth. `cc_memory/ui/installer.py` `HOOK_SCRIPTS` / `ASYNC_HOOK`
-(`installer.py:108-114`) is the standalone-install declaration. Since v2.5 those
-entries carry the **final wire values** — PreCompact 120 (sync) / 300 (async),
-SessionStart 15, Stop 22, PostToolUse 8, UserPromptSubmit 8 — and
-`_declared_hook_timeouts()` (`installer.py:753-756`) *reads* `hooks/hooks.json`
-whenever it is available (dev checkout, or `cc_memory_meta/hooks.json` inside a
-frozen build), falling back to the literal table only for a flat/frozen install
-where that file is absent.
+truth. `cc_memory/ui/installer.py`
+`HOOK_SCRIPTS` / `ASYNC_HOOK` (`installer.py:112-122`) is the standalone-install
+declaration of the timeouts; `HOOK_MATCHERS` (`installer.py:130`, v2.16.0) mirrors the
+PostToolUse matcher that `hooks.json` spells from `core.modes.HOOK_TOOL_MATCHER`
+— a third table, for the same reason: a frozen/flat install has no
+`hooks.json` to read. Since v2.5 those entries carry the **final wire values** —
+PreCompact 120 (sync) / 300 (async), SessionStart 15, Stop 22, PostToolUse 8,
+UserPromptSubmit 8 — and `_declared_hooks()` (`installer.py:715-752`, behind
+`_declared_hook_timeouts()`) *reads* `hooks/hooks.json`, timeouts and matchers
+both, whenever it is available (dev checkout, or `cc_memory_meta/hooks.json`
+inside a frozen build), falling back to the literal tables only for a
+flat/frozen install where that file is absent.
 
 The `platform`-based `× 1.5` Windows multiplier that used to express these as
 base timeouts is **deleted**. It made the standalone install disagree with the
 marketplace install on three of five events (Stop 33 vs 22, PostToolUse 12 vs 8,
-UserPromptSubmit 12 vs 8). Raising a timeout now means editing `hooks/hooks.json`
-**and** the fallback table together; `tests/test_surfaces.py` asserts they agree
-numerically.
+UserPromptSubmit 12 vs 8). Raising a timeout or changing the matcher now means
+editing `hooks/hooks.json` **and** the fallback tables together;
+`tests/smoke_test.py` asserts the timeouts agree numerically and that the JSON
+matcher, `HOOK_MATCHERS` and `core.modes` agree.
 
 ### The observation gate no longer shadows the plan branches (fixed in v2.5)
 
@@ -347,8 +361,8 @@ silently varied by mode (the edit bump fired in `code` and `writing` but not
 `apply_todowrite_sync` directly rather than through the hook, so the suite never
 caught it.
 
-`_apply_plan_integration` (`post_tool_use.py:88-120`) now runs **above** the gate
-(called at `post_tool_use.py:88-120`), and `should_observe` wraps only the
+`_apply_plan_integration` (`post_tool_use.py:103`) now runs **above** the gate
+(called at `post_tool_use.py:214`), and `should_observe` wraps only the
 `insert_observation` block. Measured per mode (code / research / writing):
 `ExitPlanMode` → `plan_active` rows `0/0/0` → `1/1/1`; `Edit` →
 `edits_since_last_guardian` `1/0/1` → `1/1/1`; Bash `git push` (1 edit + 20)
@@ -373,65 +387,73 @@ project-local at `<project>/.ccm/memory.db`, WAL mode:
 
 | Table | Purpose |
 |-------|---------|
-| `projects` | One row per project (`db.py:37`) — identified by the database it sits in, not by the `path` string it records: a moved or renamed directory re-attaches its own row instead of minting a second one (§7); carries `mode` since migration `v2_project_mode` (`db.py:165`) and the durable observer cursor `obs_watermark` since `v7_projects_obs_watermark` |
-| `sessions` | One row per compaction event (`db.py:46`); carries `complete` since `v7_sessions_complete` (backfilled, so pre-v7 rows read as complete) |
-| `memories` | Extracted facts (category, importance, topic, content_hash, **supersedes_id**, last_referenced_at) (`db.py:57`). Carries `recall_count` since `v10_memories_recall_count` — incremented when `core/recall.py` retrieves the row for a real user question, which is a different fact from `last_referenced_at`: that one records that SessionStart's importance/recency ranking chose the row with no query in existence, this one records that somebody asked. The pair is what `/cc-mem inject-usage` reports as two channels — both of them DELIVERY facts. Whether Claude USED a delivered row is a judgement about text, so it is layer 2 (`--judge`, opt-in, `llm/usage_judge.py`): one LLM call over that session's own replies, answering `used` / `unused` / `unknown` per row, where `unknown` covers every case in which the judge could not run and is never printed as `unused` |
-| `topics` | Consolidated summaries per topic name (versioned) (`db.py:71`) |
-| `keywords` | Auto-detected project vocabulary (`db.py:81`) |
-| `plans` | The legacy v2.0 task queue's table (`db.py:90`) — kept so an existing database keeps its rows; every reader and writer was deleted in v2.16.0 (§5) |
-| `observations` | Raw PostToolUse events, cleaned up after extraction (`db.py:131`) |
-| `session_summaries` | 6-field structured summary per session (request / investigated / learned / completed / next_steps / notes) + files_read/files_modified (`db.py:144`) |
-| **`progress`** | NEW in v2.1 — single row per project. SOT for `.ccm/PROGRESS.md` (`db.py:188`). |
-| **`plan_active`** | NEW in v2.2 — single row per project. SOT for `.ccm/PLAN.md` (`db.py:212`). Carries `turns_total` since `v9_plan_turns_total`: a MONOTONIC turn count that nothing resets, distinct from `turns_since_last_guardian`, which every guardian check and plan replacement zeroes. Carries `guardian_checked_at_turn` since `v10_plan_guardian_checked_at_turn` — the value of `turns_total` at the last `/cc-mem plan-check`, stamped inside that UPDATE — so "checked during this very turn" is `turns_total == guardian_checked_at_turn + 1` and the drift gate's one-turn immunity is a comparison between two monotonic numbers. `DEFAULT -1`, not 0: with 0 a brand-new plan's first Stop would read `1 == 0 + 1` and grant immunity to a check nobody ran |
+| `projects` | One row per project (`db.py:47`) — identified by the database it sits in, not by the `path` string it records: a moved or renamed directory re-attaches its own row instead of minting a second one (§7); carries `mode` since migration `v2_project_mode` (`db.py:169`) and the durable observer cursor `obs_watermark` since `v7_projects_obs_watermark` |
+| `sessions` | One row per compaction event (`db.py:55`); carries `complete` since `v7_sessions_complete` (backfilled, so pre-v7 rows read as complete) |
+| `memories` | Extracted facts (category, importance, topic, content_hash, **supersedes_id**, last_referenced_at) (`db.py:66`). Carries `recall_count` since `v10_memories_recall_count` — incremented when `core/recall.py` retrieves the row for a real user question, which is a different fact from `last_referenced_at`: that one records that SessionStart's importance/recency ranking chose the row with no query in existence, this one records that somebody asked. The pair is what `/cc-mem inject-usage` reports as two channels — both of them DELIVERY facts. Whether Claude USED a delivered row is a judgement about text, so it is layer 2 (`--judge`, opt-in, `llm/usage_judge.py`): one LLM call over that session's own replies, answering `used` / `unused` / `unknown` per row, where `unknown` covers every case in which the judge could not run and is never printed as `unused` |
+| `topics` | Consolidated summaries per topic name (versioned) (`db.py:80`) |
+| `keywords` | Auto-detected project vocabulary (`db.py:90`) |
+| `plans` | The legacy v2.0 task queue's table (`db.py:99`) — kept so an existing database keeps its rows; every reader and writer was deleted in v2.16.0 (§5) |
+| `observations` | Raw PostToolUse events, cleaned up after extraction (`db.py:140`) |
+| `session_summaries` | 6-field structured summary per session (request / investigated / learned / completed / next_steps / notes) + files_read/files_modified (`db.py:154`) |
+| **`progress`** | NEW in v2.1 — single row per project. SOT for `.ccm/PROGRESS.md` (`db.py:199`). |
+| **`plan_active`** | NEW in v2.2 — single row per project. SOT for `.ccm/PLAN.md` (`db.py:221`). Carries `turns_total` since `v9_plan_turns_total`: a MONOTONIC turn count that nothing resets, distinct from `turns_since_last_guardian`, which every guardian check and plan replacement zeroes. Carries `guardian_checked_at_turn` since `v10_plan_guardian_checked_at_turn` — the value of `turns_total` at the last `/cc-mem plan-check`, stamped inside that UPDATE — so "checked during this very turn" is `turns_total == guardian_checked_at_turn + 1` and the drift gate's one-turn immunity is a comparison between two monotonic numbers. `DEFAULT -1`, not 0: with 0 a brand-new plan's first Stop would read `1 == 0 + 1` and grant immunity to a check nobody ran |
 | **`directives`** | NEW in v2.11.0 — the user-INTENT ledger. `times_stated` accumulates on ONE row per `slug`; a directive outlives every plan, which is why it is not plan steps. Carries `turns_at_touch` since `v9_directives_turns_at_touch` — the value of `turns_total` when it was last written, so idleness is subtraction between two monotonic numbers. Since v2.12.0 `status` may also be `blocked` (parked on the user, idle-exempt) and `kind` may be `constraint` (a standing prohibition, idle-exempt) — vocabulary additions, no schema change; only `directive-add` may bump the count (`directive-edit` corrects fields without touching it) |
-| `_migrations` | Tracks applied migrations (`db.py:736`) |
+| `_migrations` | Tracks applied migrations (`db.py:851`) |
 
 Twelve tables, matching `CLAUDE.md` § "Database schema (12 tables)".
 
-Plus `memories_fts` — an FTS5 virtual table over `memories` (`core/db.py:906-957`),
-kept in sync by three triggers that `db._setup_fts5` creates with it
-(`core/db.py:906-957`); its `_MIGRATIONS` entry is `v2_fts5` (`db.py:163`).
+Plus `memories_fts` — an FTS5 virtual table over `memories` (DDL in
+`_fts_ddl`, `core/db.py:903-915`), kept in sync by three triggers that
+`db._setup_fts5` creates with it (`core/db.py:1021-1072`); its
+`_MIGRATIONS` entry is `v2_fts5` (`db.py:172`).
 It is created only when the local SQLite build has FTS5; otherwise
-`db.search_fts` (`core/db.py:3592-3640`) falls back to `LIKE ? ESCAPE '\'`
-(`core/db.py:3592-3640`). FTS5 is advertised in `.claude-plugin/plugin.json:4`
-and `:12`, and `/cc-mem status` reports which path is live (`cli/mem.py`,
+`db.search_fts` (`core/db.py:3623-3671`) falls back to `LIKE ? ESCAPE '\'`
+(`core/db.py:3664`). FTS5 is advertised in `.claude-plugin/plugin.json:4`
+and `:17`, and `/cc-mem status` reports which path is live (`cli/mem.py`,
 `cmd_status`).
 
-The `supersedes_id` column on `memories` (migration `v3_supersedes`,
-`db.py:173`) makes the anti-patch chain explicit: when `upsert_smart` decides a
+The `supersedes_id` column on `memories` (migration `v3_supersedes`, in
+`_MIGRATIONS` at `db.py:191`) makes the anti-patch chain explicit: when `upsert_smart` decides a
 new memory supersedes an old one, the new row links back to the old row's ID
 (and the old row is archived). Walking the chain via
-`db.get_supersede_chain(memory_id)` (`db.py:2048-2063`) shows the full update
+`db.get_supersede_chain(memory_id)` (`db.py:2052-2067`) shows the full update
 history. `content_hash` (migration `v2_content_hash` in
-`_MIGRATIONS`, `db.py:126`) is `sha256[:16]` of the normalized content, used
+`_MIGRATIONS`, `db.py:135`) is `sha256[:16]` of the normalized content, used
 for the cheap exact-duplicate check
-(`db.compute_content_hash` at `db.py:2619-2621`,
-`db.find_by_hash` at `db.py:2632-2640`).
+(`db.compute_content_hash` at `db.py:2623-2625`,
+`db.find_by_hash` at `db.py:2636-2644`).
 
-Migrations are applied in order from the `_MIGRATIONS` list (`db.py:121-284`) and
+Migrations are applied in order from the `_MIGRATIONS` list (`db.py:130-452`) and
 recorded in `_migrations`. Levels shipped so far: **v1** (`topic` column +
 index), **v2** (content_hash, observations, session_summaries, project mode,
 FTS5, hash backfill), **v3** (anti-patch + forced handoff: `supersedes_id`,
 `progress`), **v4** (`plan_active`), **v5** (session annotation:
 `progress.current_session_id`, `progress.session_started_at` — so a
 multi-session workflow can tell from PROGRESS.md whether it is reading its own
-write, `db.py:230-233`), **v6** (reference-aware aging:
+write, `db.py:241-244`), **v6** (reference-aware aging:
 `memories.last_referenced_at`, set on injection, so effective age is
 `now - COALESCE(last_referenced_at, created_at)` and a referenced fact stays
-"young", `db.py:244-248`), **v7** (round-7/8 hardening: `plan_active.revision`
+"young", `db.py:255-258`), **v7** (round-7/8 hardening: `plan_active.revision`
 for optimistic plan concurrency, `sessions.complete` + backfill,
 `projects.obs_watermark` for the durable observer cursor, and the two
 recency indexes `idx_memories_session` / `idx_sessions_sid` that turned two
-measured quadratics linear — 557.68 ms → 4.31 ms at 2 000 sessions).
+measured quadratics linear — 557.68 ms → 4.31 ms at 2 000 sessions), **v8**
+(`v8_directives`: the `directives` ledger table + its slug and status
+indexes), **v9** (`v9_plan_turns_total`, `v9_directives_turns_at_touch`: the
+two monotonic turn counts idleness is measured with), **v10**
+(`v10_plan_guardian_checked_at_turn`, `v10_memories_recall_count`).
 
-The `progress` row's user-facing fields are `current_request`, `status_done`,
+The `progress` table's non-PK columns are `current_request`, `status_done`,
 `status_in_flight`, `status_blocked`, `open_todos`, `plan`, `critical_context`,
 `files_touched`, `transcript_ptr`, `updated_at`, `trigger_type` (11 —
-`db.py:188-201` — plus the two v5 session-annotation columns, 13 non-PK columns
-in all). The `plan_active` row holds `raw`, `structured`, `active_step`,
+`db.py:199-211` — plus the two v5 session-annotation columns, 13 in all).
+`critical_context` is **retired** (v2.16.0): every writer stores `[]` and
+PROGRESS.md no longer renders it — §5 reads the `memories` store at
+`core.db.CRITICAL_IMPORTANCE` instead; the column stays so existing databases
+need no migration, which leaves 10 live fields. The `plan_active` row holds `raw`, `structured`, `active_step`,
 `edits_since_last_guardian`, `turns_since_last_guardian`, `last_guardian_at`,
 `last_refined_at`, `needs_refine`, `created_at`, `updated_at`
-(`db.py:210-222`), plus `revision` since `v7_plan_revision` — every UPDATE
+(`db.py:217-229`), plus `revision` since `v7_plan_revision` — every UPDATE
 bumps it, and a writer that computed its state from a read passes the
 revision it read (`update_plan_if_revision`), so a plan changed underneath
 is a refused write, not a silent overwrite.
@@ -461,18 +483,22 @@ llm.memory_writer.upsert_smart(db, project_id, session_id, category, content,
   │        and tags are unioned, since neither is part of the hash
   │      → "reinforced" when that changed the row, "skipped" when it did not
   │
-  ├─ 2. find the most similar ACTIVE memory (Jaccard on character trigrams).
+  ├─ 2. find the most similar ACTIVE memory (Jaccard on core.textsim
+  │      shingles: CJK bigrams + ASCII trigrams; memory_writer._make_pick).
   │      Scope: memories in the same topic when a topic is set AND that scan
-  │      yields candidates; otherwise a category-scoped scan of the 50 most
-  │      recently updated (memory_writer._find_similar, memory_writer.py:102-131)
+  │      yields candidates; otherwise a category-scoped scan of the 500
+  │      (MAX_CANDIDATES_TO_SCAN) most recently updated. When that best match
+  │      is below 0.80, a cross-category pass may still match at >= 0.80 only
+  │      (v2.16.0). The SQL runs in MemoryDB.reconcile_upsert, in one
+  │      BEGIN IMMEDIATE transaction with the hash check and the write.
   │      │
-  │      ├─ sim >= 0.80 → MERGE_IN_PLACE (db.update_memory)
-  │      │                  no new row, no stacking; importance = max(new, old);
-  │      │                  tags gain "merged"
+  │      ├─ sim >= 0.80 → MERGE (archive E, insert M with supersedes_id = E)
+  │      │                  E's created_at carried forward; importance =
+  │      │                  max(new, old); tags unioned + "merged"
   │      │
-  │      ├─ sim >= 0.50 → SUPERSEDE (db.supersede_memory)
+  │      ├─ sim >= 0.50 → SUPERSEDE (same category or topic scan only)
   │      │                  archive old, insert new with supersedes_id link;
-  │      │                  importance = max(new, old); tags gain "supersedes"
+  │      │                  importance = max(new, old); tags unioned + "supersedes"
   │      │
   │      └─ sim <  0.50 → fall through to insert
   │
@@ -484,27 +510,30 @@ regenerate_memory_index(db, project_id, memory_dir)   ← MEMORY.md refresh
 `upsert_smart` itself does **not** regenerate `MEMORY.md`. The refresh is the
 caller's responsibility, and there are exactly two shapes:
 
-- `upsert_batch` (`memory_writer.py:318-360`) loops `upsert_smart` per item and
+- `upsert_batch` (`memory_writer.py:335-383`) loops `upsert_smart` per item and
   regenerates ONCE at the end, only when a `memory_dir` is passed AND the batch
   wrote a row — inserted, merged, superseded or reinforced; a batch of pure
-  skips renders nothing (`memory_writer.py:372`, v2.16.0). The Stop observer
-  and the SessionStart retroactive save pass it (`stop.py:539`,
-  `session_start.py:1394`); the sync PreCompact leg passes none and renders
-  once itself, after the rest of its state changes (`pre_compact.py:729`,
-  `pre_compact.py:832`).
+  skips renders nothing (`memory_writer.py:376`, v2.16.0). The Stop observer
+  and the SessionStart retroactive save pass it (`stop.py:530`,
+  `session_start.py:1488`); the sync PreCompact leg passes none and renders
+  once itself, after the rest of its state changes (`pre_compact.py:704`,
+  `pre_compact.py:834`).
 - Single-shot callers call `regenerate_memory_index` explicitly:
-  `cli/mem.py:1241` and `:584`, `mcp/server.py:642`, `ui/dashboard.py:1735`,
-  `ui/web_viewer.py:1034`, plus the `skills/ccm-load` inline script
-  (`skills/ccm-load/SKILL.md:290, 307`). `core/idle.py:96` and
-  `hooks/consolidate_async.py:276` also refresh it after maintenance.
+  `cli/mem.py:1280` (`cmd_add`; also `:1394` cleanup and `:1619` archive),
+  `mcp/server.py:642`, `ui/dashboard.py:1735`,
+  `ui/web_viewer.py:1030`, plus the `skills/ccm-load` inline script
+  (`skills/ccm-load/SKILL.md`). `core/idle.py:112` and
+  `hooks/consolidate_async.py:287` also refresh it after maintenance.
 
 (The pre-merge diagram showed regeneration as an unconditional step of
 `upsert_smart` and elided the `db` argument; both are corrected above against
-`memory_writer.py:318-360, 190, 199`. The caller list is likewise the full set found
+`upsert_smart` and `upsert_batch` in `llm/memory_writer.py`. The caller list is likewise the full set found
 by grepping `upsert_smart|upsert_batch` across `cc_memory/`.)
 
-Thresholds live in ONE place — `memory_writer.HIGH_SIM = 0.80`,
-`MID_SIM = 0.50`, `MIN_CONTENT_LEN = 10`, `MAX_CANDIDATES_TO_SCAN = 50`
+Thresholds live in ONE place each — `HIGH_SIM = 0.80` and `MID_SIM = 0.50`
+in `core/textsim.py` (`textsim.py:60-61`; `memory_writer` imports them, and the
+consolidation stages read the same `HIGH_SIM`), and the writer's own
+`MIN_CONTENT_LEN = 10` and `MAX_CANDIDATES_TO_SCAN = 500`
 (`memory_writer.py:86`). They are no longer mirrored in `config.json`: that
 `writer` block was read by nothing and was deleted in v2.5, because an inert
 tunable is worse than no tunable. See
@@ -579,9 +608,15 @@ UserPromptSubmit (first non-scaffolding prompt, once per session):
   write_progress_md(db, project_id, memory_dir)
 
 SessionStart:
+  _refresh_progress_row(...)                ← tiers 2/3: fill ONLY still-empty
+    ↓                                         fields, before the injection
+  db.fill_empty_progress(project_id, ...)   ← emptiness tested inside the UPDATE
+    ↓
+  write_progress_md(db, project_id, memory_dir)
+    ↓
   inject context blob (standing directives 10% + topics 25% + critical 20% +
                        timeline 20% + PROGRESS digest 15% + footer 10% of a
-                       ~16000-char budget — session_start.py:48-56)
+                       ~16000-char budget — _LAYER_BUDGETS, session_start.py:80-97)
   footer may carry: killed-PreCompact warning (surviving .pre_compact_attempt.json,
                     after a 10-minute grace window), OAuth/api-key warnings, counts
   emit: <system-reminder>
@@ -589,15 +624,16 @@ SessionStart:
           since v2.16.0; MEMORY.md's facts already ride the layers)
           responding to any user request. Explicitly state in your reply:
           "Read PROGRESS.md — prior progress: <summary>."
+          (the ack demand is omitted after a compaction: demand_ack=False)
           … plus the RESUME PROTOCOL (bilingual token whitelist → auto-execute
           open_todos[0]).
         </system-reminder>
 ```
 
 Call signatures above are the real ones: `write_progress_md(db, project_id,
-memory_dir)` (`core/progress.py:498-677`; call sites `pre_compact.py:790`,
-`stop.py:540`, `user_prompt.py:53`, `session_start.py:1065`, `mcp/server.py:243`,
-`cli/mem.py:1332`). See
+memory_dir)` (`core/progress.py:611-750`).
+Call sites of `write_progress_md`: `pre_compact.py:792`, `stop.py:674`, `user_prompt.py:460`, `session_start.py:1230`, `mcp/server.py:727`, `cli/mem.py:1494`.
+See
 [docs/CONTRACTS.md](CONTRACTS.md#handoff-contract) for the PROGRESS.md
 schema.
 
@@ -607,11 +643,11 @@ A `PreCompact` killed by the host timeout dies on `TerminateProcess`: no
 `except`, no `finally`, so `.last_save.json` still describes the *previous*
 successful run and the failure is invisible. The sync leg therefore writes
 `.ccm/.pre_compact_attempt.json` **before** the transcript load
-(`pre_compact.py:581`) and removes it only on a completed run
-(`pre_compact.py:874`) — including on its own error path (`pre_compact.py:929`),
+(`pre_compact.py:583`) and removes it only on a completed run
+(`pre_compact.py:876`) — including on its own error path (`pre_compact.py:931`),
 so an *errored* run is never reported as a *killed* one. `SessionStart` reports
 a surviving marker, but only once it is at least 10 minutes old, so a run still
-in flight is never mislabelled (`session_start.py:187-206`).
+in flight is never mislabelled (`_build_footer`, `session_start.py:472-493`).
 
 ### Transcript ownership: no fuzzy matching, ever (v2.5)
 
@@ -633,21 +669,21 @@ its own memories.
 
 Three changes close it:
 
-1. `core.extractor.mangle_project_path` is the single source of truth for the
-   convention (`extractor.py:636-657`), used by `find_latest_transcript`,
+1. `core.extractor.mangle_project_path` (`extractor.py:570-586`) is the single
+   source of truth for the convention, used by `find_latest_transcript`,
    `hooks/session_start.py` and `ui/dashboard.py` — which had carried a verbatim
    copy of the old resolver, fuzzy branch included.
 2. The fuzzy fallback is **deleted**. A miss returns `None`. Callers must treat
    that as "no transcript", never as licence to guess.
 3. Ownership is checked positively. `_transcript_belongs_to`
-   (`session_start.py:880-897`) reads the `cwd` the transcript's own records carry
+   (`session_start.py:874-891`) reads the `cwd` the transcript's own records carry
    and is **fail-closed** — no `cwd`, no ingest — and gates `retroactive_save`
    after the bounded window load. The tier-3 mine uses the deliberately weaker
-   `_transcript_is_foreign` (`session_start.py:900-927`): absent `cwd` is allowed,
+   `_transcript_is_foreign` (`session_start.py:894-921`): absent `cwd` is allowed,
    a *different* `cwd` is refused. The two differ on purpose — retroactive save
    persists LLM-extracted memories forever and should demand proof, while
    tier-3 must still work for the cwd-less transcript shape
-   `tests/smoke_test.py:266-278` builds.
+   `tests/smoke_test.py:501-514` builds.
 
 Measured: with two planted transcripts, one foreign, retroactive save went from
 2 LLM legs ingesting `['aaaa-foreign', 'bbbb-mine']` to 1 leg ingesting
@@ -662,11 +698,11 @@ because a pointer to another project's transcript is itself contamination.
 `ExitPlanMode` output (or user-supplied `/cc-mem plan-set` text) lands in
 `plan_active.raw` with `needs_refine = 1`; the `plan-refiner` subagent
 normalises it to JSON, written back via `/cc-mem plan-set --from-refiner`;
-`TodoWrite` events sync step statuses mechanically by trigram-Jaccard match (no
+`TodoWrite` events sync step statuses mechanically by `core.textsim` shingle-Jaccard match (no
 LLM); `Edit`/`Write`/`MultiEdit`/`NotebookEdit` bump
 `edits_since_last_guardian`, and sensitive Bash calls (`git push`, `rm -rf`,
 `DROP TABLE`, `npm publish`, `kubectl apply`, `terraform apply`, … —
-`core.plan.is_sensitive_tool_call`, `plan.py:1440-1463`) bump it by 20. Once
+`core.plan.is_sensitive_tool_call`, `plan.py:1465-1488`) bump it by 20. Once
 `turns_since_last_guardian >= 8` OR `edits_since_last_guardian >= 12`
 (`core.plan.guardian_verdict` — THE policy point since v2.15.0, read by
 `blocking_reasons` AND `/cc-mem plan-status`, so the
@@ -683,7 +719,7 @@ every mode since v2.5 — see
 for what used to shadow them.
 
 A raw plan that has not been refined yet is no longer invisible:
-`core.plan.raw_pending_refinement` (`plan.py:402-431`) is the shared predicate, and
+`core.plan.raw_pending_refinement` (`plan.py:404-433`) is the shared predicate, and
 both `write_plan_md` and `/cc-mem plan-status` lead with a PENDING REFINEMENT
 banner plus the verbatim raw text, labelling any older structured plan as
 superseded. The verbatim block's fence widens past the longest backtick run in
@@ -703,14 +739,14 @@ nothing reads or writes it any more.
 ## 6. LLM backends and auth
 
 `llm.ccl_backend.call_llm` calls Anthropic Haiku (model
-`claude-haiku-4-5-20251001`, `ccl_backend.py:222-326`). Callers resolve one
+`claude-haiku-4-5-20251001`, `ccl_backend.py:258-362`). Callers resolve one
 credential up front with `core.auth.get_api_key()` and pass it in; `call_llm`
 tries that one FIRST, then FALLS THROUGH to the remaining
 `core.auth.get_api_candidates()` entries when a leg fails — bounded to 2
-Anthropic legs total (`ccl_backend.py:264`), so the worst-case wall-clock stays
+Anthropic legs total (`ccl_backend.py:317-322`), so the worst-case wall-clock stays
 a known quantity for the consolidation BudgetGate. Candidate order and wire
-format (`core/auth.py:20-57`, `_wire_for` at `core/auth.py:8-17`,
-`_call_haiku` headers at `ccl_backend.py:97-127`):
+format (`get_api_candidates` at `core/auth.py:43-80`; `_wire_for` at `core/auth.py:8-17`;
+`_call_haiku` headers at `ccl_backend.py:99-134`):
 
 1. `ANTHROPIC_API_KEY` env var → `x-api-key` header
 2. Claude Code OAuth token in `~/.claude/.credentials.json` (auto-detected,
@@ -722,16 +758,16 @@ The wire distinction is not cosmetic: verified live 2026-07-14, an
 while the same token via Bearer + beta gets HTTP 200 (`core/auth.py:14-15`).
 
 `get_api_key()` is the single-credential back-compat view of that same list (it
-does not retry, `core/auth.py:60-93`); it also carries the `oauth_expired`
+does not retry, `core/auth.py:83-116`); it also carries the `oauth_expired`
 signal behind SessionStart's "[WARNING: OAuth expired — LLM extraction,
-semantic de-dup, obsolescence check and topic summaries disabled]" footer (`session_start.py:808`). Hook callers use it to *supply*
-the credential passed into `call_llm`: `pre_compact.py:96 → :166`,
-`stop.py:102`, `session_start.py:808`, `core/consolidate.py:439, 549, 724`.
+semantic de-dup, obsolescence check and topic summaries disabled]" footer (`_build_footer`, `session_start.py:509-510`). Hook callers use it to *supply*
+the credential passed into `call_llm`.
+The `get_api_key()` call sites: `pre_compact.py:208` (passed on at `:234`), `stop.py:401`, `session_start.py:961`, `core/consolidate.py:483, 796, 1018`.
 
 Fall-through was added in v2.3.4 for a concrete failure: a dead env key (e.g.
 zero credit → HTTP 400) used to blackhole the healthy subscription token behind
 it and silently push every LLM call onto Ollama, cold-loading a 5.9 GB local
-model per consolidation batch (`core/auth.py:30-33`, `ccl_backend.py:10-12`).
+model per consolidation batch (`core/auth.py:53-56`, `ccl_backend.py:10-12`).
 
 The local Ollama fallback is **opt-in and OFF by default**
 (`cc_memory/config.json` `ccl.enabled: false`;
@@ -743,7 +779,7 @@ local fallback at all.
 
 ### Bounding wall-clock: `fallback_timeout` and `deadline`
 
-`call_llm` (`ccl_backend.py:222-326`) offers two independent bounds.
+`call_llm` (`ccl_backend.py:258-362`) offers two independent bounds.
 
 `fallback_timeout` bounds the Ollama leg. When `None` it defaults to
 `min(timeout*3, 120)`. The worst-case envelope of one call is then
@@ -752,7 +788,7 @@ local fallback at all.
 2 * timeout  +  (fallback_timeout if ccl.enabled else 0)
 ```
 
-because the Anthropic candidates are bounded at 2 (`ccl_backend.py:274`). That
+because the Anthropic candidates are bounded at 2 (`ccl_backend.py:317-322`). That
 arithmetic is what lets the consolidation `BudgetGate` guarantee completion —
 see `core.consolidate._worst_call_cost`.
 
@@ -791,7 +827,7 @@ final leg can still be in flight). At the measured `k ≈ 1.48` that is 17.4 s o
 Stop's 22 s and 87 s of PreCompact's 120 s.
 
 If every enabled leg fails, `call_llm` raises `RuntimeError` carrying the
-aggregated per-leg reasons (`ccl_backend.py:222-326`) and hooks degrade
+aggregated per-leg reasons (`ccl_backend.py:258-362`) and hooks degrade
 gracefully — extraction is skipped, but archives/handoff/observations still
 save. Hooks NEVER raise into Claude Code. (That last sentence only became true
 in v2.4.2: `_extract_via_llm`'s `except` tuple did not include `RuntimeError`,
@@ -812,6 +848,8 @@ Per-project state lives at `<project>/.ccm/`:
 ├── PLAN.md                      full-rewrite from `plan_active` row (v2.2)
 ├── .last_save.json              status from last PreCompact (incl. auto/manual trigger)
 ├── .last_inject.json            what SessionStart actually injected (v2.3)
+├── .last_recall.json            ids query-time recall already showed this
+│                                session (core.recall.RECALL_MANIFEST, v2.15.0)
 ├── .last_consolidation.json     session count + row-id watermark at last
 │                                consolidation (v2.3.2; watermark v2.12.0)
 ├── .consolidation.lock          prevents overlapping async workers (v2.3.2)
@@ -831,14 +869,16 @@ Per-project state lives at `<project>/.ccm/`:
 ```
 
 Writers, for traceability: `MEMORY.md` ← `memory_writer.regenerate_memory_index`
-(`memory_writer.py:384-421`); `PROGRESS.md` ← `core.progress.write_progress_md`
-(`progress.py:498-677, 366`); `PLAN.md` ← `core.plan.write_plan_md`
-(`plan.py:783-832`); `.plan_history/` ← `plan.py:783-832`; `.last_save.json` ←
-`pre_compact.py:398, 771`; `.last_inject.json` ← `session_start._write_inject_manifest`
+(`memory_writer.py:389-426`); `PROGRESS.md` ← `core.progress.write_progress_md`
+(`progress.py:611-750`); `PLAN.md` ← `core.plan.write_plan_md`
+(`plan.py:817-867`); `.plan_history/` ← `core.plan.archive_plan` (`plan.py:1068-1134`);
+`.last_save.json` ← `pre_compact.main` (`pre_compact.py:866, 916`); `.last_inject.json` ← `session_start._write_inject_manifest`
 (through `core.atomic.write_atomic` since v2.16.0; `.last_save.json` keeps its
 plain write); `.last_consolidation.json` ←
 `core.consolidate.write_consolidation_marker` (one writer, async hook + CLI);
-`.consolidation.lock` ← `_acquire_lock` (`consolidate_async.py:121-155`);
+`.last_recall.json` ← `user_prompt._emit_recall` (`user_prompt.py:230-310`;
+the name is `core.recall.RECALL_MANIFEST`, the last 200 ids kept);
+`.consolidation.lock` ← `_acquire_lock` (`consolidate_async.py:125-169`);
 `.consolidation.kick` ← `stop.py:_maybe_kick_consolidation`;
 `.observer.lock` ← `stop.py:_observe_worker` and `.retro.lock` ←
 `session_start.py:_retro_worker`, both through the same `_acquire_lock`
@@ -846,9 +886,12 @@ with a 60 s horizon; `.llm_backoff.json` ←
 `core.auth.note_llm_failure` (one writer; every
 LLM-calling hook reads it through `core.auth.llm_backoff` and the first
 successful call unlinks it); `.pre_compact_attempt.json` ←
-`pre_compact._write_attempt` (through `core.atomic.write_atomic`, v2.16.0). `sessions/` and `topics/` are created by whichever
-path touches the project first — `user_prompt.py:57-63` on auto-init, or
-`pre_compact.py:342-343`.
+`pre_compact._write_attempt` (through `core.atomic.write_atomic`, v2.16.0). `sessions/` and `topics/` are created by
+`core.progress.ensure_memory_dir` (`progress.py:131-171`), which whichever
+path touches the project first calls — `_init_project_if_needed`
+(`user_prompt.py:115-146`) on auto-init, or the PreCompact sync leg; PreCompact
+creates the `sessions/YYYY/MM/` archive directory itself
+(`_reserve_archive_ts`, `pre_compact.py:453`).
 
 `.ccm/PROGRESS.md`, `.ccm/MEMORY.md`, and `.ccm/PLAN.md` are **generated
 artifacts**. Edit the SQL source of truth instead (`progress` for PROGRESS.md,
@@ -857,7 +900,7 @@ artifacts**. Edit the SQL source of truth instead (`progress` for PROGRESS.md,
 **Identification is tri-state, and a link is not a state directory
 (v2.14.0).** `core.layout` decides where the state directory IS — `.ccm/`,
 or a pre-v2.13.0 `memory/` awaiting its one-way rename — by identifying the
-legacy directory's CONTENTS, never by its name (`CLAUDE.md` § v2.13.0).
+legacy directory's CONTENTS, never by its name (`CHANGELOG.md` § [2.13.0], *Rules recorded in CLAUDE.md at release*).
 Through v2.13.2 every probe returned a plain False when it could not run, so
 a lock held for one second, an antivirus hold or a CANTOPEN took the same
 branch as "not ours" — the irreversible one: `.ccm/` was created empty
@@ -879,7 +922,7 @@ refused the link — re-applies the same probe before it writes.
 `<project>` is **not** the `cwd` the hook payload carries. That cwd is the
 session's CURRENT working directory and follows the agent's own `cd`, so a
 session launched at a repo root that ran one command inside `cli/` began
-reporting `<root>/cli` — and `_init_project_if_needed` (`user_prompt.py:106-137`)
+reporting `<root>/cli` — and `_init_project_if_needed` (`user_prompt.py:115-146`)
 mkdir'd a second, fully independent database there. Four of the six hooks <!--ce:hooks:subset--> gate
 on `.ccm/memory.db` merely EXISTING, so once born the stray kept being
 written: measured 27 memories and its own `projects` row in one such database,
@@ -897,7 +940,7 @@ inside another one — `Claude-Code-Local/companion` alone holds 3725 memories
 and carries its own `.git`. A stray sub-database and a deliberate nested
 sub-project are **byte-for-byte indistinguishable on disk**: both have
 `.ccm/memory.db` whose `projects` row names their own directory, because
-`upsert_project` (`core/db.py:1474-1511`) records whatever cwd it was handed.
+`upsert_project` (`core/db.py:1486-1523`) records whatever cwd it was handed.
 Outermost-wins resolves that ambiguity unconditionally in the direction that
 destroys data, so the first post-upgrade session in `companion` would have
 moved 3725 memories out of reach, silently.
@@ -943,7 +986,7 @@ only after a connect actually failed — so a dashboard, web viewer or MCP
 server that outlives the rename keeps answering, and nothing but the
 migration ever joins the legacy name.
 
-`project_root` (`core/roots.py:682-727`) resolves a root first. Every hook
+`project_root` (`core/roots.py:700-745`) resolves a root first. Every hook
 rebinds `cwd` to it immediately **after** `is_excluded` and never before:
 resolving first would widen a per-subdirectory exclusion away by climbing to
 its unexcluded parent. Since v2.10.0 that ordering is not a per-hook
@@ -964,7 +1007,7 @@ levels (`_chain`, `core/roots.py:359-387`). First hit wins:
    `CodeEraser/cli` has no database while `CodeEraser` does. It needs no VCS
    and no manifest, which matters for projects that are not repositories.
 2. `CLAUDE_PROJECT_DIR`, when it names a directory in the chain (`_from_env`,
-   `core/roots.py:661-679`). Ranked *below* the database rungs deliberately:
+   `core/roots.py:679-697`). Ranked *below* the database rungs deliberately:
    it records where Claude Code was launched, which is not authority to orphan
    a database. Containment is likewise the point — a value left over from
    another project must not redirect this one.
@@ -984,7 +1027,7 @@ database rung consulted nothing, so a `.ccm/` created by one session in a
 projects folder captured every uninitialised project under it; the marker rung
 never checked the FIRST marker it found, so one stray `package.json` there did
 the same; and neither had any notion of a dependency tree. `_candidates`
-(`core/roots.py:466-515`) now filters the chain once, before any rung reads it:
+(`core/roots.py:563-628`) now filters the chain once, before any rung reads it:
 
 - **Containers of projects are removed** (`_is_container`). Two asymmetric
   triggers: two or more children that are VCS roots is always decisive (the
@@ -1053,7 +1096,7 @@ stray four levels down — the defect produced by the guard against it.
 and delivered it for `cli/mem.py` alone; the audit that followed found seven
 more surfaces that turn a supplied string into a database path, none of them
 anchoring. They now share one implementation, `anchor_project`
-(`core/roots.py:730-783`):
+(`core/roots.py:748-801`):
 
 | Surface | Can it CREATE? | Announces via |
 |---|---|---|
@@ -1086,7 +1129,7 @@ comparison could never match a relative path: `--project .` — exactly what the
 every single call.
 
 A pre-existing stray is therefore left exactly where it is — and *reported*,
-so it is not invisible: `nested_databases` (`core/roots.py:797-862`) backs a
+so it is not invisible: `nested_databases` (`core/roots.py:815-880`) backs a
 `[WARN] Separate database below this project` line in `cc-mem status`, which
 names each one and its memory count. That is an explicit command rather than a
 hook, because it walks the tree. `.ccm-root` — an empty file — pins a
@@ -1098,14 +1141,15 @@ that every hook resolves *after* the opt-out.
 
 ### .gitignore migrates, not just creates (v2.4.2)
 
-`core.progress.MEMORY_GITIGNORE_LINES` (`progress.py:42-56`) is the canonical
-ignore set, and `ensure_memory_gitignore` (`progress.py:85-122`) **appends only
+`core.progress.MEMORY_GITIGNORE_LINES` (`progress.py:69-88`) is the canonical
+ignore set, and `ensure_memory_gitignore` (`progress.py:91-128`) **appends only
 the missing lines**, preserving anything the user added. Every previous
 generator was guarded by `if not gi.exists()`, so each time the plugin started
 writing a new artifact, existing installs kept the stale ignore list forever and
 silently began leaking it. Several of these artifacts embed verbatim
 conversation or plan prose, which makes that a privacy problem rather than
-noise. `pre_compact.py:585` runs it on EVERY compaction (not only at project
+noise. PreCompact runs it on EVERY compaction, through `ensure_memory_dir`
+(`pre_compact.py:565`) (not only at project
 creation) precisely so old installs migrate. Two standalone copies of the list
 exist because they cannot import this module and must be kept in sync:
 `cc_memory/ui/installer.py` (stdlib-only bootstrap) and
@@ -1113,31 +1157,32 @@ exist because they cannot import this module and must be kept in sync:
 
 Old v2.0 `SESSION_HANDOFF.md` files are renamed to `SESSION_HANDOFF.md.v2.bak`
 on first PreCompact under v2.1 (one-shot migration
-`core.progress.migrate_legacy_handoff`, `progress.py:801-819`).
+`core.progress.migrate_legacy_handoff`, `progress.py:808-826`).
 
 ---
 
 ## 8. Install layouts
 
 Three layouts are recognised by `cli/mem.py` `_detect_install_layouts`
-(`cc_memory/cli/mem.py:487-565`). A machine can have more than one at once
+(`cc_memory/cli/mem.py:500-578`). A machine can have more than one at once
 (e.g. a dev checkout plus a stale marketplace-cache entry), so `/cc-mem status`
 reports on each:
 
 - **marketplace-directory** — `extraKnownMarketplaces["cc-memory"].source.path`
-  points at a checkout (`mem.py:134-142`). `hooks/hooks.json`'s
+  points at a checkout (`mem.py:522-530`). `hooks/hooks.json`'s
   `${CLAUDE_PLUGIN_ROOT}` then resolves to the working tree itself, so editing
   `cc_memory/**.py` updates the live hooks with no copy step. This is the dev
-  layout this repo uses, and it is why `CLAUDE.md` § "Sync protocol" says no
-  copy into `~/.claude/hooks/` is needed for code changes.
+  layout this repo uses, and it is why the **Sync.** paragraph under `CLAUDE.md`
+  § "Build, release, sync" says no copy into `~/.claude/hooks/` is needed for
+  code changes.
 - **marketplace-cache** — `installPath` from
-  `~/.claude/plugins/installed_plugins.json` (`mem.py:144-174`). A recorded
+  `~/.claude/plugins/installed_plugins.json` (`mem.py:532-564`). A recorded
   `installPath` that no longer exists is reported as a broken layout rather
-  than skipped (`mem.py:158-170`).
+  than skipped (`mem.py:547-560`).
 - **legacy / standalone install** — `~/.claude/hooks/cc-memory/`
-  (`mem.py:48`), written by the PyInstaller installer
+  (`_detect_install_layouts`, `mem.py:570`), written by the PyInstaller installer
   (`ui/installer.py:72` `TARGET_DIR`). Hooks here are registered directly in
-  `~/.claude/settings.json` by `_merge_into_settings` (`installer.py:1116-1150+`),
+  `~/.claude/settings.json` by `_merge_into_settings` (`installer.py:1143-1177`),
   not via a plugin manifest.
 
 Under the marketplace layouts `~/.claude/hooks/cc-memory/` holds only `logs/`
@@ -1180,10 +1225,14 @@ shapes do not share a `cc_memory/` path segment.
 ```
 
 **Standalone installer (FLAT)** — `_copy_subpackages(TARGET_DIR)`
-(`installer.py:77-89`) writes each `SUBPACKAGE_FILES` key (`installer.py:77-89`)
+(`installer.py:389-421`) writes each `SUBPACKAGE_FILES` key (`installer.py:77-92`)
 directly under `TARGET_DIR` (`installer.py:72`), with **no `cc_memory/`
-segment**, and `_make_hooks_config` (`installer.py:759-782`) builds commands as
-`python "<TARGET_DIR>/hooks/<name>.py"`:
+segment**, and `_make_hooks_config` (`installer.py:761-784`) builds commands as
+`{python_cmd} "<TARGET_DIR>/hooks/<name>.py"`, where `python_cmd` is whatever
+`_detect_python_cmd()` found answering as Python 3 (see
+[Interpreter requirement](#interpreter-requirement)), and copies the
+PostToolUse matcher from `hooks.json` when it can read one, else from
+`HOOK_MATCHERS`:
 
 ```
 ~/.claude/hooks/cc-memory/           ← ui/installer.py:72 TARGET_DIR
@@ -1222,14 +1271,15 @@ install contained `hooks/` and `settings.json` and nothing else — no `/cc-mem`
 command, no `plan-refiner` / `plan-guardian` agents, no skills. Everything the
 user actually interacts with was missing.
 
-`SURFACE_FILES` (`installer.py:95-101`) names exactly five paths —
+`SURFACE_FILES` (`installer.py:98-104`) names exactly five paths —
 `commands/cc-mem.md`, `agents/plan-refiner.md`, `agents/plan-guardian.md`,
 `skills/ccm-load/SKILL.md`, `skills/save-memories/SKILL.md` — and `_copy_surfaces`
-(`installer.py:467-501`) writes them into `~/.claude/` at install step [2/3],
-recording what it wrote in `installed_surfaces.json` (`installer.py:58`).
+(`installer.py:503-546`) writes them into `~/.claude/` at install step [2/3],
+recording what it wrote in `installed_surfaces.json` (`SURFACE_MANIFEST`,
+`installer.py:74`).
 
 Uninstall is **by name**, never `rmtree`: `~/.claude/{commands,agents,skills}`
-hold the user's own files. `_remove_surfaces` (`installer.py:547-581`) deletes only
+hold the user's own files. `_remove_surfaces` (`installer.py:549-583`) deletes only
 the recorded paths, removes an emptied `skills/<name>/` but never `commands/` or
 `agents/` themselves, and distinguishes "no manifest" (fall back to this build's
 `SURFACE_FILES`) from "a manifest recording nothing" (delete nothing, and say
@@ -1238,7 +1288,7 @@ seeded leaves exactly those two files behind.
 
 ### settings.json is validated before anything is copied (v2.5)
 
-`_read_settings` (`installer.py:785-817`) returns `(dict, None)` or `(None, error)`
+`_read_settings` (`installer.py:787-819`) returns `(dict, None)` or `(None, error)`
 and never raises; `cli_install` calls it at step **[0/3]** and returns 1 with
 `Nothing has been installed.` on a parse failure. Through v2.4.3 the parse
 happened *after* the copy, so a `settings.json` the installer could not read
@@ -1276,15 +1326,15 @@ of the compare-and-swap still read `SETTINGS_PATH`.
 
 ### Layout detection and inspection agree (fixed in v2.5)
 
-Detection accepts both shapes: `mem.py:522` tests
+Detection accepts both shapes: `mem.py:571` tests
 `(legacy / "cc_memory").exists() or (legacy / "core" / "db.py").exists()`.
-Inspection used to disagree with it. `_inspect_layout` (`mem.py:493-562`) resolved
-every `cc_memory/…`-prefixed entry of `_REQUIRED_PLUGIN_FILES` (`mem.py:304-363`)
+Inspection used to disagree with it. `_inspect_layout` (`mem.py:581-650`) resolved
+every `cc_memory/…`-prefixed entry of `_REQUIRED_PLUGIN_FILES` (`mem.py:304-376`)
 against the layout **root**, so a healthy flat install reported all 22 files
 missing, printed `[FAIL]`, and — because `/cc-mem status` only runs the API-key
 check against a "fully-functional" layout — skipped that check entirely.
 
-It now resolves `pkg_dir` once (`mem.py:539`:
+It now resolves `pkg_dir` once (`mem.py:604`:
 `root/"cc_memory"` if that directory exists, else `root`), strips the prefix
 accordingly, and requires `hooks/hooks.json` only for plugin-manifest installs —
 the standalone installer never copies it, and it is meaningless when the hooks
@@ -1307,7 +1357,7 @@ plugin. Otherwise hooks fail silently (logged to
 missing command).
 
 The standalone installer sidesteps this by **running** each candidate rather
-than probing for its existence: `_detect_python_cmd` (`installer.py:646-666`)
+than probing for its existence: `_detect_python_cmd` (`installer.py:660-680`)
 executes `<cand> -c "import sys;print(sys.version_info[0])"` with a 15 s timeout
 and takes the first that answers `3`. `shutil.which("python3")` was not enough —
 on Windows it resolves to a 0-byte App Execution Alias when Store Python is not
@@ -1328,7 +1378,7 @@ is `tools/i18n_check.py` (pure stdlib, dev/CI only — not shipped in the plugin
 
 > Merge note: this chapter was `docs/I18N.md` through v2.4.2, and was merged
 > here in v2.4.3. Every in-code pointer was retargeted in the same change — the
-> Tier-3 guard comments in `core/extractor.py` (`:32`, `:71`),
+> Tier-3 guard comments in `core/extractor.py` (above `_PATTERNS` and `_IMPORTANCE_BOOST`),
 > `hooks/session_start.py` and `hooks/user_prompt.py`, plus the module docstring
 > of `cc_memory/__init__.py`, all cite
 > `docs/ARCHITECTURE.md#9-documentation-language-convention-i18n §1`, and
@@ -1344,8 +1394,8 @@ The whole system rests on separating three different things people mean by
 | Tier | What | Rule | Where it lives |
 |------|------|------|----------------|
 | 1 — Skeleton | English canonical docs + all LLM-facing strings | English is authoritative; every translation needs an English source | `README.md`, `docs/*.md`; hook / CLI instruction strings |
-| 2 — Translation | Human-read docs in another language | `NAME.<lang>.md` sibling, drift-tracked, produced on demand | `README.zh.md`, `docs/ARCHITECTURE.zh.md`, `docs/CONTRACTS.zh.md` — since v2.5 all three tracked English docs have one |
-| 3 — Content | Memory content the user stores | Any language; bilingual detection is intentional | `extractor.py`, `user_prompt.py`, `session_start.py` |
+| 2 — Translation | Human-read docs in another language | `NAME.<lang>.md` sibling, drift-tracked, produced on demand | `README.zh.md`, `docs/ARCHITECTURE.zh.md`, `docs/CONTRACTS.zh.md` — since v2.5 every tracked English doc has one except the evidence record `docs/debug-pass-2026-09.md` (deliberately untranslated) |
+| 3 — Content | Memory content the user stores | Any language; bilingual detection is intentional | `extractor.py`, `prompts.py` (`RESUME_TRIGGERS`), `user_prompt.py`, `session_start.py`, `recall.py` |
 
 - **Tier 1 stays English on purpose.** Hook stdout and the `Claude:` CLI
   instruction prints are read by the model, not the end user — they are tuned for
@@ -1357,11 +1407,13 @@ The whole system rests on separating three different things people mean by
   [§1 "Bilingual by design"](#bilingual-by-design--memory-content-is-language-agnostic).
   Do **not** reduce those detectors to English-only — that would break clause 3 of
   the design ("内容可以是任意语言"). The concrete guarded sites are
-  `core/extractor.py:35-69` (`_PATTERNS`), `core/extractor.py:35-69`
-  (`_IMPORTANCE_BOOST`), the RESUME PROTOCOL token lines in
-  `hooks/session_start.py` and `resume_signals` in `hooks/user_prompt.py`; the
-  last two must stay in sync with each other, since the forced reminder promises
-  the behavior that `user_prompt` types as `resume_request`. All four carry an
+  `core/extractor.py:37` (`_PATTERNS`); `core/extractor.py:75`
+  (`_IMPORTANCE_BOOST`); `core.prompts.RESUME_TRIGGERS` and the hook code
+  that consumes it (the RESUME PROTOCOL lines in `hooks/session_start.py`,
+  `resume_signals` in `hooks/user_prompt.py`), and `core/recall.py`'s bilingual
+  `_STOPWORDS`. The resume vocabulary is spelled ONCE since v2.16.0, so the
+  forced reminder's promise and the `resume_request` typing in `user_prompt`
+  can no longer drift apart. Every one of these sites carries an
   `i18n Tier 3` comment — `grep -rn "i18n Tier 3" cc_memory/` locates them
   without depending on line numbers that move.
 
@@ -1377,13 +1429,16 @@ Only **Tier 2** — the human-facing docs — is what this convention version-co
   `NAME.md` is an **ORPHAN** (checker fails). There are no translation-only docs.
 
 Tracked set (what the checker looks at): `README.md` at the repo root plus
-`docs/*.md`, excluding `*.zh.md` (`tools/i18n_check.py:146-157`). Translations
+`docs/*.md`, excluding `*.zh.md` (`discover_english`, `tools/i18n_check.py:172-183`). Translations
 are `README.zh.md` and `docs/*.zh.md`, non-recursive
-(`tools/i18n_check.py:160-166`). After the v2.4.3 doc consolidation the tracked
-English set is exactly three files — `README.md`, `docs/ARCHITECTURE.md`,
-`docs/CONTRACTS.md` — not the five that existed before the merge. Since v2.5
-**all three have a translation**, so a healthy run reports `3 in-sync` and there
-is no MISSING-TRANSLATION left: any edit to an English doc that is not followed
+(`discover_translations`, `tools/i18n_check.py:186-192`). After the v2.4.3 doc consolidation the tracked
+English set was three files — `README.md`, `docs/ARCHITECTURE.md`,
+`docs/CONTRACTS.md` — and v2.14.0 added a fourth, `docs/debug-pass-2026-09.md`,
+which `docs/*.md` matches. The three have had a translation since v2.5; the
+evidence record has none on purpose (a dated record, never edited), so a
+healthy run reports
+`3 in-sync, 1 missing-translation` — that one MISSING-TRANSLATION is expected.
+Any edit to a translated English doc that is not followed
 by steps 2-4 of [§9.7](#97-updating-after-the-english-source-changes) turns both
 this checker and `tests/smoke_test.py` red.
 
@@ -1413,7 +1468,8 @@ completed together, which is exactly what the `I18N.md` precedent above says to
 do. `docs/CONTRACTS.md` gained its switcher in v2.5, in the same change that
 added `docs/CONTRACTS.zh.md`; it correctly had none before that, because a
 switcher without its target is the dead link this convention exists to prevent.
-All three tracked English docs now carry one, and all three have a translation.
+The three translated English docs now carry one; `docs/debug-pass-2026-09.md`
+has no translation and therefore, correctly, no switcher.
 
 ### 9.4 The drift marker
 
@@ -1427,7 +1483,7 @@ invisible when rendered and inert to Claude Code's plugin/skill/agent loader (it
 
 That line illustrates the marker **format**; it is not a claim about any current
 file's digest. Real markers are generated with `--emit-marker` (§9.6, §9.7).
-Grammar: `tools/i18n_check.py:50-60` (`MARKER_FMT` / `MARKER_RE`, which requires
+Grammar: `tools/i18n_check.py:57-77` (`MARKER_FMT` / `MARKER_RE`, which requires
 exactly 16 lowercase hex digits and an ISO date).
 
 Fields:
@@ -1446,7 +1502,7 @@ only an actual change to the English *content* does. `translation` is not a
 drift signal either: it is what lets `--emit-marker` refuse to certify a
 translation nobody translated (§9.7).
 
-Marker parsing is **fail-closed** (`tools/i18n_check.py:107-124`): it is
+Marker parsing is **fail-closed** (`parse_marker`, `tools/i18n_check.py:133-150`): it is
 BOM-tolerant, but any read/decode error, or a first line that does not match the
 grammar, yields `None` and the caller reports NO-MARKER (a FAIL state) rather
 than silently treating the translation as valid.
@@ -1473,8 +1529,8 @@ must be finalized *before* you emit the marker (see §9.6).
 
 `tools/i18n_check.py` is pure stdlib and lives outside the `cc_memory` package on
 purpose — it is a dev/CI tool and is deliberately absent from `ui/installer.py`
-`SUBPACKAGE_FILES` (`installer.py:77-89`), `build_exe.py`, and `cli/mem.py`
-`_REQUIRED_PLUGIN_FILES` (`mem.py:304-363`), so the packaged plugin is unchanged
+`SUBPACKAGE_FILES` (`installer.py:77-92`), `build_exe.py`, and `cli/mem.py`
+`_REQUIRED_PLUGIN_FILES` (`mem.py:304-376`), so the packaged plugin is unchanged
 by it.
 
 ```bash
@@ -1488,7 +1544,7 @@ python tools/i18n_check.py --emit-marker README.md --date 2026-08-04      # over
 ```
 
 `--root` defaults to the repo containing the script, not the CWD
-(`tools/i18n_check.py:305-307`), so the checker gives the same answer from any
+(`_default_root`, `tools/i18n_check.py:356-358`), so the checker gives the same answer from any
 directory.
 
 States, labels, and exit codes:
@@ -1503,13 +1559,13 @@ States, labels, and exit codes:
 
 The checker exits nonzero if **any** STALE / ORPHAN / NO-MARKER is present
 (`FAIL_STATES`, `tools/i18n_check.py:85`; `main` returns `1` on failure,
-`:351-353`). MISSING-TRANSLATION is a soft warning — a translation simply hasn't
-been produced yet — and never fails the build. `tests/smoke_test.py:878-895`
+`:422-424`). MISSING-TRANSLATION is a soft warning — a translation simply hasn't
+been produced yet — and never fails the build. `tests/smoke_test.py:1520-1532`
 imports the checker, asserts no STALE/ORPHAN/NO-MARKER across tracked docs, and
 separately asserts that `README.zh.md`'s marker digest equals the live
 `hash_source(README.md)`, so a stale translation turns the smoke test red.
 `--emit-marker` is a separate mode: it prints one marker line and exits 0, or
-exits **2** if the named English source does not exist (`tools/i18n_check.py:339-341`).
+exits **2** if the named English source does not exist (`tools/i18n_check.py:396-398`).
 
 ### 9.6 Adding a translation
 
@@ -1564,6 +1620,9 @@ or the checker will report `[FAIL] ORPHAN`.
 - `CLAUDE.md`, `commands/`, `skills/`, `agents/` — Claude-facing, and their YAML
   front-matter is owned by the loader; adding unknown keys risks loader rejection.
 - `CHANGELOG.md` — append-only release churn; not a document you read top-to-bottom.
+- `docs/debug-pass-2026-09.md` (and its `docs/debug-pass-2026-09/` evidence) — a
+  dated evidence record that is never edited; it is in the tracked set, so the
+  checker reports it as the one expected MISSING-TRANSLATION.
 - `.ccm/**` — generated artifacts.
 - Runtime UI strings (CLI / dashboard) — LLM-facing (Tier 1) and with no central
   output seam; deliberately deferred, not part of this convention.
@@ -1593,6 +1652,7 @@ or the checker will report `[FAIL] ORPHAN`.
   writes, forced handoff, live plan anchor
 - [CHANGELOG.md](../CHANGELOG.md) — version history
 - [CLAUDE.md](../CLAUDE.md) — project instructions for Claude Code
-- `tests/smoke_test.py` — the canonical end-to-end check; run it after any
-  change to `memory_writer`, `progress`, `plan`, or
+- `python tests/run_gates.py` — the one command that runs every release gate
+  (`tests/smoke_test.py`, the end-to-end suite, is one of them); run it after
+  any change to `memory_writer`, `progress`, `plan`, or
   `session_start._refresh_progress_row`
