@@ -142,7 +142,7 @@ cc-memory/
 │   │                              progress, plan, privacy, modes, roots,
 │   │                              auth, logger, encoding_setup, version,
 │   │                              atomic, markers, textsim, layout, recall,
-│   │                              prompts, adopt
+│   │                              prompts, adopt, announce
 │   ├── hooks/                   ← 6 hook entry points + _entry.py (the
 │   │                              shared entry ladder: stdin parse + the
 │   │                              opt-out→anchor gate, v2.10.0)
@@ -252,7 +252,9 @@ would falsify the record.
 
 Each hook's stdout has a specific role, and violating it is a user-visible bug:
 
-- `SessionStart` stdout → injected context (read by Claude).
+- `SessionStart` stdout → injected context (read by Claude) — plain text, or
+  the same text as `hookSpecificOutput.additionalContext` beside a
+  `systemMessage` when the user is shown a line (v2.17.0, below).
 - `Stop` stdout → **nothing on a turn that may close** (v2.16.0). A Stop
   hook's stdout is shown in the transcript view only and never reaches the
   model, so the per-turn `[cc-memory] …` status line goes to the log now. A
@@ -274,6 +276,34 @@ Each hook's stdout has a specific role, and violating it is a user-visible bug:
   bytes** otherwise; a channel that speaks every turn is a per-turn tax.
 - `PreCompact` (async) / `PostToolUse` stdout → empty. The
   async leg's stdout is not shown inline at all (`consolidate_async.py:37`).
+- **The user's line** (v2.17.0, `core/announce.py`) → the JSON field
+  `systemMessage`, the one channel Claude Code shows the USER and does not
+  send to the model (verified on 2.1.289: the transcript records it with no
+  rendered payload). Every hook's stdout above reached the model or nobody,
+  so the user could not see a single thing the plugin did. Now a hook with
+  an act to report prints ONE JSON object — the line(s) as `systemMessage`,
+  its context (if any) as `hookSpecificOutput.additionalContext`, which
+  Claude Code adds exactly as it adds plain stdout (same 10 000-character
+  cap), and a Stop refusal's `decision` / `reason` merged in unchanged. A hook
+  with nothing to report prints exactly what it printed before, byte for
+  byte. One line per act, `ccm ▸ <verb>(<english verb>) <counts> · <where>`,
+  at most 100 display columns: SessionStart says what it injected (and warns
+  when the injection is past the 10 000-character cap, where the model gets
+  a 2 000-character preview); UserPromptSubmit names the recalled ids;
+  PostToolUse a captured or synced plan, never a line per tool call; Stop
+  what finished since the last line — the detached observer
+  (`.last_observe.json`) and retroactive save (`.last_retro.json`), a
+  background consolidation (`.last_consolidation.json`), an idle reorg that
+  changed something, a kicked worker — plus the live plan's step when it
+  fits. PreCompact's `systemMessage` is DISCARDED by the host and an async
+  hook's is delivered to the model, so neither leg prints one: the
+  SessionStart(compact) that follows announces the save from
+  `.last_save.json`, and the next Stop or start announces the consolidation.
+  `.announced.json` records what was shown, so each act is shown once. A
+  failure any hook logged at ERROR becomes one `失败(error)` line
+  (`core.logger.recorded_errors`). Switch: `projects.announce`,
+  `/cc-mem announce full|batch|off` (`batch` drops the per-prompt recall
+  line; `off` restores the pre-v2.17.0 output exactly).
 
 ### PreCompact: why two legs
 
@@ -361,8 +391,8 @@ silently varied by mode (the edit bump fired in `code` and `writing` but not
 `apply_todowrite_sync` directly rather than through the hook, so the suite never
 caught it.
 
-`_apply_plan_integration` (`post_tool_use.py:103`) now runs **above** the gate
-(called at `post_tool_use.py:214`), and `should_observe` wraps only the
+`_apply_plan_integration` (`post_tool_use.py:108-153`) now runs **above** the gate
+(called at `post_tool_use.py:108-153`), and `should_observe` wraps only the
 `insert_observation` block. Measured per mode (code / research / writing):
 `ExitPlanMode` → `plan_active` rows `0/0/0` → `1/1/1`; `Edit` →
 `edits_since_last_guardian` `1/0/1` → `1/1/1`; Bash `git push` (1 edit + 20)
@@ -387,8 +417,8 @@ project-local at `<project>/.ccm/memory.db`, WAL mode:
 
 | Table | Purpose |
 |-------|---------|
-| `projects` | One row per project (`db.py:47`) — identified by the database it sits in, not by the `path` string it records: a moved or renamed directory re-attaches its own row instead of minting a second one (§7); carries `mode` since migration `v2_project_mode` (`db.py:169`) and the durable observer cursor `obs_watermark` since `v7_projects_obs_watermark` |
-| `sessions` | One row per compaction event (`db.py:55`); carries `complete` since `v7_sessions_complete` (backfilled, so pre-v7 rows read as complete) |
+| `projects` | One row per project (`db.py:387`) — identified by the database it sits in, not by the `path` string it records: a moved or renamed directory re-attaches its own row instead of minting a second one (§7); carries `mode` since migration `v2_project_mode` (`db.py:387`), the durable observer cursor `obs_watermark` since `v7_projects_obs_watermark`, and `announce` — `full` / `batch` / `off`, what the hooks show the user, set by `/cc-mem announce` — since `v12_project_announce` (v2.17.0) |
+| `sessions` | One row per compaction event (`db.py:387`); carries `complete` since `v7_sessions_complete` (backfilled, so pre-v7 rows read as complete) |
 | `memories` | Extracted facts (category, importance, topic, content_hash, **supersedes_id**, last_referenced_at) (`db.py:66`). Carries `recall_count` since `v10_memories_recall_count` — incremented when `core/recall.py` retrieves the row for a real user question, which is a different fact from `last_referenced_at`: that one records that SessionStart's importance/recency ranking chose the row with no query in existence, this one records that somebody asked. The pair is what `/cc-mem inject-usage` reports as two channels — both of them DELIVERY facts. Whether Claude USED a delivered row is a judgement about text, so it is layer 2 (`--judge`, opt-in, `llm/usage_judge.py`): one LLM call over that session's own replies, answering `used` / `unused` / `unknown` per row, where `unknown` covers every case in which the judge could not run and is never printed as `unused` |
 | `topics` | Consolidated summaries per topic name (versioned) (`db.py:80`) |
 | `keywords` | Auto-detected project vocabulary (`db.py:10`) |
@@ -421,8 +451,8 @@ new memory supersedes an old one, the new row links back to the old row's ID
 history. `content_hash` (migration `v2_content_hash` in
 `_MIGRATIONS`, `db.py:135`) is `sha256[:16]` of the normalized content, used
 for the cheap exact-duplicate check
-(`db.compute_content_hash` at `db.py:2651-2653`,
-`db.find_by_hash` at `db.py:2664-2672`).
+(`db.compute_content_hash` at `db.py:2662-2664`,
+`db.find_by_hash` at `db.py:2675-2683`).
 
 Migrations are applied in order from the `_MIGRATIONS` list (`db.py:130-452`) and
 recorded in `_migrations`. Levels shipped so far: **v1** (`topic` column +
@@ -444,7 +474,8 @@ indexes), **v9** (`v9_plan_turns_total`, `v9_directives_turns_at_touch`: the
 two monotonic turn counts idleness is measured with), **v10**
 (`v10_plan_guardian_checked_at_turn`, `v10_memories_recall_count`), **v11**
 (`v11_adopted_rows`, `v11_adopted_rows_source_idx`: the provenance table of
-`/cc-mem adopt-stray` and its unique key).
+`/cc-mem adopt-stray` and its unique key), **v12** (`v12_project_announce`:
+the per-project announce level `core/announce.py` reads).
 
 The `progress` table's non-PK columns are `current_request`, `status_done`,
 `status_in_flight`, `status_blocked`, `open_todos`, `plan`, `critical_context`,
@@ -518,7 +549,7 @@ caller's responsibility, and there are exactly two shapes:
   wrote a row — inserted, merged, superseded or reinforced; a batch of pure
   skips renders nothing (`memory_writer.py:376`, v2.16.0). The Stop observer
   and the SessionStart retroactive save pass it (`stop.py:530`,
-  `session_start.py:1488`); the sync PreCompact leg passes none and renders
+  `session_start.py:712-716`); the sync PreCompact leg passes none and renders
   once itself, after the rest of its state changes (`pre_compact.py:704`,
   `pre_compact.py:834`).
 - Single-shot callers call `regenerate_memory_index` explicitly:
@@ -635,7 +666,7 @@ SessionStart:
 
 Call signatures above are the real ones: `write_progress_md(db, project_id,
 memory_dir)` (`core/progress.py:611-750`).
-Call sites of `write_progress_md`: `pre_compact.py:792`, `stop.py:674`, `user_prompt.py:460`, `session_start.py:1230`, `mcp/server.py:727`, `cli/mem.py:1495`.
+Call sites of `write_progress_md`: `pre_compact.py:792`, `stop.py:702`, `user_prompt.py:464`, `session_start.py:1401`, `mcp/server.py:727`, `cli/mem.py:1528`.
 See
 [docs/CONTRACTS.md](CONTRACTS.md#handoff-contract) for the PROGRESS.md
 schema.
@@ -679,10 +710,10 @@ Three changes close it:
 2. The fuzzy fallback is **deleted**. A miss returns `None`. Callers must treat
    that as "no transcript", never as licence to guess.
 3. Ownership is checked positively. `_transcript_belongs_to`
-   (`session_start.py:874-891`) reads the `cwd` the transcript's own records carry
+   (`session_start.py:1045-1062`) reads the `cwd` the transcript's own records carry
    and is **fail-closed** — no `cwd`, no ingest — and gates `retroactive_save`
    after the bounded window load. The tier-3 mine uses the deliberately weaker
-   `_transcript_is_foreign` (`session_start.py:894-921`): absent `cwd` is allowed,
+   `_transcript_is_foreign` (`session_start.py:1065-1092`): absent `cwd` is allowed,
    a *different* `cwd` is refused. The two differ on purpose — retroactive save
    persists LLM-extracted memories forever and should demand proof, while
    tier-3 must still work for the cwd-less transcript shape
@@ -765,7 +796,7 @@ does not retry, `core/auth.py:83-116`); it also carries the `oauth_expired`
 signal behind SessionStart's "[WARNING: OAuth expired — LLM extraction,
 semantic de-dup, obsolescence check and topic summaries disabled]" footer (`_build_footer`, `session_start.py:509-510`). Hook callers use it to *supply*
 the credential passed into `call_llm`.
-The `get_api_key()` call sites: `pre_compact.py:208` (passed on at `:234`), `stop.py:401`, `session_start.py:961`, `core/consolidate.py:483, 796, 1018`.
+The `get_api_key()` call sites: `pre_compact.py:208` (passed on at `:234`), `stop.py:416`, `session_start.py:1132`, `core/consolidate.py:483, 796, 1018`.
 
 Fall-through was added in v2.3.4 for a concrete failure: a dead env key (e.g.
 zero credit → HTTP 400) used to blackhole the healthy subscription token behind
@@ -861,6 +892,11 @@ Per-project state lives at `<project>/.ccm/`:
 ├── .retro.lock                  the detached retroactive-save worker's lock (v2.16.0)
 ├── .llm_backoff.json            "do not call the model before" note after a
 │                                failed call; a success removes it (v2.16.0)
+├── .last_observe.json           the detached observer's last outcome, for the
+│                                user's next line (v2.17.0)
+├── .last_retro.json             the retroactive-save worker's outcome (v2.17.0)
+├── .announced.json              which status files the user was already shown
+│                                (v2.17.0)
 ├── .pre_compact_attempt.json    start marker; survives ⇒ last run was killed (v2.4.2)
 ├── .plan_raw.md                 last raw ExitPlanMode capture (v2.2)
 ├── .plan_history/               append-only archive of replaced/cleared plans (v2.4.0)
@@ -893,7 +929,11 @@ with a 60 s horizon; `.llm_backoff.json` ←
 `core.auth.note_llm_failure` (one writer; every
 LLM-calling hook reads it through `core.auth.llm_backoff` and the first
 successful call unlinks it); `.pre_compact_attempt.json` ←
-`pre_compact._write_attempt` (through `core.atomic.write_atomic`, v2.16.0). `sessions/` and `topics/` are created by
+`pre_compact._write_attempt` (through `core.atomic.write_atomic`, v2.16.0); `.last_observe.json` ←
+`stop._observer_evaluate` and `.last_retro.json` ← `session_start.retroactive_save`,
+both through `core.announce.record_status`; `.announced.json` ←
+`core.announce.take_unannounced` (SessionStart and Stop; all three through
+`core.atomic.write_atomic`, v2.17.0). `sessions/` and `topics/` are created by
 `core.progress.ensure_memory_dir` (`progress.py:131-171`), which whichever
 path touches the project first calls — `_init_project_if_needed`
 (`user_prompt.py:115-146`) on auto-init, or the PreCompact sync leg; PreCompact
@@ -1277,10 +1317,10 @@ PostToolUse matcher from `hooks.json` when it can read one, else from
 ├── __init__.py
 ├── config.json
 ├── installed_surfaces.json  ← what was written into ~/.claude (v2.5)
-├── core/    adopt.py atomic.py auth.py consolidate.py db.py encoding_setup.py
-│            extractor.py idle.py layout.py logger.py markers.py modes.py
-│            plan.py privacy.py progress.py prompts.py recall.py roots.py
-│            textsim.py version.py
+├── core/    adopt.py announce.py atomic.py auth.py consolidate.py db.py
+│            encoding_setup.py extractor.py idle.py layout.py logger.py
+│            markers.py modes.py plan.py privacy.py progress.py prompts.py
+│            recall.py roots.py textsim.py version.py
 ├── hooks/   _entry.py consolidate_async.py post_tool_use.py pre_compact.py
 │            session_start.py stop.py user_prompt.py
 ├── llm/     ccl_backend.py memory_writer.py parse.py usage_judge.py

@@ -37,6 +37,7 @@ someone who knows the command exists.
 | `cleanup` | Lightweight no-LLM cleanup + MEMORY.md regen |
 | `summary` | Latest session summary (request/done/next_steps) |
 | `mode [name]` | Show/set project mode (code/research/writing) |
+| `announce [full\|batch\|off]` | Show/set what the hooks tell YOU they did (v2.17.0): one line per act in the transcript — `ccm ▸ 注入(inject) …` at session start, `召回(recall)` when a prompt pulled memories, `提炼(extract)` / `整理(consolidate)` / `存档(save)` when a background run or a compaction finished, `计划捕获` / `计划同步` for the plan anchor, `失败(error)` when a hook swallowed a failure. `full` (default) shows every line, `batch` drops the per-prompt recall line, `off` shows none. The lines are `systemMessage`s: shown to you, never sent to the model. Per project, like `mode` |
 | `serve [--port N] [--no-open]` | Launch the browser-based web viewer (stdlib http.server; port 9377 by default). `--no-open` skips opening a browser tab |
 | `dashboard` | Launch the Tkinter GUI dashboard for this project |
 | `plan-status` | Live-plan counters + freshness summary (no LLM) |

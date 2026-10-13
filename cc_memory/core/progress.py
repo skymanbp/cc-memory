@@ -81,6 +81,11 @@ MEMORY_GITIGNORE_LINES = [
     ".observer.lock",
     ".retro.lock",
     ".llm_backoff.json",
+    # v2.17.0 (core/announce.py): the two workers' outcomes and which
+    # status files were already announced to the user.
+    ".last_observe.json",
+    ".last_retro.json",
+    ".announced.json",
     ".pre_compact_attempt.json",
     ".plan_raw.md",
     ".plan_history/",

@@ -20,7 +20,7 @@ and is marked *ungated* on purpose.
 
 | Version | Recorded here as |
 |---|---|
-| v2.17.0 | INV-123, INV-124 |
+| v2.17.0 | INV-053, INV-069, INV-123, INV-124, INV-125, INV-126 |
 | v2.16.0 | INV-001, INV-005, INV-010, INV-015, INV-016, INV-017, INV-018, INV-019, INV-020, INV-028, INV-030, INV-038, INV-041, INV-042, INV-043, INV-044, INV-045, INV-049, INV-050, INV-052, INV-053, INV-054, INV-055, INV-056, INV-057, INV-058, INV-059, INV-060, INV-061, INV-062, INV-063, INV-065, INV-069, INV-076, INV-081, INV-082, INV-088, INV-089, INV-094, INV-095, INV-096, INV-112, INV-121, INV-122 |
 | v2.15.2 | INV-086 |
 | v2.15.1 | INV-057, INV-066, INV-109 |
@@ -469,6 +469,19 @@ INV-089). *Gate:* `tests/test_directive_enforcement.py` §9(b);
 `tests/test_surfaces.py`; `tests/smoke_test.py` (`r7stdout`); `falsify --case
 r16advisorychannel` / `r7stdout`. *Source:* v2.16.0 D8.
 
+**INV-125 · What a hook tells the USER rides `systemMessage` only, through
+`core.announce.HookOutput`, and never changes what the model reads.** Every
+hook's stdout goes through one emitter: no line → the pre-v2.17.0 plain
+stdout byte for byte; lines → one JSON object whose
+`hookSpecificOutput.additionalContext` is that same text. `projects.announce`
+`off` emits no field at all, `batch` drops the per-prompt recall line; a
+logged ERROR (`core.logger.recorded_errors`) becomes one `失败` line. Acts the
+host never shows (PreCompact's field is discarded, an async hook's goes to the
+model, workers have no output) are recorded in status files and announced once
+by the next SessionStart or Stop (`take_unannounced`, `.announced.json`).
+*Gate:* `tests/test_surfaces.py` §8i, §10; `falsify --case r17announceoff` /
+`r17failline`. *Source:* v2.17.0.
+
 **INV-050 · Extraction has ONE prompt builder and ONE normaliser.**
 `llm.parse.build_extraction_prompt(kind, body, mode_suffix=)` and
 `normalize_memories(items)` serve the observer, PreCompact, the retroactive save
@@ -505,8 +518,10 @@ constraints first, then most-repeated first; an over-budget row is skipped
 **INV-053 · The injection is budgeted, and the shares sum to one.**
 `session_start._DEFAULT_BUDGET` is 16 000 characters; `_LAYER_BUDGETS` divides it
 directives 0.10 / topics 0.25 / critical 0.20 / timeline 0.20 / progress 0.15 /
-footer 0.10. *Gate:* `tests/smoke_test.py` § B1; `falsify --case layerbreak` /
-`footerbudget`. *Source:* v2.12.2; v2.16.0 B1.
+footer 0.10. The shares bound each layer; the TOTAL is bounded separately, on
+the final string, by `_INJECTION_CEILING` (INV-126). *Gate:* `tests/smoke_test.py`
+§ B1; `falsify --case layerbreak` / `footerbudget`. *Source:* v2.12.2; v2.16.0 B1;
+v2.17.0.
 
 **INV-054 · The PROGRESS layer is a §1-§4 digest of the row, not the file.**
 `core.progress.render_progress_digest` draws request, status, open todos
@@ -631,8 +646,26 @@ r15judgedefault` / `r15judgetristate` / `r15judgeforge`. *Source:* v2.15.0 §3.
 
 **INV-069 · `/cc-mem inject-show` says which template, which layer and which
 ids reached the model.** The manifest records `directive_slugs`, `progress_layer`,
-`shown_ids`, `topic_covered_ids`, `source` and `ack_demanded`. *Gate:*
-`tests/smoke_test.py` § B1/B2/B4. *Source:* v2.12.2; v2.16.0 B1-B4.
+`shown_ids`, `topic_covered_ids`, `source` and `ack_demanded`, and since
+v2.17.0 `ceiling` and `trimmed` (what INV-126 cut). *Gate:*
+`tests/smoke_test.py` § B1/B2/B4; `tests/test_surfaces.py` §10. *Source:*
+v2.12.2; v2.16.0 B1-B4; v2.17.0.
+
+**INV-126 · The SessionStart injection fits Claude Code's 10 000-character hook
+cap, measured on the final string.** Over the cap the host hands the model a
+file path and a 2 000-character preview, which loses the forced reminder
+appended last. `build_context` renders, measures against
+`session_start._INJECTION_CEILING` (500 under `core.announce.CONTEXT_CAP_CHARS`,
+leaving room for main()'s two lines) and cuts rendered entries in the
+`_TRIM_*` order — no-model topic lines, the timeline oldest first, real topic
+summaries oldest first, critical rows least important first — never the
+directive ledger, the PROGRESS digest, the footer, the frame or the reminder.
+A cut entry keeps its layer share spent (no backfill); a cut critical row is
+kept out of the timeline; the cut is stated inside the injection
+(`core.prompts.TRIM_NOTE`) and to the user (`core.announce.trim_line`), and the
+manifest's `trimmed` names exactly what the shipped text left out. *Gate:*
+`tests/test_surfaces.py` §10; `falsify --case r17fitceiling` / `r17fitorder`.
+*Source:* v2.17.0.
 
 **INV-070 · A gate that only runs on clean machines measures clean machines.**
 `tests/test_surfaces.py` §7 counts `_is_container`'s probes rather than timing

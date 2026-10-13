@@ -1,4 +1,4 @@
-<!-- i18n-source: ARCHITECTURE.md | sha256: 0459089593f6ca8d | version: 2.16.1 | translated: 2026-10-13 | translation: 98405667fe205ecd -->
+<!-- i18n-source: ARCHITECTURE.md | sha256: 4739156df19a52ce | version: 2.17.0 | translated: 2026-10-13 | translation: f6109191075a1702 -->
 > [English](ARCHITECTURE.md) · **简体中文**
 
 # cc-memory — 架构
@@ -126,7 +126,7 @@ cc-memory/
 │   │                              progress, plan, privacy, modes, roots, auth,
 │   │                              logger, encoding_setup, version,
 │   │                              atomic, markers, textsim, layout, recall,
-│   │                              prompts, adopt
+│   │                              prompts, adopt, announce
 │   ├── hooks/                   ← 6 个钩子入口 + _entry.py（共享入口阶梯：
 │   │                              stdin 解析 + 退出开关→锚定闸门，v2.10.0）
 │   ├── llm/                     ← ccl_backend（Haiku/Ollama）+ memory_writer
@@ -228,7 +228,9 @@ v2.4.3 把原本 5 份的 `docs/` 目录合并为 2 份。全部 79 处仓库内
 
 每个钩子的 stdout 都有特定角色，违反它就是一个用户可见的 bug：
 
-- `SessionStart` 的 stdout → 注入的上下文（由 Claude 读取）。
+- `SessionStart` 的 stdout → 注入的上下文（由 Claude 读取）——纯文本；或者当要给用户
+  显示一行时，同一段文本作为 `hookSpecificOutput.additionalContext`，旁边是一个
+  `systemMessage`（v2.17.0，见下）。
 - `Stop` 的 stdout → **允许收官的回合什么都不输出**（v2.16.0）。Stop 钩子的
   stdout 只出现在 transcript 视图里，从不进入模型，所以每回合那行 `[cc-memory] …`
   状态行现在只写日志。拒绝时写出 `{"decision": "block"}` 文档且不写别的；逃生预算
@@ -246,6 +248,26 @@ v2.4.3 把原本 5 份的 `docs/` 目录合并为 2 份。全部 79 处仓库内
   通道，就是每回合都要交的税。
 - `PreCompact`（异步）/ `PostToolUse` 的 stdout → 空。异步
   支路的 stdout 根本不会内联显示（`consolidate_async.py:37`）。
+- **给用户看的那一行**（v2.17.0，`core/announce.py`）→ JSON 字段
+  `systemMessage`，这是 Claude Code 唯一一条**显示给用户**、却**不送进模型**的通道
+  （在 2.1.289 上核实：transcript 里记下它，但没有渲染给模型的内容）。上面每个钩子的
+  stdout 要么进了模型、要么谁也看不到，所以用户看不见插件做的任何一件事。现在有动作要
+  报告的钩子输出**一个** JSON 对象——那一行（或几行）放在 `systemMessage`，它的上下文
+  （如果有）放在 `hookSpecificOutput.additionalContext`（Claude Code 加入上下文的方式与
+  纯 stdout 完全相同，同样是 10 000 字符上限），Stop 拒绝时的 `decision` / `reason`
+  原样并入。没有动作要报告的钩子，输出与以前逐字节相同。每个动作一行，
+  `ccm ▸ <动词>(<英文动词>) <计数> · <位置>`，最多 100 个显示列：SessionStart 说它注入了
+  什么（注入超过 10 000 字符上限、模型只拿到 2 000 字符预览时还会警告）；
+  UserPromptSubmit 列出召回的 id；PostToolUse 只报计划的捕获或同步，绝不每次工具调用
+  一行；Stop 报自上一行以来完成的事——分离的观察者（`.last_observe.json`）与追溯保存
+  （`.last_retro.json`）、后台整理（`.last_consolidation.json`）、真的改了东西的闲时
+  整理、被拉起的工作进程——放得下时再附上实时计划的当前步。PreCompact 的
+  `systemMessage` 会被宿主**丢弃**，异步钩子的则送给模型，所以这两条支路都不输出它：
+  紧随其后的 SessionStart(compact) 从 `.last_save.json` 报告这次存档，下一次 Stop 或
+  启动报告那次整理。`.announced.json` 记录已经显示过什么，所以每个动作只显示一次。
+  任何钩子以 ERROR 记下的失败都变成一行 `失败(error)`（`core.logger.recorded_errors`）。
+  开关：`projects.announce`，`/cc-mem announce full|batch|off`（`batch` 去掉每句
+  提问的召回行；`off` 精确恢复 v2.17.0 之前的输出）。
 
 ### PreCompact：为什么是两条支路
 
@@ -319,8 +341,8 @@ PostToolUse 12 对 8、UserPromptSubmit 12 对 8）。现在提高一个超时�
 `core.plan.capture_exit_plan_mode` / `apply_todowrite_sync` 而不是经由钩子，所以
 测试套件从来抓不到它。
 
-`_apply_plan_integration`（`post_tool_use.py:103`）现在跑在闸门**之上**
-（在 `post_tool_use.py:214` 调用），`should_observe` 只包住 `insert_observation`
+`_apply_plan_integration`（`post_tool_use.py:108-153`）现在跑在闸门**之上**
+（在 `post_tool_use.py:108-153` 调用），`should_observe` 只包住 `insert_observation`
 那一块。按模式实测（code / research / writing）：`ExitPlanMode` → `plan_active`
 行数 `0/0/0` → `1/1/1`；`Edit` → `edits_since_last_guardian` `1/0/1` → `1/1/1`；
 Bash `git push`（1 次编辑 + 20）`21/20/1` → `21/21/21`。
@@ -343,8 +365,8 @@ SQLite 表（定义在 [`cc_memory/core/db.py`](../cc_memory/core/db.py)），�
 
 | 表 | 用途 |
 |-------|---------|
-| `projects` | 每个项目一行（`db.py:47`）——身份由它所在的数据库决定，而不是由行里记录的 `path` 字串决定：目录被移动或重命名后，重新挂接自己那一行，而不是再造一行（§7）；自迁移 `v2_project_mode` 起带有 `mode`（`db.py:169`），自 `v7_projects_obs_watermark` 起带有持久观察者游标 `obs_watermark` |
-| `sessions` | 每次压缩事件一行（`db.py:55`）；自 `v7_sessions_complete` 起带有 `complete`（已回填，v7 之前的行读作 complete） |
+| `projects` | 每个项目一行（`db.py:387`）——身份由它所在的数据库决定，而不是由行里记录的 `path` 字串决定：目录被移动或重命名后，重新挂接自己那一行，而不是再造一行（§7）；自迁移 `v2_project_mode` 起带有 `mode`（`db.py:387`），自 `v7_projects_obs_watermark` 起带有持久观察者游标 `obs_watermark`，自 `v12_project_announce` 起带有 `announce`——`full` / `batch` / `off`，钩子给用户显示什么，由 `/cc-mem announce` 设置（v2.17.0） |
+| `sessions` | 每次压缩事件一行（`db.py:387`）；自 `v7_sessions_complete` 起带有 `complete`（已回填，v7 之前的行读作 complete） |
 | `memories` | 抽取出的事实（category、importance、topic、content_hash、**supersedes_id**、last_referenced_at）（`db.py:66`）。自 `v10_memories_recall_count` 起带有 `recall_count`——当 `core/recall.py` 因为一次真实的用户提问检索到该行时递增。它与 `last_referenced_at` 记录的是**两件事**：后者说的是「SessionStart 的重要度/新近度排序在还没有任何查询时选中了它」，前者说的是「确实有人问起过它」。这一对正是 `/cc-mem inject-usage` 分两条通道报告的东西——但它们都只是**送达**事实。Claude 是否真的**用**了送达的那一行，是对文本的判断，因此属于第 2 层（`--judge`，需显式开启，`llm/usage_judge.py`）：对该会话自己的回复做一次 LLM 调用，逐行给出 `used` / `unused` / `unknown`；判不了的一律记 `unknown`，绝不写成 `unused` |
 | `topics` | 按主题名的整理摘要（带版本）（`db.py:80`） |
 | `keywords` | 自动检测的项目词汇（`db.py:90`） |
@@ -373,8 +395,8 @@ SQLite 表（定义在 [`cc_memory/core/db.py`](../cc_memory/core/db.py)），�
 的 ID（旧行被归档）。通过 `db.get_supersede_chain(memory_id)`（`db.py:2080-2095`）走一遍
 链条，就能看到完整的更新历史。`content_hash`（迁移 `v2_content_hash`，位于
 `_MIGRATIONS`，`db.py:135`）是归一化内容的 `sha256[:16]`，用于廉价的精确重复检查
-（`db.compute_content_hash` 在 `db.py:2651-2653`，
-`db.find_by_hash` 在 `db.py:2664-2672`）。
+（`db.compute_content_hash` 在 `db.py:2662-2664`，
+`db.find_by_hash` 在 `db.py:2675-2683`）。
 
 迁移按 `_MIGRATIONS` 列表（`db.py:130-452`）的顺序应用，并记录在 `_migrations` 中。目前
 已交付的层级：**v1**（`topic` 列 + 索引）、**v2**（content_hash、observations、
@@ -392,7 +414,8 @@ session_summaries、项目模式、FTS5、哈希回填）、**v3**（反补丁 +
 status 索引）、**v9**（`v9_plan_turns_total`、`v9_directives_turns_at_touch`：用来
 度量闲置度的两个单调轮次计数）、**v10**（`v10_plan_guardian_checked_at_turn`、
 `v10_memories_recall_count`）、**v11**（`v11_adopted_rows`、
-`v11_adopted_rows_source_idx`：`/cc-mem adopt-stray` 的出处表及其唯一键）。
+`v11_adopted_rows_source_idx`：`/cc-mem adopt-stray` 的出处表及其唯一键）、
+**v12**（`v12_project_announce`：`core/announce.py` 读取的每项目播报级别）。
 
 `progress` 表的非主键列是 `current_request`、`status_done`、
 `status_in_flight`、`status_blocked`、`open_todos`、`plan`、`critical_context`、
@@ -570,7 +593,7 @@ SessionStart：
 
 上面的调用签名都是真实的：`write_progress_md(db, project_id, memory_dir)`
 （`core/progress.py:611-750`）。
-`write_progress_md` 的调用点：`pre_compact.py:792`、`stop.py:674`、`user_prompt.py:460`、`session_start.py:1230`、`mcp/server.py:727`、`cli/mem.py:1495`。
+`write_progress_md` 的调用点：`pre_compact.py:792`、`stop.py:702`、`user_prompt.py:464`、`session_start.py:1401`、`mcp/server.py:727`、`cli/mem.py:1528`。
 PROGRESS.md 的结构规格见
 [docs/CONTRACTS.md](CONTRACTS.md#handoff-contract)。
 
@@ -607,10 +630,10 @@ slug 约定是：把 `[A-Za-z0-9]` 之外的**每一个**字符替换成 `-`。c
    —— 后者此前逐字复制了旧解析器，连模糊分支一起。
 2. 模糊兜底被**删除**。未命中返回 `None`。调用方必须把它当作「没有 transcript」，
    绝不能当成可以猜的许可。
-3. 归属改为正向校验。`_transcript_belongs_to`（`session_start.py:874-891`）读取
+3. 归属改为正向校验。`_transcript_belongs_to`（`session_start.py:1045-1062`）读取
    transcript 自身记录携带的 `cwd`，并且是**失败闭合**的 —— 没有 `cwd` 就不摄取 ——
    它在有界窗口加载之后为 `retroactive_save` 把关。第 3 级挖掘则使用故意更弱的
-   `_transcript_is_foreign`（`session_start.py:894-921`）：缺失 `cwd` 放行，`cwd`
+   `_transcript_is_foreign`（`session_start.py:1065-1092`）：缺失 `cwd` 放行，`cwd`
    **不同**才拒绝。两者的差异是刻意的 —— 追溯保存会把 LLM 抽取的记忆永久落库，
    理应要求证明；而第 3 级还必须对 `tests/smoke_test.py:501-514` 构造的那种没有
    `cwd` 的 transcript 形态继续可用。
@@ -683,7 +706,7 @@ BudgetGate 来说仍是已知量。候选顺序与传输格式（`get_api_candid
 and topic summaries disabled]” 页脚
 （`_build_footer`，`session_start.py:509-510`）。
 钩子调用方用它来*提供*传给 `call_llm` 的凭据。
-`get_api_key()` 的调用点：`pre_compact.py:208`（在 `:234` 传下去）、`stop.py:401`、`session_start.py:961`、`core/consolidate.py:483, 796, 1018`。
+`get_api_key()` 的调用点：`pre_compact.py:208`（在 `:234` 传下去）、`stop.py:416`、`session_start.py:1132`、`core/consolidate.py:483, 796, 1018`。
 
 逐级回退是 v2.3.4 为一个具体故障加入的：一个失效的环境变量密钥（例如额度为零 →
 HTTP 400）过去会把排在它后面的健康订阅令牌黑洞掉，从而无声地把每一次 LLM 调用推给
@@ -771,6 +794,10 @@ v2.4.2 才成立：`_extract_via_llm` 的 `except` 元组此前不包含 `Runtim
 ├── .retro.lock                  分离的追溯保存工作进程的锁（v2.16.0）
 ├── .llm_backoff.json            调用失败后的"暂不再调模型"记录；一次成功即
 │                                删除（v2.16.0）
+├── .last_observe.json           分离的观察者最近一次的结果，供用户的下一行使用
+│                                （v2.17.0）
+├── .last_retro.json             追溯保存工作进程的结果（v2.17.0）
+├── .announced.json              哪些状态文件已经给用户显示过（v2.17.0）
 ├── .pre_compact_attempt.json    起始标记；残留 ⇒ 上一次运行被杀（v2.4.2）
 ├── .plan_raw.md                 最近一次 ExitPlanMode 原始捕获（v2.2）
 ├── .plan_history/               被替换/清除计划的只追加归档（v2.4.0）
@@ -799,7 +826,10 @@ v2.4.2 才成立：`_extract_via_llm` 的 `except` 元组此前不包含 `Runtim
 60 秒过期；`.llm_backoff.json` ←
 `core.auth.note_llm_failure`（唯一写入方；每个调用 LLM 的钩子都通过
 `core.auth.llm_backoff` 读它，第一次成功的调用即删除它）；`.pre_compact_attempt.json` ←
-`pre_compact._write_attempt`（自 v2.16.0 起经 `core.atomic.write_atomic`）。`sessions/` 与 `topics/` 由
+`pre_compact._write_attempt`（自 v2.16.0 起经 `core.atomic.write_atomic`）；`.last_observe.json` ←
+`stop._observer_evaluate` 与 `.last_retro.json` ← `session_start.retroactive_save`，都经
+`core.announce.record_status`；`.announced.json` ← `core.announce.take_unannounced`
+（SessionStart 与 Stop；三者都经 `core.atomic.write_atomic`，v2.17.0）。`sessions/` 与 `topics/` 由
 `core.progress.ensure_memory_dir`（`progress.py:131-171`）创建，调用它的是最先接触该项目的那条路径
 ——自动初始化时是 `_init_project_if_needed`（`user_prompt.py:115-146`），否则是 PreCompact
 同步支路；PreCompact 自己创建 `sessions/YYYY/MM/` 归档目录
@@ -1088,10 +1118,10 @@ MCP 服务器遵循同样的分岔。在市场类布局下，`.claude-plugin/plu
 ├── __init__.py
 ├── config.json
 ├── installed_surfaces.json  ← 写进了 ~/.claude 的东西（v2.5）
-├── core/    adopt.py atomic.py auth.py consolidate.py db.py encoding_setup.py
-│            extractor.py idle.py layout.py logger.py markers.py modes.py
-│            plan.py privacy.py progress.py prompts.py recall.py roots.py
-│            textsim.py version.py
+├── core/    adopt.py announce.py atomic.py auth.py consolidate.py db.py
+│            encoding_setup.py extractor.py idle.py layout.py logger.py
+│            markers.py modes.py plan.py privacy.py progress.py prompts.py
+│            recall.py roots.py textsim.py version.py
 ├── hooks/   _entry.py consolidate_async.py post_tool_use.py pre_compact.py
 │            session_start.py stop.py user_prompt.py
 ├── llm/     ccl_backend.py memory_writer.py parse.py usage_judge.py

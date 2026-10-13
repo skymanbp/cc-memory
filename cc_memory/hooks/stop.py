@@ -25,6 +25,12 @@ A continuation Stop (`stop_hook_active`, v2.16.0) skips the observer, the idle
 reorg, the PROGRESS patch, the backpressure probe and the plan turn bump, and
 only re-judges plan enforcement.
 
+The user's lines (v2.17.0, `core.announce`): what the detached workers and a
+background consolidation finished since the last announcement, an idle reorg
+that changed something, a consolidation kicked, a logged failure — one
+`systemMessage`, merged into the refusal document when there is one. A turn
+with none of those prints nothing, exactly as before.
+
 NOTE: The previous "save-memories reminder" text spam has been REMOVED.
 The forced <system-reminder> in SessionStart and the auto-saves above do
 the work; spamming Claude with "remember to call /save-memories" was noise.
@@ -66,6 +72,9 @@ from core.markers import (PROMPT_MARKER_PREFIX, TURN_MARKER_PREFIX, marker_path,
 # between hooks kept becoming shipped defects.
 from hooks._entry import parse_payload, resolve_project, spawn_detached
 from core.idle import maybe_run_idle
+from core.announce import (OBSERVE_STATUS, STATUS_LINE, HookOutput, idle_line,
+                           kick_line, level_for, plan_part, record_status,
+                           take_unannounced)
 from core.progress import write_progress_md
 from core import plan as plan_mod
 from llm.memory_writer import upsert_batch
@@ -310,13 +319,19 @@ def _idle_directives(db, project_id, idle_turns=plan_mod.DIRECTIVE_IDLE_TURNS,
     return out
 
 
-def _emit_block(reason_text):
+def _emit_block(reason_text, out=None):
     """Stop-hook refusal. Top-level decision/reason, exit 0 — the shape the
     harness accepts (verified against the working stop_guard implementation
-    on this machine, not inferred from documentation)."""
+    on this machine, not inferred from documentation). With `out` the
+    user's lines ride the same document as `systemMessage` (v2.17.0); the
+    refusal itself is unchanged."""
     payload = {"decision": "block", "reason": reason_text}
-    sys.stdout.write(json.dumps(payload, ensure_ascii=False) + "\n")
-    sys.stdout.flush()
+    if out is not None:
+        out.document = payload
+        out.write()
+    else:
+        sys.stdout.write(json.dumps(payload, ensure_ascii=False) + "\n")
+        sys.stdout.flush()
     sys.exit(0)
 
 
@@ -512,6 +527,9 @@ def _observer_evaluate(cwd, session_id, memory_dir, db=None):
                         deadline=_HOOK_T0 + _LLM_DEADLINE_S)
         memories = extract_json(text, kind="array")
         if memories is None:
+            record_status(memory_dir, OBSERVE_STATUS,
+                          {"ok": False, "n_fed": len(obs_fed),
+                           "error": "the model's answer was not a JSON array"})
             return 0
 
         # ONE normaliser (v2.16.0, D2); this hook adds its provenance tags.
@@ -546,6 +564,12 @@ def _observer_evaluate(cwd, session_id, memory_dir, db=None):
             project_id, max((o["id"] for o in obs_fed), default=0))
         # A call that came back ends the outage, whatever the answer held.
         clear_llm_backoff(memory_dir)
+        # For the next Stop's line (v2.17.0): this worker has no output.
+        record_status(memory_dir, OBSERVE_STATUS,
+                      {"ok": True, "n_fed": len(obs_fed),
+                       "counts": {k: counts.get(k, 0) for k in
+                                  ("inserted", "merged", "superseded",
+                                   "reinforced", "skipped")}})
 
         if n_total:
             _log.info(
@@ -566,10 +590,14 @@ def _observer_evaluate(cwd, session_id, memory_dir, db=None):
         # bad answer, not an outage, and writes no backoff.
         n = note_llm_failure(memory_dir, str(e))
         _log.error(f"observer evaluation failed: {e} (backoff #{n})")
+        record_status(memory_dir, OBSERVE_STATUS,
+                      {"ok": False, "n_fed": len(obs_fed), "error": str(e)[:200]})
         return 0
     except (urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError,
             TimeoutError, OSError, KeyError, ValueError) as e:
         _log.error(f"observer evaluation failed: {e}")
+        record_status(memory_dir, OBSERVE_STATUS,
+                      {"ok": False, "n_fed": len(obs_fed), "error": str(e)[:200]})
         return 0
 
 
@@ -730,6 +758,10 @@ def main():
     if not (memory_dir / DB_FILENAME).exists():
         sys.exit(0)
 
+    # ONE emitter for stdout (v2.17.0): nothing on a quiet turn, the refusal
+    # document as before, the user's lines when an act happened.
+    out = HookOutput("Stop")
+
     # ONE handle for every job below (v2.16.0). Job 2 and Job 3 each used to
     # construct their own, and every construction pays the bootstrap probes:
     # measured at v2.15.2, the second handle was 2 of this hook's 17 sqlite
@@ -741,7 +773,9 @@ def main():
         project_id = db.upsert_project(cwd)
     except Exception:
         _log.error_tb("stop hook: database unavailable")
+        out.write()
         sys.exit(0)
+    out.level_fn = lambda: level_for(db, project_id)
 
     # Job 1: the observer, as a DETACHED worker (v2.16.0, A1) — not on a
     # continuation (A3)
@@ -755,7 +789,10 @@ def main():
     turn_count = _read_turn_count(session_id)
     if not continuation:
         try:
-            maybe_run_idle(cwd, session_id, turn_count, db=db)
+            idle_results = (
+                maybe_run_idle(cwd, session_id, turn_count, db=db)
+            )
+            out.announce(idle_line(idle_results))
         except Exception as e:
             _log.error(f"idle reorg failed: {e}")
 
@@ -772,9 +809,20 @@ def main():
             # Job 3.5: consolidation backpressure (v2.12.0). Own try: a probe
             # failure must not cost plan enforcement below.
             try:
-                _maybe_kick_consolidation(cwd, memory_dir, db, project_id)
+                if _maybe_kick_consolidation(cwd, memory_dir, db, project_id):
+                    out.announce(kick_line())
             except Exception:
                 _log.error_tb("backpressure probe failed")
+
+            # What finished since the last announcement (v2.17.0): the
+            # detached observer and retroactive save, a background
+            # consolidation, a compaction's save — none has output of its
+            # own that reaches the user. Not on a continuation: it is the
+            # same turn, and its acts were announced by the first Stop.
+            if out.level != "off":
+                for key, record in take_unannounced(
+                        memory_dir, ("save", "consolidation", "observe", "retro")):
+                    out.announce(STATUS_LINE[key](record))
 
         # NO status line (v2.16.0, A7). A Stop hook's stdout is shown in
         # the transcript view only and never reaches the model, so the
@@ -817,7 +865,8 @@ def main():
                 attempt = _block_attempt(session_id, [r[0] for r in reasons])
                 if attempt is not None and attempt <= plan_mod._BLOCK_MAX_CONSECUTIVE:
                     # ONLY the JSON document reaches stdout on this path.
-                    _emit_block(plan_mod.render_block_reason(reasons, attempt))
+                    _emit_block(plan_mod.render_block_reason(reasons, attempt),
+                                out)
                 # Escape budget spent (or unmarkable temp dir): say so loudly
                 # and let the turn close. A block we cannot count is a block
                 # that could trap the session.
@@ -850,11 +899,16 @@ def main():
             # it here reached nobody. The line is already neutralised.
             _note_advisory(session_id, advisory)
             _log.info("plan advisory parked for the next prompt")
+        # The live plan's position rides the turn's last line, when there
+        # is one and it still fits — never a line of its own every turn.
+        if plan_mod.is_live_plan(plan_row):
+            out.append_to_last(plan_part(plan_row))
     except SystemExit:
         raise
     except Exception:
         _log.error_tb("stop hook tail")
 
+    out.write()
     sys.exit(0)
 
 

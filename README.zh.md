@@ -1,4 +1,4 @@
-<!-- i18n-source: README.md | sha256: 53bf51b39649a320 | version: 2.16.1 | translated: 2026-10-13 | translation: e261ff5723e6ae32 -->
+<!-- i18n-source: README.md | sha256: 18135df5bc2833d3 | version: 2.17.0 | translated: 2026-10-13 | translation: e8d5269ebef7da3b -->
 > [English](README.md) · **简体中文**
 
 <div align="center">
@@ -10,7 +10,7 @@
 下一个会话在动手之前会被**强制**先读它们，而存下来的东西是**被调和过的**，
 绝不是堆叠出来的。
 
-[![version](https://img.shields.io/badge/version-2.16.1-blue.svg)](CHANGELOG.md)
+[![version](https://img.shields.io/badge/version-2.17.0-blue.svg)](CHANGELOG.md)
 [![license](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![python](https://img.shields.io/badge/python-3.8%2B-blue.svg)](pyproject.toml)
 [![dependencies](https://img.shields.io/badge/runtime%20deps-0-brightgreen.svg)](#运行要求)
@@ -33,17 +33,18 @@
 - [实战实录](#实战实录)
 - [实测数字](#实测数字)
 - [参考手册](#参考手册)
-  - [`/cc-mem`——35 个子命令](#cc-mem35-个子命令)
+  - [`/cc-mem`——36 个子命令](#cc-mem36-个子命令)
   - [MCP 工具](#mcp-工具)
   - [配置](#配置)
   - [磁盘上与数据库里](#磁盘上与数据库里)
   - [钩子一览](#钩子一览)
+  - [cc-memory 显示给你的那几行](#cc-memory-显示给你的那几行)
 - [设计哲学](#设计哲学)
 - [架构](#架构)
 - [开发](#开发)
 - [故障排查](#故障排查)
 - [路线图与已知限制](#路线图与已知限制)
-- [v2.16.0 有什么新东西](#v2160-有什么新东西)
+- [v2.17.0 有什么新东西](#v2170-有什么新东西)
 - [文档地图](#文档地图)
 - [许可](#许可)
 
@@ -542,7 +543,7 @@ You MUST Read .ccm/PROGRESS.md before responding …
 
 ## 参考手册
 
-### `/cc-mem`——35 个子命令
+### `/cc-mem`——36 个子命令
 
 在 Claude Code 内（与路径无关——包装脚本会解析插件根）：
 
@@ -553,6 +554,8 @@ You MUST Read .ccm/PROGRESS.md before responding …
 /cc-mem paths [--json]              解析后的 DB / PROGRESS.md / PLAN.md / MEMORY.md 路径
 /cc-mem schema                      实时 SQLite schema（表、索引、迁移）
 /cc-mem mode [code|research|writing] 查看或设置项目模式
+/cc-mem announce [full|batch|off]   查看或设置 cc-memory 在对话里显示给你的
+                                    那几行（v2.17.0）
 /cc-mem summary                     最近一次会话摘要
 /cc-mem sessions                    压缩历史与归档路径
 /cc-mem observations                尚待抽取的原始 PostToolUse 行
@@ -707,10 +710,35 @@ schema（含每张表的定义位置）见 [§4](docs/ARCHITECTURE.zh.md#4-数�
 | `Stop` | `hooks/stop.py` | 22 秒 | 分离的 Haiku 观察者（v2.16.0）、按轮增量更新 PROGRESS、每 5 轮空闲整理、背压探针、计划强制执行 |
 | `PreCompact`（同步） | `hooks/pre_compact.py` | 120 秒 | 抽取 → 调和 → 全量重写 PROGRESS.md → 归档 |
 | `PreCompact`（异步） | `hooks/consolidate_async.py` | 300 秒 | 预算闸门下的整理，不在阻塞路径上；也是独立运行的背压工作者 |
-| `SessionStart` | `hooks/session_start.py` | 15 秒 | 注入分层上下文 + 强制的 `<system-reminder>`；拉起分离的追溯保存工作进程（v2.16.0） |
+| `SessionStart` | `hooks/session_start.py` | 15 秒 | 注入分层上下文 + 强制的 `<system-reminder>`，控制在 Claude Code 每个钩子 10 000 字符的上限之内（v2.17.0）；拉起分离的追溯保存工作进程（v2.16.0） |
 
 钩子契约，绝不违反：钩子从不写 stderr（Claude Code 会把 stderr 渲染成报错界面）、
 从不抛异常、永远以 0 退出。
+
+### cc-memory 显示给你的那几行
+
+自 v2.17.0 起，每做一件事都会在对话里显示一行，最多 100 列，格式是
+`ccm ▸ <动词>(<verb>) <计数> · <位置>`：
+
+| 行 | 什么时候 |
+|---|---|
+| `注入(inject)` | SessionStart：加载了哪些记忆、指令和 PROGRESS 摘要，以及大小 |
+| `裁剪(trim)` | SessionStart：为放进 Claude Code 10 000 字符上限而裁掉的条目 |
+| `续接(resume)` | 续接的会话：重申了几条指令 |
+| `存档(save)` | 压缩前的存档——由下一次 SessionStart 显示，因为 Claude Code 不显示 PreCompact 的那一行 |
+| `整理(consolidate)` | 后台整理跑完了，或因写入积压而启动 |
+| `提炼(extract)` | 后台观察者把本回合的工具调用提炼成了记忆 |
+| `补存(retro-save)` | 补存了从未压缩过的旧会话 |
+| `闲时整理(idle)` | 闲时整理改了东西 |
+| `召回(recall)` | 有记忆匹配你这句话（只在 `full`） |
+| `计划捕获(plan)` / `计划同步(plan)` | 从计划模式捕获了计划；待办清单同步到了步骤 |
+| `建库(init)` | 本项目第一次使用 |
+| `警告(warn)` | 注入仍然超过上限 |
+| `失败(error)` | 有东西失败了；细节在 cc-memory 日志里 |
+
+`/cc-mem announce` 查看开关，`/cc-mem announce full|batch|off` 为本项目设置。这些行
+只给你看：Claude Code 不把 `systemMessage` 发给模型，设为 `off` 时每个钩子输出的
+内容与 v2.17.0 之前完全一样。
 
 ---
 
@@ -859,39 +887,30 @@ Release，附上两个 exe，并以对应的 CHANGELOG 段落作为正文。与 
 
 ---
 
-## v2.16.0 有什么新东西
+## v2.17.0 有什么新东西
 
-**钩子不再挡路，注入变小且按场景成形，手册重新成了手册。** 整个版本作为一个整体
-在同一个 600 条记忆的沙箱里前后各量了一次（`scripts/bench_hooks.py`；表格在
-`CHANGELOG.md` § [2.16.0]）。
+**你能看见 cc-memory 在做什么，它的注入总能完整送到，游离的数据库和 git 工作树
+也不再把一个项目的记忆分成两份。**
 
-- **再没有钩子在等模型。** Stop 观察者和追溯保存各自在钩子的预算里跑一次 Haiku
-  调用（Stop 的 22 秒里最多 14 秒，SessionStart 的 15 秒里最多 13 秒）。现在两者都是
-  分离的工作进程——钩子几毫秒内做决定然后拉起进程；失败的调用记在
-  `.ccm/.llm_backoff.json` 里（一分钟起、翻倍到三十分钟），一次故障只花一次尝试，
-  而不是每回合一次。
-- **PostToolUse 只为它处理的工具启动。** 这个钩子过去注册的是空匹配器，每次工具调用
-  都付一次解释器启动，然后对大多数调用提前返回。匹配器现在从模式和计划三条腿推导，
-  只拼写一次。
-- **被拒绝的回合只算一回合。** 续发的 Stop（拒绝之后宿主重新触发）过去重跑每一项工作、
-  记两次数；构造一次数据库对象现在开三个连接而不是五个，因为已就绪的 schema 盖了戳；Stop 每回合只开一个句柄；PreCompact
-  只把观察者还没送过的观察喂给提取。
-- **SessionStart 注入摘要，不再注入整个文件。** PROGRESS.md 过去被整篇内嵌，然后又
-  被要求 Read 一遍——同一段文字出现两次。这一层现在是由文件自己的渲染器画出的
-  §1–§4 摘要；握手只要求一次 Read（PROGRESS.md；MEMORY.md 的事实本来就在各层里）；
-  续接的会话只得到指令账本，压缩后的会话得到各层但不要求确认；一个"已见集合"保证
-  同一条事实不会出现在两层里或再被召回。`/cc-mem inject-show` 会说哪一层、哪个模板、
-  哪些 id 到达了模型。
-- **整理看得见。** 没有凭据的一次运行会说明它跳过了哪些 LLM 阶段；`/cc-mem status`
-  打印上一次运行、积压量和是否到期；被改述成 note 的 decision 会跨类别合并，而不是
-  挨着它改述的那条事实落下；空闲整理在判定器持锁时等待。
-- **重复的东西都少了。** 四个提取器共用一个提示词构造器和一个归一化器（模式的提示词
-  后缀第一次真的到达模型）；阈值、标记前缀和文件名只拼写一次；v2.0 的 plans 队列
-  （`cli/plan.py`、仪表盘页、九个 `MemoryDB` 方法）删除、表保留；死代码和注释与代码
-  的矛盾清扫干净；MCP 的手动添加不再挂靠会话，和其他手动路径一致。
-- **`CLAUDE.md` 重新成为操作手册**——45 KB 以内，有闸门把守。三十二节版本叙事搬进
-  `CHANGELOG.md` 各自的版本条目下，它们承载的规则在 `INVARIANTS.md` 里编号，每条
-  附闸门与证伪用例。
+- **每做一件事就显示一行，只给你看，不给模型。** 会话开始时加载记忆、按你这句话
+  召回、捕获或同步计划、压缩前存档、后台整理或提炼、补存旧会话，以及任何失败，
+  都会在对话里显示短短一行，例如 `ccm ▸ 注入(inject) 25 条记忆 … · 9.0 K 字`。
+  它们走钩子字段 `systemMessage`——Claude Code 把它显示给用户、不发给模型——所以
+  上下文里不会多出任何东西。`/cc-mem announce full|batch|off` 按项目设置：
+  `batch` 去掉每句提问的召回行，`off` 逐字节恢复旧输出。见
+  [cc-memory 显示给你的那几行](#cc-memory-显示给你的那几行)。
+- **SessionStart 的注入放得进 Claude Code 每个钩子 10 000 字符的上限。** 超过上限，
+  模型只拿到一个文件路径和前 2 000 字符的预览，而最后才出现的「先读 PROGRESS.md」
+  强制提醒根本到不了——在一个真实项目上实测为 13 252 字符。现在钩子先量一量要发出
+  的东西，超了就先裁最没用的条目（没有摘要的主题行，然后是最旧的时间线，然后是主题
+  摘要，最后是关键记忆），直到放得下。常设指令、PROGRESS 摘要和提醒永远不裁；裁了
+  什么会告诉模型、告诉你，并写进 `/cc-mem inject-show`。
+- **`/cc-mem adopt-stray <dir>` 把游离的数据库并回它的项目**——某个子目录里的会话在
+  根锚定出现之前建的 `.ccm/`。默认只演练；`--yes` 先把游离库挪到一边（从不删除），
+  再导入每一张表，每条源记录各留一行出处，所以第二次运行什么也不导入，中途被打断的
+  会接着做完。
+- **git 工作树用它主检出的记忆。** 链接的工作树过去会在第一句提问时另起一个新库；
+  现在只要主检出有库，它就解析到主检出。
 
 ## 运行要求
 

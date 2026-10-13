@@ -26,8 +26,10 @@ Fires on every new session (startup, resume, post-compaction). Three jobs:
      stat()-only scan finds a candidate), so the 15 s hook never waits on
      the model.
 
-Stdout: injected context (Claude reads it as additional system input).
-Stderr: suppressed (file log only).
+Stdout: injected context (Claude reads it as additional system input) —
+plain text, or, when `core.announce` has a line for the user (v2.17.0), one
+JSON object carrying the same text as `additionalContext` beside a
+`systemMessage`. Stderr: suppressed (file log only).
 """
 import json
 import os
@@ -55,6 +57,11 @@ enable_utf8_io()
 from core.db import MemoryDB
 from core.layout import DB_FILENAME, MEMORY_DIRNAME, memory_dir as resolve_memory_dir
 from core.atomic import write_atomic
+# The user-visible line per act (v2.17.0): what this start injected, what
+# the compaction before it saved, what a background run did since.
+from core.announce import (RETRO_STATUS, STATUS_LINE, HookOutput, inject_line,
+                           oversize_line, record_status, resume_line,
+                           take_unannounced, trim_line)
 from core.extractor import (_DEFAULT_TAIL_BYTES, find_transcript_dir,
                             load_transcript_window)
 from core.logger import get_logger
@@ -68,7 +75,8 @@ from core.progress import ACK_TEMPLATE, render_progress_digest, write_progress_m
 from core.prompts import (FALLBACK_SUMMARY_PREFIX, HANDSHAKE_ACK_LEAD,
                           HANDSHAKE_LEAD, HANDSHAKE_READ_STEP, HANDSHAKE_TITLE,
                           HANDSHAKE_WHY, RESUME_NOTE, RESUME_PROTOCOL_HEAD,
-                          RESUME_PROTOCOL_STEPS, RESUME_TRIGGER_LINES)
+                          RESUME_PROTOCOL_STEPS, RESUME_TRIGGER_LINES,
+                          TRIM_NOTE)
 from llm.memory_writer import upsert_batch
 
 _log = get_logger("session_start")
@@ -95,6 +103,34 @@ _LAYER_BUDGETS = {
     "progress": 0.15,
     "footer":   0.10,
 }
+
+# The ceiling on what `build_context` returns (v2.17.0), measured on the
+# FINAL string: frame, every layer and the forced reminder. Claude Code caps a
+# hook's `additionalContext` and its plain stdout at 10 000 characters, with
+# no setting to raise it (code.claude.com/docs/en/hooks, "capped at 10,000
+# characters"; `core.announce.CONTEXT_CAP_CHARS`). Over it the model gets a
+# file path and a 2 000-character preview — and the forced reminder, appended
+# LAST, is exactly what the preview loses. Measured on a real project before
+# this existed: 13 252 characters, so the model saw the first 2 000 and no
+# handshake. 500 below the cap is room for the two lines main() puts around
+# the injection (the start line, ~50 characters plus a directory name, and
+# the `[cc-memory OK]` line, ~130).
+#
+# `_DEFAULT_BUDGET` is NOT this number. It is the allocation the shares above
+# divide, and the shares keep one layer from starving another; lowering it to
+# the ceiling would cut the layers that are never trimmed (the ledger's 0.10
+# share would fall to 950 characters, where the same project's ledger is
+# 1 577). The shares bound each layer; `_fit_to_ceiling` bounds the total.
+_INJECTION_CEILING = 9_500
+
+# What `_fit_to_ceiling` may drop, least informative first. A topic whose
+# summary is the no-model fallback states no fact (`FALLBACK_SUMMARY_PREFIX`;
+# it is not even counted as covering its rows), so it goes before any memory;
+# then the timeline, oldest row first; then real topic summaries, oldest
+# first; then the critical layer, least important first. The directive
+# ledger, the PROGRESS digest (request, status, todos, plan), the footer, the
+# frame and the forced reminder are never dropped.
+_TRIM_FALLBACK_TOPIC, _TRIM_TIMELINE, _TRIM_TOPIC, _TRIM_CRITICAL = range(4)
 
 # Longest topic NAME rendered into a layer. Names are LLM-derived and also
 # model-supplied through the `memory_add` MCP tool, so nothing else bounds
@@ -135,14 +171,16 @@ _BANNER_TAIL = "=== END CC-MEMORY ==="
 # `neutralize_inline`, because each renders exactly ONE line per row and a
 # newline there lets content forge a new markdown section; the PROGRESS.md
 # preview below uses `neutralize_markers`, which keeps newlines.
-def _build_topics_layer(db, project_id, budget):
+def _build_topics_layer(db, project_id, budget, drop=frozenset(),
+                        trim_out=None):
+    """`drop` / `trim_out`: see `_fit_to_ceiling`."""
     topics = db.get_topics(project_id)
     if not topics:
         return "", set()
     lines = ["### Knowledge Base (by topic)", ""]
     used = 0
     topic_names = set()
-    for t in topics:
+    for idx, t in enumerate(topics):
         # The NAME is capped too. It was interpolated whole, so one 10,000-char
         # topic name blew the per-entry budget and the `break` below then
         # emptied the entire knowledge-base layer — measured, 21 topics in the
@@ -161,8 +199,17 @@ def _build_topics_layer(db, project_id, budget):
         entry = f"**[{name}]** {summary}\n"
         if used + len(entry) > budget:
             continue   # skip THIS entry; see _LAYER_SKIP_NOTE
-        lines.append(entry)
         used += len(entry)
+        fallback = str(t["content"]).startswith(FALLBACK_SUMMARY_PREFIX)
+        if t["name"] in drop:
+            # Cut to the ceiling. Its share stays spent, so the row behind it
+            # cannot take the room the cut was made to free.
+            continue
+        lines.append(entry)
+        if trim_out is not None:
+            # topics come newest first: -idx drops the oldest first
+            trim_out.append((_TRIM_FALLBACK_TOPIC if fallback else _TRIM_TOPIC,
+                             -idx, "topics", t["name"], len(entry) + 1))
         # RAW name, deliberately: _build_critical_layer matches this set against
         # `memories.topic` straight out of the DB, so a neutralised copy here
         # would silently stop de-duplicating the critical layer.
@@ -172,12 +219,16 @@ def _build_topics_layer(db, project_id, budget):
         # was the eight top facts verbatim, which is why "covered" used to be
         # true for it — and why the Knowledge Base layer repeated the Critical
         # layer's rows on every no-credential project.
-        if not str(t["content"]).startswith(FALLBACK_SUMMARY_PREFIX):
+        if not fallback:
             topic_names.add(t["name"])
+    if drop and len(lines) == 2:
+        return "", topic_names   # every rendered topic was cut
     return "\n".join(lines), topic_names
 
 
-def _build_critical_layer(db, project_id, budget, topic_names, covered_out=None):
+def _build_critical_layer(db, project_id, budget, topic_names, covered_out=None,
+                          drop=frozenset(), trim_out=None):
+    """`drop` / `trim_out`: see `_fit_to_ceiling`."""
     critical = db.get_critical_memories(project_id)
     unmerged = [
         m for m in critical
@@ -196,9 +247,10 @@ def _build_critical_layer(db, project_id, budget, topic_names, covered_out=None)
     lines = ["### Critical (unmerged)", ""]
     used = 0
     shown = set()
+    taken = 0   # emitted + cut to the ceiling: a cut row keeps its slot
     scanned = 0
     for m in unmerged:
-        if len(shown) >= 8 or scanned >= 64:
+        if taken >= 8 or scanned >= 64:
             # scanned cap (register r6-B7): with only the emitted-count cap,
             # a sea of oversized rows made this loop neutralise EVERY
             # critical memory while emitting none — unbounded work on a hook
@@ -215,16 +267,27 @@ def _build_critical_layer(db, project_id, budget, topic_names, covered_out=None)
                  f"{neutralize_inline(str(m['content']))}")
         if used + len(entry) > budget:
             continue   # skip THIS entry; see _LAYER_SKIP_NOTE
-        lines.append(entry)
         used += len(entry)
+        taken += 1
+        if m["id"] in drop:
+            continue   # cut to the ceiling; slot and share stay spent
+        lines.append(entry)
         shown.add(m["id"])
+        if trim_out is not None:
+            # rendered most important first: -taken drops the least first
+            trim_out.append((_TRIM_CRITICAL, -taken, "critical", m["id"],
+                             len(entry) + 1))
+    if drop and not shown:
+        return "", shown   # every rendered row was cut
     lines.append("")
     return "\n".join(lines), shown
 
 
-def _build_timeline_layer(db, project_id, budget, shown_ids, mode_name="code"):
+def _build_timeline_layer(db, project_id, budget, shown_ids, mode_name="code",
+                          drop=frozenset(), trim_out=None):
     """Returns (text, injected_ids). injected_ids are the memory ids actually
-    rendered into the timeline (used for the inject manifest + reference bump)."""
+    rendered into the timeline (used for the inject manifest + reference bump).
+    `drop` / `trim_out`: see `_fit_to_ceiling`."""
     from core.modes import get_injection_priority
     priority = get_injection_priority(mode_name)
     recent = db.get_recent_memories(project_id, sessions_back=3, min_importance=3, limit=20)
@@ -247,9 +310,17 @@ def _build_timeline_layer(db, project_id, budget, shown_ids, mode_name="code"):
             entry = f"#{m['id']} {cat}: {short}"
         if used + len(entry) > budget:
             continue   # skip THIS entry; see _LAYER_SKIP_NOTE
-        lines.append(entry)
         used += len(entry)
+        if m["id"] in drop:
+            continue   # cut to the ceiling; its share stays spent
+        lines.append(entry)
         injected.append(m["id"])
+        if trim_out is not None:
+            # ids are insertion order: the smallest is the oldest, cut first
+            trim_out.append((_TRIM_TIMELINE, m["id"], "timeline", m["id"],
+                             len(entry) + 1))
+    if drop and not injected:
+        return "", []   # every rendered row was cut
     lines.append("")
     return "\n".join(lines), injected
 
@@ -615,6 +686,73 @@ def _write_inject_manifest(memory_dir, manifest):
         _log.error(f".last_inject.json write failed: {e}")
 
 
+# Upper bound on render passes. Each pass cuts enough, by the sizes the
+# previous pass measured, to cover the whole overshoot, so one extra pass is
+# the normal case; more happen only when a cut topic uncovers critical rows.
+_FIT_PASSES = 8
+
+
+class _LayerReads:
+    """The three layer reads, once per injection. A fitting pass re-renders
+    the SAME rows with more of them cut; querying them again doubled
+    `build_context` on a project that needs the cut (measured 72 -> 142 ms on
+    the §10 fixture). Everything else passes through to the database."""
+
+    _ONCE = ("get_topics", "get_critical_memories", "get_recent_memories")
+
+    def __init__(self, db):
+        self._db = db
+        self._memo = {}
+
+    def __getattr__(self, name):
+        attr = getattr(self._db, name)
+        if name not in self._ONCE:
+            return attr
+
+        def once(*args, **kwargs):
+            key = (name, args, tuple(sorted(kwargs.items())))
+            if key not in self._memo:
+                self._memo[key] = attr(*args, **kwargs)
+            return self._memo[key]
+        return once
+
+
+def _fit_to_ceiling(drops, trim, over):
+    """Add to `drops` the cheapest-to-lose rendered entries covering `over`
+    characters. Returns True when something was added (render again), False
+    when the text already fits or nothing is left to cut — the ledger, the
+    PROGRESS digest, the footer, the frame and the reminder are never in
+    `trim`, and the user's `警告` line (core.announce.oversize_line) still
+    reports a context the cut could not bring under the cap.
+
+    `trim` holds `(order, rank, layer, key, size)` per entry the builders
+    RENDERED this pass (see `_TRIM_FALLBACK_TOPIC`): sorting it is the cut
+    order. The estimate is the entry's own length; the next pass re-measures
+    the real string, so a header that disappears with its last row, or an
+    escape the sweep adds, only changes how many passes it takes."""
+    if over <= 0:
+        return False
+    freed = 0
+    added = False
+    for _order, _rank, layer, key, size in sorted(trim):
+        if freed >= over:
+            break
+        drops[layer].add(key)
+        freed += size
+        added = True
+    return added
+
+
+def _trim_note(drops):
+    """The one line inside the injection that says what was cut, or ""."""
+    n_mem = len(drops["timeline"] | drops["critical"])
+    n_top = len(drops["topics"])
+    what = " and ".join(p for p in (
+        f"{n_mem} memor{'y' if n_mem == 1 else 'ies'}" if n_mem else "",
+        f"{n_top} topic{'' if n_top == 1 else 's'}" if n_top else "") if p)
+    return TRIM_NOTE.format(what=what) + "\n" if what else ""
+
+
 def _injection_mode(source):
     """Which injection a start reason gets (v2.16.0, B4).
 
@@ -636,10 +774,16 @@ def _injection_mode(source):
 
 
 def build_context(memory_dir, db, project_id, project_name, current_session_id="",
-                  source=""):
+                  source="", info=None, mode_name=None):
+    """The injection text. `info`, when a dict, receives `directives` — the
+    number of ledger rows restated on a resumed start, whose manifest is
+    deliberately not rewritten (the announcement needs the count).
+    `mode_name`: the project mode when the caller already read it
+    (`MemoryDB.get_project_switches`); read here otherwise."""
     total_budget = _DEFAULT_BUDGET
     mode = _injection_mode(source)
-    mode_name = db.get_project_mode(project_id)
+    if mode_name is None:
+        mode_name = db.get_project_mode(project_id)
 
     # parts[0] is the plugin's own frame and is deliberately kept OUT of the
     # sweep below; `project_name` is the one caller-supplied value in it, so it
@@ -670,85 +814,104 @@ def build_context(memory_dir, db, project_id, project_name, current_session_id="
         result = parts[0] + "\n" + restated + "\n\n" + _BANNER_TAIL + "\n"
         _log.info(f"resumed: {len(directive_slugs)} directive(s) restated, "
                   f"{len(result)} chars; manifest untouched")
+        if isinstance(info, dict):
+            info["directives"] = len(directive_slugs)
         return result
     if directives_text:
         parts.append(directives_text)
 
-    budget = int(total_budget * _LAYER_BUDGETS["topics"])
-    topics_text, topic_names = _build_topics_layer(db, project_id, budget)
-    if topics_text:
-        parts.append(topics_text)
-
-    budget = int(total_budget * _LAYER_BUDGETS["critical"])
-    covered = set()
-    critical_text, shown_ids = _build_critical_layer(
-        db, project_id, budget, topic_names, covered_out=covered)
-    if critical_text:
-        parts.append(critical_text)
-
-    budget = int(total_budget * _LAYER_BUDGETS["timeline"])
-    # ONE `seen` set (v2.16.0, B2): what the critical layer rendered AND what
-    # a topic summary already covered. With the rendered set alone, a ≥5 row
-    # whose topic had rendered was dropped by the critical layer and then
-    # listed again under "### Recent" — the same fact twice, in two layers.
-    timeline_text, timeline_ids = _build_timeline_layer(
-        db, project_id, budget, shown_ids | covered, mode_name)
-    if timeline_text:
-        parts.append(timeline_text)
-
-    budget = int(total_budget * _LAYER_BUDGETS["progress"])
+    # Built once: the PROGRESS digest (request, status, todos, plan), the
+    # footer and the forced reminder are never cut to the ceiling, so the
+    # fitting passes below do not rebuild them.
     progress_text, progress_layer = _build_progress_digest(
-        db, project_id, memory_dir, budget)
-    if progress_text:
-        parts.append(progress_text)
-
-    # `total_budget`, not the `budget` local — that name has been reassigned
-    # four times by the layers above and holds the PROGRESS share here.
+        db, project_id, memory_dir,
+        int(total_budget * _LAYER_BUDGETS["progress"]))
+    # `total_budget`, not a share: the footer takes its own 0.10.
     footer = _build_footer(db, project_id, memory_dir,
                            budget=int(total_budget * _LAYER_BUDGETS["footer"]))
-    parts.append(footer)
-
-    # ONE MORE PASS OVER THE ASSEMBLED CONTENT — and over the CONTENT ONLY.
-    #
-    # Per-value neutralisation is not sufficient, because the renderer
-    # CONCATENATES values: a row ending `<system-reminder` and the next row
-    # starting `>` produce a token this module's OWN `_MARKER_TAG_RE` matches,
-    # from two rows that each pass the check alone. Measured on three memories
-    # written through the real writer: 4 tag matches inside the final
-    # injection where the plugin emits 2, forging a block that reads as
-    # authoritative policy. `memory_add` is a model-invokable MCP tool, so
-    # both halves are writable by the same actor.
-    #
-    # The forced reminder is appended AFTER this pass, never before: it is the
-    # one block that is SUPPOSED to contain a live `<system-reminder>`, and
-    # running it through the escaper turns the mandatory handoff into visible
-    # `&lt;system-reminder` noise. Verified by driving the real hook — the
-    # first version of this fix did exactly that, and the check below is what
-    # caught it.
-    # The plugin's OWN banners are exempt for the same reason, and they were
-    # not until this was measured: `parts[0]` is the header
-    # `=== CC-MEMORY: Context Restored ===` and the last part ends with
-    # `=== END CC-MEMORY ===`, both of which `_BANNER_RE` matches BY
-    # CONSTRUCTION — it was written to catch a memory row forging them. Sweeping
-    # the whole join therefore escaped the plugin's own emission on every
-    # session for every user: `&#61;&#61;&#61; CC-MEMORY: Context Restored
-    # &#61;&#61;&#61;`, and no terminator at all. The terminator is load-bearing
-    # by this file's own account (`_build_footer` truncates its STATUS lines
-    # specifically so `=== END CC-MEMORY ===` survives). Only the CONTENT is
-    # swept; the header and the footer are the plugin speaking, not stored text.
-    body = neutralize_document("\n".join(parts[1:])) if len(parts) > 1 else ""
-    result = parts[0] + ("\n" + body if body else "")
-    result = result + "\n\n" + _BANNER_TAIL + "\n"
     # The compact path keeps the reminder — the window was just rebuilt — and
     # drops the ack demand: there is no first reply for the ack to appear in.
     reminder = (_build_forced_reminder(memory_dir) if mode == "full"
                 else _build_forced_reminder(memory_dir, demand_ack=False))
-    if reminder:
-        result = result + "\n" + reminder
-    assert "<system-reminder>" in result or not reminder, \
-        "the forced reminder was escaped by the assembled-content pass"
-    assert _BANNER_HEAD in result and _BANNER_TAIL in result, \
-        "the assembled-content pass escaped the plugin's own frame banners"
+
+    # Fit the FINAL string under `_INJECTION_CEILING` (v2.17.0): render, measure,
+    # cut the least informative rendered entries, render again. A first pass
+    # that fits is the whole cost on every project under the ceiling.
+    drops = {"topics": set(), "critical": set(), "timeline": set()}
+    rows = _LayerReads(db)
+    for _pass in range(_FIT_PASSES):
+        trim = []
+        topics_text, topic_names = _build_topics_layer(
+            rows, project_id, int(total_budget * _LAYER_BUDGETS["topics"]),
+            drop=drops["topics"], trim_out=trim)
+
+        covered = set()
+        critical_text, shown_ids = _build_critical_layer(
+            rows, project_id, int(total_budget * _LAYER_BUDGETS["critical"]),
+            topic_names, covered_out=covered, drop=drops["critical"],
+            trim_out=trim)
+
+        # ONE `seen` set (v2.16.0, B2): what the critical layer rendered AND
+        # what a topic summary already covered. With the rendered set alone, a
+        # ≥5 row whose topic had rendered was dropped by the critical layer and
+        # then listed again under "### Recent" — the same fact twice, in two
+        # layers. A critical row cut to the ceiling is seen too: cut from one
+        # layer, it must not come back in the other.
+        timeline_text, timeline_ids = _build_timeline_layer(
+            rows, project_id, int(total_budget * _LAYER_BUDGETS["timeline"]),
+            shown_ids | covered | drops["critical"], mode_name,
+            drop=drops["timeline"], trim_out=trim)
+
+        # ONE MORE PASS OVER THE ASSEMBLED CONTENT — and over the CONTENT ONLY.
+        #
+        # Per-value neutralisation is not sufficient, because the renderer
+        # CONCATENATES values: a row ending `<system-reminder` and the next row
+        # starting `>` produce a token this module's OWN `_MARKER_TAG_RE` matches,
+        # from two rows that each pass the check alone. Measured on three memories
+        # written through the real writer: 4 tag matches inside the final
+        # injection where the plugin emits 2, forging a block that reads as
+        # authoritative policy. `memory_add` is a model-invokable MCP tool, so
+        # both halves are writable by the same actor.
+        #
+        # The forced reminder is appended AFTER this pass, never before: it is the
+        # one block that is SUPPOSED to contain a live `<system-reminder>`, and
+        # running it through the escaper turns the mandatory handoff into visible
+        # `&lt;system-reminder` noise. Verified by driving the real hook — the
+        # first version of this fix did exactly that, and the check below is what
+        # caught it.
+        # The plugin's OWN banners are exempt for the same reason, and they were
+        # not until this was measured: `parts[0]` is the header
+        # `=== CC-MEMORY: Context Restored ===` and the last part ends with
+        # `=== END CC-MEMORY ===`, both of which `_BANNER_RE` matches BY
+        # CONSTRUCTION — it was written to catch a memory row forging them. Sweeping
+        # the whole join therefore escaped the plugin's own emission on every
+        # session for every user: `&#61;&#61;&#61; CC-MEMORY: Context Restored
+        # &#61;&#61;&#61;`, and no terminator at all. The terminator is load-bearing
+        # by this file's own account (`_build_footer` truncates its STATUS lines
+        # specifically so `=== END CC-MEMORY ===` survives). Only the CONTENT is
+        # swept; the header and the footer are the plugin speaking, not stored text.
+        layers = parts + [x for x in (topics_text, critical_text, timeline_text,
+                                      progress_text, _trim_note(drops)) if x]
+        layers.append(footer)
+        body = neutralize_document("\n".join(layers[1:])) if len(layers) > 1 else ""
+        result = layers[0] + ("\n" + body if body else "")
+        result = result + "\n\n" + _BANNER_TAIL + "\n"
+        if reminder:
+            result = result + "\n" + reminder
+        assert "<system-reminder>" in result or not reminder, \
+            "the forced reminder was escaped by the assembled-content pass"
+        assert _BANNER_HEAD in result and _BANNER_TAIL in result, \
+            "the assembled-content pass escaped the plugin's own frame banners"
+        # The last pass cuts nothing more: `drops` must name exactly what
+        # the shipped `result` left out, because the manifest records it.
+        if (_pass == _FIT_PASSES - 1
+                or not _fit_to_ceiling(drops, trim,
+                                       len(result) - _INJECTION_CEILING)):
+            break
+    if any(drops.values()):
+        _log.info(f"trimmed to the {_INJECTION_CEILING}-char ceiling in "
+                  f"{_pass + 1} pass(es): {len(drops['timeline'] | drops['critical'])} "
+                  f"memories, {len(drops['topics'])} topics; {len(result)} chars")
 
     # ── v2.3 observability: persist exactly WHAT was injected, and mark those
     # memories as referenced (keeps them "young" for the staleness net). The
@@ -783,6 +946,14 @@ def build_context(memory_dir, db, project_id, project_name, current_session_id="
         "ack_demanded": mode == "full",
         "total_chars": len(result),
         "est_tokens": len(result) // 4,
+        # v2.17.0: what `_fit_to_ceiling` cut, so inject-show can list it.
+        # Cut memories are NOT in `shown_ids`, so the recall channel may still
+        # bring one back when a prompt matches it.
+        "ceiling": _INJECTION_CEILING,
+        "trimmed": {
+            "memory_ids": sorted(drops["timeline"] | drops["critical"]),
+            "topic_names": sorted(drops["topics"]),
+        },
     }
     _write_inject_manifest(memory_dir, manifest)
     try:
@@ -1420,6 +1591,9 @@ def retroactive_save(cwd, db, project_id, current_session_id="", deadline=None):
 
     memory_dir = resolve_memory_dir(cwd)
     n_retroactive = 0
+    # For the next Stop's line (v2.17.0): this worker has no output.
+    totals = {}
+    last_error = ""
     for jsonl in candidates:
         if deadline is not None and time.monotonic() >= deadline:
             _log.info(f"retroactive save: wall-clock budget spent, stopping "
@@ -1495,6 +1669,9 @@ def retroactive_save(cwd, db, project_id, current_session_id="", deadline=None):
             # retroactive pass retries this transcript instead of skipping it.
             db.mark_session_complete(sid)
             n_retroactive += 1
+            for k, v in counts.items():
+                if isinstance(v, int):
+                    totals[k] = totals.get(k, 0) + v
             _log.info(
                 f"retroactive {session_uuid[:8]}: +{counts.get('inserted',0)} "
                 f"~{counts.get('merged',0)} ↻{counts.get('superseded',0)} "
@@ -1502,11 +1679,20 @@ def retroactive_save(cwd, db, project_id, current_session_id="", deadline=None):
             )
         except Exception as e:
             _log.error(f"retroactive save error: {e}")
+            last_error = str(e)[:200]
+    if n_retroactive or last_error:
+        record_status(memory_dir, RETRO_STATUS,
+                      {"sessions": n_retroactive, "counts": totals,
+                       "error": last_error})
 
 
-def _print_injected_line(db, project_id, memory_dir):
+def _injected_line(db, project_id, memory_dir):
     """The v2.3 observability one-liner: WHAT was injected, read from the
-    manifest `build_context` just wrote (ground truth, not a guess)."""
+    manifest `build_context` just wrote (ground truth, not a guess).
+
+    Returns `(line, manifest)` — the line goes into the context as it always
+    did, the manifest (None when unreadable) feeds the user's announcement
+    (v2.17.0; this function printed the line itself before)."""
     try:
         man = json.loads((memory_dir / ".last_inject.json").read_text(encoding="utf-8"))
         if not isinstance(man, dict):
@@ -1525,22 +1711,22 @@ def _print_injected_line(db, project_id, memory_dir):
         ni = neutralize_inline(str(man.get("n_injected_memories", 0)))
         nd = neutralize_inline(str(man.get("n_injected_directives", 0)))
         et = neutralize_inline(str(man.get("est_tokens", 0)))
-        print(
+        return (
             f"[cc-memory OK] Injected {ni} memories"
             f" ({n_topics} topics, {nd} directives, ~{et} tokens"
             f"{', +PROGRESS.md' if man.get('progress_preview_included') else ''})"
             f" · see `/cc-mem inject-show`"
-        )
+        ), man
     except (OSError, json.JSONDecodeError, ValueError, TypeError,
             AttributeError):
         # Read only on THIS path (v2.16.0, A7): the manifest line above needs
         # none of these counts, and `get_stats` is four queries that every
         # start paid for a fallback it did not take.
         stats = db.get_stats(project_id)
-        print(
+        return (
             f"[cc-memory OK] Context loaded: "
             f"{stats['n_memories']} memories, {stats.get('n_topics', 0)} topics"
-        )
+        ), None
 
 
 def _flush_stdout():
@@ -1605,6 +1791,9 @@ def main():
     # .ccm/.last_inject.json, and still run retroactive LLM extraction over
     # its transcripts. Rare hook: it passes the logger, so a redirection is
     # announced and any stray database stepped over is named.
+    # Everything this hook writes to stdout goes through ONE emitter
+    # (v2.17.0): the context exactly as before, plus the user's lines.
+    out = HookOutput("SessionStart")
     resolved = resolve_project(cwd, log=_log)
     if resolved is None:
         # A project the user LISTED stays completely silent — that silence is
@@ -1622,8 +1811,11 @@ def main():
             # why: a diagnostic must never be what breaks the hook it explains
             fault = None
         if fault:
+            # The logged error is also the user's `失败` line (core.announce):
+            # the fault suspends every project, so it is said where they look.
             _log.error(f"skipped: {fault}")
-            print(f"[cc-memory] {fault}")
+            out.context(f"[cc-memory] {fault}")
+            out.write()
         else:
             _log.info(f"skipped: {cwd} is in config.json excluded_projects")
         sys.exit(0)
@@ -1640,6 +1832,16 @@ def main():
 
         db = MemoryDB(db_path)
         project_id = db.upsert_project(cwd)
+        # Both per-project switches in one read: the announce level would
+        # otherwise cost a SQLite open of its own on every start.
+        try:
+            mode_name, announce = db.get_project_switches(project_id)
+        except Exception as e:
+            # why: the switches are preferences; build_context reads the mode
+            # itself (and degrades to the reminder alone) when this is None
+            _log.error(f"project switches unreadable: {e}")
+            mode_name, announce = None, None
+        out.level = announce
 
         # Tier 2 + 3 fallback: fill PROGRESS.md empty fields before injection.
         # PreCompact remains the authoritative full-rewrite path; this only
@@ -1652,7 +1854,7 @@ def main():
         except Exception as e:
             _log.error(f"progress refresh failed: {e}")
 
-        print(f"\n[cc-memory] Session start — loading memory for '{Path(cwd).name}'...")
+        out.context(f"\n[cc-memory] Session start — loading memory for '{Path(cwd).name}'...")
         # The FORCED reminder must not share a failure domain with the layers.
         # `build_context` assembles five layers from unbounded database and
         # file content and appends the reminder LAST, so anything raising
@@ -1664,23 +1866,42 @@ def main():
         # anywhere upstream can delete is not mandatory. The layers are
         # best-effort; the reminder is the contract, so it is emitted either
         # way and the layer failure degrades to "no context this session".
+        info = {}
+        built = False
         try:
-            print(build_context(memory_dir, db, project_id, Path(cwd).name,
-                                current_session_id=session_id, source=source))
+            out.context(build_context(memory_dir, db, project_id, Path(cwd).name,
+                                      current_session_id=session_id,
+                                      source=source, info=info,
+                                      mode_name=mode_name))
+            built = True
         except Exception:
             _log.error_tb("build_context failed; emitting the forced reminder alone")
-            print(_build_forced_reminder(memory_dir))
-        # The injection is complete and irreplaceable — get it out of the
-        # buffer before any further work can run us into the 15s timeout.
-        _flush_stdout()
+            out.context(_build_forced_reminder(memory_dir))
         if _injection_mode(source) == "resume":
             # The manifest is the STARTUP injection's record and was not
             # rewritten (B4); its counts would describe an injection this
             # start did not make.
-            print("[cc-memory OK] Session resumed — the startup injection is "
-                  "still in this conversation; standing directives restated")
+            out.context("[cc-memory OK] Session resumed — the startup injection is "
+                        "still in this conversation; standing directives restated")
+            if built:
+                out.announce(resume_line(info.get("directives", 0)))
         else:
-            _print_injected_line(db, project_id, memory_dir)
+            ok_line, manifest = _injected_line(db, project_id, memory_dir)
+            out.context(ok_line)
+            if built:
+                out.announce(inject_line(manifest))
+                out.announce(trim_line(manifest))
+        # What happened since the last announcement: the compaction this
+        # start follows (PreCompact's own line is discarded by the host), a
+        # background consolidation, a worker's save.
+        if out.level != "off":
+            for key, record in take_unannounced(
+                    memory_dir, ("save", "consolidation", "observe", "retro")):
+                out.announce(STATUS_LINE[key](record))
+            out.announce(oversize_line(out.context_chars()))
+        # The injection is complete and irreplaceable — get it out of the
+        # buffer before any further work can run us into the 15s timeout.
+        out.write()
         _flush_stdout()
         _log.info(f"injected context for {Path(cwd).name}")
 
@@ -1696,6 +1917,10 @@ def main():
 
     except Exception:
         _log.error_tb("session_start ERROR")
+    # A context already queued is never lost to a later failure (the
+    # prints this replaced had already reached stdout); a no-op after the
+    # normal write above.
+    out.write()
     sys.exit(0)
 
 

@@ -76,8 +76,8 @@ SURFACE_MANIFEST = TARGET_DIR / "installed_surfaces.json"
 # Subdirectory contents (relative to cc_memory/ on disk OR cc_memory_files/ in exe)
 SUBPACKAGE_FILES = {
     "":      ["__init__.py", "config.json"],
-    "core":  ["__init__.py", "adopt.py", "atomic.py", "auth.py", "consolidate.py",
-              "db.py",
+    "core":  ["__init__.py", "adopt.py", "announce.py", "atomic.py", "auth.py",
+              "consolidate.py", "db.py",
               "encoding_setup.py", "extractor.py", "idle.py", "layout.py",
               "logger.py", "markers.py", "modes.py", "plan.py",
               "privacy.py", "progress.py", "prompts.py", "recall.py", "roots.py",
@@ -1441,6 +1441,7 @@ def _init_project(project_path, log_fn=print):
         ".last_consolidation.json",
         ".consolidation.lock", ".consolidation.kick",
         ".observer.lock", ".retro.lock", ".llm_backoff.json",
+        ".last_observe.json", ".last_retro.json", ".announced.json",
         ".pre_compact_attempt.json",
         ".plan_raw.md", ".plan_history/", "*.tmp",
     ]

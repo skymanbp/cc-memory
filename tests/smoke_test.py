@@ -4970,9 +4970,13 @@ def main():
     # mandatory handoff into visible `&lt;system-reminder` noise.
     _ss_src = (_REPO / "cc_memory" / "hooks" / "session_start.py").read_text(
         encoding="utf-8")
-    _ss_join = _ss_src.index('body = neutralize_document("\\n".join(parts[1:]))')
-    _ss_rem = _ss_src.index("_build_forced_reminder(memory_dir)", _ss_join)
-    assert _ss_join < _ss_rem, (
+    # v2.17.0: the sweep runs once per fitting pass over `layers`; the
+    # reminder is BUILT once before the loop and APPENDED after the sweep.
+    # What must hold is that it is never one of the swept layers.
+    _ss_join = _ss_src.index('body = neutralize_document("\\n".join(layers[1:]))')
+    _ss_layers = _ss_src[_ss_src.index("layers = parts + ["):_ss_join]
+    _ss_rem = _ss_src.index('result = result + "\\n" + reminder', _ss_join)
+    assert _ss_join < _ss_rem and "reminder" not in _ss_layers, (
         "the forced reminder is inside the assembled-content neutralisation "
         "pass; it is the ONE block that must keep a live <system-reminder>")
     # `parts[1:]`, not `parts`: parts[0] is the plugin's own header banner and

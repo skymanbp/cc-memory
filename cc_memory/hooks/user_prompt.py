@@ -13,6 +13,11 @@ Jobs:
   5. Print, once, the plan advisory a Stop parked on the block marker when its
      escape budget was spent, then clear it.
 
+Stdout goes through `core.announce.HookOutput` (v2.17.0): plain text as
+before, or — when the user is shown a line (the recall, a first-contact
+init, a failure) — one JSON object carrying the same text as
+`additionalContext` beside a `systemMessage`.
+
 On the session's FIRST NON-SCAFFOLDING user message it also seeds
 `progress.current_request`, so PROGRESS.md captures the goal right away
 (don't wait for PreCompact). Scaffolding -- a slash command such as
@@ -59,6 +64,7 @@ from core.privacy import clean_for_storage, strip_harness_blocks
 from core.layout import DB_FILENAME, find_db_path, memory_dir
 from core.prompts import RESUME_TRIGGERS
 from core.recall import RECALL_MANIFEST
+from core.announce import HookOutput, init_line, level_for, recall_line
 
 _TURN_FILE_PREFIX = TURN_MARKER_PREFIX       # spelled once, in core.markers (v2.16.0, D3)
 _PROMPT_FILE_PREFIX = PROMPT_MARKER_PREFIX
@@ -198,7 +204,17 @@ def _already_shown(state_dir, session_id=""):
     return shown
 
 
-def _emit_block_advisory(session_id):
+def _announce_level(cwd):
+    """The project's announce level, for `HookOutput.level_fn` — read only
+    when this prompt has a line to show. `find_project_id`, never
+    `upsert_project`: a read must not mint a project row."""
+    from core.db import MemoryDB
+    db = MemoryDB(memory_dir(cwd) / DB_FILENAME)
+    pid = db.find_project_id(cwd)
+    return level_for(db, pid) if pid is not None else None
+
+
+def _emit_block_advisory(session_id, out):
     """Print the plan advisory a Stop parked for this session, once. Never raises.
 
     v2.16.0 (D8). The Stop hook's stdout never reaches the model, so the
@@ -219,7 +235,7 @@ def _emit_block_advisory(session_id):
         note = note.strip()
         if not note:
             return
-        print(neutralize_inline(note))
+        out.context(neutralize_inline(note))
         write_marker(f, head.strip())
     except Exception:
         # why: the advisory is a courtesy; a failure here must cost the line,
@@ -227,7 +243,7 @@ def _emit_block_advisory(session_id):
         pass
 
 
-def _emit_recall(cwd, prompt, session_id=""):
+def _emit_recall(cwd, prompt, session_id, out):
     """Retrieve, print and record. Everything here is best-effort.
 
     Prints to STDOUT, which for `UserPromptSubmit` is injected into Claude's
@@ -261,9 +277,13 @@ def _emit_recall(cwd, prompt, session_id=""):
     block = render_recall_block(rows, prompt)
     if not block:
         return
-    sys.stdout.write(block)
-    sys.stdout.flush()
     ids = [int(r["id"]) for r in rows]
+    out.context(block, end="")
+    # The user's line names the rows the model was just given (v2.17.0);
+    # per-prompt, so only the `full` level shows it.
+    out.level = level_for(db, pid)
+    out.announce(recall_line(ids), batch=False)
+    out.write()
     # AFTER the write and the flush. The block is this function's product, and
     # a bookkeeping failure must not cost the thing that already reached the
     # model — the same ordering rule the PROGRESS seed above follows.
@@ -339,10 +359,16 @@ def main():
     if cwd is None:
         sys.exit(0)
 
-    # Zero-config bootstrap. The return value is deliberately NOT consulted:
-    # gating the turn-1 PROGRESS seeding on it is exactly what made that seeding
-    # unreachable for a project's first session (see below).
-    _init_project_if_needed(cwd)
+    # ONE emitter for stdout (v2.17.0). The level is read from the database
+    # only if this prompt ends up with a line to show.
+    out = HookOutput("UserPromptSubmit")
+    out.level_fn = lambda: _announce_level(cwd)
+
+    # Zero-config bootstrap. The return value gates NOTHING but the user's
+    # one-time line: gating the turn-1 PROGRESS seeding on it is exactly what
+    # made that seeding unreachable for a project's first session (see below).
+    if _init_project_if_needed(cwd):
+        out.announce(init_line())
     # find_db_path, not db_path: init just ran and either created the state
     # directory or could not. This is the "did it work" check, and a probe
     # that migrates would be answering its own question.
@@ -483,8 +509,8 @@ def main():
         # command already reduced to "". Retrieval must never run on the raw
         # prompt — that would search on text the user marked private, and the
         # retrieved rows go into the model's context.
-        _emit_block_advisory(session_id)
-        _emit_recall(cwd, prompt, session_id)
+        _emit_block_advisory(session_id, out)
+        _emit_recall(cwd, prompt, session_id, out)
 
     except Exception:
         try:
@@ -494,6 +520,8 @@ def main():
             # why: logger failing in a hook — silent fallback per hook contract
             pass
 
+    # Whatever was queued, and a no-op when the recall already wrote it.
+    out.write()
     sys.exit(0)
 
 

@@ -66,6 +66,70 @@ bootstrap once. Because hooks run `core/roots.py`, an install that runs from a
 copy of the package (the plugin cache, the standalone installer) needs the new
 version installed before worktree sessions resolve the new way.
 
+### What cc-memory does is shown to the user, and its injection arrives whole
+
+The user could not see the plugin work. A hook's stdout goes to the model
+(SessionStart, UserPromptSubmit) or to nobody (the rest), so whether a session's
+memories loaded, a turn's facts were saved or a backlog was consolidated could
+only be learned by asking `/cc-mem`.
+
+**One line per act, for the user only (`core/announce.py`, new).** Every hook
+writes stdout through one emitter, `HookOutput`: model text as before, plus a
+user line per act — `ccm ▸ <动词>(<verb>) <counts> · <where>`, at most 100
+display columns. The lines travel in the hook JSON field `systemMessage`, which
+Claude Code shows the user and does not send to the model (verified on 2.1.289:
+the transcript records a `hook_system_message` attachment with no rendered
+payload; `-p --output-format stream-json` prints it for UserPromptSubmit,
+PostToolUse and Stop). With a line to show, the context moves to
+`hookSpecificOutput.additionalContext` unchanged; without one, stdout is
+byte-for-byte the v2.16.1 output (checked per hook and start reason against
+`HEAD`). The host discards PreCompact's field and hands an async hook's to the
+model, so the compaction's save is announced by the SessionStart that follows
+it (from `.last_save.json`), and the consolidation worker, the Stop observer
+and the retroactive save record `.last_consolidation.json` /
+`.last_observe.json` / `.last_retro.json` for the next SessionStart or Stop to
+announce once (`.announced.json`). A logged ERROR becomes one `失败(error)`
+line (`core.logger.recorded_errors`). Per project, `/cc-mem announce
+full|batch|off` (`projects.announce`, migration `v12_project_announce`):
+`batch` drops the per-prompt recall line, `off` emits no field at all. Cost,
+measured in-process on the §10 fixture: the line work adds 1.0 ms (median) to
+SessionStart; the level is read in the same query as the mode
+(`MemoryDB.get_project_switches`), so no hook opens an extra connection for it,
+and PostToolUse / UserPromptSubmit read it only when they have a line.
+
+**The SessionStart injection fits Claude Code's 10 000-character hook cap.**
+The first SessionStart with the new lines reported `警告(warn) 注入 12.1 K 字超过
+Claude Code 单段 10 K 上限` on the NCCL project; the context saved by that
+session's host was 13 252 characters. Past the cap the host gives the model a
+file path and a 2 000-character preview, so the forced reminder, appended last,
+never reached it. The layer shares bound each
+layer against `_DEFAULT_BUDGET` (16 000) but nothing bounded the total, and the
+frame and the reminder sit outside the shares. `build_context` now measures the
+FINAL string against `_INJECTION_CEILING` (9 500: the cap less room for the two
+lines `main()` adds) and cuts rendered entries until it fits: topic lines with a
+no-model summary first (they state no fact), then the timeline oldest first,
+then topic summaries, then critical rows least important first. The directive
+ledger, the PROGRESS digest, the footer, the frame and the reminder are never
+cut. A cut entry keeps its layer share spent, so the next row cannot take its
+place; a cut critical row is kept out of the timeline; the passes re-render
+from one read of the three layers' rows (`_LayerReads`), so a fitted start
+costs 77.8 ms against 68.5 ms uncut (medians, §10 fixture). The cut is stated
+inside the injection (`core.prompts.TRIM_NOTE`), to the user (`裁剪(trim)`),
+and in the manifest's `trimmed`, which `/cc-mem inject-show` prints; cut
+memories are not in `shown_ids`, so recall may still bring one back. Live, from
+the NCCL project after the fix: a 9 682-character context delivered whole, 139
+no-summary topic lines cut, and the model reporting the handoff reminder
+received with no preview (`claude -p`, stream-json and transcript).
+
+Gates: `tests/test_surfaces.py` §10 (each hook's line, `off`, the failure line;
+a fixture rendering 13 133 characters uncut shipped at 9 042 with the reminder,
+the ledger and the digest verbatim) and §8i (PostToolUse's stdout is exactly the
+plan line); `tools/falsify_fixes.py` cases `r17fitceiling`, `r17fitorder`,
+`r17announceoff`, `r17failline`, and `joinedtag`, `r16fallbackcover`,
+`r16seenset`, `r8banner` re-anchored on the fitting loop; INV-125 and INV-126,
+INV-053 and INV-069 amended. `docs/CONTRACTS.md` records the reminder's
+delivery and the user line beside a Stop refusal.
+
 ## [2.16.1] — 2026-10-02
 
 ### The dashboard stopped showing a field that no longer exists
@@ -1593,7 +1657,7 @@ baseline control is itself finding F6, below).
   line>` pass `16 verified, 0 quote`, exit 0 — an elision means text was CUT,
   never rearranged. Each segment is now searched from the end of the
   previous match and an out-of-order segment is reported as such. The
-  tightening found one real case: README.md:141 quoted `B.with-ccm.txt` at
+  tightening found one real case: README.md:142 quoted `B.with-ccm.txt` at
   offset 5885 before 5606 — split into two regions, zero quoted words
   changed, both languages. `falsify --case r14verbatimorder`.
 - **The falsification suite had no negative control (F6).** A case was
@@ -5047,7 +5111,7 @@ Two of the six turned out to be worse than they were written up as.
 - **Doc citation coverage nearly doubled.** `tools/citation_check.py` could only
   anchor a citation when the symbol was defined in the *cited* file, so the most
   common shape in these docs — a call site, `` `db.tag_progress_session(...)`
-  (`user_prompt.py:446`) `` — went unchecked: 370 of 594, 62 %. It now anchors
+  (`user_prompt.py:472`) `` — went unchecked: 370 of 594, 62 %. It now anchors
   cross-file citations on the text of the cited range, and **341 of 594 are
   checked** (was 224).
 

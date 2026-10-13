@@ -477,6 +477,17 @@ _MIGRATIONS = [
     ("v11_adopted_rows_source_idx",
      "CREATE UNIQUE INDEX IF NOT EXISTS idx_adopted_rows_source "
      "ON adopted_rows (source, source_table, source_id)"),
+
+    # ── v12: what the user is shown (`core/announce.py`, v2.17.0) ─────────
+    #
+    # Each hook announces what it just did as one `systemMessage` line the
+    # user sees and the model does not. `full` (every line), `batch` (no
+    # per-prompt recall line) or `off` (no line; stdout as before v2.17.0),
+    # per project, set by `/cc-mem announce` — the same shape as `mode`
+    # above. Read by `core.announce.level_for`, which maps anything else to
+    # the default, so a NULL can never silence or crash a hook.
+    ("v12_project_announce",
+     "ALTER TABLE projects ADD COLUMN announce TEXT NOT NULL DEFAULT 'full'"),
 ]
 
 
@@ -3712,6 +3723,34 @@ class MemoryDB:
             conn.execute(
                 "UPDATE projects SET mode = ? WHERE id = ?",
                 (mode, project_id)
+            )
+
+    # ── announce level (v12, v2.17.0; core/announce.py) ──────────────────
+
+    def get_project_announce(self, project_id):
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT announce FROM projects WHERE id = ?", (project_id,)
+            ).fetchone()
+            return row["announce"] if row and row["announce"] else "full"
+
+    def get_project_switches(self, project_id):
+        """`(mode, announce)` in ONE connection. SessionStart needs both on
+        every start, and a separate open for the announce level was most of
+        the cost the user lines added to that hook (one SQLite open, ~5 ms)."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT mode, announce FROM projects WHERE id = ?", (project_id,)
+            ).fetchone()
+        if not row:
+            return "code", "full"
+        return row["mode"] or "code", row["announce"] or "full"
+
+    def set_project_announce(self, project_id, level):
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE projects SET announce = ? WHERE id = ?",
+                (level, project_id)
             )
 
     # ── topics ───────────────────────────────────────────────────────────────

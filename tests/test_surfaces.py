@@ -23,6 +23,8 @@ that defence.
   §7 roots      project-root anchoring: the ladder over a real filesystem, the
                 same six hooks run from a SUBDIRECTORY, and the source-level
                 rule that every hook resolves before it touches memory/
+  §10 announce the user-visible line per hook and level (v2.17.0), and
+                the SessionStart injection held under the host's 10 000-char cap
 
 Hermetic by construction: HOME / USERPROFILE / HOMEDRIVE / HOMEPATH / TEMP /
 TMP / TMPDIR *and* `tempfile.tempdir` are redirected into one sandbox root
@@ -4098,7 +4100,13 @@ def _plan_anchor_runs_in_every_mode(pkg):
             None)
         assert rc == 0 and err == "", \
             f"[{mode}] post_tool_use rc={rc} stderr={err[:200]!r}"
-        assert out == "", f"[{mode}] PostToolUse wrote to stdout: {out[:200]!r}"
+        # Since 2.17.0 (ANNOUNCE) the hook's ONLY stdout is the user-visible
+        # line for the capture: one JSON object whose sole field is
+        # systemMessage. Anything else on stdout (context, debris) is a defect.
+        doc = json.loads(out) if out.strip() else {}
+        assert set(doc) == {"systemMessage"} and doc["systemMessage"] \
+            .startswith("ccm \u25b8 计划捕获(plan)"), \
+            f"[{mode}] PostToolUse stdout is not the single plan line: {out[:200]!r}"
         row = db.get_plan_active(pid)
         assert row and (row.get("raw") or "").strip(), (
             f"[{mode}] ExitPlanMode went through the real hook and plan_active "
@@ -5515,6 +5523,198 @@ def test_late_surfaces():
     shutil.rmtree(pkg.parent, ignore_errors=True)
 
 
+# ── §10 v2.17.0: what the hooks tell the USER, and the injection ceiling ───
+
+def _hook_output(out):
+    """(context, systemMessage) of one hook's stdout. A plain stdout is the
+    pre-v2.17.0 shape and carries no user line."""
+    if out.strip().startswith("{"):
+        doc = json.loads(out)
+        return ((doc.get("hookSpecificOutput") or {}).get("additionalContext", ""),
+                doc.get("systemMessage"))
+    return out, None
+
+
+def _announce_fixture(level=None):
+    root = Path(tempfile.mkdtemp(prefix="ccm-announce-"))
+    db, pid = _seed_project(root, n_sessions=1)
+    db.insert_memory(pid, None, "decision",
+                     "The exporter writes CSV with a header row always", 5, [], "")
+    (root / _MEM / "PROGRESS.md").write_text("# PROGRESS\n", encoding="utf-8")
+    if level:
+        db.set_project_announce(pid, level)
+    return root, db, pid
+
+
+def _announce_lines_per_hook(pkg):
+    """(§10a) one user-visible line per act, through each hook's own process.
+
+    `systemMessage` is the one hook field Claude Code shows the user and does
+    not send to the model; before v2.17.0 nothing cc-memory did was visible
+    without asking `/cc-mem`. Asserted per hook, per level, plus the failure
+    line, because each is a separate code path in a separate process."""
+    from core.announce import CONSOLIDATION_STATUS, PREFIX, record_status
+    checks = 0
+    root, db, pid = _announce_fixture()
+
+    # SessionStart: exactly the inject line, and the context is unchanged
+    rc, out, err = _run_hook(pkg, "session_start", root, "ann-1", None)
+    assert rc == 0 and err == "", f"session_start rc={rc} stderr={err[:200]!r}"
+    ctx, msg = _hook_output(out)
+    assert msg and msg.startswith(PREFIX + "注入(inject) 1 条记忆") \
+        and "\n" not in msg, f"SessionStart user line: {msg!r}"
+    assert "<system-reminder>" in ctx and "CSV with a header row" in ctx, ctx[-400:]
+    assert "[cc-memory] trimmed" not in ctx and "裁剪" not in msg, (
+        "a 1-memory injection was reported as trimmed")
+    man = json.loads((root / _MEM / ".last_inject.json").read_text(encoding="utf-8"))
+    assert man.get("trimmed") == {"memory_ids": [], "topic_names": []}, man
+    checks += 4
+
+    # PostToolUse on an observed tool with nothing to report: no line, so the
+    # stdout stays the empty pre-v2.17.0 stdout
+    rc, out, err = _run_hook(pkg, "post_tool_use", root, "ann-1", None)
+    assert rc == 0 and err == "" and out == "", f"PostToolUse(Read): {out[:200]!r}"
+    checks += 1
+
+    # Stop: a finished consolidation is announced ONCE (the watermark)
+    record_status(root / _MEM, CONSOLIDATION_STATUS,
+                  {"duplicates_archived": 2, "archived_stale": 1,
+                   "topics_consolidated": 0, "final_active": 1})
+    rc, out, err = _run_hook(pkg, "stop", root, "ann-1", None)
+    assert rc == 0 and err == "", f"stop rc={rc} stderr={err[:200]!r}"
+    _ctx, msg = _hook_output(out)
+    assert msg and PREFIX + "整理(consolidate) 去重 2 · 过时 1" in msg, \
+        f"Stop did not announce the consolidation: {out[:300]!r}"
+    rc, out, err = _run_hook(pkg, "stop", root, "ann-1", None)
+    _ctx, msg = _hook_output(out)
+    assert not msg or "整理(consolidate)" not in msg, \
+        f"the same consolidation was announced twice: {msg!r}"
+    checks += 2
+
+    # off: byte-for-byte the pre-v2.17.0 shape — plain stdout, no field
+    db.set_project_announce(pid, "off")
+    rc, out, err = _run_hook(pkg, "session_start", root, "ann-2", None)
+    assert rc == 0 and not out.lstrip().startswith("{") \
+        and "systemMessage" not in out and "<system-reminder>" in out, \
+        f"announce=off still emitted JSON: {out[:200]!r}"
+    checks += 1
+
+    # a logged failure is ONE 失败 line, and the context still ships
+    db.set_project_announce(pid, "full")
+    (root / _MEM / ".last_inject.json").unlink()
+    (root / _MEM / ".last_inject.json").mkdir()   # the manifest write must fail
+    rc, out, err = _run_hook(pkg, "session_start", root, "ann-3", None)
+    assert rc == 0 and err == "", f"session_start rc={rc} stderr={err[:200]!r}"
+    ctx, msg = _hook_output(out)
+    assert msg and msg.count(PREFIX + "失败(error)") == 1, \
+        f"an unwritable manifest produced no failure line: {msg!r}"
+    assert "<system-reminder>" in ctx, "the failure cost the forced reminder"
+    checks += 2
+    shutil.rmtree(root, ignore_errors=True)
+    return checks
+
+
+def _injection_fits_the_hook_cap(pkg):
+    """(§10b) the SessionStart injection fits Claude Code's 10 000-char cap.
+
+    Over the cap the host saves the text to a file and the model gets the
+    path and a 2 000-character preview — so the forced reminder, appended
+    last, never arrived. Measured on a real project: 13 252 characters. The
+    hook now measures the FINAL string and cuts fallback topics, then the
+    timeline, then real topics, then critical rows until it fits; the
+    ledger, the PROGRESS digest and the reminder are never cut."""
+    from core.announce import CONTEXT_CAP_CHARS, PREFIX
+    from core.plan import render_directive_lines
+    from core.prompts import FALLBACK_SUMMARY_PREFIX
+    from hooks import session_start as ss
+    root = Path(tempfile.mkdtemp(prefix="ccm-fit-"))
+    db, pid = _seed_project(root, n_sessions=1)
+    mem = root / _MEM
+    (mem / "PROGRESS.md").write_text("# PROGRESS\n", encoding="utf-8")
+    db.upsert_progress(pid, current_request="FITREQUEST ship the exporter",
+                       status_done="FITSTATUS the reader is merged")
+    for i in range(3):
+        db.upsert_directive(pid, f"fit-rule-{i}", kind="constraint",
+                            quote=f"FITQUOTE{i}",
+                            demand=f"FITDIRECTIVE{i} " + "never skip the gate " * 12)
+    for i in range(8):
+        db.insert_memory(pid, None, "decision",
+                         f"FITCRIT{i} " + "the deploy key rotates monthly " * 12,
+                         5, [], "")
+    for i in range(20):
+        db.insert_memory(pid, None, "note",
+                         f"FITRECENT{i} " + "the exporter retried after a timeout " * 16,
+                         4, [], "")
+    for i in range(150):
+        db.upsert_topic(pid, f"fallback-topic-{i}",
+                        FALLBACK_SUMMARY_PREFIX + "3 rows")
+    for i in range(10):
+        db.upsert_topic(pid, f"fact-topic-{i}",
+                        f"FITTOPIC{i} " + "the exporter settles on port 9100. " * 6)
+
+    # the same fixture WITHOUT the ceiling, so the test proves it was needed
+    _ceiling = ss._INJECTION_CEILING
+    ss._INJECTION_CEILING = 10 ** 9
+    try:
+        uncut = ss.build_context(mem, db, pid, root.name)
+    finally:
+        ss._INJECTION_CEILING = _ceiling
+    assert len(uncut) > 12_000, f"fixture: only {len(uncut)} chars uncut"
+
+    rc, out, err = _run_hook(pkg, "session_start", root, "fit-1", None)
+    assert rc == 0 and err == "", f"session_start rc={rc} stderr={err[:200]!r}"
+    ctx, msg = _hook_output(out)
+    man = json.loads((mem / ".last_inject.json").read_text(encoding="utf-8"))
+    assert man["total_chars"] <= _ceiling and len(ctx) <= CONTEXT_CAP_CHARS, (
+        f"injection {man['total_chars']} chars (ceiling {_ceiling}), hook "
+        f"context {len(ctx)} (cap {CONTEXT_CAP_CHARS}) — uncut it was "
+        f"{len(uncut)}")
+    reminder = ss._build_forced_reminder(mem)
+    assert reminder and reminder in ctx, "the forced reminder is not verbatim"
+    for _slug, entry in render_directive_lines(
+            db.list_directives(pid, status="active"), style="inject"):
+        assert entry in ctx, f"a standing directive was cut: {entry[:80]!r}"
+    assert "FITREQUEST" in ctx and "FITSTATUS" in ctx, "the digest was cut"
+    trimmed = man["trimmed"]
+    assert trimmed["memory_ids"] or trimmed["topic_names"], man
+    assert "[cc-memory] trimmed " in ctx, "the cut is not stated to the model"
+    assert msg and PREFIX + "裁剪(trim) 已裁" in msg and "警告(warn)" not in msg, \
+        f"the user line does not report the cut: {msg!r}"
+    # least informative first: every fallback topic goes before any memory
+    if trimmed["memory_ids"]:
+        assert "fallback-topic-" not in ctx, (
+            "a memory was cut while a no-model topic line (no fact) stayed")
+    # the manifest is ground truth: nothing it calls cut is in the text, and
+    # nothing it calls shown is missing from it
+    for mid in trimmed["memory_ids"]:
+        assert mid not in man["shown_ids"], mid
+    for name in trimmed["topic_names"]:
+        assert f"**[{name}]**" not in ctx, name
+    n_cut = len(trimmed["memory_ids"]) + len(trimmed["topic_names"])
+    shutil.rmtree(root, ignore_errors=True)
+    return len(uncut), man["total_chars"], n_cut
+
+
+def test_announce_surfaces():
+    print("\n--- §10 v2.17.0 announce + injection ceiling ------------------")
+    pkg = Path(tempfile.mkdtemp(prefix="ccm-r17-pkg-")) / "cc_memory"
+    shutil.copytree(REPO / "cc_memory", pkg,
+                    ignore=shutil.ignore_patterns("__pycache__", "*.pyc",
+                                                  "projects.json"))
+    assert REPO not in pkg.parents, "the fixture package must be a COPY"
+    n = _announce_lines_per_hook(pkg)
+    print(f"[OK] user lines: {n} checks — SessionStart's inject line, a "
+          f"silent PostToolUse stays empty, Stop announces a consolidation "
+          f"once, 'off' is the plain pre-2.17 stdout, and a logged failure "
+          f"is one 失败 line beside an intact context")
+    uncut, cut, n_cut = _injection_fits_the_hook_cap(pkg)
+    print(f"[OK] injection ceiling: {uncut} chars uncut → {cut} shipped "
+          f"({n_cut} entries cut, fallback topics first); the reminder, the "
+          f"ledger and the digest verbatim; the cut is stated to the model "
+          f"and to the user, and the manifest records it")
+    shutil.rmtree(pkg.parent, ignore_errors=True)
+
+
 def main():
     print(f"Sandbox root: {_SANDBOX}")
     print(f"Sandbox home: {Path.home()}")
@@ -5528,6 +5728,7 @@ def main():
     test_project_root_anchoring()
     test_late_surfaces()
     test_dual_review_surfaces()
+    test_announce_surfaces()
     # Teardown is a GATE, not a courtesy: this suite creates ~475 KB of SQLite
     # per run under the real %TEMP% and used to hide its own failure to remove
     # it behind ignore_errors=True.

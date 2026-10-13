@@ -458,10 +458,11 @@ def _break_crheading(root):
       "neutralise per value only -> two rows reassemble a live authority tag")
 def _break_joinedtag(root):
     # anchor repaired 2026-08-09 (round 8): the sweep moved off the whole join
-    # onto parts[1:], so the plugin's own frame banners stop being escaped.
+    # onto parts[1:], so the plugin's own frame banners stop being escaped;
+    # and 2026-10-13 (v2.17.0): the join is `layers`, built per fitting pass.
     _patch(root, f"{PKG}/hooks/session_start.py",
-           'body = neutralize_document("\\n".join(parts[1:]))',
-           'body = ("\\n".join(parts[1:]))  # BREAKAGE')
+           'body = neutralize_document("\\n".join(layers[1:]))',
+           'body = ("\\n".join(layers[1:]))  # BREAKAGE')
 
 
 @case("layerbreak", ["tests/smoke_test.py"],
@@ -1281,11 +1282,12 @@ def _break_r8literal(root):
       "sweep the whole join -> the injection loses its own header and terminator")
 def _break_r8banner(root):
     _patch(root, f"{PKG}/hooks/session_start.py",
-           "    body = neutralize_document(" + Q + BS + "n" + Q
-           + ".join(parts[1:])) if len(parts) > 1 else " + Q + Q + N
-           + "    result = parts[0] + (" + Q + BS + "n" + Q + " + body if body else " + Q + Q + ")" + N
-           + "    result = result + " + Q + BS + "n" + BS + "n" + Q + " + _BANNER_TAIL + " + Q + BS + "n" + Q + N,
-           "    result = neutralize_document(" + Q + BS + "n" + Q + ".join(parts))"
+           # v2.17.0: inside the fitting loop, over `layers`
+           "        body = neutralize_document(" + Q + BS + "n" + Q
+           + ".join(layers[1:])) if len(layers) > 1 else " + Q + Q + N
+           + "        result = layers[0] + (" + Q + BS + "n" + Q + " + body if body else " + Q + Q + ")" + N
+           + "        result = result + " + Q + BS + "n" + BS + "n" + Q + " + _BANNER_TAIL + " + Q + BS + "n" + Q + N,
+           "        result = neutralize_document(" + Q + BS + "n" + Q + ".join(layers))"
            + "  # BREAKAGE" + N)
 
 
@@ -1365,14 +1367,16 @@ def _break_r8planhook(root):
     path = root / PKG / "hooks" / "post_tool_use.py"
     text = path.read_text(encoding="utf-8")
     block = ("        try:" + N
-             + "            _apply_plan_integration(db, project_id, cwd, tool_name, tool_input)" + N)
+             + "            out.announce(_apply_plan_integration(" + N
+             + "                db, project_id, cwd, tool_name, tool_input))" + N)
     gate = "        if should_observe(mode, tool_name):" + N
     i = text.index(block)
     j = text.index(gate)
     assert i < j, "BREAKAGE ANCHOR ROTTED: the plan block is already below the gate"
     text = text[:i] + text[i + len(block):]
     j = text.index(gate)
-    moved = ("            _apply_plan_integration(db, project_id, cwd, tool_name, tool_input)" + N
+    moved = ("            out.announce(_apply_plan_integration(" + N
+             + "                db, project_id, cwd, tool_name, tool_input))" + N
              + "            try:" + N)
     text = text[:j + len(gate)] + moved + text[j + len(gate):]
     path.write_text(text, encoding="utf-8")
@@ -2849,7 +2853,7 @@ def _break_r15remedyorder(root):
       "82.6% of stored memories had never once reached a context window")
 def _break_r15recallchannel(root):
     _patch(root, f"{PKG}/hooks/user_prompt.py",
-           "        _emit_recall(cwd, prompt, session_id)",
+           "        _emit_recall(cwd, prompt, session_id, out)",
            "        pass  # BREAKAGE: the query-bearing channel stays empty")
 
 
@@ -2932,8 +2936,8 @@ def _break_r15recalldedup(root):
       "matches are injected into the model's context")
 def _break_r15recallprivate(root):
     _patch(root, f"{PKG}/hooks/user_prompt.py",
-           "        _emit_recall(cwd, prompt, session_id)",
-           '        _emit_recall(cwd, data.get("prompt", ""), session_id)'
+           "        _emit_recall(cwd, prompt, session_id, out)",
+           '        _emit_recall(cwd, data.get("prompt", ""), session_id, out)'
            "  # BREAKAGE: raw")
 
 
@@ -3111,7 +3115,7 @@ def _break_r16retrospawn(root):
       "the model reads (the v2.11.0 silence, back)")
 def _break_r16advisorychannel(root):
     _patch(root, "cc_memory/hooks/user_prompt.py",
-           "        _emit_block_advisory(session_id)\n",
+           "        _emit_block_advisory(session_id, out)\n",
            "        _ = session_id  # BREAKAGE: the parked advisory is never printed\n")
 
 
@@ -3141,7 +3145,8 @@ def _break_r16handshake(root):
       "of a no-credential project's topics vanishes from the injection")
 def _break_r16fallbackcover(root):
     _patch(root, "cc_memory/hooks/session_start.py",
-           '        if not str(t["content"]).startswith(FALLBACK_SUMMARY_PREFIX):\n'
+           # v2.17.0: the prefix test is the `fallback` local, read once
+           '        if not fallback:\n'
            '            topic_names.add(t["name"])',
            '        if True:  # BREAKAGE: a fallback line counts as coverage\n'
            '            topic_names.add(t["name"])')
@@ -3175,8 +3180,9 @@ def _break_r16recallscope(root):
       "listed again under Recent")
 def _break_r16seenset(root):
     _patch(root, f"{PKG}/hooks/session_start.py",
-           "        db, project_id, budget, shown_ids | covered, mode_name)",
-           "        db, project_id, budget, shown_ids, mode_name)  # BREAKAGE")
+           # v2.17.0: the seen set also holds the rows cut to the ceiling
+           '            shown_ids | covered | drops["critical"], mode_name,',
+           '            shown_ids | drops["critical"], mode_name,  # BREAKAGE')
 
 
 @case("r16memoryread", ["tests/smoke_test.py"],
@@ -3413,6 +3419,43 @@ def _break_r17adoptdup(root):
            "                # REINFORCE, as `upsert_smart` treats an exact-hash\n",
            "            if False and dup is not None:  # BREAKAGE\n"
            "                # REINFORCE, as `upsert_smart` treats an exact-hash\n")
+
+
+@case("r17fitceiling", ["tests/test_surfaces.py"],
+      "lift the injection ceiling -> a large project's SessionStart context "
+      "passes Claude Code's 10 000-char cap and the model gets a 2 000-char "
+      "preview without the forced reminder")
+def _break_r17fitceiling(root):
+    _patch(root, f"{PKG}/hooks/session_start.py",
+           "_INJECTION_CEILING = 9_500\n",
+           "_INJECTION_CEILING = 10 ** 9  # BREAKAGE\n")
+
+
+@case("r17fitorder", ["tests/test_surfaces.py"],
+      "cut the timeline before the no-model topic lines -> memories leave "
+      "the injection while factless topic names stay")
+def _break_r17fitorder(root):
+    _patch(root, f"{PKG}/hooks/session_start.py",
+           "_TRIM_FALLBACK_TOPIC, _TRIM_TIMELINE, _TRIM_TOPIC, _TRIM_CRITICAL = range(4)\n",
+           "_TRIM_TIMELINE, _TRIM_FALLBACK_TOPIC, _TRIM_TOPIC, _TRIM_CRITICAL = range(4)  # BREAKAGE\n")
+
+
+@case("r17announceoff", ["tests/test_surfaces.py"],
+      "ignore announce=off -> a project that switched the lines off still "
+      "gets a systemMessage and a JSON stdout")
+def _break_r17announceoff(root):
+    _patch(root, f"{PKG}/core/announce.py",
+           "        if level == \"off\":\n            return []\n",
+           "        if False:  # BREAKAGE\n            return []\n")
+
+
+@case("r17failline", ["tests/test_surfaces.py"],
+      "stop recording logged errors -> a hook that failed shows the user "
+      "nothing")
+def _break_r17failline(root):
+    _patch(root, f"{PKG}/core/logger.py",
+           "            _record_error(self.component, msg)\n",
+           "            pass  # BREAKAGE\n")
 
 
 def verify_anchors():

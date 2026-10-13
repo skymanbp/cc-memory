@@ -9,7 +9,7 @@ Your project's decisions, results, bugs and plans survive compaction, session
 boundaries, and closed terminals — the next session is *forced* to read them
 before it does anything, and what is stored is *reconciled*, never stacked.
 
-[![version](https://img.shields.io/badge/version-2.16.1-blue.svg)](CHANGELOG.md)
+[![version](https://img.shields.io/badge/version-2.17.0-blue.svg)](CHANGELOG.md)
 [![license](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![python](https://img.shields.io/badge/python-3.8%2B-blue.svg)](pyproject.toml)
 [![dependencies](https://img.shields.io/badge/runtime%20deps-0-brightgreen.svg)](#requirements)
@@ -32,17 +32,18 @@ before it does anything, and what is stored is *reconciled*, never stacked.
 - [Seen in the field](#seen-in-the-field)
 - [Measured numbers](#measured-numbers)
 - [Reference](#reference)
-  - [`/cc-mem` — 35 subcommands](#cc-mem--35-subcommands)
+  - [`/cc-mem` — 36 subcommands](#cc-mem--36-subcommands)
   - [MCP tools](#mcp-tools)
   - [Configuration](#configuration)
   - [On disk and in the database](#on-disk-and-in-the-database)
   - [Hook table](#hook-table)
+  - [The lines cc-memory shows you](#the-lines-cc-memory-shows-you)
 - [Design philosophy](#design-philosophy)
 - [Architecture](#architecture)
 - [Development](#development)
 - [Troubleshooting](#troubleshooting)
 - [Roadmap and known limits](#roadmap-and-known-limits)
-- [What's new in v2.16.0](#whats-new-in-v2160)
+- [What's new in v2.17.0](#whats-new-in-v2170)
 - [Documentation map](#documentation-map)
 - [License](#license)
 
@@ -586,7 +587,7 @@ kept anyway, because a leaked WAL handle is worse — the reasoning is in
 
 ## Reference
 
-### `/cc-mem` — 35 subcommands
+### `/cc-mem` — 36 subcommands
 
 Inside Claude Code (path-agnostic — the wrapper resolves the plugin root):
 
@@ -597,6 +598,8 @@ Inside Claude Code (path-agnostic — the wrapper resolves the plugin root):
 /cc-mem paths [--json]              Resolved DB / PROGRESS.md / PLAN.md / MEMORY.md paths
 /cc-mem schema                      Live SQLite schema (tables, indexes, migrations)
 /cc-mem mode [code|research|writing] Show or set the project mode
+/cc-mem announce [full|batch|off]   Show or set the lines cc-memory shows
+                                    you in the conversation (v2.17.0)
 /cc-mem summary                     Latest session summary
 /cc-mem sessions                    Compaction history with archive paths
 /cc-mem observations                Raw PostToolUse rows awaiting extraction
@@ -762,10 +765,36 @@ Six hook commands <!--ce:hooks--> across five Claude Code events, declared in
 | `Stop` | `hooks/stop.py` | 22 s | Detached Haiku observer (v2.16.0), per-turn PROGRESS patch, idle reorg every 5 turns, backpressure probe, plan enforcement |
 | `PreCompact` (sync) | `hooks/pre_compact.py` | 120 s | Extract → reconcile → full-rewrite PROGRESS.md → archive |
 | `PreCompact` (async) | `hooks/consolidate_async.py` | 300 s | Budget-gated consolidation, off the blocking path; also the standalone backpressure worker |
-| `SessionStart` | `hooks/session_start.py` | 15 s | Inject layered context + the forced `<system-reminder>`; start the detached retroactive-save worker (v2.16.0) |
+| `SessionStart` | `hooks/session_start.py` | 15 s | Inject layered context + the forced `<system-reminder>`, held under Claude Code's 10 000-character hook cap (v2.17.0); start the detached retroactive-save worker (v2.16.0) |
 
 Hook contract, never violated: hooks never write to stderr (Claude Code renders
 stderr as error UI), never raise, and always exit 0.
+
+### The lines cc-memory shows you
+
+Since v2.17.0 every act prints one line in the conversation, at most 100
+columns, in the form `ccm ▸ <动词>(<verb>) <counts> · <where>`:
+
+| Line | When |
+|---|---|
+| `注入(inject)` | SessionStart: the memories, directives and PROGRESS digest loaded, and the size |
+| `裁剪(trim)` | SessionStart: entries cut to fit Claude Code's 10 000-character cap |
+| `续接(resume)` | a resumed session: the directives restated |
+| `存档(save)` | the save before a compaction — shown by the next SessionStart, because Claude Code does not display PreCompact's line |
+| `整理(consolidate)` | a background consolidation finished, or was started on a write backlog |
+| `提炼(extract)` | the background observer turned this turn's tool calls into memories |
+| `补存(retro-save)` | earlier sessions that were never compacted were saved |
+| `闲时整理(idle)` | the idle reorg changed something |
+| `召回(recall)` | memories matched your prompt (`full` only) |
+| `计划捕获(plan)` / `计划同步(plan)` | a plan captured from plan mode; a todo list synced to its steps |
+| `建库(init)` | the project's first use |
+| `警告(warn)` | an injection still over the cap |
+| `失败(error)` | something failed; the detail is in the cc-memory log |
+
+`/cc-mem announce` shows the switch and `/cc-mem announce full|batch|off` sets
+it for this project. The lines are for you only: Claude Code does not send
+`systemMessage` to the model, and with `off` every hook prints exactly what it
+printed before v2.17.0.
 
 ---
 
@@ -940,52 +969,38 @@ has to rediscover:
 
 ---
 
-## What's new in v2.16.0
+## What's new in v2.17.0
 
-**The hooks got out of the way, the injection got smaller and shaped, and the
-manual became a manual.** The release was measured as a whole on the same
-600-memory sandbox before and after (`scripts/bench_hooks.py`; the table is in
-`CHANGELOG.md` § [2.16.0]).
+**You can see what cc-memory does, its injection always arrives whole, and a
+stray database or a git worktree no longer splits a project's memory.**
 
-- **No hook waits on the model any more.** The Stop observer and the
-  retroactive save each ran a Haiku call inside the hook's own budget (up to
-  14 s of Stop's 22 s, up to 13 s of SessionStart's 15 s). Both are detached
-  workers now — the hook decides in milliseconds and spawns; a failed call is
-  remembered in `.ccm/.llm_backoff.json` (one minute, doubling to thirty) so an
-  outage costs one attempt, not one per turn.
-- **PostToolUse fires only for the tools it handles.** The hook was registered
-  with an empty matcher and paid an interpreter start for every tool call,
-  returning early for most of them. The matcher is derived from the modes and
-  the plan legs, and spelled once.
-- **A refused turn is one turn.** A continuation Stop (the harness re-firing
-  after a refusal) re-ran every job and counted twice; constructing the
-  database opens three connections instead of five, because a settled schema
-  is stamped; Stop opens one handle per turn; PreCompact feeds
-  the extraction only what the observer has not already sent.
-- **SessionStart injects a digest, not the file.** PROGRESS.md was embedded
-  whole and then demanded as a Read — the same text twice. The layer is now a
-  §1-§4 digest drawn by the file's own renderers, the handshake demands one Read
-  (PROGRESS.md; MEMORY.md's facts were already in the layers), a resumed
-  session gets the directive ledger and nothing else, a compacted one gets the
-  layers and no ack demand, and one seen set keeps a fact from appearing in two
-  layers or in recall. `/cc-mem inject-show` says which layer, which template
-  and which ids reached the model.
-- **Consolidation you can see.** A run without a credential says which LLM
-  stages it skipped; `/cc-mem status` prints the last run, the backlog and
-  whether one is due; a decision restated as a note merges across categories
-  instead of landing beside the fact it restates; the idle reorg waits while a
-  judge holds the lock.
-- **Less of everything that was duplicated.** One extraction prompt and one
-  normaliser for the four extractors (the modes' prompt suffix reaches the
-  model for the first time); thresholds, marker prefixes and file names spelled
-  once; the v2.0 plans queue (`cli/plan.py`, the dashboard tab, nine `MemoryDB`
-  methods) deleted with the table kept; dead code and comment/code
-  contradictions swept; a manual MCP add stores no session, like every other
-  manual path.
-- **`CLAUDE.md` is an operating manual again** — under 45 KB, gated. Thirty-two
-  version narratives moved into `CHANGELOG.md` under their own releases, and the
-  rules they carried are numbered in `INVARIANTS.md`, each with its gate and
-  falsification case.
+- **One line per act, shown to you and never to the model.** Loading memories
+  at session start, a recall for your prompt, a captured or synced plan, the
+  save before a compaction, a background consolidation or extraction, a
+  retroactive save, and any failure each print one short line in the
+  conversation, such as `ccm ▸ 注入(inject) 25 条记忆 … · 9.0 K 字`. They ride
+  the hook field `systemMessage`, which Claude Code shows the user and does not
+  send to the model, so nothing new enters the context. `/cc-mem announce
+  full|batch|off` sets it per project: `batch` drops the per-prompt recall line,
+  `off` restores the old output byte for byte. See
+  [The lines cc-memory shows you](#the-lines-cc-memory-shows-you).
+- **The SessionStart injection fits Claude Code's 10 000-character hook cap.**
+  Past the cap the model gets a file path and a 2 000-character preview, and
+  the forced "read PROGRESS.md" reminder, which comes last, never arrived —
+  measured on a real project at 13 252 characters. The hook now measures what
+  it is about to send and cuts the least useful entries first (topic lines with
+  no summary, then the oldest timeline rows, then topic summaries, then critical
+  rows) until it fits. Standing directives, the PROGRESS digest and the reminder
+  are never cut, and the cut is stated to the model, to you, and in
+  `/cc-mem inject-show`.
+- **`/cc-mem adopt-stray <dir>` merges a stray database back into its
+  project** — a `.ccm/` that a sub-directory session created before root
+  anchoring existed. A dry run by default; `--yes` moves the stray aside first
+  (never deleted), then imports every table with one provenance row per source
+  row, so a second run imports nothing and an interrupted one resumes.
+- **A git worktree uses its main checkout's memory.** A linked worktree used to
+  start a fresh database at its first prompt; it now resolves to the main
+  checkout when that checkout owns one.
 
 ## Requirements
 

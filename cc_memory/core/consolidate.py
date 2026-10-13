@@ -1246,6 +1246,12 @@ def write_consolidation_marker(db, project_id, memory_dir: Path, cwd: str,
         "final_topics": results.get("final_topics"),
         "semantic_dedup_archived": results.get("semantic_dedup_archived"),
         "archived_obsolete": results.get("archived_obsolete"),
+        # What the user is told the run did (v2.17.0, core.announce
+        # .consolidation_line): the lexical merge, the staleness net and
+        # the topic summaries, beside the two LLM counts above.
+        "duplicates_archived": results.get("duplicates_archived"),
+        "archived_stale": results.get("archived_stale"),
+        "topics_consolidated": results.get("topics_consolidated"),
         # Which LLM stages ran, and why the others did not (v2.16.0, C1).
         "llm_stages": results.get("llm_stages"),
     }

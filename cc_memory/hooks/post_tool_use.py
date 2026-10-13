@@ -16,7 +16,10 @@ Two jobs:
      Stop-hook observer to later sift through. No LLM call. This is the ONLY
      part the project's mode gates.
 
-Output: stdout EMPTY, stderr suppressed, always exits 0.
+Output: stdout EMPTY, stderr suppressed, always exits 0 — except for the
+user's line (v2.17.0, `core.announce`): a captured plan, a TodoWrite synced
+into the live plan, or a logged failure is one `systemMessage`. NEVER one per
+observation row: that would be a line per tool call.
 
 Latency: NOT <50 ms. Measured on Windows 11 / CPython 3.13, median of 25
 subprocess invocations against a warm 40 KiB DB with an 8-step active plan:
@@ -54,6 +57,8 @@ from core.logger import get_logger
 # this module already bind a local named `memory_dir`, and a shadowed import
 # is a NameError waiting for the first refactor that moves a line.
 from core.layout import DB_FILENAME, memory_dir as resolve_memory_dir
+from core.announce import (HookOutput, level_for, plan_capture_line,
+                           plan_sync_line)
 
 # Construction is I/O-free (the file opens on first WRITE, core/logger.py
 # Logger._get_file), so a module-level logger costs this per-tool-call hook
@@ -104,7 +109,10 @@ def _apply_plan_integration(db, project_id, cwd, tool_name, tool_input):
     """v2.2 live plan anchor. Best-effort: the caller logs and swallows.
 
     Deliberately independent of `core.modes.should_observe` — see main().
+    Returns the user's line for a plan capture or a step sync, else ""
+    (v2.17.0); the drift counters are silent — they move every edit.
     """
+    announcement = ""
     from core import plan as plan_mod
     from core.modes import EDIT_TOOLS
     memory_dir = resolve_memory_dir(cwd)
@@ -112,9 +120,9 @@ def _apply_plan_integration(db, project_id, cwd, tool_name, tool_input):
     if tool_name == "ExitPlanMode":
         raw_plan = tool_input.get("plan", "") if isinstance(tool_input, dict) else ""
         if raw_plan:
-            plan_mod.capture_exit_plan_mode(
-                db, project_id, raw_plan, memory_dir=memory_dir
-            )
+            if plan_mod.capture_exit_plan_mode(
+                    db, project_id, raw_plan, memory_dir=memory_dir):
+                announcement = plan_capture_line(len(raw_plan))
 
     # `is_live_plan`, NOT the row's truthiness. `clear_plan_active` keeps a
     # TOMBSTONE row by design (it is what keeps `revision` monotonic across
@@ -126,9 +134,9 @@ def _apply_plan_integration(db, project_id, cwd, tool_name, tool_input):
     elif tool_name == "TodoWrite":
         todos = tool_input.get("todos", []) if isinstance(tool_input, dict) else []
         if todos and plan_mod.is_live_plan(db.get_plan_active(project_id)):
-            plan_mod.apply_todowrite_sync(
+            announcement = plan_sync_line(plan_mod.apply_todowrite_sync(
                 db, project_id, todos, memory_dir=memory_dir
-            )
+            ))
 
     elif tool_name in EDIT_TOOLS:
         if plan_mod.is_live_plan(db.get_plan_active(project_id)):
@@ -142,6 +150,7 @@ def _apply_plan_integration(db, project_id, cwd, tool_name, tool_input):
     if plan_mod.is_sensitive_tool_call(tool_name, tool_input):
         if plan_mod.is_live_plan(db.get_plan_active(project_id)):
             db.bump_plan_edit_counter(project_id, n=20)
+    return announcement
 
 
 def main():
@@ -188,6 +197,8 @@ def main():
 
     tool_input = data.get("tool_input", {})
 
+    # stdout stays EMPTY unless the user is shown a line (v2.17.0).
+    out = HookOutput("PostToolUse")
     try:
         from core.modes import should_observe
         from core.privacy import clean_for_storage, has_private
@@ -195,6 +206,7 @@ def main():
 
         db = MemoryDB(db_path)
         project_id = db.upsert_project(cwd)
+        out.level_fn = lambda: level_for(db, project_id)
         mode = db.get_project_mode(project_id)
 
         # ── v2.2 live plan integration — runs in EVERY mode ───────────────
@@ -211,7 +223,8 @@ def main():
         # *remembering*; it must never decide whether the plan anchor tracks
         # reality. Keep this block above the gate.
         try:
-            _apply_plan_integration(db, project_id, cwd, tool_name, tool_input)
+            out.announce(_apply_plan_integration(
+                db, project_id, cwd, tool_name, tool_input))
         except Exception:
             try:
                 from core.logger import get_logger
@@ -271,6 +284,7 @@ def main():
             # observability; there's nothing left to do but exit cleanly
             pass
 
+    out.write()
     sys.exit(0)
 
 

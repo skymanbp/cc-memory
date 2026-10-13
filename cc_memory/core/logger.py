@@ -17,6 +17,32 @@ _LOG_LEVELS = {"DEBUG": 0, "INFO": 1, "WARN": 2, "ERROR": 3, "SILENT": 4}
 _DEFAULT_LEVEL = "INFO"
 _MAX_LOG_DAYS = 7
 
+# Every ERROR line this process logged, as (component, first line), whatever
+# the configured level (v2.17.0). A hook swallows its failures by contract —
+# never stderr, never raise — so this log was the ONLY trace of one, and
+# nobody reads it until they already suspect something.
+# `core.announce.HookOutput` turns the list into one user-visible line. Bounded:
+# the long-lived surfaces (dashboard, web viewer, MCP server) log through the
+# same module and must not grow it forever.
+_RECORDED_ERRORS = []
+_MAX_RECORDED_ERRORS = 20
+
+
+def recorded_errors():
+    """(component, first line) of each ERROR logged by this process."""
+    return list(_RECORDED_ERRORS)
+
+
+def clear_recorded_errors():
+    del _RECORDED_ERRORS[:]
+
+
+def _record_error(component, msg):
+    if len(_RECORDED_ERRORS) >= _MAX_RECORDED_ERRORS:
+        return
+    first = str(msg).strip().split("\n", 1)[0].strip()
+    _RECORDED_ERRORS.append((component, first[:200]))
+
 
 def _log_dir():
     """Resolve the log directory lazily; None when there is no home to use.
@@ -108,6 +134,8 @@ class Logger:
         return self._file_handle
 
     def _write(self, level: str, msg: str):
+        if level == "ERROR":
+            _record_error(self.component, msg)
         if _LOG_LEVELS.get(level, 0) < self._level:
             return
         ts = datetime.now().strftime("%H:%M:%S.%f")[:12]

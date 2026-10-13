@@ -78,6 +78,12 @@ HANDSHAKE_WHY = (
 RESUME_NOTE = ("[cc-memory] session resumed — startup context is still in this "
                "conversation; standing directives restated:")
 
+# The injection was cut to Claude Code's per-hook limit (v2.17.0,
+# `session_start._fit_to_ceiling`). Said inside the injection so the model
+# knows the layers above are not the whole store.
+TRIM_NOTE = ("[cc-memory] trimmed {what} to fit Claude Code's 10 000-character "
+             "hook limit; `/cc-mem inject-show` lists them.")
+
 # ── Query-time recall frame (core/recall.py) ───────────────────────────────
 RECALL_FRAME_OPEN = "<cc-memory-recall>"
 RECALL_FRAME_CLOSE = "</cc-memory-recall>"

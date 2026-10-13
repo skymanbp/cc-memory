@@ -358,6 +358,10 @@ _REQUIRED_PLUGIN_FILES = [
     # certifying an install that cannot run a documented subcommand is the
     # same lie in a smaller size.
     "cc_memory/core/adopt.py",
+    # v2.17.0: every hook imports this at MODULE level (the user's line per
+    # act), so a missing copy loses all six hooks <!--ce:hooks--> at import —
+    # the shape this list exists to report.
+    "cc_memory/core/announce.py",
     # v2.10.0, and the SAME shape a THIRD time — the comment two entries above
     # named this list as "the copy that goes quiet" and was then proved right
     # by the very next module added. `hooks/_entry.py` is THE hook entry ladder
@@ -1490,6 +1494,35 @@ def cmd_mode(args):
             print(f"  {m['name']:<12} {m['description']}")
 
 
+def cmd_announce(args):
+    """Show or set what the hooks tell the USER they did (v2.17.0).
+
+    `projects.announce`, the same shape as `mode`: `full` (a line per act,
+    the default), `batch` (no per-prompt recall line), `off` (no line; the
+    hooks' output is what it was before v2.17.0). The lines are
+    `systemMessage`s — shown in the transcript, never sent to the model
+    (`core/announce.py`).
+    """
+    from core.announce import LEVELS, normalize_level
+    _, db_path, _ = _resolve_db(args.project)
+    _require_db_path(db_path)
+    db = MemoryDB(db_path)
+    pid = db.upsert_project(args.project)
+    if args.level:
+        if args.level not in LEVELS:
+            print(f"Invalid level '{args.level}'. Choose from: {', '.join(LEVELS)}")
+            sys.exit(1)
+        db.set_project_announce(pid, args.level)
+        print(f"Announce level set to: {args.level}")
+        return
+    print(f"Current announce level: {normalize_level(db.get_project_announce(pid))}")
+    print("\nLevels:")
+    print("  full   one line per act: injection, recall, save, extraction, "
+          "consolidation, plan sync, failure (default)")
+    print("  batch  the same without the per-prompt recall line")
+    print("  off    no line at all")
+
+
 def cmd_progress(args):
     """Regenerate PROGRESS.md from DB and print a preview."""
     from core.progress import write_progress_md
@@ -2278,6 +2311,15 @@ def cmd_inject_show(args):
         # v2.16.0: rows a topic summary stood in for — not rendered, and not
         # excluded from the recall channel (a topic line is not the fact)
         print(f"  topic-covered ids : {data['topic_covered_ids']}")
+    # v2.17.0: what was cut to keep the injection under Claude Code's
+    # 10 000-character hook cap (`session_start._fit_to_ceiling`).
+    _trimmed = data.get("trimmed") if isinstance(data.get("trimmed"), dict) else {}
+    if _trimmed.get("memory_ids") or _trimmed.get("topic_names"):
+        print(f"  trimmed to fit   : {data.get('ceiling', '?')} chars")
+        if _trimmed.get("memory_ids"):
+            print(f"  trimmed memories  : {_trimmed['memory_ids']}")
+        if _trimmed.get("topic_names"):
+            print(f"  trimmed topics    : {', '.join(map(str, _trimmed['topic_names']))}")
 
 
 # `inject-usage`'s observation window. It was an unnamed `limit=200` inside
@@ -2854,6 +2896,11 @@ def make_parser():
     pm = sub.add_parser("mode", help="Show/set project mode")
     pm.add_argument("mode_name", nargs="?", default=None)
 
+    pan = sub.add_parser("announce",
+                         help="Show/set the per-act lines the hooks show you "
+                              "(full | batch | off)")
+    pan.add_argument("level", nargs="?", default=None)
+
     sub.add_parser("summary", help="Latest session summary")
 
     pv = sub.add_parser("serve", help="Launch web dashboard")
@@ -3129,6 +3176,7 @@ def main():
         "progress": cmd_progress, "supersedes": cmd_supersedes,
         "archive": cmd_archive, "adopt-stray": cmd_adopt_stray,
         "observations": cmd_observations, "mode": cmd_mode,
+        "announce": cmd_announce,
         "summary": cmd_summary, "serve": cmd_serve, "dashboard": cmd_dashboard,
         "plan-show": cmd_plan_show, "plan-status": cmd_plan_status,
         "plan-set": cmd_plan_set, "plan-clear": cmd_plan_clear,

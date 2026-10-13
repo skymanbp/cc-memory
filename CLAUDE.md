@@ -2,7 +2,7 @@
 
 ## Project: cc-memory
 
-**Claude Code persistent memory plugin (v2.16.1)** — anti-patch reconcile-on-write
+**Claude Code persistent memory plugin (v2.17.0)** — anti-patch reconcile-on-write
 with LLM-judged semantic de-duplication and backpressure-triggered consolidation,
 a forced PROGRESS.md handoff, a live PLAN.md anchor with plan-refiner /
 plan-guardian subagents and a mandatory carryover gate, an enforced directive
@@ -11,7 +11,7 @@ recall, CJK-capable FTS5 search, and Haiku extraction from detached workers
 (optional local Ollama fallback).
 
 - **Language**: Python 3.8+ (pure stdlib, zero pip dependencies at runtime)
-- **Version**: 2.16.1 — what changed in this version is `CHANGELOG.md` § [2.16.1]
+- **Version**: 2.17.0 — what changed in this version is `CHANGELOG.md` § [2.17.0]
 - **License**: MIT
 - **Platform**: Windows-primary; CI runs every gate on Windows and Linux
   (Tkinter required for the GUI)
@@ -44,7 +44,7 @@ cc-memory/
 │   ├── core/                    db, extractor, consolidate, idle, progress, plan,
 │   │                            prompts, privacy, recall, modes, roots, layout,
 │   │                            auth, logger, encoding_setup, version, atomic,
-│   │                            markers, textsim, adopt
+│   │                            markers, textsim, adopt, announce
 │   ├── hooks/                   _entry, post_tool_use, pre_compact,
 │   │                            consolidate_async, session_start, stop, user_prompt
 │   ├── llm/                     ccl_backend, memory_writer, parse, usage_judge
@@ -73,7 +73,7 @@ blocking sync leg and a background `async` leg.
 | Hook | Entry | Timeout | Matcher | Does | Detached worker | stdout reaches the model? |
 |---|---|---|---|---|---|---|
 | `UserPromptSubmit` | `hooks/user_prompt.py` | 8 s | all | auto-init `.ccm/` (migrating a pre-v2.13.0 `memory/`), count the turn, seed `progress.current_request` once per session on the first non-scaffolding prompt, **query-time recall**, print the plan advisory a Stop parked | — | **yes** — the recall block, the parked advisory, or nothing |
-| `PostToolUse` | `hooks/post_tool_use.py` | 8 s | `core.modes.HOOK_TOOL_MATCHER` (the tools any mode observes + the plan legs; spelled in `hooks.json` and `ui/installer.py:HOOK_MATCHERS`) | live plan anchor in EVERY mode (ExitPlanMode capture, TodoWrite step sync, drift counters), THEN one observation row for observed tools | — | no (empty) |
+| `PostToolUse` | `hooks/post_tool_use.py` | 8 s | `core.modes.HOOK_TOOL_MATCHER` (the tools any mode observes + the plan legs; spelled in `hooks.json` and `ui/installer.py:HOOK_MATCHERS`) | live plan anchor in EVERY mode (ExitPlanMode capture, TodoWrite step sync, drift counters), THEN one observation row for observed tools | — | no — empty, or a user line for a plan capture / sync |
 | `Stop` | `hooks/stop.py` | 22 s | all | decide whether to spawn the observer, idle reorg every `IDLE_INTERVAL_TURNS`, per-turn `patch_progress(files_touched)`, backpressure probe, plan enforcement | `stop.py --observe` (Haiku extraction from this turn's observations, `.observer.lock`) | **no** — empty on a turn that may close; the `{"decision": "block"}` document on a refusal |
 | `PreCompact` (sync) | `hooks/pre_compact.py` | 120 s | all | bounded transcript window → Haiku extract → `upsert_batch` → FULL-REWRITE PROGRESS.md → archive | — | no (empty; status goes to the log) |
 | `PreCompact` (async) | `hooks/consolidate_async.py` | 300 s, `async: true` | all | budget-gated consolidation every N sessions or on backlog | itself; also spawned standalone (`--cwd`) by the Stop probe | no |
@@ -95,6 +95,17 @@ Hook contract (never violate):
 - Workers are spawned only through `hooks/_entry.py:spawn_detached`, take
   their lock only through `consolidate_async._acquire_lock`, and never call
   the model while `core.auth.llm_backoff` says a call recently failed.
+- Every hook writes stdout through ONE emitter, `core.announce.HookOutput`
+  (v2.17.0): model text via `.context()`, the user's one-line report of an
+  act via `.announce()`. No line → the plain stdout above, byte for byte;
+  lines → one JSON object with `systemMessage` (shown to the user, never
+  sent to the model) and the same text as `additionalContext`. The switch is
+  `projects.announce` (`full` / `batch` / `off`, `/cc-mem announce`). The host
+  discards PreCompact's field and sends an async hook's to the model, so
+  those acts and the workers' record a status file (`.last_save.json`,
+  `.last_consolidation.json`, `.last_observe.json`, `.last_retro.json`) that
+  the next SessionStart or Stop announces once (`.announced.json`). A logged
+  ERROR becomes one `失败` line. Nothing here touches the model's context.
 
 ## Database schema (13 tables)
 
@@ -116,6 +127,7 @@ Defined in `cc_memory/core/db.py`; the diagram is `docs/ARCHITECTURE.md` §4.
 and the migration ledger's names, so a settled open runs one pragma instead of
 the whole bootstrap; the two self-healing probes (`_detect_fts5`,
 `_ensure_active_hash_unique`) stay outside the stamp on purpose. Key columns:
+`projects.mode` and `projects.announce` (v12, the user-line switch),
 `memories.supersedes_id` (the update chain), `memories.content_hash`
 (sha256[:16] of normalised content), `memories.recall_count`,
 `plan_active.turns_total` / `guardian_checked_at_turn`,
@@ -191,6 +203,7 @@ newlines are structure; `python tools/contracts.py` lists the modules.
 | Recent (timeline) | SessionStart | `_build_timeline_layer` | 0.20 | ordered by id; never re-lists a row in `shown_ids ∪ covered` |
 | PROGRESS digest | SessionStart | `core.progress.render_progress_digest` via `_build_progress_digest` (§1-§4 of the row, with the file's own slot renderers; file preview only when there is a file and no row) | 0.15 | — |
 | Footer + forced reminder | SessionStart | `_build_footer`, `_build_forced_reminder(demand_ack=)` | 0.10 | one Read demanded: PROGRESS.md |
+| The whole SessionStart injection | SessionStart | `build_context`'s fitting loop + `_fit_to_ceiling` | `_INJECTION_CEILING` 9 500 chars on the FINAL string (Claude Code caps a hook's context at 10 000 and shows the model a 2 000-char preview past it) | cuts no-model topic lines, then the timeline oldest first, then topic summaries, then critical rows; never the ledger, the digest, the footer or the reminder; says so in `core.prompts.TRIM_NOTE` and the manifest's `trimmed` |
 | Query-time recall | UserPromptSubmit, when `core.recall.is_query_like` | `core.recall.select_recalls` → `render_recall_block` | `RECALL_MAX_ROWS` 3, `RECALL_BUDGET_CHARS` 1 200, floor `RECALL_MIN_RELEVANCE` 0.45 (overlap coefficient), prompt ≥ `RECALL_MIN_PROMPT_CHARS` 12 | session-scoped: skips `shown_ids` of this session's inject manifest and the last 200 ids in `.last_recall.json` (`core.recall.RECALL_MANIFEST`); zero bytes when nothing clears the floor |
 | Parked plan advisory | UserPromptSubmit, once | `user_prompt` reads the `core.plan.BLOCK_MARKER_PREFIX` marker Stop wrote | one line | cleared on print |
 | Refusal | Stop, on `blocking_reasons` | `core.plan.render_block_reason` | one JSON document | — |
@@ -397,7 +410,7 @@ the GitHub Release, which lays the package FLAT under
 ## See also
 
 - `INVARIANTS.md` — the numbered rules, with their gates and falsification cases
-- `CHANGELOG.md` — version history; § [2.16.1] is this version
+- `CHANGELOG.md` — version history; § [2.17.0] is this version
 - `docs/ARCHITECTURE.md` — module map, data flow, install layouts, the i18n convention
 - `docs/CONTRACTS.md` — the three contracts in specification form
 - `commands/cc-mem.md` — every `/cc-mem` subcommand
