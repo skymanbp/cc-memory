@@ -44,7 +44,7 @@ cc-memory/
 │   ├── core/                    db, extractor, consolidate, idle, progress, plan,
 │   │                            prompts, privacy, recall, modes, roots, layout,
 │   │                            auth, logger, encoding_setup, version, atomic,
-│   │                            markers, textsim
+│   │                            markers, textsim, adopt
 │   ├── hooks/                   _entry, post_tool_use, pre_compact,
 │   │                            consolidate_async, session_start, stop, user_prompt
 │   ├── llm/                     ccl_backend, memory_writer, parse, usage_judge
@@ -96,7 +96,7 @@ Hook contract (never violate):
   their lock only through `consolidate_async._acquire_lock`, and never call
   the model while `core.auth.llm_backoff` says a call recently failed.
 
-## Database schema (12 tables)
+## Database schema (13 tables)
 
 Defined in `cc_memory/core/db.py`; the diagram is `docs/ARCHITECTURE.md` §4.
 
@@ -108,7 +108,9 @@ Defined in `cc_memory/core/db.py`; the diagram is `docs/ARCHITECTURE.md` §4.
   `MemoryDB.observer_cursor`, and deleted once fed)
 - `session_summaries`, `progress` (single row per project, SOT for PROGRESS.md),
   `plan_active` (single row per project, SOT for PLAN.md), `directives` (the
-  user-INTENT ledger), `_migrations`
+  user-INTENT ledger), `adopted_rows` (provenance of every row
+  `/cc-mem adopt-stray` merged in from a stray database, v2.17.0),
+  `_migrations`
 
 `PRAGMA user_version` carries `_bootstrap_stamp`, derived from the schema text
 and the migration ledger's names, so a settled open runs one pragma instead of
@@ -130,7 +132,11 @@ forward), SUPERSEDES at `MID_SIM` (archive + insert with a chain link),
 REINFORCES an exact-hash duplicate (importance max + tags union, no new row) or
 INSERTS, on `core.textsim` similarity (CJK bigrams, ASCII trigrams), all inside
 one `MemoryDB.reconcile_upsert` transaction. Never call `db.insert_memory` from
-a caller path — its only callers are the tests. The save paths: `hooks/pre_compact.py`,
+a caller path — its only callers are the tests. The one INSERT outside the
+writer is `core/adopt.py` (`/cc-mem adopt-stray`), which relocates rows another
+database's writer already reconciled and so is not a save path: it keeps every
+row, and folds an active exact duplicate of a project row as an archived row
+linked to it (`docs/CONTRACTS.md#anti-patch-contract`). The save paths: `hooks/pre_compact.py`,
 the `stop.py --observe` worker, `cli/mem.py add`, `mcp/server.py memory_add`,
 `skills/save-memories/SKILL.md`, `ui/dashboard.py` (Add Memory, Save Session,
 new-project init), `ui/web_viewer.py` POST `/api/memory`, and the
@@ -224,7 +230,10 @@ Per-project state lives in `.ccm/` (`core/layout.MEMORY_DIRNAME`, resolved by
 `core.roots.project_root`; `/cc-mem paths` prints every file). `.ccm/.gitignore`
 hides everything but PROGRESS.md, PLAN.md and MEMORY.md; a pre-v2.13.0
 `memory/` is renamed once, only when positively identified as ours
-(`core.layout.is_ccm_dir`), never through a link.
+(`core.layout.is_ccm_dir`), never through a link. A linked git worktree with no
+database of its own resolves to its main checkout when that owns one
+(`core.roots._worktree_main`); a stray database below the root is merged only by
+the explicit `/cc-mem adopt-stray`, which moves it to `.ccm/.adopted/`.
 
 ## Development guidelines
 

@@ -2272,6 +2272,61 @@ def _roots_ladder(project_root, pin_marker):
     cases.append(("a project below a users/ directory resolves upward",
                   _mkdirs(box, "Users/alice/proj/src"), inside))
 
+    # ── v2.17.0: the two ways a split is still born, both closed ──────────
+    # The brief's own shape, with the CURRENT state-dir name: a session in a
+    # sub-directory of an initialised project that has no database of its own
+    # resolves to the project, so the hooks never create one there.
+    p10 = _mkdirs(box, "p10", [".git/config", _MEM + "/memory.db"])
+    cases.append(("a .ccm project's subdir with no DB resolves to the project",
+                  _mkdirs(box, "p10/companion"), p10))
+    # A LINKED GIT WORKTREE of an initialised checkout. Its `.git` is a FILE,
+    # a VCS marker, so through v2.16.1 the marker rung answered the worktree
+    # and the first prompt there minted a second database (measured on an
+    # NCCL lane worktree, 2026-10-13). Built the way `git worktree add`
+    # builds it: the worktree's `.git` names an admin dir under the main
+    # checkout's `.git/worktrees/`, whose `gitdir` file points back.
+    wt_main = _mkdirs(box, "wt-main", [".git/config", _MEM + "/memory.db"])
+
+    def _worktree(rel, main, name, back=None):
+        tree = _mkdirs(box, rel)
+        admin = main / ".git" / "worktrees" / name
+        admin.mkdir(parents=True, exist_ok=True)
+        (tree / ".git").write_text(f"gitdir: {admin.as_posix()}\n",
+                                   encoding="utf-8")
+        (admin / "gitdir").write_text(
+            f"{(back or tree / '.git').as_posix()}\n", encoding="utf-8")
+        return tree
+
+    lane = _worktree("lanes/one/repo", wt_main, "repo1")
+    cases.append(("a linked worktree resolves to its main checkout's DB",
+                  lane, wt_main))
+    cases.append(("...and so does a directory inside it",
+                  _mkdirs(box, "lanes/one/repo/pkg/deep"), wt_main))
+    owned = _worktree("lanes/two/repo", wt_main, "repo2")
+    _mkdirs(owned, "", [_MEM + "/memory.db"])
+    cases.append(("a worktree that already owns a DB keeps it (rung 0)",
+                  owned, owned))
+    pinned_wt = _worktree("lanes/three/repo", wt_main, "repo3")
+    _mkdirs(pinned_wt, "", [pin_marker])
+    cases.append((f"a {pin_marker}-pinned worktree stays itself",
+                  pinned_wt, pinned_wt))
+    bare_main = _mkdirs(box, "wt-nodb", [".git/config"])
+    no_db_wt = _worktree("lanes/four/repo", bare_main, "repo4")
+    cases.append(("a worktree of a checkout with NO DB stays itself",
+                  no_db_wt, no_db_wt))
+    forged = _worktree("lanes/five/repo", wt_main, "repo5",
+                       back=box / "somewhere-else" / ".git")
+    cases.append(("a .git file whose admin dir does not point back is not "
+                  "a worktree", forged, forged))
+    sub = _mkdirs(box, "lanes/six/repo")
+    sub_admin = wt_main / ".git" / "modules" / "six"
+    sub_admin.mkdir(parents=True, exist_ok=True)
+    (sub / ".git").write_text(f"gitdir: {sub_admin.as_posix()}\n",
+                              encoding="utf-8")
+    (sub_admin / "gitdir").write_text(f"{(sub / '.git').as_posix()}\n",
+                                      encoding="utf-8")
+    cases.append(("a submodule's .git file is not a worktree", sub, sub))
+
     # THE boundary: a memory.db in ~ must never capture a directory below it
     home_db = Path.home() / _MEM
     home_db.mkdir(parents=True, exist_ok=True)
@@ -3279,7 +3334,8 @@ def test_project_root_anchoring():
     print(f"[OK] project-root anchoring: {n_cases} ladder cases (a dir that "
           f"owns a DB is never re-rooted, nested project keeps its own, "
           f"marker-only, no-marker, workspace member, VCS ceiling, container "
-          f"refusal, {PIN_MARKER} pin, nonexistent cwd, and the ~ boundary in "
+          f"refusal, {PIN_MARKER} pin, nonexistent cwd, a linked git "
+          f"worktree -> its main checkout's DB, and the ~ boundary in "
           f"both directions); all {len(_HOOK_ORDER)} hooks run from a "
           f"SUBDIRECTORY create no second memory/ and write to the root db; a "
           f"first-ever session in a subdirectory initialises the REPO ROOT; "
@@ -3449,6 +3505,240 @@ def _cli_archive_retires_a_wrong_memory(pkg):
         f"an unknown id was not reported: {gone.stdout}"
     shutil.rmtree(box, ignore_errors=True)
     return 3
+
+
+def _cli_adopt_stray(pkg):
+    """(§8d) `/cc-mem adopt-stray`: a stray below the project is merged into it.
+
+    The command the resolver's docstring promised ("an explicit
+    user-confirmed command") and that did not exist through v2.16.1: a
+    `companion/.ccm/memory.db` born before the v2.6.0 ladder held 14025 rows
+    no session at the project root ever read. Driven through the real CLI,
+    over fixture databases built by `MemoryDB`, covering: the dry run writes
+    nothing; `--yes` moves the stray under `.ccm/.adopted/<date>/` and
+    imports every table by its rule, with provenance; an exact duplicate is
+    folded onto the project row; supersede links are re-mapped; a second run
+    imports nothing; a run cut off after the move resumes; a stray in use is
+    PENDING with nothing moved; five refusals; `status` stops warning and the
+    sub-directory resolves to the project.
+    """
+    from core.adopt import (ADOPTED_DIRNAME, MANIFEST_NAME, locate,
+                            move_stray)
+    from core.roots import project_root as _project_root
+    box = Path(tempfile.mkdtemp(prefix="ccm-adopt-")).resolve()
+    proj = box / "proj"
+    (proj / ".git").mkdir(parents=True)
+    (proj / ".git" / "config").write_text("x", encoding="utf-8")
+    (proj / _MEM).mkdir()
+    pdb = MemoryDB(proj / _MEM / "memory.db")
+    ppid = pdb.upsert_project(str(proj))
+    shared = pdb.insert_memory(ppid, None, "config",
+                               "The cache timeout is sixty seconds", 2,
+                               ["proj-tag"], "cache")
+    pdb.upsert_topic(ppid, "cache", "project summary of cache")
+    pdb.upsert_keywords(ppid, {"cache": 3})
+    pdb.upsert_directive(ppid, "keep-x", quote="keep x", demand="keep x")
+
+    def make_stray(rel):
+        root = proj / rel
+        (root / _MEM).mkdir(parents=True)
+        sdb = MemoryDB(root / _MEM / "memory.db")
+        return root, sdb, sdb.upsert_project(str(root))
+
+    stray, sdb, spid = make_stray("companion")
+    arch = stray / _MEM / "sessions" / "2026" / "10" / "session_a.md"
+    arch.parent.mkdir(parents=True)
+    arch.write_text("# archived transcript", encoding="utf-8")
+    sid = sdb.insert_session(spid, "claude-a", "auto", 4,
+                             str(Path("sessions") / "2026" / "10" /
+                                 "session_a.md"), "brief")
+    sdb.insert_session_summary(sid, spid, {"request": "fix the cache"})
+    # same fact, different case and trailing space: equal after normalisation
+    dup = sdb.insert_memory(spid, sid, "config",
+                            "the cache timeout is SIXTY seconds  ", 4,
+                            ["stray-tag"], "cache")
+    survivor = sdb.insert_memory(spid, sid, "decision",
+                                 "Adoptwidget runs before the importer", 3,
+                                 [], "ui")
+    loser = sdb.insert_memory(spid, sid, "decision",
+                              "Adoptwidget runs after the importer", 3, [],
+                              "ui")
+    sdb.archive_obsolete([loser], survivor)
+    sdb.upsert_topic(spid, "cache", "stray summary of cache")
+    sdb.upsert_topic(spid, "ui", "stray summary of ui")
+    sdb.upsert_keywords(spid, {"cache": 2, "widget": 1})
+    sdb.upsert_directive(spid, "keep-x", quote="stray keep x", demand="other")
+    sdb.upsert_directive(spid, "new-y", quote="do y", demand="do y")
+    obs = [sdb.insert_observation(spid, "claude-a", "Read", "a", "b")
+           for _ in range(3)]
+    sdb.advance_observer_watermark(spid, obs[0])
+    n_source = 1 + 1 + 3 + 2 + 2 + 2 + 3   # every row adopt-stray visits
+
+    def run(*args):
+        return subprocess.run(
+            [sys.executable, str(pkg / "cli" / "mem.py"), "--project",
+             str(proj), *args],
+            capture_output=True, text=True, encoding="utf-8", timeout=120,
+            env={**os.environ, "PYTHONIOENCODING": "utf-8"})
+
+    def count(sql, *params):
+        conn = sqlite3.connect(str(proj / _MEM / "memory.db"))
+        try:
+            return conn.execute(sql, params).fetchone()[0]
+        finally:
+            conn.close()
+
+    checks = 0
+    warned = run("status")
+    assert "Separate database below this project" in warned.stdout and \
+        "adopt-stray" in warned.stdout, \
+        f"status names the stray without its remedy: {warned.stdout[-600:]}"
+    checks += 1
+
+    # ── the dry run writes nothing ────────────────────────────────────────
+    before = count("SELECT COUNT(*) FROM memories")
+    dry = run("adopt-stray", "companion")
+    assert dry.returncode == 0, f"dry run rc={dry.returncode}: {dry.stdout}"
+    assert "dry run: nothing was written" in dry.stdout, dry.stdout
+    assert (stray / _MEM / "memory.db").is_file(), "the dry run moved the stray"
+    assert count("SELECT COUNT(*) FROM memories") == before and \
+        count("SELECT COUNT(*) FROM adopted_rows") == 0, \
+        "the dry run wrote to the project database"
+    assert "merged-duplicate 1" in dry.stdout, \
+        f"the dry run did not foresee the exact duplicate: {dry.stdout}"
+    checks += 1
+
+    # ── refusals ───────────────────────────────────────────────────────────
+    outside = box / "elsewhere"
+    (outside / _MEM).mkdir(parents=True)
+    MemoryDB(outside / _MEM / "memory.db").upsert_project(str(outside))
+    pinned, _pdb2, _ = make_stray("pinned")
+    (pinned / ".ccm-root").write_text("", encoding="utf-8")
+    refusals = [".", str(outside), "pinned", "no/such/dir",
+                str(proj / _MEM / "memory.db")]
+    link = proj / "linked"
+    if _make_dir_link(link, outside) is not None:
+        refusals.append("linked")
+    for target in refusals:
+        r = run("adopt-stray", target, "--yes")
+        assert r.returncode == 1 and r.stdout.startswith("Refused:"), \
+            f"adopt-stray {target!r} was not refused: rc={r.returncode} " \
+            f"{r.stdout[-400:]}"
+        checks += 1
+    assert (outside / _MEM / "memory.db").is_file() and \
+        (pinned / _MEM / "memory.db").is_file(), "a refused path was moved"
+
+    # ── a stray in use is PENDING: nothing moved, nothing written ─────────
+    busy = sqlite3.connect(str(stray / _MEM / "memory.db"))
+    busy.execute("BEGIN IMMEDIATE")
+    try:
+        r = run("adopt-stray", "companion", "--yes")
+    finally:
+        busy.rollback()
+        busy.close()
+    assert r.returncode == 3 and r.stdout.startswith("Pending:"), \
+        f"a locked stray was not reported pending: rc={r.returncode} {r.stdout}"
+    assert (stray / _MEM / "memory.db").is_file() and \
+        not (stray / _MEM / MANIFEST_NAME).exists() and \
+        count("SELECT COUNT(*) FROM adopted_rows") == 0, \
+        "a pending adoption moved or wrote something"
+    checks += 1
+
+    # ── the real run ─────────────────────────────────────────────────────
+    gc.collect()
+    ok = run("adopt-stray", "companion", "--yes")
+    assert ok.returncode == 0, f"--yes rc={ok.returncode}: {ok.stdout} " \
+                               f"{ok.stderr[-400:]}"
+    assert not (stray / _MEM).exists(), "the stray's state dir is still there"
+    moved = list((proj / _MEM / ADOPTED_DIRNAME).glob("*/companion"))
+    assert len(moved) == 1 and (moved[0] / "memory.db").is_file(), \
+        f"the stray was not moved under .adopted/<date>/companion: {moved}"
+    manifest = json.loads((moved[0] / MANIFEST_NAME).read_text("utf-8"))
+    assert manifest["status"] == "adopted", manifest
+    assert (proj / _MEM / ADOPTED_DIRNAME / ".gitignore").read_text(
+        "utf-8").splitlines()[-1] == "*", "the adopted root is not ignored"
+    assert count("SELECT COUNT(*) FROM adopted_rows") == n_source, \
+        "not every source row has a provenance record"
+    checks += 1
+    # the exact duplicate: folded, archived, linked, the project row reinforced
+    row = count("SELECT new_id FROM adopted_rows WHERE source_table = "
+                "'memories' AND source_id = ?", dup)
+    got = pdb.get_memory(row)
+    assert got["is_active"] == 0 and got["supersedes_id"] == shared, \
+        f"the duplicate was not folded onto the project row: {dict(got)}"
+    kept = pdb.get_memory(shared)
+    assert kept["importance"] == 4 and \
+        {"proj-tag", "stray-tag"} <= set(json.loads(kept["tags"])), \
+        f"the project row was not reinforced: {dict(kept)}"
+    # the archived loser keeps its lineage, re-mapped to the new survivor id
+    new_surv = count("SELECT new_id FROM adopted_rows WHERE source_table = "
+                     "'memories' AND source_id = ?", survivor)
+    new_loser = count("SELECT new_id FROM adopted_rows WHERE source_table = "
+                      "'memories' AND source_id = ?", loser)
+    assert pdb.get_memory(new_loser)["supersedes_id"] == new_surv and \
+        pdb.get_memory(new_loser)["is_active"] == 0 and \
+        pdb.get_memory(new_surv)["is_active"] == 1, \
+        "the supersede link was not re-mapped through the id map"
+    checks += 1
+    # the FTS index follows the import (its triggers fire on the INSERT)
+    hits = pdb.search_fts(ppid, "Adoptwidget")
+    assert any(h["id"] == new_surv for h in hits), \
+        f"an imported memory is not searchable: {hits}"
+    # sessions point at the moved archive, relative to the project's state dir
+    ap = count("SELECT archive_path FROM sessions WHERE id = (SELECT new_id "
+               "FROM adopted_rows WHERE source_table = 'sessions')")
+    assert (proj / _MEM / ap).is_file(), \
+        f"the imported session's archive_path {ap!r} does not resolve"
+    # topics by name, keywords summed, directives by slug, observations kept
+    # only above the stray's own observer cursor
+    assert count("SELECT content FROM topics WHERE project_id = ? AND name = "
+                 "'cache'", ppid) == "project summary of cache" and \
+        count("SELECT COUNT(*) FROM topics WHERE name = 'ui'") == 1
+    assert count("SELECT frequency FROM keywords WHERE keyword = 'cache'") == 5
+    assert count("SELECT demand FROM directives WHERE slug = 'keep-x'") == \
+        "keep x" and count("SELECT COUNT(*) FROM directives WHERE "
+                           "slug = 'new-y' AND project_id = ?", ppid) == 1
+    assert count("SELECT COUNT(*) FROM observations WHERE project_id = ?",
+                 ppid) == 2, "observations were not filtered by the cursor"
+    checks += 1
+
+    # ── after: no warning, the subdir resolves to the project ──────────────
+    after = run("status")
+    assert str(stray) not in after.stdout, \
+        f"status still warns about the adopted stray: {after.stdout[-600:]}"
+    assert os.path.normcase(str(_project_root(str(stray)))) == \
+        os.path.normcase(str(proj)), "the sub-directory still resolves to itself"
+    checks += 1
+
+    # ── idempotent: a second run imports nothing ───────────────────────────
+    total = count("SELECT COUNT(*) FROM memories")
+    again = run("adopt-stray", "companion", "--yes")
+    assert again.returncode == 0 and "resumed" in again.stdout, again.stdout
+    assert count("SELECT COUNT(*) FROM memories") == total and \
+        count("SELECT COUNT(*) FROM adopted_rows") == n_source, \
+        "a second run imported rows again"
+    checks += 1
+
+    # ── resumable: a run cut off right after the move finishes later ───────
+    tools, tdb, tpid = make_stray("tools")
+    tdb.insert_memory(tpid, None, "note", "Tools stray fact worth keeping", 3,
+                      [], "tools")
+    del tdb
+    gc.collect()
+    loc = locate(proj, proj / _MEM, "tools")
+    move_stray(loc, proj, proj / _MEM)     # ...and the process "dies" here
+    assert not (tools / _MEM).exists()
+    resumed = run("adopt-stray", "tools", "--yes")
+    assert resumed.returncode == 0 and "resumed" in resumed.stdout, \
+        resumed.stdout
+    assert count("SELECT COUNT(*) FROM memories WHERE content = "
+                 "'Tools stray fact worth keeping'") == 1, \
+        "the resumed run did not import the moved stray"
+    checks += 1
+    del pdb, sdb
+    gc.collect()
+    shutil.rmtree(box, ignore_errors=True)
+    return checks
 
 
 def _llm_deadline_is_wall_clock():
@@ -5161,6 +5451,14 @@ def test_late_surfaces():
     print(f"[OK] /cc-mem archive: a wrong memory retires with its lineage "
           f"recorded, and {n_arch - 1} refusals (a sibling project's id in "
           f"the SAME database file, and an unknown id)")
+    n_adopt = _cli_adopt_stray(pkg)
+    print(f"[OK] /cc-mem adopt-stray: {n_adopt} checks \u2014 the dry run "
+          f"writes nothing; --yes moves the stray under .ccm/.adopted/ and "
+          f"imports every table with provenance (exact duplicate folded onto "
+          f"the project row, supersede links re-mapped, FTS consistent, "
+          f"observations kept only above the stray's cursor); a second run "
+          f"imports nothing, a run cut off after the move resumes, a stray "
+          f"in use is PENDING, every refusal holds; status stops warning")
     elapsed = _llm_deadline_is_wall_clock()
     print(f"[OK] call_llm deadline is WALL-CLOCK: a 1-byte/0.25s drip was "
           f"bounded at {elapsed:.2f}s against a 3.0s deadline (11.07s pre-fix)")

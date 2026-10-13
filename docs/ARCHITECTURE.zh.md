@@ -1,4 +1,4 @@
-<!-- i18n-source: ARCHITECTURE.md | sha256: 5d058215415461c4 | version: 2.16.0 | translated: 2026-10-02 | translation: f4a51048dc0b2cbb -->
+<!-- i18n-source: ARCHITECTURE.md | sha256: 0459089593f6ca8d | version: 2.16.1 | translated: 2026-10-13 | translation: 98405667fe205ecd -->
 > [English](ARCHITECTURE.md) · **简体中文**
 
 # cc-memory — 架构
@@ -126,7 +126,7 @@ cc-memory/
 │   │                              progress, plan, privacy, modes, roots, auth,
 │   │                              logger, encoding_setup, version,
 │   │                              atomic, markers, textsim, layout, recall,
-│   │                              prompts
+│   │                              prompts, adopt
 │   ├── hooks/                   ← 6 个钩子入口 + _entry.py（共享入口阶梯：
 │   │                              stdin 解析 + 退出开关→锚定闸门，v2.10.0）
 │   ├── llm/                     ← ccl_backend（Haiku/Ollama）+ memory_writer
@@ -285,7 +285,7 @@ v2.3.2 把这个事件拆开了：
 
 `hooks/hooks.json` 是市场 / 开发用的声明，也是唯一真相来源。`cc_memory/ui/installer.py` 的
 `HOOK_SCRIPTS` / `ASYNC_HOOK`（`installer.py:112-122`）是独立安装对超时的声明；
-`HOOK_MATCHERS`（`installer.py:130`，v2.16.0）镜像了 `hooks.json` 依据
+`HOOK_MATCHERS`（`installer.py:131-134`，v2.16.0）镜像了 `hooks.json` 依据
 `core.modes.HOOK_TOOL_MATCHER` 写出的 PostToolUse 匹配器——第三张表，理由相同：
 扁平 / 冻结安装没有 `hooks.json` 可读。自 v2.5 起，这些条目直接携带**最终上线
 值**——PreCompact 120（同步）/ 300（异步）、SessionStart 15、Stop 22、
@@ -354,12 +354,13 @@ SQLite 表（定义在 [`cc_memory/core/db.py`](../cc_memory/core/db.py)），�
 | **`progress`** | v2.1 新增——每项目一行。`.ccm/PROGRESS.md` 的唯一真相来源（`db.py:199`）。 |
 | **`plan_active`** | v2.2 新增——每项目一行。`.ccm/PLAN.md` 的唯一真相来源（`db.py:221`）。自 `v9_plan_turns_total` 起带有 `turns_total`：一个**单调**轮次计数，任何东西都不会重置它；与之相对的 `turns_since_last_guardian` 会被每次 guardian 检查和计划替换清零。自 `v10_plan_guardian_checked_at_turn` 起带有 `guardian_checked_at_turn`——最近一次 `/cc-mem plan-check` 时的 `turns_total` 值，在同一条 UPDATE 里就地写入——于是「就在本回合检查过」等价于 `turns_total == guardian_checked_at_turn + 1`，漂移闸门的**单回合豁免**因此是两个单调数字之间的比较。默认值是 `-1` 而不是 0：若为 0，一份全新计划的第一次 Stop 会读到 `1 == 0 + 1`，把豁免发给一次根本没人跑过的检查 |
 | **`directives`** | v2.11.0 新增——用户**意图**账本。`times_stated` 累加在同一 `slug` 的**一行**上；指令的寿命长于任何一份计划，这正是它不能被折叠成计划步骤的原因。自 `v9_directives_turns_at_touch` 起带有 `turns_at_touch`——最后一次写入时的 `turns_total` 值，因此闲置度是两个单调数字相减。自 v2.12.0 起 `status` 还可以是 `blocked`（停在用户那边，闲置豁免），`kind` 还可以是 `constraint`（长期禁令，闲置豁免）——只是词汇扩充，无 schema 变更；只有 `directive-add` 可以累加计数（`directive-edit` 修正字段但不碰它） |
+| **`adopted_rows`** | v2.17.0 新增（`v11_adopted_rows`）——`/cc-mem adopt-stray` 在游离库里访问过的每一条**源**行各占一行：`source`（游离库原来的 `memory.db`，规范化路径）、`source_table`、`source_id`、`new_id`（项目里的行，跳过时为 NULL）、`outcome`（imported / merged-duplicate / merged-by-name / summed / kept-project-row / 跳过原因）、`merged_into`、`adopted_at`。在 `(source, source_table, source_id)` 上唯一，与它描述的那一行在同一个事务里写入——`core/adopt.py` 的幂等与续跑键（`db.py:466`） |
 | `_migrations` | 记录已应用的迁移（`db.py:851`） |
 
-共十二张表，与 `CLAUDE.md` 的 §“Database schema (12 tables)” 一致。
+共十三张表，与 `CLAUDE.md` 的 §“Database schema (13 tables)” 一致。
 
 此外还有 `memories_fts`——一个建立在 `memories` 之上的 FTS5 虚拟表
-（DDL 在 `_fts_ddl`，`core/db.py:903-915`），
+（DDL 在 `_fts_ddl`，`core/db.py:931-943`），
 由 `db._setup_fts5` 与它一并建出的三个触发器保持同步（`core/db.py:1021-1072`）；
 它的 `_MIGRATIONS` 条目是 `v2_fts5`（`db.py:172`）。
 它只在本地 SQLite 构建带 FTS5 时才会创建；否则
@@ -369,11 +370,11 @@ SQLite 表（定义在 [`cc_memory/core/db.py`](../cc_memory/core/db.py)），�
 
 `memories` 上的 `supersedes_id` 列（迁移 `v3_supersedes`，在 `_MIGRATIONS` 的 `db.py:191`）把反补丁的
 取代链显式化：当 `upsert_smart` 判定一条新记忆取代了一条旧记忆时，新行会回链到旧行
-的 ID（旧行被归档）。通过 `db.get_supersede_chain(memory_id)`（`db.py:2052-2067`）走一遍
+的 ID（旧行被归档）。通过 `db.get_supersede_chain(memory_id)`（`db.py:2080-2095`）走一遍
 链条，就能看到完整的更新历史。`content_hash`（迁移 `v2_content_hash`，位于
 `_MIGRATIONS`，`db.py:135`）是归一化内容的 `sha256[:16]`，用于廉价的精确重复检查
-（`db.compute_content_hash` 在 `db.py:2623-2625`，
-`db.find_by_hash` 在 `db.py:2636-2644`）。
+（`db.compute_content_hash` 在 `db.py:2651-2653`，
+`db.find_by_hash` 在 `db.py:2664-2672`）。
 
 迁移按 `_MIGRATIONS` 列表（`db.py:130-452`）的顺序应用，并记录在 `_migrations` 中。目前
 已交付的层级：**v1**（`topic` 列 + 索引）、**v2**（content_hash、observations、
@@ -390,7 +391,8 @@ session_summaries、项目模式、FTS5、哈希回填）、**v3**（反补丁 +
 557.68 ms → 4.31 ms）、**v8**（`v8_directives`：`directives` 账本表及其 slug 与
 status 索引）、**v9**（`v9_plan_turns_total`、`v9_directives_turns_at_touch`：用来
 度量闲置度的两个单调轮次计数）、**v10**（`v10_plan_guardian_checked_at_turn`、
-`v10_memories_recall_count`）。
+`v10_memories_recall_count`）、**v11**（`v11_adopted_rows`、
+`v11_adopted_rows_source_idx`：`/cc-mem adopt-stray` 的出处表及其唯一键）。
 
 `progress` 表的非主键列是 `current_request`、`status_done`、
 `status_in_flight`、`status_blocked`、`open_todos`、`plan`、`critical_context`、
@@ -568,7 +570,7 @@ SessionStart：
 
 上面的调用签名都是真实的：`write_progress_md(db, project_id, memory_dir)`
 （`core/progress.py:611-750`）。
-`write_progress_md` 的调用点：`pre_compact.py:792`、`stop.py:674`、`user_prompt.py:460`、`session_start.py:1230`、`mcp/server.py:727`、`cli/mem.py:1494`。
+`write_progress_md` 的调用点：`pre_compact.py:792`、`stop.py:674`、`user_prompt.py:460`、`session_start.py:1230`、`mcp/server.py:727`、`cli/mem.py:1495`。
 PROGRESS.md 的结构规格见
 [docs/CONTRACTS.md](CONTRACTS.md#handoff-contract)。
 
@@ -776,7 +778,10 @@ v2.4.2 才成立：`_extract_via_llm` 的 `except` 元组此前不包含 `Runtim
 │                                每一个点前缀的运行时产物，外加 *.tmp——三个生成的
 │                                .md 文件是刻意不被忽略的
 ├── sessions/YYYY/MM/            按会话归档的摘要
-└── topics/                      预留给未来的按主题 md 导出
+├── topics/                      预留给未来的按主题 md 导出
+└── .adopted/<date>/<rel__path>/ 由 /cc-mem adopt-stray **移**到这里的游离库整个
+                                 状态目录（绝不删除），附 ADOPTED.json 清单；
+                                 自带一个 `*` 的 .gitignore（v2.17.0）
 ```
 
 写入方，便于溯源：`MEMORY.md` ← `memory_writer.regenerate_memory_index`
@@ -841,8 +846,8 @@ agent 自己的 `cd` 走：一个在仓库根启动、却在 `cli/` 里跑过一
 
 因此，**已存在的数据库就是身份宣告**，永不被覆盖。所报告的那个 bug 改由**预防**修复：
 标记那一档在任何数据库存在之前就会触发，野生库根本不会诞生。收编一个已经存在的野生库
-意味着合并两个 SQLite 文件——破坏性且不可逆——那属于一条需要用户确认的显式命令，而不属于
-每轮提示都会跑的 hook。
+意味着合并两个 SQLite 文件，那属于一条需要用户确认的显式命令，而不属于每轮提示都会跑的
+hook——自 v2.17.0 起这条命令已经存在：`/cc-mem adopt-stray`（`core/adopt.py`），见下文。
 
 **同一条规则在数据库内部同样成立。**`upsert_project` 把解析后的 cwd 记进 `projects.path`，
 而直到 v2.13.2，这个字串同时也是项目的身份：项目目录被移动或重命名后会多出第二行，第一行
@@ -880,12 +885,19 @@ agent 自己的 `cd` 走：一个在仓库根启动、却在 `cli/` 里跑过一
    这一档修复了所报告的 bug，因为 `CodeEraser/cli` 没有数据库而 `CodeEraser` 有。它不
    需要任何版本控制系统、不需要任何清单文件——对根本不是仓库的项目，这一点是决定性的。
 2. `CLAUDE_PROJECT_DIR`，当它指向链中某个目录时（`_from_env`，
-   `core/roots.py:679-697`）。刻意排在数据库两档**之后**：它记录的是 Claude Code 在
+   `core/roots.py:751-769`）。刻意排在数据库两档**之后**：它记录的是 Claude Code 在
    哪里启动，而这并不构成弃养一个数据库的授权。同样地，"必须在链内"也是要点——别的项目
    残留的值不得改道本项目。
 3. 项目标记——`.git`、`.hg`、`.svn`、`.ccm-root` 以及常见清单文件（`_MARKERS`）——
    最近命中后向外延伸至其所属的版本库（`_marker_root`）。这是唯一能在任何数据库存在
-   **之前**触发的一档，也就是真正在做预防的那一档。
+   **之前**触发的一档，也就是真正在做预防的那一档。**git 链接工作树**（v2.17.0）：
+   当第 2 或第 3 档选出的根自己没有数据库、没有被钉住，并且按 git 自己的双向记录是一个
+   工作树——它的 `.git` 是一个文件，指向 `<main>/.git/worktrees/` 下的管理目录，而该目录
+   的 `gitdir` 文件又指回来——答案就是主检出，前提是主检出拥有数据库
+   （`_worktree_main`）。2026-10-13 实测：`D:\Projects\.worktrees\` 下的一个 NCCL
+   车道工作树经由 `.git` 标记答成了它自己，第一次提示就会另起一个数据库。已经拥有数据库
+   的工作树在第 0 档就有答案；子模块（`.git/modules/`）与拷贝来的 `.git` 文件过不了这份
+   记录。
 4. 原样的 cwd——即 v2.6.0 之前的答案，所以此前能用的一切照旧。当答案就是 cwd 时返回的
    是**未解析的原始字符串**，因此符号链接形式的项目目录与旧行为逐字节一致。
 
@@ -943,7 +955,7 @@ home 边界是双份的：环境所声称的（`HOME`/`USERPROFILE`/`Path.home()
 
 **不只 hook，所有入口都锚定（v2.8.0）。** v2.7.0 宣称做到了这一点，实际只对
 `cli/mem.py` 兑现；随后的审计又找出七个把外部字符串变成数据库路径、却完全不锚定的入口。
-它们现在共用同一个实现 `anchor_project`（`core/roots.py:748-801`）：
+它们现在共用同一个实现 `anchor_project`（`core/roots.py:827-880`）：
 
 | 入口 | 会不会**创建**？ | 通过什么announce |
 |---|---|---|
@@ -970,9 +982,23 @@ home 边界是双份的：环境所声称的（`HOME`/`USERPROFILE`/`Path.home()
 `. is inside a project rooted at .`。
 
 因此，已存在的野生库会被原地留下——并且被**报告**出来，不至于隐形：`nested_databases`
-（`core/roots.py:815-880`）支撑着 `cc-mem status` 里的
-`[WARN] Separate database below this project` 一行，逐个点名并给出记忆条数。它是显式
-命令而不是 hook，因为它要走一遍目录树。`.ccm-root`——一个空文件——把某个目录钉成独立的
+（`core/roots.py:894-959`）支撑着 `cc-mem status` 里的
+`[WARN] Separate database below this project` 一行，逐个点名并给出记忆条数，第二行写明
+处置。它是显式命令而不是 hook，因为它要走一遍目录树。
+
+**收编（v2.17.0）。** 处置就是 `/cc-mem adopt-stray <dir>`（`core/adopt.py`；没有任何
+hook 导入它）。不带 `--yes` 时是演练：以只读方式打开项目数据库——连 schema 引导都不跑——
+只打印将做什么。带 `--yes` 时先把游离库的整个状态目录**移**到
+`.ccm/.adopted/<date>/<相对路径，"/" 写作 "__">/`（之前先做一次 `BEGIN IMMEDIATE`
+探测；改名被拒就报 PENDING，退出码 3，什么都不写），于是从这一刻起该子目录不再拥有
+数据库，下一个会话经第 1 档落到项目。随后从移走的副本导入，每 `_CHUNK` 行一个事务，每条
+源行都记进 `adopted_rows`：记忆（活跃与已归档都导入，重新编号，`session_id` 与
+`supersedes_id` 重新映射；与项目活跃行完全相同的活跃行以已归档身份导入并链接到它，项目行
+得到强化）、会话（`archive_path` 改指向移走后的目录）、摘要、按名合并的主题（保留项目的
+摘要）、累加的关键词、按 slug 合并的指令（新指令的闲置计时从收编时起算），以及只在游离库
+自己的观察者游标之上、且在保留上限之内的观察行。`progress`、`plan_active` 与 `plans` 是
+游离库自己的单行状态，不合并。它拒绝不严格位于根之下的路径、项目自己的数据库、被
+`.ccm-root` 钉住的目录、链接，以及无法确证是 cc-memory 所写的状态目录（退出码 1）。`.ccm-root`——一个空文件——把某个目录钉成独立的
 根，这是"刻意嵌套在另一个项目里的项目"以及"任何被这些启发式读错的布局"的逃生舱。
 `tests/test_surfaces.py` §7 把这一切钉死：真实文件系统上的整条阶梯、从子目录运行的全部
 六个 hook<!--ce:hooks-->，以及"每个 hook 都在退出开关**之后**解析"这条源码级规则。
@@ -1062,7 +1088,7 @@ MCP 服务器遵循同样的分岔。在市场类布局下，`.claude-plugin/plu
 ├── __init__.py
 ├── config.json
 ├── installed_surfaces.json  ← 写进了 ~/.claude 的东西（v2.5）
-├── core/    atomic.py auth.py consolidate.py db.py encoding_setup.py
+├── core/    adopt.py atomic.py auth.py consolidate.py db.py encoding_setup.py
 │            extractor.py idle.py layout.py logger.py markers.py modes.py
 │            plan.py privacy.py progress.py prompts.py recall.py roots.py
 │            textsim.py version.py

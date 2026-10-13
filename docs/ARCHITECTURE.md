@@ -142,7 +142,7 @@ cc-memory/
 │   │                              progress, plan, privacy, modes, roots,
 │   │                              auth, logger, encoding_setup, version,
 │   │                              atomic, markers, textsim, layout, recall,
-│   │                              prompts
+│   │                              prompts, adopt
 │   ├── hooks/                   ← 6 hook entry points + _entry.py (the
 │   │                              shared entry ladder: stdin parse + the
 │   │                              opt-out→anchor gate, v2.10.0)
@@ -321,7 +321,7 @@ the event:
 `hooks/hooks.json` is the marketplace/dev declaration and is the source of
 truth. `cc_memory/ui/installer.py`
 `HOOK_SCRIPTS` / `ASYNC_HOOK` (`installer.py:112-122`) is the standalone-install
-declaration of the timeouts; `HOOK_MATCHERS` (`installer.py:130`, v2.16.0) mirrors the
+declaration of the timeouts; `HOOK_MATCHERS` (`installer.py:131-134`, v2.16.0) mirrors the
 PostToolUse matcher that `hooks.json` spells from `core.modes.HOOK_TOOL_MATCHER`
 — a third table, for the same reason: a frozen/flat install has no
 `hooks.json` to read. Since v2.5 those entries carry the **final wire values** —
@@ -391,19 +391,20 @@ project-local at `<project>/.ccm/memory.db`, WAL mode:
 | `sessions` | One row per compaction event (`db.py:55`); carries `complete` since `v7_sessions_complete` (backfilled, so pre-v7 rows read as complete) |
 | `memories` | Extracted facts (category, importance, topic, content_hash, **supersedes_id**, last_referenced_at) (`db.py:66`). Carries `recall_count` since `v10_memories_recall_count` — incremented when `core/recall.py` retrieves the row for a real user question, which is a different fact from `last_referenced_at`: that one records that SessionStart's importance/recency ranking chose the row with no query in existence, this one records that somebody asked. The pair is what `/cc-mem inject-usage` reports as two channels — both of them DELIVERY facts. Whether Claude USED a delivered row is a judgement about text, so it is layer 2 (`--judge`, opt-in, `llm/usage_judge.py`): one LLM call over that session's own replies, answering `used` / `unused` / `unknown` per row, where `unknown` covers every case in which the judge could not run and is never printed as `unused` |
 | `topics` | Consolidated summaries per topic name (versioned) (`db.py:80`) |
-| `keywords` | Auto-detected project vocabulary (`db.py:90`) |
-| `plans` | The legacy v2.0 task queue's table (`db.py:99`) — kept so an existing database keeps its rows; every reader and writer was deleted in v2.16.0 (§5) |
-| `observations` | Raw PostToolUse events, cleaned up after extraction (`db.py:140`) |
+| `keywords` | Auto-detected project vocabulary (`db.py:10`) |
+| `plans` | The legacy v2.0 task queue's table (`db.py:183`) — kept so an existing database keeps its rows; every reader and writer was deleted in v2.16.0 (§5) |
+| `observations` | Raw PostToolUse events, cleaned up after extraction (`db.py:183`) |
 | `session_summaries` | 6-field structured summary per session (request / investigated / learned / completed / next_steps / notes) + files_read/files_modified (`db.py:154`) |
 | **`progress`** | NEW in v2.1 — single row per project. SOT for `.ccm/PROGRESS.md` (`db.py:199`). |
 | **`plan_active`** | NEW in v2.2 — single row per project. SOT for `.ccm/PLAN.md` (`db.py:221`). Carries `turns_total` since `v9_plan_turns_total`: a MONOTONIC turn count that nothing resets, distinct from `turns_since_last_guardian`, which every guardian check and plan replacement zeroes. Carries `guardian_checked_at_turn` since `v10_plan_guardian_checked_at_turn` — the value of `turns_total` at the last `/cc-mem plan-check`, stamped inside that UPDATE — so "checked during this very turn" is `turns_total == guardian_checked_at_turn + 1` and the drift gate's one-turn immunity is a comparison between two monotonic numbers. `DEFAULT -1`, not 0: with 0 a brand-new plan's first Stop would read `1 == 0 + 1` and grant immunity to a check nobody ran |
 | **`directives`** | NEW in v2.11.0 — the user-INTENT ledger. `times_stated` accumulates on ONE row per `slug`; a directive outlives every plan, which is why it is not plan steps. Carries `turns_at_touch` since `v9_directives_turns_at_touch` — the value of `turns_total` when it was last written, so idleness is subtraction between two monotonic numbers. Since v2.12.0 `status` may also be `blocked` (parked on the user, idle-exempt) and `kind` may be `constraint` (a standing prohibition, idle-exempt) — vocabulary additions, no schema change; only `directive-add` may bump the count (`directive-edit` corrects fields without touching it) |
+| **`adopted_rows`** | NEW in v2.17.0 (`v11_adopted_rows`) — one row per SOURCE row `/cc-mem adopt-stray` visited in a stray database: `source` (the stray's original `memory.db`, canonical), `source_table`, `source_id`, `new_id` (the project row, NULL when skipped), `outcome` (imported / merged-duplicate / merged-by-name / summed / kept-project-row / a skip reason), `merged_into`, `adopted_at`. Unique on `(source, source_table, source_id)`, written in the same transaction as the row it describes — the idempotence and resume key of `core/adopt.py` (`db.py:466`) |
 | `_migrations` | Tracks applied migrations (`db.py:851`) |
 
-Twelve tables, matching `CLAUDE.md` § "Database schema (12 tables)".
+Thirteen tables, matching `CLAUDE.md` § "Database schema (13 tables)".
 
 Plus `memories_fts` — an FTS5 virtual table over `memories` (DDL in
-`_fts_ddl`, `core/db.py:903-915`), kept in sync by three triggers that
+`_fts_ddl`, `core/db.py:931-943`), kept in sync by three triggers that
 `db._setup_fts5` creates with it (`core/db.py:1021-1072`); its
 `_MIGRATIONS` entry is `v2_fts5` (`db.py:172`).
 It is created only when the local SQLite build has FTS5; otherwise
@@ -416,12 +417,12 @@ The `supersedes_id` column on `memories` (migration `v3_supersedes`, in
 `_MIGRATIONS` at `db.py:191`) makes the anti-patch chain explicit: when `upsert_smart` decides a
 new memory supersedes an old one, the new row links back to the old row's ID
 (and the old row is archived). Walking the chain via
-`db.get_supersede_chain(memory_id)` (`db.py:2052-2067`) shows the full update
+`db.get_supersede_chain(memory_id)` (`db.py:2080-2095`) shows the full update
 history. `content_hash` (migration `v2_content_hash` in
 `_MIGRATIONS`, `db.py:135`) is `sha256[:16]` of the normalized content, used
 for the cheap exact-duplicate check
-(`db.compute_content_hash` at `db.py:2623-2625`,
-`db.find_by_hash` at `db.py:2636-2644`).
+(`db.compute_content_hash` at `db.py:2651-2653`,
+`db.find_by_hash` at `db.py:2664-2672`).
 
 Migrations are applied in order from the `_MIGRATIONS` list (`db.py:130-452`) and
 recorded in `_migrations`. Levels shipped so far: **v1** (`topic` column +
@@ -441,7 +442,9 @@ measured quadratics linear — 557.68 ms → 4.31 ms at 2 000 sessions), **v8**
 (`v8_directives`: the `directives` ledger table + its slug and status
 indexes), **v9** (`v9_plan_turns_total`, `v9_directives_turns_at_touch`: the
 two monotonic turn counts idleness is measured with), **v10**
-(`v10_plan_guardian_checked_at_turn`, `v10_memories_recall_count`).
+(`v10_plan_guardian_checked_at_turn`, `v10_memories_recall_count`), **v11**
+(`v11_adopted_rows`, `v11_adopted_rows_source_idx`: the provenance table of
+`/cc-mem adopt-stray` and its unique key).
 
 The `progress` table's non-PK columns are `current_request`, `status_done`,
 `status_in_flight`, `status_blocked`, `open_todos`, `plan`, `critical_context`,
@@ -632,7 +635,7 @@ SessionStart:
 
 Call signatures above are the real ones: `write_progress_md(db, project_id,
 memory_dir)` (`core/progress.py:611-750`).
-Call sites of `write_progress_md`: `pre_compact.py:792`, `stop.py:674`, `user_prompt.py:460`, `session_start.py:1230`, `mcp/server.py:727`, `cli/mem.py:1494`.
+Call sites of `write_progress_md`: `pre_compact.py:792`, `stop.py:674`, `user_prompt.py:460`, `session_start.py:1230`, `mcp/server.py:727`, `cli/mem.py:1495`.
 See
 [docs/CONTRACTS.md](CONTRACTS.md#handoff-contract) for the PROGRESS.md
 schema.
@@ -865,7 +868,11 @@ Per-project state lives at `<project>/.ccm/`:
 │                                dot-prefixed runtime artifact above, plus *.tmp — the
 │                                three generated .md files are deliberately NOT ignored
 ├── sessions/YYYY/MM/            archived per-session summaries
-└── topics/                      reserved for future per-topic md exports
+├── topics/                      reserved for future per-topic md exports
+└── .adopted/<date>/<rel__path>/ a stray's whole state directory, MOVED here by
+                                 /cc-mem adopt-stray (never deleted) with its
+                                 ADOPTED.json manifest; carries its own
+                                 `*` .gitignore (v2.17.0)
 ```
 
 Writers, for traceability: `MEMORY.md` ← `memory_writer.regenerate_memory_index`
@@ -948,9 +955,10 @@ moved 3725 memories out of reach, silently.
 An existing database is therefore a **declaration of identity** and is never
 overridden. The reported bug is fixed by *prevention*: the marker rung runs
 before any database exists, so the stray is never born. Adopting one that
-already exists means merging two SQLite files — destructive and irreversible —
-which belongs in an explicit, confirmed command, not in a hook that runs on
-every prompt.
+already exists means merging two SQLite files, which belongs in an explicit,
+confirmed command, not in a hook that runs on every prompt — and since v2.17.0
+that command exists: `/cc-mem adopt-stray` (`core/adopt.py`), described
+below.
 
 **The same rule holds INSIDE the database.** `upsert_project` records the
 resolved cwd in `projects.path`, and through v2.13.2 that string was also the
@@ -1007,14 +1015,23 @@ levels (`_chain`, `core/roots.py:359-387`). First hit wins:
    `CodeEraser/cli` has no database while `CodeEraser` does. It needs no VCS
    and no manifest, which matters for projects that are not repositories.
 2. `CLAUDE_PROJECT_DIR`, when it names a directory in the chain (`_from_env`,
-   `core/roots.py:679-697`). Ranked *below* the database rungs deliberately:
+   `core/roots.py:751-769`). Ranked *below* the database rungs deliberately:
    it records where Claude Code was launched, which is not authority to orphan
    a database. Containment is likewise the point — a value left over from
    another project must not redirect this one.
 3. Project markers — `.git`, `.hg`, `.svn`, `.ccm-root` and the usual
    manifests (`_MARKERS`) — nearest, then extended outward to the enclosing
    repository (`_marker_root`). The only rung that can fire before any
-   database exists, i.e. the one doing the actual prevention.
+   database exists, i.e. the one doing the actual prevention. **A linked git
+   worktree** (v2.17.0): when the root rung 2 or 3 chose owns no database, is
+   not pinned, and is a worktree by git's own two-way record — its `.git` is a
+   file naming an admin directory under `<main>/.git/worktrees/`, whose
+   `gitdir` file points back — the answer is the main checkout, provided that
+   owns a database (`_worktree_main`). Measured 2026-10-13: an NCCL lane
+   worktree under `D:\Projects\.worktrees\` answered itself through the
+   `.git` marker and would have started a database of its own on its first
+   prompt. A worktree that already owns a database answered rung 0; a
+   submodule (`.git/modules/`) and a copied `.git` file fail the record.
 4. The cwd as given — the pre-v2.6.0 answer, so nothing that worked before
    stops working. When the answer is cwd, the ORIGINAL string is returned
    unresolved, which keeps symlinked project directories byte-identical to
@@ -1096,7 +1113,7 @@ stray four levels down — the defect produced by the guard against it.
 and delivered it for `cli/mem.py` alone; the audit that followed found seven
 more surfaces that turn a supplied string into a database path, none of them
 anchoring. They now share one implementation, `anchor_project`
-(`core/roots.py:748-801`):
+(`core/roots.py:827-880`):
 
 | Surface | Can it CREATE? | Announces via |
 |---|---|---|
@@ -1129,10 +1146,31 @@ comparison could never match a relative path: `--project .` — exactly what the
 every single call.
 
 A pre-existing stray is therefore left exactly where it is — and *reported*,
-so it is not invisible: `nested_databases` (`core/roots.py:815-880`) backs a
+so it is not invisible: `nested_databases` (`core/roots.py:894-959`) backs a
 `[WARN] Separate database below this project` line in `cc-mem status`, which
-names each one and its memory count. That is an explicit command rather than a
-hook, because it walks the tree. `.ccm-root` — an empty file — pins a
+names each one and its memory count, and on a second line its remedy. That is
+an explicit command rather than a hook, because it walks the tree.
+
+**Adoption (v2.17.0).** The remedy is `/cc-mem adopt-stray <dir>`
+(`core/adopt.py`; imported by no hook). Without `--yes` it is a dry run that
+opens the project database read-only — not even the schema bootstrap runs — and
+prints what it would do. With `--yes` it first MOVES the stray's whole state
+directory to `.ccm/.adopted/<date>/<relative path, "/" spelled "__">/` (after a
+`BEGIN IMMEDIATE` probe; a refused rename is reported PENDING, exit 3, and
+nothing is written), so the sub-directory owns no database from that moment
+and rung 1 sends its next session to the project. It then imports from the
+moved copy, `_CHUNK` rows per transaction, recording every source row in
+`adopted_rows`: memories active and archived (re-numbered, `session_id` and
+`supersedes_id` re-mapped; an active exact duplicate of a project row is
+imported archived and linked to it, the project row reinforced), sessions with
+their `archive_path` re-pointed into the moved directory, summaries, topics by
+name (the project's summary kept), keywords summed, directives by slug (a new
+one's idle clock starts at adoption), and observations only above the stray's
+own observer cursor and under the retention cap. `progress`, `plan_active` and
+`plans` are the stray's own single-row state and are not merged. It refuses a
+path not strictly below the root, the project's own database, a
+`.ccm-root`-pinned directory, a link, and a state directory it cannot
+positively identify (exit 1). `.ccm-root` — an empty file — pins a
 directory as a root in its own right, which is the escape hatch for a project
 deliberately nested inside another and for any layout these heuristics read
 wrong. `tests/test_surfaces.py` §7 pins all of it: the ladder over a real
@@ -1239,7 +1277,7 @@ PostToolUse matcher from `hooks.json` when it can read one, else from
 ├── __init__.py
 ├── config.json
 ├── installed_surfaces.json  ← what was written into ~/.claude (v2.5)
-├── core/    atomic.py auth.py consolidate.py db.py encoding_setup.py
+├── core/    adopt.py atomic.py auth.py consolidate.py db.py encoding_setup.py
 │            extractor.py idle.py layout.py logger.py markers.py modes.py
 │            plan.py privacy.py progress.py prompts.py recall.py roots.py
 │            textsim.py version.py

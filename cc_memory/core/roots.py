@@ -52,9 +52,14 @@ would have silently moved 3725 memories out of reach.
 So an existing database is now a DECLARATION OF IDENTITY and is never
 overridden. The reported bug is fixed by PREVENTION: the marker rung runs
 before any database exists, so the stray is never born in the first place.
-Adopting an already-born stray means merging two SQLite files — destructive,
-irreversible, and therefore an explicit user-confirmed command, never
-something a hook does on every prompt.
+Adopting an already-born stray means merging two SQLite files, and that is
+an explicit user-confirmed command, never something a hook does on every
+prompt: `/cc-mem adopt-stray` (`core/adopt.py`, v2.17.0), which the
+`[WARN] Separate database below this project` line of `/cc-mem status`
+names. It moves the stray's state directory under the project's
+`.ccm/.adopted/` (never deletes it) and then imports its rows, so after it
+the sub-directory owns no database and rung 1 sends its sessions to the
+project.
 
 THE LADDER
 ----------
@@ -72,7 +77,12 @@ Over a BOUNDED ancestor chain (see `_chain`), first hit wins:
      (2026-08-07), so it is a free bonus, not the mechanism.
   3. Project markers, nearest-then-extend-outward, with two ceilings (see
      `_marker_root`). The only rung that can fire before any database exists,
-     i.e. the one that actually prevents the stray.
+     i.e. the one that actually prevents the stray. When the root rungs 2-3
+     chose is a LINKED GIT WORKTREE that owns no database and is not pinned,
+     and the main checkout it belongs to owns one, the answer is the main
+     checkout (`_worktree_main`, v2.17.0): a worktree is the same project's
+     source in another directory, and answering the worktree minted a
+     second database there on the first prompt.
   4. The `cwd` as given — today's behaviour, unchanged.
 
 BOUNDARIES ARE THE SAFETY PROPERTY
@@ -676,6 +686,68 @@ def _marker_root(chain):
     return best
 
 
+def _worktree_main(directory):
+    """The main checkout `directory` is a linked git worktree of, or None.
+
+    WHY. A linked worktree (`git worktree add`) is the SAME repository's
+    source in a second directory, usually far outside the main checkout —
+    on the reporting machine every lane worktree lives under
+    `D:/Projects/.worktrees/<project>/<lane>/`, a sibling tree. Its `.git`
+    is a FILE, which `_has_marker` accepts as a VCS root, so the marker rung
+    answered the worktree itself and the first prompt there minted a fresh
+    database: one more stray per lane, holding the facts a session learned
+    about the project while working on it, read by no later session at the
+    project root. Measured 2026-10-13: `project_root` of an NCCL lane worktree
+    answered the worktree.
+
+    Recognised STRICTLY — every link of git's own two-way record must hold,
+    so a hand-made `.git` file, a submodule (`.git/modules/<name>`, not
+    `.git/worktrees/<name>`) or a bare repository's worktree (the admin
+    directory's parent is not named `.git`) is not redirected:
+      * `<dir>/.git` is a regular FILE (not a link) whose first line is
+        `gitdir: <G>`;
+      * `<G>`'s parent is named `worktrees` and ITS parent `.git`;
+      * `<G>/gitdir` points back at `<dir>/.git` (git writes this file when it
+        creates the worktree; a copied `.git` file fails it).
+    The main checkout is the directory holding that `.git`. It is returned
+    ONLY when it already owns a database: redirecting a project's worktree
+    into a checkout cc-memory has never run in would create the database
+    THERE, a directory the user did not open. Never raises.
+    """
+    dotgit = directory / ".git"
+    try:
+        if _markers_is_link(dotgit) or not dotgit.is_file():
+            return None
+        with open(dotgit, "r", encoding="utf-8", errors="replace") as fh:
+            head = fh.read(4096)
+        first = head.splitlines()[0].strip() if head.strip() else ""
+        if not first.lower().startswith("gitdir:"):
+            return None
+        admin = Path(first[len("gitdir:"):].strip())
+        if not admin.is_absolute():
+            admin = directory / admin
+        admin = admin.resolve()
+        if admin.parent.name != "worktrees" or \
+                admin.parent.parent.name != ".git":
+            return None
+        back = (admin / "gitdir").read_text(encoding="utf-8",
+                                             errors="replace").strip()
+        back_path = Path(back)
+        if not back_path.is_absolute():
+            back_path = admin / back_path
+        if _norm(back_path.resolve()) != _norm(dotgit.resolve()):
+            return None
+        main = admin.parent.parent.parent
+        if _is_volume_root(main) or _is_profile_dir(main) \
+                or _norm(main) in _home_dirs():
+            return None
+        return main if _has_db(main) else None
+    except Exception:
+        # why: an unreadable or malformed worktree record proves nothing; the
+        # worktree then resolves as before (to itself), never to a guess
+        return None
+
+
 def _from_env(chain):
     """`CLAUDE_PROJECT_DIR`, but only if it names a directory in the chain.
 
@@ -728,6 +800,13 @@ def project_root(cwd, log=None):
         root = (_nearest(chain, _has_db)
                 or _from_env(chain)
                 or _marker_root(chain))
+        # A linked git worktree belongs to its main checkout's database (see
+        # `_worktree_main`). Only for a root the database rungs did NOT
+        # choose — a worktree that already owns a database answered rung 0
+        # or 1 and is a declaration of identity like any other — and never
+        # past the user's `.ccm-root` pin.
+        if root is not None and not _has_db(root) and not _is_pinned(root):
+            root = _worktree_main(root) or root
         if root is None or _norm(root) == _norm(start):
             return Path(cwd)
         if log is not None:

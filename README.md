@@ -32,7 +32,7 @@ before it does anything, and what is stored is *reconciled*, never stacked.
 - [Seen in the field](#seen-in-the-field)
 - [Measured numbers](#measured-numbers)
 - [Reference](#reference)
-  - [`/cc-mem` — 34 subcommands](#cc-mem--34-subcommands)
+  - [`/cc-mem` — 35 subcommands](#cc-mem--35-subcommands)
   - [MCP tools](#mcp-tools)
   - [Configuration](#configuration)
   - [On disk and in the database](#on-disk-and-in-the-database)
@@ -586,7 +586,7 @@ kept anyway, because a leaked WAL handle is worse — the reasoning is in
 
 ## Reference
 
-### `/cc-mem` — 34 subcommands
+### `/cc-mem` — 35 subcommands
 
 Inside Claude Code (path-agnostic — the wrapper resolves the plugin root):
 
@@ -615,6 +615,9 @@ Inside Claude Code (path-agnostic — the wrapper resolves the plugin root):
 /cc-mem add <category> "<text>" [--importance N] [--tags T] [--topic T]
                                     Anti-patch upsert
 /cc-mem archive <id>... [--supersedes ID]          Retire a WRONG fact (recoverable)
+/cc-mem adopt-stray <path> [--yes]  Merge a stray database below the project into
+                                    it; a dry run unless --yes, and the stray
+                                    is moved under .ccm/.adopted/, never deleted
 /cc-mem consolidate [--deep] [--no-llm]
                                     Full LLM-backed consolidation; --deep loops
                                     the dedup judge until it runs dry; --no-llm
@@ -744,7 +747,7 @@ directory** and is unrelated to `~/.claude/projects/<slug>/memory/`, which
 some Claude Code setups use for their own per-project notes. The full
 per-project file tree, with the writer of each file, is in
 [docs/ARCHITECTURE.md §7](docs/ARCHITECTURE.md#7-per-project-state-ccm); the
-12-table schema, with the definition site of each table, in
+13-table schema, with the definition site of each table, in
 [§4](docs/ARCHITECTURE.md#4-database-schema).
 
 ### Hook table
@@ -889,7 +892,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md). Security reports: [SECURITY.md](SECURITY
 | Nothing is being extracted | No credential. `/cc-mem status` checks it. Log in to Claude Code, or set `ANTHROPIC_API_KEY` |
 | Where is the database, actually? | `/cc-mem paths` prints the resolved DB / PROGRESS.md / PLAN.md / MEMORY.md with exists/absent verdicts — do not hunt with a recursive glob; the first `*.db` it finds may belong to another tool |
 | CJK output shows as `�` | The *capturing shell* decoded UTF-8 with its own codepage (PowerShell 5.1 uses the console codepage). Use `--json` — pure-ASCII output that no capture codec can garble |
-| A `.ccm/` appeared in a subdirectory | A stray from before root anchoring. `/cc-mem status` lists every separate database below the project root with its memory count. A stray is **reported, never merged or deleted** — pin a genuinely nested project with a `.ccm-root` file |
+| A `.ccm/` appeared in a subdirectory | A stray from before root anchoring. `/cc-mem status` lists every separate database below the project root with its memory count, and names the remedy on each row: `/cc-mem adopt-stray <dir>` shows what it would merge, `--yes` merges it into the project and moves the stray under `.ccm/.adopted/` (never deleted). Hooks never merge on their own — pin a genuinely nested project with a `.ccm-root` file. A session in a linked git worktree of an initialised checkout writes to the checkout's database (v2.17.0), so a worktree no longer starts one of its own |
 | The plugin went completely silent | A `config.json` that exists but cannot be parsed **fails closed** and excludes every project. `SessionStart` prints one line saying so; fix the JSON |
 | Claude cannot end a turn | Plan enforcement is blocking. Read the refusal — it names the condition and the fix. It always degrades to an advisory after its escape budget; `CC_MEMORY_PLAN_ENFORCE=0` switches it off |
 | A directive keeps blocking but it's waiting on *me* | `/cc-mem directive-edit <slug> --status blocked` parks it (idle enforcement skips it); `--status active` un-parks. A "never do X" rule should be `--kind constraint` — it is never idle-checked at all |

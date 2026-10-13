@@ -3393,6 +3393,28 @@ def _break_r16dashcrit(root):
            "            for m in (prog.get(\"critical_context\") or [])[:10]:  # BREAKAGE\n"
            "                out.append(f\" -. critical_context : {_ni(str(m))[:90]}\")\n")
 
+@case("r17worktree", ["tests/test_surfaces.py"],
+      "answer a linked git worktree itself again (drop the main-checkout "
+      "redirect) -> the first prompt in a lane worktree mints a second "
+      "database there")
+def _break_r17worktree(root):
+    _patch(root, f"{PKG}/core/roots.py",
+           "            root = _worktree_main(root) or root\n",
+           "            root = root  # BREAKAGE\n")
+
+
+@case("r17adoptdup", ["tests/test_surfaces.py"],
+      "import an active exact duplicate of a project row as a second ACTIVE "
+      "row -> adopt-stray plants the duplicate the anti-patch contract "
+      "exists to prevent")
+def _break_r17adoptdup(root):
+    _patch(root, f"{PKG}/core/adopt.py",
+           "            if dup is not None:\n"
+           "                # REINFORCE, as `upsert_smart` treats an exact-hash\n",
+           "            if False and dup is not None:  # BREAKAGE\n"
+           "                # REINFORCE, as `upsert_smart` treats an exact-hash\n")
+
+
 def verify_anchors():
     """Count every registered case's breakage anchors WITHOUT running a gate.
 

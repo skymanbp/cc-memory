@@ -20,6 +20,7 @@ and is marked *ungated* on purpose.
 
 | Version | Recorded here as |
 |---|---|
+| v2.17.0 | INV-123, INV-124 |
 | v2.16.0 | INV-001, INV-005, INV-010, INV-015, INV-016, INV-017, INV-018, INV-019, INV-020, INV-028, INV-030, INV-038, INV-041, INV-042, INV-043, INV-044, INV-045, INV-049, INV-050, INV-052, INV-053, INV-054, INV-055, INV-056, INV-057, INV-058, INV-059, INV-060, INV-061, INV-062, INV-063, INV-065, INV-069, INV-076, INV-081, INV-082, INV-088, INV-089, INV-094, INV-095, INV-096, INV-112, INV-121, INV-122 |
 | v2.15.2 | INV-086 |
 | v2.15.1 | INV-057, INV-066, INV-109 |
@@ -300,6 +301,30 @@ a base that IS the cwd or is not a designated temp root is refused;
 writer is gone stays registered in `ui/installer.py:_TEMP_MARKER_PREFIXES` so
 an uninstall still sweeps what older installs wrote. *Gate:* `tests/smoke_test.py`
 § D2-D7 greps for a second spelling. *Source:* v2.16.0 C2, C3, D3.
+
+**INV-123 · A linked git worktree is its main checkout's project.** When the
+root the marker or environment rung chose owns no database, is not pinned, and
+is a linked worktree by git's own two-way record (`.git` FILE → an admin dir
+under `<main>/.git/worktrees/` whose `gitdir` points back), `project_root`
+answers the main checkout — only when that checkout owns a database
+(`core.roots._worktree_main`). A worktree that owns a database, a pinned one, a
+submodule and a forged `.git` file all stay themselves. *Gate:*
+`tests/test_surfaces.py` §7 (the ladder's worktree cases); `falsify --case
+r17worktree`. *Source:* v2.17.0.
+
+**INV-124 · A stray database is merged only by `/cc-mem adopt-stray`, moved
+before it is read, never deleted, and every source row leaves a provenance
+row.** `core/adopt.py` is imported by no hook. The dry run (the default) opens
+the project database read-only and writes nothing; `--yes` moves the stray's
+whole state directory to `.ccm/.adopted/<date>/<relative path>/` FIRST (a
+refused move is PENDING, exit 3, with nothing written), then imports each
+table by its rule in `_CHUNK`-row transactions, each source row recorded in
+`adopted_rows` in the same transaction (unique on source, table, id — so a
+re-run is a no-op and a cut-off run resumes). It is not a save path: an
+active row whose `content_hash` equals an active project row is imported
+archived with `supersedes_id` = that row, which is reinforced (importance max,
+tags union); no other reconciliation. *Gate:* `tests/test_surfaces.py` §8
+(`_cli_adopt_stray`); `falsify --case r17adoptdup`. *Source:* v2.17.0.
 
 ## 2. Hook entry and safety
 

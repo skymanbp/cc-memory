@@ -449,6 +449,34 @@ _MIGRATIONS = [
     # inject-usage` reports the two channels separately.
     ("v10_memories_recall_count",
      "ALTER TABLE memories ADD COLUMN recall_count INTEGER NOT NULL DEFAULT 0"),
+
+    # ── v11: where an adopted row came from (`/cc-mem adopt-stray`) ─────────
+    #
+    # A stray database below the project (a sub-directory a session once ran
+    # in before the v2.6.0 root ladder existed) is merged by `core/adopt.py`.
+    # Its ids are re-numbered — `memories.id` is global to a database file —
+    # so without a record of the mapping a second run could not tell what it
+    # already imported, a run cut off half way could not resume, and no row
+    # could be traced back to the database it came from. One row per SOURCE
+    # row, whatever happened to it: imported (`new_id` = the project row),
+    # folded into an existing project row (`merged_into`), or skipped (`new_id`
+    # NULL, the reason in `outcome`). Written in the same transaction as the
+    # row it describes; the unique index is what makes the import idempotent.
+    ("v11_adopted_rows", """
+        CREATE TABLE IF NOT EXISTS adopted_rows (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            project_id    INTEGER NOT NULL REFERENCES projects(id),
+            source        TEXT    NOT NULL,
+            source_table  TEXT    NOT NULL,
+            source_id     INTEGER NOT NULL,
+            new_id        INTEGER,
+            outcome       TEXT    NOT NULL,
+            merged_into   INTEGER,
+            adopted_at    TEXT    NOT NULL
+        )"""),
+    ("v11_adopted_rows_source_idx",
+     "CREATE UNIQUE INDEX IF NOT EXISTS idx_adopted_rows_source "
+     "ON adopted_rows (source, source_table, source_id)"),
 ]
 
 

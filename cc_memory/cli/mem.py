@@ -353,6 +353,11 @@ _REQUIRED_PLUGIN_FILES = [
     # module level, and every hook imports memory_writer — an install missing
     # it loses all six hooks <!--ce:hooks--> at once.
     "cc_memory/core/textsim.py",
+    # v2.17.0: `/cc-mem adopt-stray`. No hook imports it, so a missing copy
+    # costs that one command, not the hooks — listed anyway because `status`
+    # certifying an install that cannot run a documented subcommand is the
+    # same lie in a smaller size.
+    "cc_memory/core/adopt.py",
     # v2.10.0, and the SAME shape a THIRD time — the comment two entries above
     # named this list as "the copy that goes quiet" and was then proved right
     # by the very next module added. `hooks/_entry.py` is THE hook entry ladder
@@ -732,7 +737,10 @@ def _report_nested_databases(project):
     machine has four genuinely nested ones, the largest holding 3725
     memories). But an unnoticed stray is otherwise invisible: nothing reads
     it and nothing says so. Listing them here — an explicit command, not a
-    per-turn hook — is the visibility without the destruction.
+    per-turn hook — is the visibility without the destruction. Each row names
+    its remedy, `adopt-stray` (`core/adopt.py`), which the user runs: it
+    merges a stray into this project (dry run first) and moves the stray's
+    state directory under `.ccm/.adopted/`, after which the row is gone.
     """
     try:
         from core.roots import nested_databases
@@ -746,9 +754,10 @@ def _report_nested_databases(project):
         # projects found by a scan, and a report must not rename them.
         n_sub = _count_active_memories(find_db_path(sub))
         print(f"  [WARN] Separate database below this project: {sub} "
-              f"(~{n_sub} memories). Sessions run there use IT, not this one. "
-              f"If that is a stray, move or delete it; if it is a project in "
-              f"its own right, nothing to do.")
+              f"(~{n_sub} memories). Sessions run there use IT, not this one.")
+        print(f"         If it is a stray: `/cc-mem adopt-stray {sub}` merges "
+              f"it into this project (a dry run; add --yes to write). If it "
+              f"is a project in its own right, nothing to do.")
 
 
 def cmd_status(args):
@@ -1629,6 +1638,40 @@ def cmd_archive(args):
         # validations above means a concurrent writer got there first — an
         # outcome, but not the requested one (register Y4's other half).
         sys.exit(1)
+
+
+def cmd_adopt_stray(args):
+    """Merge ONE stray database below this project into it (`core/adopt.py`).
+
+    A dry run unless `--yes`: the dry run reads both databases and writes
+    nothing — not even the schema migration a `MemoryDB` construction would
+    run — and prints what `--yes` would do. Exit 1 = refused (the path is not
+    a stray of this project); exit 3 = pending (the stray is in use right now;
+    nothing was written, retry when no session runs there).
+    """
+    from core.adopt import (AdoptPending, AdoptRefused, adopt, dry_run,
+                            format_report, locate, read_source)
+    project = Path(args.project).resolve()
+    memory_dir, db_path, _ = _resolve_db(args.project)
+    try:
+        loc = locate(project, memory_dir, args.path)
+    except AdoptRefused as exc:
+        print(f"Refused: {exc}")
+        sys.exit(1)
+    if not args.yes:
+        report = dry_run(db_path, project, loc, read_source(loc["db"]))
+    else:
+        from core.progress import ensure_memory_dir
+        ensure_memory_dir(memory_dir)
+        db = MemoryDB(db_path)
+        pid = db.upsert_project(args.project)
+        try:
+            report = adopt(db, pid, project, memory_dir, loc)
+        except AdoptPending as exc:
+            print(f"Pending: {exc}")
+            sys.exit(3)
+    for line in format_report(report, project):
+        print(line)
 
 
 def cmd_summary(args):
@@ -2789,6 +2832,22 @@ def make_parser():
                      help="Record that this memory replaces the archived ones "
                           "(sets supersedes_id, keeping the chain walkable)")
 
+    pad = sub.add_parser(
+        "adopt-stray",
+        help="Merge a stray database below this project into it (dry run "
+             "unless --yes; the stray is moved under .ccm/.adopted/, never "
+             "deleted)")
+    pad.add_argument("path", help="The stray's directory, its .ccm/ (or "
+                                  "legacy memory/) directory, or its "
+                                  "memory.db; relative to the project root")
+    pad_mode = pad.add_mutually_exclusive_group()
+    pad_mode.add_argument("--dry-run", action="store_true",
+                          help="Report what would be merged; write nothing "
+                               "(the default)")
+    pad_mode.add_argument("--yes", action="store_true",
+                          help="Move the stray under .ccm/.adopted/ and "
+                               "import it")
+
     po = sub.add_parser("observations", help="List recent tool observations")
     po.add_argument("--limit", type=_bounded_limit, default=30)
 
@@ -3068,7 +3127,7 @@ def main():
         "consolidate": cmd_consolidate, "cleanup": cmd_cleanup,
         "schema": cmd_schema, "paths": cmd_paths,
         "progress": cmd_progress, "supersedes": cmd_supersedes,
-        "archive": cmd_archive,
+        "archive": cmd_archive, "adopt-stray": cmd_adopt_stray,
         "observations": cmd_observations, "mode": cmd_mode,
         "summary": cmd_summary, "serve": cmd_serve, "dashboard": cmd_dashboard,
         "plan-show": cmd_plan_show, "plan-status": cmd_plan_status,

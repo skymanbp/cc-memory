@@ -1,4 +1,4 @@
-<!-- i18n-source: README.md | sha256: 1676803d042fce08 | version: 2.16.1 | translated: 2026-10-02 | translation: 12d08a549acc39d9 -->
+<!-- i18n-source: README.md | sha256: 53bf51b39649a320 | version: 2.16.1 | translated: 2026-10-13 | translation: e261ff5723e6ae32 -->
 > [English](README.md) · **简体中文**
 
 <div align="center">
@@ -33,7 +33,7 @@
 - [实战实录](#实战实录)
 - [实测数字](#实测数字)
 - [参考手册](#参考手册)
-  - [`/cc-mem`——34 个子命令](#cc-mem34-个子命令)
+  - [`/cc-mem`——35 个子命令](#cc-mem35-个子命令)
   - [MCP 工具](#mcp-工具)
   - [配置](#配置)
   - [磁盘上与数据库里](#磁盘上与数据库里)
@@ -542,7 +542,7 @@ You MUST Read .ccm/PROGRESS.md before responding …
 
 ## 参考手册
 
-### `/cc-mem`——34 个子命令
+### `/cc-mem`——35 个子命令
 
 在 Claude Code 内（与路径无关——包装脚本会解析插件根）：
 
@@ -570,6 +570,9 @@ You MUST Read .ccm/PROGRESS.md before responding …
 /cc-mem add <category> "<text>" [--importance N] [--tags T] [--topic T]
                                     反补丁式 upsert
 /cc-mem archive <id>... [--supersedes ID]          退役一条**错的**事实（可恢复）
+/cc-mem adopt-stray <path> [--yes]  把项目之下的一个游离数据库并进项目；不带
+                                    --yes 只是演练，游离库被移到
+                                    .ccm/.adopted/ 之下，绝不删除
 /cc-mem consolidate [--deep] [--no-llm]
                                     完整的 LLM 整理；--deep 循环去重裁判
                                     直到跑干；--no-llm 跳过 LLM 工序
@@ -689,7 +692,7 @@ LF 换行——**不需要任何 `PYTHONUTF8` / `PYTHONIOENCODING` 环境变量*
 `/cc-mem paths` 精确打印本插件为当前项目读写的每个文件。它指出的 `.ccm/` 位于
 **你的项目目录**里——与 `~/.claude/projects/<slug>/memory/` 无关，后者是某些
 Claude Code 配置自己的按项目笔记。完整的每项目文件树（含每个文件由谁写入）见
-[docs/ARCHITECTURE.zh.md §7](docs/ARCHITECTURE.zh.md#7-按项目的状态ccm)；12 张表的
+[docs/ARCHITECTURE.zh.md §7](docs/ARCHITECTURE.zh.md#7-按项目的状态ccm)；13 张表的
 schema（含每张表的定义位置）见 [§4](docs/ARCHITECTURE.zh.md#4-数据库-schema)。
 
 ### 钩子一览
@@ -818,7 +821,7 @@ Release，附上两个 exe，并以对应的 CHANGELOG 段落作为正文。与 
 | 什么都没被抽取 | 没有凭据。`/cc-mem status` 会检查。登录 Claude Code，或设置 `ANTHROPIC_API_KEY` |
 | 数据库到底在哪？ | `/cc-mem paths` 打印解析后的 DB / PROGRESS.md / PLAN.md / MEMORY.md 及各自的存在/缺失结论——不要用递归 glob 去找；它先找到的那个 `*.db` 可能属于别的工具 |
 | CJK 输出显示成 `�` | 是*捕获输出的 shell* 用自己的码页解码了 UTF-8（PowerShell 5.1 用的是控制台码页）。改用 `--json`——纯 ASCII 输出，任何捕获码页都糟蹋不了 |
-| 子目录里冒出一个 `.ccm/` | 根锚定之前留下的游离数据库。`/cc-mem status` 会列出项目根之下每一个独立数据库及其记忆数。游离库只被**报告，绝不合并或删除**——真正的嵌套子项目请用 `.ccm-root` 文件钉住 |
+| 子目录里冒出一个 `.ccm/` | 根锚定之前留下的游离数据库。`/cc-mem status` 会列出项目根之下每一个独立数据库及其记忆数，并在每一行写明处置：`/cc-mem adopt-stray <dir>` 显示将合并什么，加 `--yes` 才真正并进项目，并把游离库移到 `.ccm/.adopted/` 之下（绝不删除）。钩子从不自行合并——真正的嵌套子项目请用 `.ccm-root` 文件钉住。在已初始化检出的 git 链接工作树（worktree）里运行的会话写入该检出的数据库（v2.17.0），工作树不再另起一个库 |
 | 插件彻底不出声了 | 存在但无法解析的 `config.json` 会**失败即关闭**并排除所有项目。`SessionStart` 会打印一行说明；把 JSON 修好即可 |
 | Claude 结束不了一轮 | 计划强制执行正在拦截。读那段拒绝文本——它会指明是哪个条件以及怎么修。逃生预算耗尽后它一定会退化成建议；`CC_MEMORY_PLAN_ENFORCE=0` 可以整个关掉 |
 | 某条指令总在拦截，但它明明在等*我* | `/cc-mem directive-edit <slug> --status blocked` 把它停靠起来（闲置强制执行会跳过它）；`--status active` 解除停靠。"绝不做 X"类规则应该用 `--kind constraint`——它根本不做闲置检查 |

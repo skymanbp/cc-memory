@@ -7,6 +7,65 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [2.17.0] — 2026-10-13
+
+### A stray database can be merged back, and a git worktree no longer starts one
+
+A database below a project — a sub-directory a session once ran in — is read by
+no session at the project root. Root anchoring (v2.6.0) stopped new ones from
+being born, but left every existing one where it was, because a stray and a
+deliberately nested project look the same on disk; `/cc-mem status` named them
+and said "move or delete it". Measured on the reporting machine, 2026-10-13: a
+`companion/.ccm/memory.db` under the NCCL project, created 2026-07-24 — two
+weeks before the ladder existed, when every hook still wrote `Path(cwd)/memory`
+and that project's tests ran from `companion/` — held 14,025 memory rows (9,137
+active) and 2,181 sessions, against the project's own 15,384 rows; an existing
+database is terminal at rung 0, so it kept being written for two and a half
+months after the fix that would have prevented it.
+
+**`/cc-mem adopt-stray <dir>` (new, `core/adopt.py`).** A dry run by default;
+`--yes` to write. It first MOVES the stray's whole state directory to
+`.ccm/.adopted/<date>/<relative path>/` — never deleted, readable afterwards —
+so the sub-directory owns no database from that moment and its next session
+resolves to the project. Then it imports every table from the moved copy, in
+400-row transactions against the live database, and records each source row in
+the new `adopted_rows` table (`v11_adopted_rows`) in the same transaction: a
+second run imports nothing, and a run cut off half way resumes. Memories keep
+their archive state, timestamps and counters; ids are re-numbered and supersede
+links re-mapped. An active row whose hash equals an active project row is
+imported archived and linked to it (the project row is reinforced: importance
+max, tags union) — the one exact decision; near-duplicates go to consolidation.
+Sessions keep their transcripts (archive paths re-pointed), topics merge by name,
+keywords sum, directives merge by slug, observations are kept only where the
+retention cap would keep them. It refuses anything not strictly below the
+project root, the project's own database, a `.ccm-root`-pinned directory and a
+link (exit 1), and reports a stray in use as pending with nothing moved
+(exit 3). `/cc-mem status` keeps its `[WARN] Separate database below this
+project` rows and now names this command on each. `docs/CONTRACTS.md` records
+why adoption is not a save path (the anti-patch "adoption exception").
+
+**A linked git worktree resolves to its main checkout (`core/roots.py`).** A
+worktree's `.git` is a file, which the marker rung accepted as a repository
+root, so a session in `D:\Projects\.worktrees\<project>\<lane>\repo`
+resolved to the worktree and its first prompt would start a fresh database
+there (measured on an NCCL lane worktree). When the root the marker or
+environment rung chose owns no database, is not pinned, and git's own two-way
+record says it is a worktree (`.git` names an admin directory under
+`<main>/.git/worktrees/`, whose `gitdir` points back), the answer is now the
+main checkout, if that owns a database (`_worktree_main`). A worktree that
+already owns one, a pinned one, a submodule and a forged `.git` file all stay
+themselves. A sub-directory of an initialised project with no database of its
+own already resolved to the project (rung 1); a test now pins that with the
+`.ccm/` name too.
+
+Gates: `tests/test_surfaces.py` §7 gains eight ladder cases, §8 the adoption
+walk through the real CLI (`_cli_adopt_stray`); `tools/falsify_fixes.py`
+cases `r17worktree` and `r17adoptdup`; INV-123 and INV-124. The schema gains a
+table (13), so an older install opening an adopted database re-runs its
+bootstrap once. Because hooks run `core/roots.py`, an install that runs from a
+copy of the package (the plugin cache, the standalone installer) needs the new
+version installed before worktree sessions resolve the new way.
+
 ## [2.16.1] — 2026-10-02
 
 ### The dashboard stopped showing a field that no longer exists

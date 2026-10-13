@@ -1,4 +1,4 @@
-<!-- i18n-source: CONTRACTS.md | sha256: 0d60f52bf4664494 | version: 2.16.0 | translated: 2026-10-02 | translation: 47625fc0b7bab484 -->
+<!-- i18n-source: CONTRACTS.md | sha256: 1e12a080d2d74c71 | version: 2.16.1 | translated: 2026-10-13 | translation: 6db4b8e2ece32daa -->
 > [English](CONTRACTS.md) · **简体中文**
 
 # cc-memory — 契约（Contracts）
@@ -192,7 +192,7 @@ v2.0 有四条互相独立的保存路径（`pre_compact`、`stop` 观察者、`
 
 2. **没有历史的补丁式更新。** 如果一个事实真的发生了变化（“我们把 lr=3e-4 换成了
    lr=1e-4，因为……”），取代路径会把旧事实以 `is_active=0` 保留下来，并通过
-   `supersedes_id` 链接。`db.get_supersede_chain(id)`（`core/db.py:2052-2067`）可以走一遍
+   `supersedes_id` 链接。`db.get_supersede_chain(id)`（`core/db.py:2080-2095`）可以走一遍
    历史。不需要什么“记忆版 git blame”的黑魔法。
 
 3. **MEMORY.md 过期。** 每次批量写入之后自动重新生成，避免了 v2.0 中观察到的“过期
@@ -220,7 +220,7 @@ v2.0 有四条互相独立的保存路径（`pre_compact`、`stop` 观察者、`
 | `Stop` 观察者 | `upsert_batch(db, pid, session_row, observer_list, memory_dir)`（`hooks/stop.py:530`）; 所属会话的 `sessions` 行，PreCompact 尚未认领时由观察者先认领（v2.16.0） |
 | `SessionStart` 追溯保存 | `upsert_batch(db, pid, sid, memories, memory_dir=memory_dir)`（`hooks/session_start.py:1488`）; 处理此前未保存的会话 |
 | `/save-memories` 技能 | `upsert_batch(db, pid, None, memories, memory_dir=mem_dir)`（`skills/save-memories/SKILL.md:180`）; `mem_dir` 是 `core.layout.memory_dir(project)`，绝不是手写的路径拼接 |
-| `mem.py add` CLI | `upsert_smart(...)`（`cli/mem.py:1250`）; 然后 `regenerate_memory_index(...)`（`cli/mem.py:1280`） |
+| `mem.py add` CLI | `upsert_smart(...)`（`cli/mem.py:1250`）; 然后 `regenerate_memory_index(...)`（`cli/mem.py:1289`） |
 | `mcp/server.py handle_memory_add` | `upsert_smart(...)`（`mcp/server.py:627`）; 然后 `regenerate_memory_index(...)`（`mcp/server.py:642`） |
 | Dashboard UI 的 “Add Memory” | `upsert_smart(...)`（`ui/dashboard.py:1722`）; 然后 `regenerate_memory_index(...)`（`ui/dashboard.py:1729`）; 自 v2.2 起改为路由。`ui/dashboard.py` 中没有任何 `db.insert_memory` 调用。 |
 | Dashboard UI 的 “Save Session” | `upsert_batch(...)`（`ui/dashboard.py:1946`） |
@@ -300,15 +300,37 @@ v2.0 有四条互相独立的保存路径（`pre_compact`、`stop` 观察者、`
   送审），一份积了几个月的账就是这样一次清完的——每次运行 12 组的上限是为
   受预算门约束的后台通道定的尺寸，不是为积压定的。
 
+### 收编的例外（Adoption，v2.17.0）
+
+`/cc-mem adopt-stray`（`core/adopt.py`）不经写入器就 INSERT 记忆行，但它不是保存路径。它
+不创造任何事实：它把**另一个**数据库的写入器早已调和过的行，从项目之下的一个游离库（根锚定
+出现之前某个会话在子目录里运行时留下的）搬进项目的数据库。让每一行都走一遍
+`upsert_smart`，会拿今天的行按相似度去重新裁决几个月前的决定，并仅凭相似度就 MERGE /
+SUPERSEDE——那是整理的工作，而且需要模型；还会丢掉行本身已有的东西（它自己的归档状态、
+时间戳、召回与引用计数、它的 supersede 谱系）。所以收编保留每一行，只裁决**精确**的情形：
+
+- 游离库里的一条**活跃**行，若其 `content_hash` 等于项目里的一条**活跃**行，就以已归档
+  （`is_active=0`）身份导入，`supersedes_id` 指向那条项目行——这正是整理给被合并的失败方
+  的形状——而项目行按“精确哈希重述”得到**强化**：importance 取最大、标签取并集
+  （`_merged_tags`）、内容不动。这就是“收编的重复行”形状：一条已归档的行，链接指向一条
+  比它更早的行；
+- 其余一切按原样导入，活跃或已归档，supersede 链接经 id 映射重新指向。近似重复留给导入的
+  积压所触发的整理。
+
+隐私防线的写入半边依旧生效：每条导入的内容都过 `core.privacy.clean_for_storage`（对写入器
+已经清洗过的行是幂等的），清洗后为空的行被跳过。每条源行都在同一个事务里记进
+`adopted_rows`，所以这个例外可以逐行审计。它用原生 INSERT 而不是 `db.insert_memory`，因此
+上文那份计算出来的 `insert_memory_callers` 契约仍然为空。
+
 ### 不应该做什么
 
 - 不要在任何保存路径里直接调用 `db.insert_memory`。它的 docstring 把它留给测试
-  （`core/db.py:1715-1732`）; `supersede_memory` 与 `reconcile_upsert` 都在各自的事务
+  （`core/db.py:1743-1760`）; `supersede_memory` 与 `reconcile_upsert` 都在各自的事务
   里自己写 `INSERT`，而 `tools/contracts.py` 计算出的调用方集合为空。
 - 不要自己撸一套 `"SELECT content FROM memories ..."` 去重。决策归
   `db.reconcile_upsert`（`core/db.py:1807-2000`），喂给它的是写入器的纯函数最佳候选
   选择器 `_make_pick`（`llm/memory_writer.py:160-182`），它取代了 `_find_similar`；
-  `db.find_by_hash`（`core/db.py:2636-2644`）只作为 IntegrityError 的恢复路径存在。
+  `db.find_by_hash`（`core/db.py:2664-2672`）只作为 IntegrityError 的恢复路径存在。
   （并不存在 `db.find_similar`；匹配器就住在写入器里，按设计是私有的。）
 - 不要手工“打补丁”改 MEMORY.md，也不要指望别的路径去刷新它。任何非平凡的状态变更
   之后都要调用 `regenerate_memory_index`。生成出的文件自带一条 DO-NOT-EDIT 横幅
@@ -380,7 +402,7 @@ SQL 行生成。Schema 见 `cc_memory/core/db.py:_MIGRATIONS:v3_progress`（`db.
 | `transcript_ptr` | TEXT | PreCompact 解析为绝对路径的 `transcript_path`（`collect_progress_state(transcript_ptr=…)`，`pre_compact.py:773-782`）→ 第 3 级 `find_latest_transcript(cwd, exclude_session_id=...)`（`_refresh_progress_row`，`session_start.py:1168-1170`） |
 | `updated_at` | TEXT | ISO 时间戳，由 `upsert_progress`（`db.py:2872-2948`）与 `patch_progress`（`:2968-3007`）打戳 |
 | `trigger_type` | TEXT | "auto" \| "manual"（PreCompact 把宿主自己的触发字符串原样透传 —— `collect_progress_state(trigger_type=trigger)`，`pre_compact.py:773-783`; `"precompact"` 只是 `collect_progress_state` 在 `progress.py:234-241` 的默认关键字参数，且总会被覆盖）; "stop"（`patch_progress`，`stop.py:672`）; "user_prompt" \| "resume_request"（`patch_progress`，`user_prompt.py:457-459`）; "session_start_refresh"（`_refresh_progress_row`，`session_start.py:1227`） |
-| `current_session_id` | TEXT | 只由 `db.tag_progress_session` 写入（`db.py:3061-3085`）—— `tag_progress_session` 的调用方：PreCompact（`pre_compact.py:790`）、Stop（`stop.py:769`）、SessionStart（`session_start.py:1113`）、UserPromptSubmit（`user_prompt.py:446`） |
+| `current_session_id` | TEXT | 只由 `db.tag_progress_session` 写入（`db.py:3089-3113`）—— `tag_progress_session` 的调用方：PreCompact（`pre_compact.py:790`）、Stop（`stop.py:769`）、SessionStart（`session_start.py:1113`）、UserPromptSubmit（`user_prompt.py:446`） |
 | `session_started_at` | TEXT | `db.tag_progress_session` —— 只在存储的 sid 发生变化时重置；`upsert_progress` 在整篇重写时会把这两个字段一并保留（`db.py:2872-2948`） |
 
 渲染出的 Markdown（[`cc_memory/core/progress.py`](../cc_memory/core/progress.py)
@@ -389,7 +411,7 @@ SQL 行生成。Schema 见 `cc_memory/core/db.py:_MIGRATIONS:v3_progress`（`db.
 手动重新生成入口 `/cc-mem progress`（`cli/mem.py:1484-1507`）和 MCP 的
 `progress_regenerate` 工具（`mcp/server.py:719-728`）——都会覆盖它。全部六处
 `write_progress_md` 调用点：`pre_compact.py:792`、`stop.py:674`、`user_prompt.py:460`、
-`session_start.py:1230`、`cli/mem.py:1494`、`mcp/server.py:727`。
+`session_start.py:1230`、`cli/mem.py:1495`、`mcp/server.py:727`。
 
 ### 渲染布局（§0-§7）
 
@@ -429,7 +451,7 @@ sid），每一行形如
    - 只有高于 `MemoryDB.observer_cursor` 的观察才会送进 LLM 提取（v2.16.0，A4）：
      游标及以下的行 Stop 观察者已经送过，无论提取是否运行，PreCompact 都会删掉它们。
    - `db.tag_progress_session(...)` **先**运行，这样标签才能存活
-     （`pre_compact.py:790`；保留逻辑见 `db.py:3061-3085`）。
+     （`pre_compact.py:790`；保留逻辑见 `db.py:3089-3113`）。
    - `db.upsert_progress(**all_fields)` 覆盖整行（`pre_compact.py:791`）。
    - `write_progress_md(db, pid, memory_dir)` 重写文件（`:792`）。
 
@@ -729,8 +751,8 @@ cc-memory 的**实时计划锚点**：每个项目一份 `.ccm/PLAN.md`，它与
 | `last_refined_at`               | TEXT    | 上一次精炼的 ISO 时间戳 |
 | `needs_refine`                  | INTEGER | 1 = raw 是新的，但 structured 已过期 |
 | `created_at`, `updated_at`      | TEXT    | 标准时间戳 |
-| `revision`                      | INTEGER | v7（`v7_plan_revision`）：乐观并发计数器，每次 UPDATE 都加一。`update_plan_if_revision`（`core/db.py:3263-3288`）只在它仍等于读到的值时才写入 |
-| `turns_total`                   | INTEGER | v9（`v9_plan_turns_total`）：单调的回合时钟，什么都不会重置它。`bump_plan_turn_counter`（`core/db.py:3323`）把它与 `turns_since_last_guardian` 一起累加；指令闲置度就是对着它量的 |
+| `revision`                      | INTEGER | v7（`v7_plan_revision`）：乐观并发计数器，每次 UPDATE 都加一。`update_plan_if_revision`（`core/db.py:3291-3316`）只在它仍等于读到的值时才写入 |
+| `turns_total`                   | INTEGER | v9（`v9_plan_turns_total`）：单调的回合时钟，什么都不会重置它。`bump_plan_turn_counter`（`core/db.py:3351-3368`）把它与 `turns_since_last_guardian` 一起累加；指令闲置度就是对着它量的 |
 | `guardian_checked_at_turn`      | INTEGER | v10（`v10_plan_guardian_checked_at_turn`，DEFAULT -1）：`/cc-mem plan-check` 上一次登记巡检时的 `turns_total`。`reset_plan_guardian_counters` 打这个戳；它授予一回合豁免 |
 
 ### 结构化计划的 JSON schema
@@ -934,7 +956,7 @@ There is no force flag by design.
 #### 入口 2 —— CLEAR（`/cc-mem plan-clear`）
 
 当 `unfinished_steps(row["structured"])` 非空且没有给出 `--reason` 时，
-`cmd_plan_clear`（`cli/mem.py:1907-1937`）会拒绝并以 1 退出（`:1918-1928`）：
+`cmd_plan_clear`（`cli/mem.py:1945-1975`）会拒绝并以 1 退出（`:1918-1928`）：
 
 ```
 [FAIL] carryover gate: the active plan still has 2 unfinished step(s):
@@ -946,7 +968,7 @@ There is no force flag by design.
 
 解决办法是带上 `--reason "<why>"` 重新运行。这个理由不是装饰品——它会被写进归档
 载荷。只有在门禁通过之后，命令才会归档、执行 `db.clear_plan_active(pid)`，并删除
-`.ccm/PLAN.md` + `.ccm/.plan_raw.md`（`cli/mem.py:1929-1936`）。
+`.ccm/PLAN.md` + `.ccm/.plan_raw.md`（`cli/mem.py:1973`）。
 
 #### 兜底 —— 只追加的计划历史
 
