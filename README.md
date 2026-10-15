@@ -9,7 +9,7 @@ Your project's decisions, results, bugs and plans survive compaction, session
 boundaries, and closed terminals — the next session is *forced* to read them
 before it does anything, and what is stored is *reconciled*, never stacked.
 
-[![version](https://img.shields.io/badge/version-2.17.0-blue.svg)](CHANGELOG.md)
+[![version](https://img.shields.io/badge/version-2.18.0-blue.svg)](CHANGELOG.md)
 [![license](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![python](https://img.shields.io/badge/python-3.8%2B-blue.svg)](pyproject.toml)
 [![dependencies](https://img.shields.io/badge/runtime%20deps-0-brightgreen.svg)](#requirements)
@@ -43,6 +43,7 @@ before it does anything, and what is stored is *reconciled*, never stacked.
 - [Development](#development)
 - [Troubleshooting](#troubleshooting)
 - [Roadmap and known limits](#roadmap-and-known-limits)
+- [What's new in v2.18.0](#whats-new-in-v2180)
 - [What's new in v2.17.0](#whats-new-in-v2170)
 - [Documentation map](#documentation-map)
 - [License](#license)
@@ -968,6 +969,25 @@ has to rediscover:
   diagnostics for multi-database machines.
 
 ---
+
+## What's new in v2.18.0
+
+**A changed fact now replaces its memory instead of landing beside it.**
+
+- **The extractor sees the store.** Before every extraction — the Stop
+  observer, the save before a compaction, the retroactive save, the
+  dashboard's Save Session — the memories the text is about are retrieved
+  (at most 24 rows) and shown to the model as `#id [category] content`. A
+  new fact that changes one of them comes back with `"supersedes": id`: the
+  old row is archived and linked to the new one, so `/cc-mem supersedes`
+  walks the history. A memory that is now false or finished, with nothing
+  replacing it, comes back as `{"archive": id}`. The model may name only the
+  ids it was shown, and every operation is re-checked against the live row.
+  Measured before the change on a 1,334-row project: of the last 211 rows
+  written, 0 had reached the writer's similarity bar in their topic, so the
+  save line read `+8/~0/↻0/^0` session after session.
+- **The save line has a fifth number.** `+N/~N/↻N/^N/-N`: inserted, merged,
+  superseded, reinforced, archived.
 
 ## What's new in v2.17.0
 

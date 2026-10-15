@@ -1,4 +1,4 @@
-<!-- i18n-source: README.md | sha256: 18135df5bc2833d3 | version: 2.17.0 | translated: 2026-10-13 | translation: e8d5269ebef7da3b -->
+<!-- i18n-source: README.md | sha256: baf0ecd4fdd8a7c2 | version: 2.18.0 | translated: 2026-10-14 | translation: a7817703ad74a662 -->
 > [English](README.md) · **简体中文**
 
 <div align="center">
@@ -10,7 +10,7 @@
 下一个会话在动手之前会被**强制**先读它们，而存下来的东西是**被调和过的**，
 绝不是堆叠出来的。
 
-[![version](https://img.shields.io/badge/version-2.17.0-blue.svg)](CHANGELOG.md)
+[![version](https://img.shields.io/badge/version-2.18.0-blue.svg)](CHANGELOG.md)
 [![license](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![python](https://img.shields.io/badge/python-3.8%2B-blue.svg)](pyproject.toml)
 [![dependencies](https://img.shields.io/badge/runtime%20deps-0-brightgreen.svg)](#运行要求)
@@ -44,6 +44,7 @@
 - [开发](#开发)
 - [故障排查](#故障排查)
 - [路线图与已知限制](#路线图与已知限制)
+- [v2.18.0 有什么新东西](#v2180-有什么新东西)
 - [v2.17.0 有什么新东西](#v2170-有什么新东西)
 - [文档地图](#文档地图)
 - [许可](#许可)
@@ -886,6 +887,19 @@ Release，附上两个 exe，并以对应的 CHANGELOG 段落作为正文。与 
   `directive-*` 界面；面向多数据库机器的更丰富的 `paths` 式诊断。
 
 ---
+
+## v2.18.0 有什么新东西
+
+**一条变了的事实现在会替换它的记忆，而不是落在旁边。**
+
+- **提取器看得见库里的内容。** 每次提取之前——Stop 观察者、压缩前的保存、追溯保存、仪表盘的
+  Save Session——都会把文本所涉及的记忆检索出来（最多 24 行），以 `#id [category] content`
+  的形式给模型看。改变了其中某一条的新事实会带着 `"supersedes": id` 回来：旧行归档并链接到
+  新行，`/cc-mem supersedes` 能走完这段历史。已经不成立或已经做完、又没有东西替代的记忆，
+  以 `{"archive": id}` 回来。模型只能指名它看过的 id，每个操作都会再对照活着的那一行核一遍。
+  改动之前在一个 1,334 行的项目上测得：最后写入的 211 行里，在各自 topic 内达到写入器相似度
+  门槛的有 0 行，所以保存行一个会话接一个会话都是 `+8/~0/↻0/^0`。
+- **保存行多了第五个数字。** `+N/~N/↻N/^N/-N`：新增、合并、替换、加强、归档。
 
 ## v2.17.0 有什么新东西
 

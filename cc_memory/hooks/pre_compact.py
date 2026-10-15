@@ -195,7 +195,7 @@ _build_transcript_summary = summarize_transcript
 
 
 def _extract_via_llm(messages, observations=None, total_records=None,
-                     mode_suffix=""):
+                     mode_suffix="", db=None, project_id=None):
     """Returns a (possibly EMPTY) list when extraction RAN, None when it did
     not — no key, nothing to summarise, or a failed call. The distinction is
     load-bearing (register C1): the caller deletes the observations it fed
@@ -204,7 +204,12 @@ def _extract_via_llm(messages, observations=None, total_records=None,
 
     `observations` must already be the caller's bounded, oldest-first slice —
     every row passed in IS shown to the model, so the caller's consumption
-    watermark and this prompt cannot disagree (register B3)."""
+    watermark and this prompt cannot disagree (register B3).
+
+    With `db` and `project_id` (v2.18.0, E1) the model is shown the stored
+    rows its transcript is about (`llm.memory_writer.existing_for`) and may
+    answer with `supersedes` / `archive` operations, which the normaliser
+    keeps only for the ids shown; without them the prompt is v2.16.0's."""
     from core.auth import get_api_key
     api_key, source = get_api_key()
     if not api_key:
@@ -226,11 +231,15 @@ def _extract_via_llm(messages, observations=None, total_records=None,
 
     try:
         from llm.ccl_backend import call_llm
+        from llm.memory_writer import existing_for
         from llm.parse import (build_extraction_prompt, extract_json,
                                normalize_memories)
+        existing = (existing_for(db, project_id, transcript_text + obs_context)
+                    if db is not None and project_id is not None else [])
         # ONE prompt and ONE normaliser for every extractor (v2.16.0, D2).
         system, user_content = build_extraction_prompt(
-            "transcript", transcript_text + obs_context, mode_suffix=mode_suffix)
+            "transcript", transcript_text + obs_context, mode_suffix=mode_suffix,
+            existing=existing)
         text = call_llm(system, user_content, api_key,
                         max_tokens=2500, timeout=_API_TIMEOUT,
                         fallback_timeout=_FALLBACK_TIMEOUT,
@@ -239,7 +248,8 @@ def _extract_via_llm(messages, observations=None, total_records=None,
         if memories is None:
             return None
 
-        valid = normalize_memories(memories)
+        valid = normalize_memories(memories,
+                                   allowed_ids=[r["id"] for r in existing])
         _log.info(f"LLM extracted {len(valid)} memories")
         # An empty list is a RESULT (the model ran and found nothing worth
         # keeping), not a failure — see the docstring. `valid if valid else
@@ -691,7 +701,8 @@ def main():
         from core.modes import get_extraction_suffix
         extracted = _extract_via_llm(
             messages, obs_fed, total_records=window.total_records,
-            mode_suffix=get_extraction_suffix(db.get_project_mode(project_id)))
+            mode_suffix=get_extraction_suffix(db.get_project_mode(project_id)),
+            db=db, project_id=project_id)
         llm_ok = extracted is not None
         extracted = extracted or []
         method = "llm" if extracted else "none"
@@ -705,6 +716,9 @@ def main():
         n_inserted = counts.get("inserted", 0)
         n_merged   = counts.get("merged", 0)
         n_super    = counts.get("superseded", 0)
+        # Archived by the extractor (v2.18.0, E1): a row the model judged
+        # false or finished, with nothing replacing it. A write landed.
+        n_archived = counts.get("archived", 0)
         # A "reinforced" item is an exact-hash restatement whose importance or
         # tags were folded into the matched row (register C3) — a write DID
         # land, so it may not be reported as a skip and may not go unreported
@@ -856,6 +870,7 @@ def main():
             "n_merged": n_merged,
             "n_superseded": n_super,
             "n_reinforced": n_reinf,
+            "n_archived": n_archived,
             "n_skipped": n_skipped,
             "n_observations": len(observations),
             "msg_count": ext["msg_count"],

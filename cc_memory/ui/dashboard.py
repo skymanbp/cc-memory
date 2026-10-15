@@ -1772,20 +1772,25 @@ Memories:
         try:
             from core.modes import get_extraction_suffix
             from llm.ccl_backend import call_llm
+            from llm.memory_writer import existing_for
             from llm.parse import (build_extraction_prompt, extract_json,
                                    normalize_memories)
             # ONE prompt and ONE normaliser (v2.16.0, D2): this copy never
             # asked the model for `topic`, so Save Session rows had none.
+            # The store is shown to the model here too (v2.18.0, E1).
+            existing = existing_for(self.db, self.project_id, transcript_text)
             system, user = build_extraction_prompt(
                 "transcript", transcript_text,
                 mode_suffix=get_extraction_suffix(
-                    self.db.get_project_mode(self.project_id)))
+                    self.db.get_project_mode(self.project_id)),
+                existing=existing)
             text_content = call_llm(system, user, api_key,
                                     max_tokens=2000, timeout=25)
             memories = extract_json(text_content, kind="array")
             if memories is None:
                 return None
-            valid = normalize_memories(memories)
+            valid = normalize_memories(memories,
+                                       allowed_ids=[r["id"] for r in existing])
             return valid if valid else None
         except Exception:
             # why: deliberately broad, and `None` is a documented outcome, not a

@@ -2105,6 +2105,24 @@ class MemoryDB:
                 cur_id = row["supersedes_id"]
         return chain
 
+    def latest_active(self, project_id, limit=8):
+        """The active rows most recently written or changed, newest first
+        (v2.18.0, E1): what the extractor is shown beside the rows its text
+        retrieves, because the fact most likely to change is the one the
+        session just stored. Ordered by `updated_at` then id, so a row
+        reinforced or merged a moment ago counts as recent."""
+        try:
+            limit = max(1, int(limit))
+        except (TypeError, ValueError):
+            limit = 8
+        with self._connect() as conn:
+            rows = conn.execute(
+                """SELECT * FROM memories
+                   WHERE project_id = ? AND is_active = 1
+                   ORDER BY updated_at DESC, id DESC LIMIT ?""",
+                (project_id, limit)).fetchall()
+        return [dict(r) for r in rows]
+
     def get_recent_memories(self, project_id, sessions_back=3,
                             categories=None, min_importance=1, limit=30):
         """Memories from the last N sessions PLUS every session-less memory.

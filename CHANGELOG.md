@@ -7,6 +7,93 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [2.18.0] — 2026-10-15
+
+### The extractor sees the store, so a changed fact replaces its row instead of landing beside it
+
+The save line almost never showed an update. On the reporting machine's
+largest project (2026-10-14: 1,334 memory rows, 1,291 active, 80 sessions)
+42 rows carried a `supersedes_id` — 3.1% — and the last six sessions' 211
+rows carried none; the status line read `+8/~0/↻0/^0` session after session,
+with Haiku extracting. Measured against the writer's own rule: of those 211
+rows, the best trigram-Jaccard against an older active row OF THE SAME
+TOPIC reached `MID_SIM` (0.50) for **0** of them, and against ANY older row
+for 1 (`scratchpad/ccm_measure.py`, the writer's `shingle_set` / `jaccard`).
+The background consolidation on the same project judged 12 nominated groups
+and archived 0 (`.last_consolidation.json`).
+
+Two causes, both structural. The model that writes memories never saw what
+was stored: the extraction prompt (`llm.parse.build_extraction_prompt`)
+carried the transcript or the observations and nothing else, so "release
+0.2.1 shipped" could only be a NEW sentence beside "release 0.2.0 shipped";
+the only path that archives a row at write time is the lexical one, and a
+fact restated by a model is a different sentence (0.37 for the two release
+lines above). And the lexical path looks inside ONE topic, while the model
+names topics freely — 362 distinct topics among the active rows (`release`,
+`versioning`, `publish`, `ci`, `gates`, `testing` for one family of facts)
+— so the row a new fact should replace was usually not even a candidate.
+The model used for extraction does not change either fact, which is why
+switching to Haiku changed nothing.
+
+**The store is shown to the extractor (`llm.memory_writer.existing_for`).**
+Before the call, the text about to be extracted — the observations block,
+or the transcript summary — is searched in the FTS index in windows of
+about 400 characters (`core.recall.build_query` caps one query at eight
+Latin terms, a sentence's worth), the candidates are scored by
+`core.recall.relevance` (the overlap coefficient: high when a short memory's
+words all occur somewhere in the long text) above the recall channel's own
+floor (0.45), ranked, and joined by the eight rows most recently written —
+the fact most likely to change is the one the session just stored. At most
+24 rows and 3,000 characters of content. Probed on a copy of the project
+above with the 0.2.1 release's observations: 12 rows shown, among them
+"Release 0.2.0 shipped on 2026-10-13", "Successfully published renyi v0.1.0
+to crates.io" and "Release 0.2.0 version bump completed" — the rows a
+model should replace — for 5,066 characters of prompt.
+
+**Two operations, one shape each (`llm.parse`).** With rows to show, the
+user message opens with `Existing memories` as `#<id> [<category>]
+<content>` lines and the system prompt gains the rules: a new fact that
+changes, corrects or replaces one of them carries `"supersedes": <id>`;
+a memory now false, finished or no longer applying, with nothing replacing
+it, is answered as `{"archive": <id>, "reason": ...}`; only listed ids may
+be named; an unchanged memory is not output again. `normalize_memories
+(items, allowed_ids=)` keeps an operation only for an id the prompt showed
+— an id the model was never shown is an id it invented — and with no
+`allowed_ids` (the old call shape) keeps none, so a caller that shows
+nothing cannot archive anything. With no rows both prompts are byte for
+byte v2.16.0's.
+
+**The writer applies them (`llm.memory_writer.upsert_batch`).** A memory
+with `supersedes` archives the named row and inserts the new one linked to
+it through `db.supersede_memory` — the chain `/cc-mem supersedes` walks —
+with the old row's importance and tags folded in and `supersedes` added as
+the provenance tag, exactly the MID-band rule; an archive operation goes
+through `db.archive_obsolete`, no new row, no link. Both re-check the live
+row: a target archived or rewritten since the prompt was built leaves the
+fact a plain `upsert_smart` write and the archive a no-op; a replacement
+whose text is already an active row makes that row the winner (importance
+and tags folded in) and archives the old one linked to it. The batch gains
+an `archived` count; the save line reads `+N/~N/↻N/^N/-N` (`-` archived),
+PreCompact's status and the observer's carry `n_archived` / `archived`.
+All four extractors pass the rows and the allowed ids: the Stop observer,
+PreCompact (`_extract_via_llm(db=, project_id=)`), the retroactive save
+(`_retroactive_extract(db=, project_id=)`) and the dashboard's Save
+Session. `MemoryDB.latest_active(project_id, limit)` is new: the active
+rows most recently written or changed.
+
+Gates: `tests/smoke_test.py` § E1 — retrieval on a seeded store, the prompt
+with and without rows, the normaliser's id bound, the writer's three
+outcomes (supersede with the chain link and the folded fields, archive,
+the gone target and the already-stored replacement), and the Stop observer
+end to end with the model stubbed, its status file and its counts;
+`tools/falsify_fixes.py --case r18allowed` (the id bound) and `r18apply`
+(the supersede branch); INV-127. A live run against the real model on a
+scratch project (`D:\Projects\.worktrees\cc-memory\e2e\live_e2e.py`:
+three stored facts, three observations about a release) is the reporting
+machine's own evidence and is not a gate.
+
+---
+
 ## [2.17.0] — 2026-10-13
 
 ### A stray database can be merged back, and a git worktree no longer starts one
@@ -1657,7 +1744,7 @@ baseline control is itself finding F6, below).
   line>` pass `16 verified, 0 quote`, exit 0 — an elision means text was CUT,
   never rearranged. Each segment is now searched from the end of the
   previous match and an out-of-order segment is reported as such. The
-  tightening found one real case: README.md:142 quoted `B.with-ccm.txt` at
+  tightening found one real case: README.md:143 quoted `B.with-ccm.txt` at
   offset 5885 before 5606 — split into two regions, zero quoted words
   changed, both languages. `falsify --case r14verbatimorder`.
 - **The falsification suite had no negative control (F6).** A case was

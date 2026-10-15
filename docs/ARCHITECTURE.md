@@ -438,8 +438,8 @@ Plus `memories_fts` — an FTS5 virtual table over `memories` (DDL in
 `db._setup_fts5` creates with it (`core/db.py:1021-1072`); its
 `_MIGRATIONS` entry is `v2_fts5` (`db.py:172`).
 It is created only when the local SQLite build has FTS5; otherwise
-`db.search_fts` (`core/db.py:3623-3671`) falls back to `LIKE ? ESCAPE '\'`
-(`core/db.py:3664`). FTS5 is advertised in `.claude-plugin/plugin.json:4`
+`db.search_fts` (`core/db.py:3680-3728`) falls back to `LIKE ? ESCAPE '\'`
+(`core/db.py:3680-3728`). FTS5 is advertised in `.claude-plugin/plugin.json:4`
 and `:17`, and `/cc-mem status` reports which path is live (`cli/mem.py`,
 `cmd_status`).
 
@@ -451,8 +451,8 @@ new memory supersedes an old one, the new row links back to the old row's ID
 history. `content_hash` (migration `v2_content_hash` in
 `_MIGRATIONS`, `db.py:135`) is `sha256[:16]` of the normalized content, used
 for the cheap exact-duplicate check
-(`db.compute_content_hash` at `db.py:2662-2664`,
-`db.find_by_hash` at `db.py:2675-2683`).
+(`db.compute_content_hash` at `db.py:2680-2682`,
+`db.find_by_hash` at `db.py:2693-2701`).
 
 Migrations are applied in order from the `_MIGRATIONS` list (`db.py:130-452`) and
 recorded in `_migrations`. Levels shipped so far: **v1** (`topic` column +
@@ -551,7 +551,7 @@ caller's responsibility, and there are exactly two shapes:
   and the SessionStart retroactive save pass it (`stop.py:530`,
   `session_start.py:712-716`); the sync PreCompact leg passes none and renders
   once itself, after the rest of its state changes (`pre_compact.py:704`,
-  `pre_compact.py:834`).
+  `pre_compact.py:848`).
 - Single-shot callers call `regenerate_memory_index` explicitly:
   `cli/mem.py:1280` (`cmd_add`; also `:1394` cleanup and `:1619` archive),
   `mcp/server.py:642`, `ui/dashboard.py:1735`,
@@ -666,7 +666,7 @@ SessionStart:
 
 Call signatures above are the real ones: `write_progress_md(db, project_id,
 memory_dir)` (`core/progress.py:611-750`).
-Call sites of `write_progress_md`: `pre_compact.py:792`, `stop.py:702`, `user_prompt.py:464`, `session_start.py:1401`, `mcp/server.py:727`, `cli/mem.py:1528`.
+Call sites of `write_progress_md`: `pre_compact.py:806`, `stop.py:713`, `user_prompt.py:464`, `session_start.py:1413`, `mcp/server.py:727`, `cli/mem.py:1528`.
 See
 [docs/CONTRACTS.md](CONTRACTS.md#handoff-contract) for the PROGRESS.md
 schema.
@@ -677,7 +677,7 @@ A `PreCompact` killed by the host timeout dies on `TerminateProcess`: no
 `except`, no `finally`, so `.last_save.json` still describes the *previous*
 successful run and the failure is invisible. The sync leg therefore writes
 `.ccm/.pre_compact_attempt.json` **before** the transcript load
-(`pre_compact.py:583`) and removes it only on a completed run
+(`pre_compact.py:593`) and removes it only on a completed run
 (`pre_compact.py:876`) — including on its own error path (`pre_compact.py:931`),
 so an *errored* run is never reported as a *killed* one. `SessionStart` reports
 a surviving marker, but only once it is at least 10 minutes old, so a run still
@@ -796,7 +796,7 @@ does not retry, `core/auth.py:83-116`); it also carries the `oauth_expired`
 signal behind SessionStart's "[WARNING: OAuth expired — LLM extraction,
 semantic de-dup, obsolescence check and topic summaries disabled]" footer (`_build_footer`, `session_start.py:509-510`). Hook callers use it to *supply*
 the credential passed into `call_llm`.
-The `get_api_key()` call sites: `pre_compact.py:208` (passed on at `:234`), `stop.py:416`, `session_start.py:1132`, `core/consolidate.py:483, 796, 1018`.
+The `get_api_key()` call sites: `pre_compact.py:213` (passed on at `:234`), `stop.py:416`, `session_start.py:1139`, `core/consolidate.py:483, 796, 1018`.
 
 Fall-through was added in v2.3.4 for a concrete failure: a dead env key (e.g.
 zero credit → HTTP 400) used to blackhole the healthy subscription token behind
@@ -912,7 +912,7 @@ Per-project state lives at `<project>/.ccm/`:
 ```
 
 Writers, for traceability: `MEMORY.md` ← `memory_writer.regenerate_memory_index`
-(`memory_writer.py:389-426`); `PROGRESS.md` ← `core.progress.write_progress_md`
+(`memory_writer.py:579-616`); `PROGRESS.md` ← `core.progress.write_progress_md`
 (`progress.py:611-750`); `PLAN.md` ← `core.plan.write_plan_md`
 (`plan.py:817-867`); `.plan_history/` ← `core.plan.archive_plan` (`plan.py:1068-1134`);
 `.last_save.json` ← `pre_compact.main` (`pre_compact.py:866, 916`); `.last_inject.json` ← `session_start._write_inject_manifest`
@@ -1227,7 +1227,7 @@ writing a new artifact, existing installs kept the stale ignore list forever and
 silently began leaking it. Several of these artifacts embed verbatim
 conversation or plan prose, which makes that a privacy problem rather than
 noise. PreCompact runs it on EVERY compaction, through `ensure_memory_dir`
-(`pre_compact.py:565`) (not only at project
+(`pre_compact.py:569`) (not only at project
 creation) precisely so old installs migrate. Two standalone copies of the list
 exist because they cannot import this module and must be kept in sync:
 `cc_memory/ui/installer.py` (stdlib-only bootstrap) and

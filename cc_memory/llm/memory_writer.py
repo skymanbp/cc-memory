@@ -332,6 +332,186 @@ def upsert_smart(db: MemoryDB,
     return result
 
 
+# ── The store, shown to the extractor (v2.18.0, E1) ─────────────────────────
+# The model that writes memories decides UPDATE and ARCHIVE only when it can
+# see what is stored. `existing_for` picks the active rows a batch of text is
+# about; the prompt shows them as `#<id> [category] content`
+# (`llm.parse.build_extraction_prompt(existing=)`), and `upsert_batch` applies
+# what comes back: a memory carrying `supersedes` archives that row and
+# inserts the new one linked to it (`db.supersede_memory`, the chain every
+# `/cc-mem supersedes` walk reads), an `{"archive": id}` element archives a
+# row nothing replaces (`db.archive_obsolete`). Both are bounded by the ids
+# the prompt showed (`normalize_memories(allowed_ids=)`), re-checked here
+# against the live row: a target archived or rewritten since the prompt was
+# built is left alone, and the fact is still written as a plain row.
+#
+# How many rows the model sees. The candidates come from the FTS index,
+# one OR-query per ~400-character window of the text (`core.recall.
+# build_query` caps a query at eight Latin terms, which is a sentence's
+# worth, not a transcript's), ranked by `core.recall.relevance` — the
+# overlap coefficient, high when a short memory's words all occur somewhere
+# in the long text — above the recall channel's own floor, plus the rows
+# most recently written, because the fact most likely to change is the one
+# the session just stored. The caps bound the prompt, not the decision: a
+# row the model never saw is a row it cannot update, and the writer's
+# lexical branches still stand behind it.
+EXISTING_MAX_ROWS = 24
+EXISTING_BUDGET_CHARS = 3000
+EXISTING_RECENT_ROWS = 8
+EXISTING_WINDOW_CHARS = 400
+_EXISTING_FTS_LIMIT = 20
+
+
+def existing_for(db: MemoryDB, project_id: int, text: str) -> List[Dict]:
+    """The active rows the extractor should see for `text`, as dicts of
+    `id`, `category`, `content` (and the row's other columns), most relevant
+    first, capped at EXISTING_MAX_ROWS rows and EXISTING_BUDGET_CHARS of
+    content. Never raises: retrieval is advisory, and an empty list sends
+    the v2.16.0 prompt unchanged."""
+    from core.recall import RECALL_MIN_RELEVANCE, build_query, relevance
+    text = text or ""
+    try:
+        found: Dict[int, Dict] = {}
+        window: List[str] = []
+        size = 0
+
+        def _search(chunk):
+            query = build_query(chunk)
+            if not query:
+                return
+            for row in db.search_fts(project_id, query, limit=_EXISTING_FTS_LIMIT):
+                try:
+                    found.setdefault(int(row["id"]), dict(row))
+                except (TypeError, ValueError, KeyError):
+                    continue
+
+        for line in text.splitlines():
+            window.append(line)
+            size += len(line) + 1
+            if size >= EXISTING_WINDOW_CHARS:
+                _search("\n".join(window))
+                window, size = [], 0
+        if window:
+            _search("\n".join(window))
+        scored = []
+        for row in found.values():
+            if not row.get("is_active", 1):
+                continue
+            score = relevance(text, str(row.get("content") or ""))
+            if score >= RECALL_MIN_RELEVANCE:
+                scored.append((score, str(row.get("updated_at") or ""), row))
+        # Most relevant first; among equals the most recently written (two
+        # stable sorts, the tie-break first).
+        scored.sort(key=lambda t: t[1], reverse=True)
+        scored.sort(key=lambda t: -t[0])
+        picked: List[Dict] = []
+        seen = set()
+        used = 0
+        for score, _, row in scored:
+            cost = len(str(row.get("content") or "")) + 16
+            if len(picked) >= EXISTING_MAX_ROWS or used + cost > EXISTING_BUDGET_CHARS:
+                break
+            picked.append(row)
+            seen.add(int(row["id"]))
+            used += cost
+        for row in db.latest_active(project_id, limit=EXISTING_RECENT_ROWS):
+            try:
+                rid = int(row["id"])
+            except (TypeError, ValueError, KeyError):
+                continue
+            cost = len(str(row.get("content") or "")) + 16
+            if rid in seen or not row.get("is_active", 1):
+                continue
+            if len(picked) >= EXISTING_MAX_ROWS or used + cost > EXISTING_BUDGET_CHARS:
+                break
+            picked.append(dict(row))
+            seen.add(rid)
+            used += cost
+        return picked
+    except Exception as e:
+        # why: the rows are context for a prompt, not data; a retrieval
+        # failure (an FTS index mid-rebuild, a malformed row) must cost the
+        # extraction nothing but the two operations. Logged, never raised.
+        _log.error(f"existing_for failed: {e}")
+        return []
+
+
+def _live_target(db: MemoryDB, project_id: int, memory_id) -> Optional[Dict]:
+    """The row an operation names, when it is this project's and active."""
+    try:
+        row = db.get_memory(int(memory_id))
+    except (TypeError, ValueError):
+        return None
+    if not row or not row.get("is_active") or row.get("project_id") != project_id:
+        return None
+    return row
+
+
+def _apply_archive(db: MemoryDB, project_id: int, op: Dict) -> Dict:
+    """`{"archive": id, "reason": text}` from the extractor: archive the row,
+    no new row, no link (nothing replaces it). Guarded by `archive_obsolete`'s
+    own `is_active = 1`, so a row archived since the prompt is a no-op."""
+    target = _live_target(db, project_id, op.get("archive"))
+    if target is None:
+        return {"action": "skipped", "id": None, "old_id": op.get("archive"),
+                "reason": "archive_target_gone"}
+    n = db.archive_obsolete([target["id"]])
+    if not n:
+        return {"action": "skipped", "id": None, "old_id": target["id"],
+                "reason": "archive_target_gone"}
+    _log.info(f"archived #{target['id']} by the extractor: "
+              f"{(op.get('reason') or '')[:120]!r}")
+    return {"action": "archived", "id": target["id"], "old_id": target["id"],
+            "reason": op.get("reason") or ""}
+
+
+def _apply_supersede(db: MemoryDB, project_id: int, session_id: Optional[int],
+                     m: Dict) -> Dict:
+    """A memory carrying `supersedes`: archive the named row and insert the
+    new one linked to it, the old row's importance and tags folded in
+    (`_supersede_fields`' rule). When the target is gone the fact still
+    lands, through `upsert_smart`; when the new text already exists as an
+    active row, that row wins and the old one is archived linked to it."""
+    old = _live_target(db, project_id, m.get("supersedes"))
+    plain = dict(m)
+    plain.pop("supersedes", None)
+    if old is None:
+        return upsert_smart(db, project_id, session_id,
+                            category=plain.get("category", "note"),
+                            content=plain.get("content", ""),
+                            importance=plain.get("importance", 3),
+                            tags=plain.get("tags"), topic=plain.get("topic", ""))
+    content = clean_for_storage((m.get("content") or "").strip())
+    if len(content) < MIN_CONTENT_LEN:
+        return {"action": "skipped", "id": None, "reason": "too_short"}
+    category = m.get("category", "note")
+    if category not in CATEGORIES:
+        category = old.get("category") or "note"
+    try:
+        importance = max(1, min(5, int(m.get("importance", 3))))
+    except (TypeError, ValueError):
+        importance = 3
+    importance = max(importance, int(old.get("importance") or 1))
+    tags = _merged_tags(_row_tags(old), m.get("tags") or [], ["supersedes"])
+    topic = clean_for_storage((m.get("topic") or "").strip()) or old.get("topic") or ""
+    winner = db.find_by_hash(project_id, db.compute_content_hash(content))
+    if winner is not None and winner["id"] != old["id"]:
+        db.archive_obsolete([old["id"]], canonical_id=winner["id"])
+        folded = _fold_into_hash_match(
+            db, {"action": "skipped", "id": winner["id"], "similarity": 1.0,
+                 "reason": "hash_match"}, importance, tags)
+        _log.info(f"superseded #{old['id']} -> #{winner['id']} by the extractor "
+                  f"(the new text was already stored)")
+        return {"action": "superseded", "id": winner["id"], "old_id": old["id"],
+                "similarity": 1.0, "reinforced": folded["action"] == "reinforced"}
+    new_id = db.supersede_memory(old["id"], content, project_id, session_id,
+                                 category, importance=importance, tags=tags,
+                                 topic=topic)
+    _log.info(f"superseded #{old['id']} -> #{new_id} by the extractor")
+    return {"action": "superseded", "id": new_id, "old_id": old["id"],
+            "similarity": None}
+
+
 def upsert_batch(db: MemoryDB,
                  project_id: int,
                  session_id: Optional[int],
@@ -340,29 +520,38 @@ def upsert_batch(db: MemoryDB,
     """Batch upsert with single MEMORY.md regen at the end.
 
     Each item in `memories` is a dict with keys:
-        category, content, importance, topic (optional), tags (optional)
+        category, content, importance, topic (optional), tags (optional),
+        supersedes (optional, v2.18.0: the id of the row this one replaces)
+    or an archive operation `{"archive": <id>, "reason": <text>}` (v2.18.0).
 
     Returns aggregate counts: {"inserted": N, "merged": N, "superseded": N,
-                               "reinforced": N, "skipped": N,
+                               "reinforced": N, "skipped": N, "archived": N,
                                "results": [<per-item>]}
 
     "reinforced" (register C3) is an exact-hash restatement whose importance
     or tags were folded into the matched row; it is counted apart from
-    "skipped" because a write DID land. Every key is pre-seeded so the shape
-    is stable for callers that read one of them.
+    "skipped" because a write DID land. "superseded" counts the writer's
+    MID-band decisions and the extractor's `supersedes` alike — both archive
+    a row and insert its replacement with the chain link. Every key is
+    pre-seeded so the shape is stable for callers that read one of them.
     """
     counts = {"inserted": 0, "merged": 0, "superseded": 0,
-              "reinforced": 0, "skipped": 0}
+              "reinforced": 0, "skipped": 0, "archived": 0}
     results = []
     for m in memories:
-        r = upsert_smart(
-            db, project_id, session_id,
-            category=m.get("category", "note"),
-            content=m.get("content", ""),
-            importance=m.get("importance", 3),
-            tags=m.get("tags"),
-            topic=m.get("topic", ""),
-        )
+        if "archive" in m and not m.get("content"):
+            r = _apply_archive(db, project_id, m)
+        elif m.get("supersedes"):
+            r = _apply_supersede(db, project_id, session_id, m)
+        else:
+            r = upsert_smart(
+                db, project_id, session_id,
+                category=m.get("category", "note"),
+                content=m.get("content", ""),
+                importance=m.get("importance", 3),
+                tags=m.get("tags"),
+                topic=m.get("topic", ""),
+            )
         counts[r["action"]] = counts.get(r["action"], 0) + 1
         results.append(r)
 
@@ -374,7 +563,8 @@ def upsert_batch(db: MemoryDB,
     # call that found nothing new. A reinforced row counts: its importance
     # or tags changed, and the index orders by importance.
     if memory_dir is not None and any(
-            counts[k] for k in ("inserted", "merged", "superseded", "reinforced")):
+            counts[k] for k in ("inserted", "merged", "superseded",
+                                "reinforced", "archived")):
         try:
             regenerate_memory_index(db, project_id, memory_dir)
         except Exception as e:

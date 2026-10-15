@@ -516,11 +516,17 @@ def _observer_evaluate(cwd, session_id, memory_dir, db=None):
     try:
         from core.modes import get_extraction_suffix
         from llm.ccl_backend import call_llm
+        from llm.memory_writer import existing_for
         from llm.parse import (build_extraction_prompt, extract_json,
                                normalize_memories)
+        # The store, shown to the model (v2.18.0, E1): the active rows the
+        # observations are about, so a changed fact can supersede or
+        # archive its row instead of landing beside it.
+        existing = existing_for(db, project_id, user_msg)
         system, user_msg = build_extraction_prompt(
             "observations", user_msg,
-            mode_suffix=get_extraction_suffix(db.get_project_mode(project_id)))
+            mode_suffix=get_extraction_suffix(db.get_project_mode(project_id)),
+            existing=existing)
         text = call_llm(system, user_msg, api_key,
                         max_tokens=1000, timeout=_API_TIMEOUT,
                         fallback_timeout=_FALLBACK_TIMEOUT,
@@ -532,9 +538,11 @@ def _observer_evaluate(cwd, session_id, memory_dir, db=None):
                            "error": "the model's answer was not a JSON array"})
             return 0
 
-        # ONE normaliser (v2.16.0, D2); this hook adds its provenance tags.
-        cleaned = [dict(m, tags=["observer", "realtime"])
-                   for m in normalize_memories(memories)]
+        # ONE normaliser (v2.16.0, D2); this hook adds its provenance tags
+        # to the memories (an archive operation carries none).
+        cleaned = [dict(m, tags=["observer", "realtime"]) if "content" in m else m
+                   for m in normalize_memories(
+                       memories, allowed_ids=[r["id"] for r in existing])]
 
         # The rows belong to THIS session (v2.16.0, B8). With `session_id`
         # NULL they matched `get_recent_memories`' session-less arm forever,
@@ -547,7 +555,8 @@ def _observer_evaluate(cwd, session_id, memory_dir, db=None):
                                             0, "", "")
         counts = upsert_batch(db, project_id, session_row, cleaned,
                               memory_dir=memory_dir)
-        n_total = sum(counts.get(k, 0) for k in ("inserted", "merged", "superseded"))
+        n_total = sum(counts.get(k, 0) for k in
+                      ("inserted", "merged", "superseded", "archived"))
 
         # write_marker, not write_text: it never raises, and it refuses to
         # follow a symlink. Marker write is best-effort either way; the next
@@ -569,14 +578,16 @@ def _observer_evaluate(cwd, session_id, memory_dir, db=None):
                       {"ok": True, "n_fed": len(obs_fed),
                        "counts": {k: counts.get(k, 0) for k in
                                   ("inserted", "merged", "superseded",
-                                   "reinforced", "skipped")}})
+                                   "reinforced", "skipped", "archived")}})
 
         if n_total:
             _log.info(
                 f"observer: {counts.get('inserted',0)} new, "
                 f"{counts.get('merged',0)} merged, "
-                f"{counts.get('superseded',0)} superseded "
-                f"from {len(obs_fed)} of {len(observations)} obs"
+                f"{counts.get('superseded',0)} superseded, "
+                f"{counts.get('archived',0)} archived "
+                f"from {len(obs_fed)} of {len(observations)} obs "
+                f"({len(existing)} existing rows shown)"
             )
         return n_total
 

@@ -2,8 +2,9 @@
 
 ## Project: cc-memory
 
-**Claude Code persistent memory plugin (v2.17.0)** — anti-patch reconcile-on-write
-with LLM-judged semantic de-duplication and backpressure-triggered consolidation,
+**Claude Code persistent memory plugin (v2.18.0)** — anti-patch reconcile-on-write
+with the store shown to the extractor (it supersedes and archives what it was
+shown), LLM-judged semantic de-duplication and backpressure-triggered consolidation,
 a forced PROGRESS.md handoff, a live PLAN.md anchor with plan-refiner /
 plan-guardian subagents and a mandatory carryover gate, an enforced directive
 ledger, layered SessionStart injection shaped by the start reason, query-time
@@ -11,7 +12,7 @@ recall, CJK-capable FTS5 search, and Haiku extraction from detached workers
 (optional local Ollama fallback).
 
 - **Language**: Python 3.8+ (pure stdlib, zero pip dependencies at runtime)
-- **Version**: 2.17.0 — what changed in this version is `CHANGELOG.md` § [2.17.0]
+- **Version**: 2.18.0 — what changed in this version is `CHANGELOG.md` § [2.18.0]
 - **License**: MIT
 - **Platform**: Windows-primary; CI runs every gate on Windows and Linux
   (Tkinter required for the GUI)
@@ -143,7 +144,15 @@ at `HIGH_SIM` (archive + insert with a chain link, `created_at` carried
 forward), SUPERSEDES at `MID_SIM` (archive + insert with a chain link),
 REINFORCES an exact-hash duplicate (importance max + tags union, no new row) or
 INSERTS, on `core.textsim` similarity (CJK bigrams, ASCII trigrams), all inside
-one `MemoryDB.reconcile_upsert` transaction. Never call `db.insert_memory` from
+one `MemoryDB.reconcile_upsert` transaction. Since v2.18.0 the extractor is
+shown the active rows its text is about (`llm.memory_writer.existing_for`:
+FTS over the text in windows, `core.recall.relevance` above the recall floor,
+plus the rows most recently written, at most 24 rows / 3 000 characters) and
+may answer `"supersedes": <id>` on a memory or `{"archive": <id>}`, kept by
+`normalize_memories(allowed_ids=)` only for ids the prompt showed and applied
+by `upsert_batch` through `db.supersede_memory` / `db.archive_obsolete` against
+the live row (a target gone since the prompt leaves the fact a plain insert).
+Never call `db.insert_memory` from
 a caller path — its only callers are the tests. The one INSERT outside the
 writer is `core/adopt.py` (`/cc-mem adopt-stray`), which relocates rows another
 database's writer already reconciled and so is not a save path: it keeps every

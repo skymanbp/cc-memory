@@ -519,8 +519,12 @@ def _build_footer(db, project_id, memory_dir, budget=None):
                 # A write landed, so it belongs in a line that accounts for
                 # the writes; absent from an older status file it reads 0.
                 nr = neutralize_inline(str(info.get("n_reinforced", 0)))
+                # `-` = archived by the extractor (v2.18.0, E1): a row it
+                # judged false or finished, nothing replacing it. Absent
+                # from an older status file it reads 0, like `^`.
+                na = neutralize_inline(str(info.get("n_archived", 0)))
                 lines.append(
-                    f"[Last save: {ts}{trig_s} | +{ni}/~{nm}/↻{ns}/^{nr} "
+                    f"[Last save: {ts}{trig_s} | +{ni}/~{nm}/↻{ns}/^{nr}/-{na} "
                     f"via {method}]"
                 )
             else:
@@ -1116,9 +1120,12 @@ from core.extractor import summarize_transcript as _summarize_transcript
 
 
 def _retroactive_extract(messages, total_records=None, deadline=None,
-                         state_dir=None, mode_suffix=""):
+                         state_dir=None, mode_suffix="", db=None,
+                         project_id=None):
     """Returns a (possibly EMPTY) list when extraction RAN, None when it
-    did not — no key, nothing to summarise, or a failed call.
+    did not — no key, nothing to summarise, or a failed call. With `db` and
+    `project_id` (v2.18.0, E1) the model is shown the stored rows the
+    transcript is about and may supersede or archive them.
 
     The same distinction register C1 drew for
     `pre_compact._extract_via_llm`, missing here: `valid if valid else
@@ -1138,11 +1145,15 @@ def _retroactive_extract(messages, total_records=None, deadline=None,
         return None
     try:
         from llm.ccl_backend import call_llm
+        from llm.memory_writer import existing_for
         from llm.parse import (build_extraction_prompt, extract_json,
                                normalize_memories)
+        existing = (existing_for(db, project_id, transcript_text)
+                    if db is not None and project_id is not None else [])
         # ONE prompt and ONE normaliser for every extractor (v2.16.0, D2).
         system, user = build_extraction_prompt("transcript", transcript_text,
-                                               mode_suffix=mode_suffix)
+                                               mode_suffix=mode_suffix,
+                                               existing=existing)
         text = call_llm(system, user, api_key, max_tokens=2000,
                         timeout=_API_TIMEOUT, fallback_timeout=_FALLBACK_TIMEOUT,
                         deadline=deadline)
@@ -1151,7 +1162,8 @@ def _retroactive_extract(messages, total_records=None, deadline=None,
             return None
         # An empty list is a RESULT: the model ran and found nothing worth
         # saving. Only None means "no answer" (see the docstring).
-        return normalize_memories(memories)
+        return normalize_memories(memories,
+                                  allowed_ids=[r["id"] for r in existing])
     except Exception as e:
         # why: retroactive save is best-effort; any LLM/JSON failure
         # should be silent — the rest of the hook still works. A
@@ -1642,7 +1654,8 @@ def retroactive_save(cwd, db, project_id, current_session_id="", deadline=None):
                                             total_records=window.total_records,
                                             deadline=deadline,
                                             state_dir=memory_dir,
-                                            mode_suffix=mode_suffix)
+                                            mode_suffix=mode_suffix,
+                                            db=db, project_id=project_id)
             # `is None`, because an EMPTY list is a RESULT (register C1 and
             # _retroactive_extract's docstring). `not memories` read "the
             # model found nothing worth keeping" as "extraction never ran",
@@ -1672,10 +1685,12 @@ def retroactive_save(cwd, db, project_id, current_session_id="", deadline=None):
             for k, v in counts.items():
                 if isinstance(v, int):
                     totals[k] = totals.get(k, 0) + v
+            # `-` is archived by the extractor (v2.18.0, E1), the fifth
+            # number of every save line.
             _log.info(
                 f"retroactive {session_uuid[:8]}: +{counts.get('inserted',0)} "
                 f"~{counts.get('merged',0)} ↻{counts.get('superseded',0)} "
-                f"^{counts.get('reinforced',0)}"
+                f"^{counts.get('reinforced',0)} -{counts.get('archived',0)}"
             )
         except Exception as e:
             _log.error(f"retroactive save error: {e}")

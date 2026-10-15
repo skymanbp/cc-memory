@@ -2354,8 +2354,10 @@ def _break_r14curtranscript(root):
 def _break_r14retroempty(root):
     _patch(root, f"{PKG}/hooks/session_start.py",
            '        # saving. Only None means "no answer" (see the docstring).\n'
-           '        return normalize_memories(memories)',
-           '        return normalize_memories(memories) or None  # BREAKAGE: empty reads as no answer')
+           '        return normalize_memories(memories,\n'
+           '                                  allowed_ids=[r["id"] for r in existing])',
+           '        return normalize_memories(memories,\n'
+           '                                  allowed_ids=[r["id"] for r in existing]) or None  # BREAKAGE: empty reads as no answer')
 
 
 @case("r14retrokey", ["tests/smoke_test.py"],
@@ -3126,7 +3128,8 @@ def _break_r16advisorychannel(root):
 def _break_r16noregen(root):
     _patch(root, "cc_memory/llm/memory_writer.py",
            "    if memory_dir is not None and any(\n"
-           '            counts[k] for k in ("inserted", "merged", "superseded", "reinforced")):',
+           '            counts[k] for k in ("inserted", "merged", "superseded",\n'
+           '                                "reinforced", "archived")):',
            "    if memory_dir is not None:  # BREAKAGE: render regardless")
 
 
@@ -3438,6 +3441,24 @@ def _break_r17fitorder(root):
     _patch(root, f"{PKG}/hooks/session_start.py",
            "_TRIM_FALLBACK_TOPIC, _TRIM_TIMELINE, _TRIM_TOPIC, _TRIM_CRITICAL = range(4)\n",
            "_TRIM_TIMELINE, _TRIM_FALLBACK_TOPIC, _TRIM_TOPIC, _TRIM_CRITICAL = range(4)  # BREAKAGE\n")
+
+
+@case("r18allowed", ["tests/smoke_test.py"],
+      "let a supersede name any id, not only one the prompt showed -> a row "
+      "the model never saw is archived on an id it invented")
+def _break_r18allowed(root):
+    _patch(root, f"{PKG}/llm/parse.py",
+           "        if old_id is not None and old_id in allowed:\n",
+           "        if old_id is not None:  # BREAKAGE\n")
+
+
+@case("r18apply", ["tests/smoke_test.py"],
+      "ignore the extractor's supersede and write the fact as a plain row -> "
+      "the changed fact lands beside the fact it changed, the v2.17 behaviour")
+def _break_r18apply(root):
+    _patch(root, f"{PKG}/llm/memory_writer.py",
+           "        elif m.get(\"supersedes\"):\n",
+           "        elif False and m.get(\"supersedes\"):  # BREAKAGE\n")
 
 
 @case("r17announceoff", ["tests/test_surfaces.py"],

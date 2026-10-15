@@ -8085,6 +8085,140 @@ def main():
           "listing orders by id; §5 reads the store's floor; Blocked renders only "
           "when set; the dead writers, the tuple view and the context family are gone")
 
+    # ── v2.18.0 · E1: the extractor sees the store, and may supersede or ────
+    # archive what it was shown; an id it was not shown names nothing.
+    from llm.memory_writer import (EXISTING_BUDGET_CHARS as _e_budget,
+                                   existing_for as _e_for,
+                                   upsert_batch as _e_batch)
+    from llm.parse import (EXISTING_HEAD as _e_head,
+                           build_extraction_prompt as _e_bep,
+                           normalize_memories as _e_norm)
+    _e_root = Path(tempfile.mkdtemp(prefix="cc-memory-e1-"))
+    _e_db = MemoryDB(_e_root / _MEM / "memory.db")
+    _e_pid = _e_db.upsert_project(str(_e_root))
+    _e_sid = _e_db.insert_session(_e_pid, "e1-s", "auto", 1, "", "")
+    _e_old = _e_db.insert_memory(
+        _e_pid, _e_sid, "result",
+        "Release 0.2.0 of the toolchain shipped on 2026-10-13 with eight crates on crates.io",
+        4, tags=["observer"], topic="release")
+    _e_plan = _e_db.insert_memory(
+        _e_pid, _e_sid, "task",
+        "Pending: upload the extension to the Marketplace by hand after the release",
+        3, topic="release")
+    _e_far = _e_db.insert_memory(
+        _e_pid, _e_sid, "config",
+        "The dashboard's font is Inter at 11 points on every platform", 2, topic="ui")
+    # ...the rows a text is about are retrieved (and the unrelated one is not)
+    _e_text = ("Tool observations:\n[Bash] cargo publish -p renyi -> Uploading renyi v0.2.1\n"
+               "[Bash] git tag v0.2.1 && git push -> ok\n"
+               "[Bash] curl marketplace extensionquery -> 0.2.1 2026-10-15T02:03Z\n"
+               "The extension upload to the Marketplace is done; release 0.2.1 shipped "
+               "with eight crates on crates.io")
+    _e_rows = _e_for(_e_db, _e_pid, _e_text)
+    _e_ids = [r["id"] for r in _e_rows]
+    assert _e_old in _e_ids and _e_plan in _e_ids, (_e_ids, _e_old, _e_plan)
+    assert sum(len(r["content"]) + 16 for r in _e_rows) <= _e_budget
+    # ...the prompt carries them, and only then
+    _e_sys, _e_user = _e_bep("observations", "O-BODY", existing=_e_rows)
+    assert _e_user.startswith(_e_head) and f"#{_e_old} [result]" in _e_user \
+        and _e_user.endswith("\n\nO-BODY") and '"supersedes"' in _e_sys \
+        and '"archive"' in _e_sys, (_e_user[:200], _e_sys[-400:])
+    _e_sys0, _e_user0 = _e_bep("observations", "O-BODY", existing=[])
+    assert _e_user0 == "O-BODY" and '"supersedes"' not in _e_sys0, \
+        "an empty store changed the v2.16.0 prompt"
+    # ...the normaliser keeps an operation only for an id the prompt showed
+    _e_items = _e_norm([
+        {"category": "result", "content": "Release 0.2.1 shipped on 2026-10-14 with eight crates on crates.io",
+         "importance": 4, "topic": "release", "supersedes": str(_e_old)},
+        {"archive": _e_plan, "reason": "the upload is done"},
+        {"archive": 99999, "reason": "an id the model invented"},
+        {"category": "note", "content": "a fact that names a row it was never shown",
+         "importance": 2, "supersedes": _e_far + 1000},
+    ], allowed_ids=_e_ids)
+    assert [i.get("archive") for i in _e_items] == [None, _e_plan, None], _e_items
+    assert _e_items[0]["supersedes"] == _e_old and "supersedes" not in _e_items[2], _e_items
+    assert _e_norm([{"archive": _e_plan}]) == [], "an operation survived with no allowed ids"
+    assert _e_norm([{"archive": _e_plan, "content": "an archive op that also carries content"}],
+                   allowed_ids=_e_ids) == [{"category": "note", "importance": 3, "topic": "",
+                                           "content": "an archive op that also carries content"}]
+    # ...the writer applies them: the old row archived and linked, the new
+    # one inserted with the old importance and tags folded in; the finished
+    # task archived with no replacement; the counts say so
+    _e_counts = _e_batch(_e_db, _e_pid, _e_sid, [dict(i, tags=["observer", "realtime"])
+                                                 if "content" in i else i for i in _e_items],
+                         memory_dir=_e_root / _MEM)
+    assert (_e_counts["superseded"], _e_counts["archived"], _e_counts["inserted"]) == (1, 1, 1), _e_counts
+    _e_new = _e_db.get_memory(_e_counts["results"][0]["id"])
+    _e_gone = _e_db.get_memory(_e_old)
+    assert _e_new["supersedes_id"] == _e_old and _e_new["is_active"] == 1 \
+        and _e_new["importance"] == 4 and "supersedes" in _json.loads(_e_new["tags"]) \
+        and "observer" in _json.loads(_e_new["tags"]) and _e_new["topic"] == "release", _e_new
+    assert _e_gone["is_active"] == 0, _e_gone
+    assert _e_db.get_memory(_e_plan)["is_active"] == 0
+    assert [r["id"] for r in _e_db.get_supersede_chain(_e_new["id"])] == [_e_new["id"], _e_old]
+    assert (_e_root / _MEM / "MEMORY.md").stat().st_size > 0
+    # ...a target archived since the prompt: the fact still lands as a plain
+    # row, the archive is a no-op, nothing raises
+    _e_counts2 = _e_batch(_e_db, _e_pid, _e_sid, [
+        {"category": "result", "content": "Release 0.2.1 is also on the official MCP registry",
+         "importance": 3, "topic": "release", "supersedes": _e_old},
+        {"archive": _e_plan, "reason": "already archived"}])
+    assert (_e_counts2["inserted"], _e_counts2["skipped"], _e_counts2["archived"]) == (1, 1, 0), _e_counts2
+    # ...a supersede whose text already exists: that row wins, the old one is
+    # archived linked to it, and the batch reports a supersede
+    _e_counts3 = _e_batch(_e_db, _e_pid, _e_sid, [
+        {"category": "config", "content": "The dashboard's font is Inter at 11 points on every platform",
+         "importance": 5, "topic": "ui", "supersedes": _e_new["id"]}])
+    assert _e_counts3["superseded"] == 1 and _e_counts3["results"][0]["id"] == _e_far, _e_counts3
+    assert _e_db.get_memory(_e_new["id"])["is_active"] == 0 \
+        and _e_db.get_memory(_e_new["id"])["supersedes_id"] == _e_old, \
+        "the archived row lost its own lineage link"
+    assert _e_db.get_memory(_e_far)["importance"] == 5
+    # ...end to end through the Stop observer with the model stubbed: the
+    # answer names the ids the prompt showed, and the database changes
+    import core.auth as _e_auth
+    import llm.ccl_backend as _e_be
+    import hooks.stop as _e_stop
+    _e_seen = {}
+    _e_target = _e_db.insert_memory(
+        _e_pid, _e_sid, "task",
+        "Next step: publish the 0.2.1 crates to crates.io in dependency order", 3, topic="release")
+    for _e_i in range(3):
+        _e_db.insert_observation(_e_pid, "e1-s", "Bash",
+                                 f"cargo publish -p crate{_e_i} crates.io 0.2.1 dependency order",
+                                 "Uploading 0.2.1")
+
+    def _e_fake_llm(system, user, *a, **kw):
+        _e_seen["system"], _e_seen["user"] = system, user
+        return _json.dumps([
+            {"category": "result", "content": "The 0.2.1 crates are published to crates.io in dependency order",
+             "importance": 4, "topic": "release", "supersedes": _e_target},
+            {"archive": 424242, "reason": "invented"},
+        ])
+    _e_saved = (_e_auth.get_api_key, _e_be.call_llm)
+    # why: a placeholder, not a credential — call_llm is stubbed, so nothing
+    # built from this string ever reaches the network
+    _e_auth.get_api_key = lambda: ("placeholder-key", "env")
+    _e_be.call_llm = _e_fake_llm
+    try:
+        _e_n = _e_stop._observer_evaluate(str(_e_root), "e1-s", _e_root / _MEM, db=_e_db)
+    finally:
+        _e_auth.get_api_key, _e_be.call_llm = _e_saved
+    assert _e_n == 1, f"the observer wrote {_e_n}, expected the one supersede"
+    assert f"#{_e_target} [task]" in _e_seen["user"] and _e_seen["user"].startswith(_e_head), \
+        _e_seen["user"][:300]
+    assert _e_db.get_memory(_e_target)["is_active"] == 0, "the observer's supersede did not archive"
+    _e_live = [r for r in _e_db.latest_active(_e_pid, limit=3)
+               if r["supersedes_id"] == _e_target]
+    assert len(_e_live) == 1 and "observer" in _json.loads(_e_live[0]["tags"]), _e_live
+    assert _e_db.get_memory(424242) is None
+    _e_status = _json.loads((_e_root / _MEM / ".last_observe.json").read_text(encoding="utf-8"))
+    assert _e_status["counts"]["superseded"] == 1 and _e_status["counts"]["archived"] == 0, _e_status
+    del _e_db
+    shutil.rmtree(_e_root, ignore_errors=True)
+    print("[OK] v2.18.0 E1: the extractor is shown the rows its text is about, may "
+          "supersede or archive only those, and the observer applies it end to end")
+
     # ── v2.16.0 · PreCompact feeds only rows ABOVE the observer cursor ──────
     # Every observation used to reach a model twice: the Stop observer fed it
     # and advanced `projects.obs_watermark`, then PreCompact fed EVERYTHING

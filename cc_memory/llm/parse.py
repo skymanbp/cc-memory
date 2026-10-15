@@ -116,8 +116,49 @@ _EXTRACTION_KINDS = {
     ),
 }
 
+# The store, shown to the extractor (v2.18.0, E1). Until this version the
+# model that wrote memories never saw what was stored, so a changed fact —
+# a version bumped, a plan dropped, a file renamed — could only become a
+# NEW row beside the old one: the writer's merge/supersede branches fire
+# on trigram similarity within one topic, and measured on a live
+# 1,334-row database the last 211 rows written reached that bar 0 times
+# in their topic and once anywhere (`CHANGELOG.md` § [2.18.0]). These
+# rules name the two operations the model may now return, and the ONE
+# shape each takes, so every caller's normaliser reads them the same way.
+EXISTING_HEAD = ("Existing memories (already stored; use them ONLY to decide "
+                 "what to update or archive, never restate one unchanged):")
+_EXISTING_RULES = (
+    '- The user message opens with "Existing memories", one per line as '
+    '"#<id> [<category>] <content>". When a new fact CHANGES, CORRECTS or '
+    'REPLACES one of them, add "supersedes": <id> to the new object; the old '
+    'memory is archived and linked to the new one.\n'
+    '- When an existing memory is now false, finished or no longer applies '
+    'and nothing replaces it, output {"archive": <id>, "reason": "<why>"} in '
+    'place of a memory.\n'
+    '- Name only ids from that list. A memory that is still true and '
+    'unchanged is not output again.'
+)
 
-def build_extraction_prompt(kind, body, *, mode_suffix=""):
+
+def render_existing(rows):
+    """The "Existing memories" block: one `#<id> [<category>] <content>` line
+    per row, in the order given. Stored content is never interpolated raw
+    into anything a model reads (`core.privacy.neutralize_inline`)."""
+    from core.privacy import neutralize_inline
+    lines = []
+    for row in rows or []:
+        try:
+            rid = int(row.get("id"))
+        except (TypeError, ValueError, AttributeError):
+            continue
+        content = neutralize_inline(str(row.get("content") or "")).strip()
+        if not content:
+            continue
+        lines.append(f"#{rid} [{row.get('category') or 'note'}] {content}")
+    return "\n".join(lines)
+
+
+def build_extraction_prompt(kind, body, *, mode_suffix="", existing=None):
     """`(system, user)` for one extraction call.
 
     `kind` is "transcript" (PreCompact, the retroactive save, the dashboard;
@@ -128,20 +169,44 @@ def build_extraction_prompt(kind, body, *, mode_suffix=""):
     after the rules so a `research` project's extractor is told to favour
     numbers and a `writing` project's to favour structure — the line every
     mode declared and no extractor read until v2.16.0.
+
+    `existing` (v2.18.0, E1) is the list of stored rows the model may update
+    or archive — `llm.memory_writer.existing_for` chooses them. With rows,
+    the system prompt gains the two operations' rules and the user message
+    opens with the rendered block; without, both are exactly what v2.16.0
+    sent, so a caller that passes nothing changes nothing.
     """
     from core.db import CATEGORIES
     head, rules, user_prefix = _EXTRACTION_KINDS[kind]
     suffix = (mode_suffix or "").strip()
+    block = render_existing(existing) if existing else ""
+    if block:
+        rules = rules + "\n" + _EXISTING_RULES
     system = (head + "\n\nOutput a JSON array of objects with these fields:\n"
               + _EXTRACTION_FIELDS.format(
                   categories=", ".join(f'"{c}"' for c in CATEGORIES))
               + "\n\nRules:\n" + rules
               + (("\n" + suffix) if suffix else "")
               + "\n\nOutput ONLY a valid JSON array, no markdown, no explanation.")
-    return system, user_prefix + body
+    user = user_prefix + body
+    if block:
+        user = EXISTING_HEAD + "\n" + block + "\n\n" + user
+    return system, user
 
 
-def normalize_memories(items):
+def _positive_id(value):
+    """`value` as a positive int, else None. Model output: `"12"`, `12.0`
+    and `12` all name row 12; anything else names nothing."""
+    if isinstance(value, bool):
+        return None
+    try:
+        rid = int(value)
+    except (TypeError, ValueError):
+        return None
+    return rid if rid > 0 else None
+
+
+def normalize_memories(items, allowed_ids=None):
     """The rows worth writing from a parsed extraction array.
 
     Every element is untrusted model output: a non-dict is dropped, `content`
@@ -150,15 +215,32 @@ def normalize_memories(items):
     clamped to 1-5 (an unparsable one is 3 — it used to raise out of the loop
     and cost the whole batch), and a non-string `topic` becomes "". Returns
     dicts with exactly those four keys; callers add their own `tags`.
+
+    The two operations of v2.18.0 (E1) ride on the same list. A memory may
+    carry `"supersedes": <id>` (a fifth key, present only when it names a
+    row); an element `{"archive": <id>, "reason": ...}` with no content
+    becomes `{"archive": <id>, "reason": <cleaned text>}`. `allowed_ids`
+    are the ids the prompt showed the model: an operation naming any other
+    id is dropped — the key removed from a memory, the archive element
+    skipped — because an id the model was never shown is an id it invented.
+    With `allowed_ids=None` (a caller that showed nothing) every operation
+    is dropped the same way, so the old call shape cannot archive a row.
     """
     from core.db import CATEGORIES
     from core.privacy import clean_for_storage
     from llm.memory_writer import MIN_CONTENT_LEN
+    allowed = {int(i) for i in (allowed_ids or [])}
     out = []
     for m in items or []:
         if not isinstance(m, dict):
             continue
         content = clean_for_storage(str(m.get("content") or "").strip())
+        if "archive" in m and not content:
+            rid = _positive_id(m.get("archive"))
+            if rid is not None and rid in allowed:
+                reason = clean_for_storage(str(m.get("reason") or "").strip())
+                out.append({"archive": rid, "reason": reason[:200]})
+            continue
         if len(content) < MIN_CONTENT_LEN:
             continue
         category = m.get("category", "note")
@@ -169,7 +251,11 @@ def normalize_memories(items):
         except (TypeError, ValueError):
             importance = 3
         topic = m.get("topic", "")
-        out.append({"category": category, "content": content,
-                    "importance": max(1, min(importance, 5)),
-                    "topic": topic if isinstance(topic, str) else ""})
+        row = {"category": category, "content": content,
+               "importance": max(1, min(importance, 5)),
+               "topic": topic if isinstance(topic, str) else ""}
+        old_id = _positive_id(m.get("supersedes"))
+        if old_id is not None and old_id in allowed:
+            row["supersedes"] = old_id
+        out.append(row)
     return out

@@ -1,4 +1,4 @@
-<!-- i18n-source: ARCHITECTURE.md | sha256: 4739156df19a52ce | version: 2.17.0 | translated: 2026-10-13 | translation: f6109191075a1702 -->
+<!-- i18n-source: ARCHITECTURE.md | sha256: a070005f4d5486c5 | version: 2.18.0 | translated: 2026-10-14 | translation: 6dcdaf2fec8c51b3 -->
 > [English](ARCHITECTURE.md) · **简体中文**
 
 # cc-memory — 架构
@@ -386,8 +386,8 @@ SQLite 表（定义在 [`cc_memory/core/db.py`](../cc_memory/core/db.py)），�
 由 `db._setup_fts5` 与它一并建出的三个触发器保持同步（`core/db.py:1021-1072`）；
 它的 `_MIGRATIONS` 条目是 `v2_fts5`（`db.py:172`）。
 它只在本地 SQLite 构建带 FTS5 时才会创建；否则
-`db.search_fts`（`core/db.py:3623-3671`）回退到 `LIKE ? ESCAPE '\'`
-（`core/db.py:3664`）。FTS5 在 `.claude-plugin/plugin.json:4` 与 `:17` 中被
+`db.search_fts`（`core/db.py:3680-3728`）回退到 `LIKE ? ESCAPE '\'`
+（`core/db.py:3680-3728`）。FTS5 在 `.claude-plugin/plugin.json:4` 与 `:17` 中被
 宣传，`/cc-mem status` 会报告当前实际走哪条路径（`cli/mem.py` 的 `cmd_status`）。
 
 `memories` 上的 `supersedes_id` 列（迁移 `v3_supersedes`，在 `_MIGRATIONS` 的 `db.py:191`）把反补丁的
@@ -395,8 +395,8 @@ SQLite 表（定义在 [`cc_memory/core/db.py`](../cc_memory/core/db.py)），�
 的 ID（旧行被归档）。通过 `db.get_supersede_chain(memory_id)`（`db.py:2080-2095`）走一遍
 链条，就能看到完整的更新历史。`content_hash`（迁移 `v2_content_hash`，位于
 `_MIGRATIONS`，`db.py:135`）是归一化内容的 `sha256[:16]`，用于廉价的精确重复检查
-（`db.compute_content_hash` 在 `db.py:2662-2664`，
-`db.find_by_hash` 在 `db.py:2675-2683`）。
+（`db.compute_content_hash` 在 `db.py:2680-2682`，
+`db.find_by_hash` 在 `db.py:2693-2701`）。
 
 迁移按 `_MIGRATIONS` 列表（`db.py:130-452`）的顺序应用，并记录在 `_migrations` 中。目前
 已交付的层级：**v1**（`topic` 列 + 索引）、**v2**（content_hash、observations、
@@ -484,10 +484,10 @@ regenerate_memory_index(db, project_id, memory_dir)   ← MEMORY.md 刷新
 
 - `upsert_batch`（`memory_writer.py:335-383`）逐条循环调用 `upsert_smart`，并在最后
   重新生成**一次**，但仅当传入了 `memory_dir` **且**这一批真的写了行——插入、合并、
-  取代或强化——时才会；一批纯 skip 什么都不渲染（`memory_writer.py:376`，v2.16.0）。
+  取代或强化——时才会；一批纯 skip 什么都不渲染（`memory_writer.py:519`，v2.16.0）。
   Stop 观察者与 SessionStart 的追溯保存会传（`stop.py:530`、
   `session_start.py:1488`）；同步 PreCompact 支路不传（`pre_compact.py:704`），
-  而是在其余状态变更之后自己渲染一次（`pre_compact.py:834`）。
+  而是在其余状态变更之后自己渲染一次（`pre_compact.py:848`）。
 - 单发调用方显式调用 `regenerate_memory_index`：`cli/mem.py:1280`（`cmd_add`；另有
   `:1394` cleanup 与 `:1619` archive）、
   `mcp/server.py:642`、`ui/dashboard.py:1735`、`ui/web_viewer.py:1030`，外加
@@ -593,7 +593,7 @@ SessionStart：
 
 上面的调用签名都是真实的：`write_progress_md(db, project_id, memory_dir)`
 （`core/progress.py:611-750`）。
-`write_progress_md` 的调用点：`pre_compact.py:792`、`stop.py:702`、`user_prompt.py:464`、`session_start.py:1401`、`mcp/server.py:727`、`cli/mem.py:1528`。
+`write_progress_md` 的调用点：`pre_compact.py:806`、`stop.py:713`、`user_prompt.py:464`、`session_start.py:1413`、`mcp/server.py:727`、`cli/mem.py:1528`。
 PROGRESS.md 的结构规格见
 [docs/CONTRACTS.md](CONTRACTS.md#handoff-contract)。
 
@@ -602,7 +602,7 @@ PROGRESS.md 的结构规格见
 被宿主超时杀死的 `PreCompact` 死于 `TerminateProcess`：不走 `except`，也不走
 `finally`，所以 `.last_save.json` 仍然描述着*上一次*成功的运行，失败因此不可见。
 为此，同步支路会在加载 transcript **之前**写入
-`.ccm/.pre_compact_attempt.json`（`pre_compact.py:583`），并且只在运行完整
+`.ccm/.pre_compact_attempt.json`（`pre_compact.py:593`），并且只在运行完整
 结束时才移除它（`pre_compact.py:876`）——包括在它自己的错误路径上
 （`pre_compact.py:931`），这样一次*报错*的运行绝不会被报告成一次*被杀*的运行。
 `SessionStart` 会报告残留的标记，但只在它至少已存在 10 分钟之后才报，因此一次仍在
@@ -706,7 +706,7 @@ BudgetGate 来说仍是已知量。候选顺序与传输格式（`get_api_candid
 and topic summaries disabled]” 页脚
 （`_build_footer`，`session_start.py:509-510`）。
 钩子调用方用它来*提供*传给 `call_llm` 的凭据。
-`get_api_key()` 的调用点：`pre_compact.py:208`（在 `:234` 传下去）、`stop.py:416`、`session_start.py:1132`、`core/consolidate.py:483, 796, 1018`。
+`get_api_key()` 的调用点：`pre_compact.py:213`（在 `:234` 传下去）、`stop.py:416`、`session_start.py:1139`、`core/consolidate.py:483, 796, 1018`。
 
 逐级回退是 v2.3.4 为一个具体故障加入的：一个失效的环境变量密钥（例如额度为零 →
 HTTP 400）过去会把排在它后面的健康订阅令牌黑洞掉，从而无声地把每一次 LLM 调用推给
@@ -812,7 +812,7 @@ v2.4.2 才成立：`_extract_via_llm` 的 `except` 元组此前不包含 `Runtim
 ```
 
 写入方，便于溯源：`MEMORY.md` ← `memory_writer.regenerate_memory_index`
-（`memory_writer.py:389-426`）；`PROGRESS.md` ← `core.progress.write_progress_md`
+（`memory_writer.py:579-616`）；`PROGRESS.md` ← `core.progress.write_progress_md`
 （`progress.py:611-750`）；`PLAN.md` ← `core.plan.write_plan_md`（`plan.py:817-867`）；
 `.plan_history/` ← `core.plan.archive_plan`（`plan.py:1068-1134`）；
 `.last_save.json` ← `pre_compact.main`（`pre_compact.py:866, 916`）；`.last_inject.json` ← `session_start._write_inject_manifest`
@@ -1040,7 +1040,7 @@ hook 导入它）。不带 `--yes` 时是演练：以只读方式打开项目数
 添加的任何内容。此前每一版生成器都被 `if not gi.exists()` 守卫着，因此每当插件开始
 写一种新产物，已有安装就会永远保留过期的忽略列表，并开始无声地泄漏它。这些产物中
 有几种会逐字嵌入对话或计划原文，所以那是隐私问题，而不只是噪声。PreCompact 经由 `ensure_memory_dir`
-（`pre_compact.py:565`）在**每一次**压缩时都运行它（而不只是在项目创建时），正是为了让老安装完成迁移。这份
+（`pre_compact.py:569`）在**每一次**压缩时都运行它（而不只是在项目创建时），正是为了让老安装完成迁移。这份
 列表另有两份独立副本，因为它们无法导入本模块，必须手工保持同步：
 `cc_memory/ui/installer.py`（仅 stdlib 的引导程序）与 `skills/ccm-load/SKILL.md`
 （内联脚本）。

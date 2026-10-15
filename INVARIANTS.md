@@ -20,6 +20,7 @@ and is marked *ungated* on purpose.
 
 | Version | Recorded here as |
 |---|---|
+| v2.18.0 | INV-127 |
 | v2.17.0 | INV-053, INV-069, INV-123, INV-124, INV-125, INV-126 |
 | v2.16.0 | INV-001, INV-005, INV-010, INV-015, INV-016, INV-017, INV-018, INV-019, INV-020, INV-028, INV-030, INV-038, INV-041, INV-042, INV-043, INV-044, INV-045, INV-049, INV-050, INV-052, INV-053, INV-054, INV-055, INV-056, INV-057, INV-058, INV-059, INV-060, INV-061, INV-062, INV-063, INV-065, INV-069, INV-076, INV-081, INV-082, INV-088, INV-089, INV-094, INV-095, INV-096, INV-112, INV-121, INV-122 |
 | v2.15.2 | INV-086 |
@@ -488,6 +489,18 @@ by the next SessionStart or Stop (`take_unannounced`, `.announced.json`).
 and the dashboard; the mode's `extraction_prompt_suffix` reaches the prompt
 through `core.modes.get_extraction_suffix`. *Gate:* `tests/smoke_test.py`
 § D2-D7; `falsify --case r16suffix` / `r16normfloor`. *Source:* v2.16.0 D2.
+
+**INV-127 · The extractor may supersede or archive only a row it was shown,
+and only against the live row.** `llm.memory_writer.existing_for` chooses the
+rows the prompt shows; `normalize_memories(items, allowed_ids=)` drops every
+`supersedes` / `archive` naming an id outside that list (and every one when
+no list is given); `upsert_batch` re-reads the target and, when it is gone,
+writes the fact as a plain row and the archive as a no-op; a supersede goes
+through `db.supersede_memory` (the chain link) and an archive through
+`db.archive_obsolete`. *Why:* an id the model was never shown is an id it
+invented, and a row archived on a model's say-so with no link is data loss
+the chain cannot recover. *Gate:* `tests/smoke_test.py` § E1; `falsify --case
+r18allowed` / `r18apply`. *Source:* v2.18.0 E1.
 
 ## 3. Injection and rendering
 
