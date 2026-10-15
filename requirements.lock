@@ -1,0 +1,4 @@
+# cc-memory declares no required third-party dependencies: pyproject.toml has
+# `dependencies = []`; its only extra, `build`, is pyinstaller for packaging the
+# dashboard and the installer. This file records that snapshot for tooling that
+# expects a dependency lock beside a pyproject.toml; there is nothing to pin.

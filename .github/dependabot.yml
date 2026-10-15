@@ -1,0 +1,9 @@
+# Dependabot keeps the pinned GitHub Actions in .github/workflows current:
+# every `uses:` there names a commit SHA, so an update is a pull request
+# that moves the SHA and its version comment together.
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "monthly"
