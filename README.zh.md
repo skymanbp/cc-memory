@@ -1,14 +1,11 @@
-<!-- i18n-source: README.md | sha256: baf0ecd4fdd8a7c2 | version: 2.18.0 | translated: 2026-10-14 | translation: a7817703ad74a662 -->
+<!-- i18n-source: README.md | sha256: d874e6a83a36e7fc | version: 2.18.0 | translated: 2026-10-17 | translation: 0abf4d146c0f1969 -->
 > [English](README.md) · **简体中文**
 
 <div align="center">
 
 # cc-memory
 
-**给 Claude Code 的持久化记忆。**
-项目里的决策、结果、缺陷与计划，能挺过上下文压缩、会话边界和关掉的终端——
-下一个会话在动手之前会被**强制**先读它们，而存下来的东西是**被调和过的**，
-绝不是堆叠出来的。
+**cc-memory 给 Claude Code 一份挺得过上下文压缩和关掉终端的记忆，下一个会话动手前被强制先读它。**
 
 [![version](https://img.shields.io/badge/version-2.18.0-blue.svg)](CHANGELOG.md)
 [![license](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)

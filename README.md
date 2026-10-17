@@ -4,10 +4,7 @@
 
 # cc-memory
 
-**Persistent memory for Claude Code.**
-Your project's decisions, results, bugs and plans survive compaction, session
-boundaries, and closed terminals — the next session is *forced* to read them
-before it does anything, and what is stored is *reconciled*, never stacked.
+**cc-memory gives Claude Code a memory that survives compaction and closed terminals, and the next session is forced to read it first.**
 
 [![version](https://img.shields.io/badge/version-2.18.0-blue.svg)](CHANGELOG.md)
 [![license](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)

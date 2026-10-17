@@ -1744,7 +1744,7 @@ baseline control is itself finding F6, below).
   line>` pass `16 verified, 0 quote`, exit 0 — an elision means text was CUT,
   never rearranged. Each segment is now searched from the end of the
   previous match and an out-of-order segment is reported as such. The
-  tightening found one real case: README.md:143 quoted `B.with-ccm.txt` at
+  tightening found one real case: README.md:140 quoted `B.with-ccm.txt` at
   offset 5885 before 5606 — split into two regions, zero quoted words
   changed, both languages. `falsify --case r14verbatimorder`.
 - **The falsification suite had no negative control (F6).** A case was
